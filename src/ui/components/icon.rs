@@ -24,7 +24,7 @@ pub enum ArgusIcon {
     Search,
     /// 连接入口。
     Connection,
-    /// 新建标签或新增来源。
+    /// 新增来源或增大数值。
     Plus,
     /// 减少数值。
     Minus,

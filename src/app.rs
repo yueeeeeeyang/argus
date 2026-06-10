@@ -85,28 +85,6 @@ impl ThemeMode {
     }
 }
 
-/// 设置模态框左侧导航分组。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SettingsSection {
-    /// 关于页面，仅展示程序版本。
-    About,
-    /// 外观页面，展示主题和日志内容字号设置。
-    Appearance,
-    /// 日志加载页面，展示加载策略占位设置。
-    LogLoading,
-}
-
-impl SettingsSection {
-    /// 返回设置分组展示文案。
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::About => "关于",
-            Self::Appearance => "外观",
-            Self::LogLoading => "日志加载",
-        }
-    }
-}
-
 /// 打开来源占位弹窗中的来源类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlaceholderSourceKind {
@@ -136,13 +114,31 @@ pub enum PlaceholderDialog {
     OpenSource,
 }
 
-/// 顶部标签页占位状态。
+/// 顶部标签页类型，决定主内容区渲染哪个页面。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TabKind {
+    /// 空标签页，用于启动或关闭最后一个标签后的占位状态。
+    Empty,
+    /// 日志来源标签页；本轮只保存来源身份和展示路径，不读取正文。
+    LogSource {
+        /// 对应来源树节点 ID，用于去重和重新选中来源树。
+        source_id: SourceId,
+        /// 来源展示路径，可能是本地路径或压缩包内虚拟路径。
+        path: String,
+    },
+    /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
+    Settings,
+}
+
+/// 顶部标签页状态。
 #[derive(Clone, Debug)]
-pub struct PlaceholderTab {
+pub struct ArgusTab {
     /// 标签唯一 ID，用于选中、关闭和渲染。
     pub id: usize,
     /// 标签标题。
     pub title: String,
+    /// 标签内容类型。
+    pub kind: TabKind,
 }
 
 /// 来源树占位节点，用于模拟文件、目录和压缩包结构。
@@ -235,8 +231,8 @@ pub struct ArgusApp {
     pub content_state: ContentState,
     /// 日志行占位数据。
     pub logs: Vec<LogLine>,
-    /// 当前打开的占位标签页。
-    pub tabs: Vec<PlaceholderTab>,
+    /// 当前打开的标签页。
+    pub tabs: Vec<ArgusTab>,
     /// 当前激活的标签 ID。
     pub active_tab_id: usize,
     /// 下一个占位标签 ID。
@@ -277,10 +273,6 @@ pub struct ArgusApp {
     pub active_dialog: Option<PlaceholderDialog>,
     /// 打开来源弹窗中选中的来源类型。
     pub selected_placeholder_source: PlaceholderSourceKind,
-    /// 设置模态框是否打开。
-    pub is_settings_modal_open: bool,
-    /// 设置模态框当前选中的左侧设置项。
-    pub active_settings_section: SettingsSection,
     /// 设置页主题模式。
     pub theme_mode: ThemeMode,
     /// 日志内容区字号，仅影响主阅读区域。
@@ -338,9 +330,10 @@ impl ArgusApp {
             source_child_load_generations: HashMap::new(),
             content_state: ContentState::SourceNotSelected,
             logs: Vec::new(),
-            tabs: vec![PlaceholderTab {
+            tabs: vec![ArgusTab {
                 id: 1,
                 title: "未选择日志".to_string(),
+                kind: TabKind::Empty,
             }],
             active_tab_id: 1,
             next_tab_id: 2,
@@ -362,8 +355,6 @@ impl ArgusApp {
             selected_log_line: None,
             active_dialog: None,
             selected_placeholder_source: PlaceholderSourceKind::File,
-            is_settings_modal_open: false,
-            active_settings_section: SettingsSection::About,
             theme_mode,
             log_content_font_size,
             selected_encoding,
@@ -374,6 +365,11 @@ impl ArgusApp {
 
     /// 切换标题栏工作区入口，并更新状态提示。
     pub fn switch_workspace(&mut self, workspace: Workspace) {
+        if workspace == Workspace::Settings {
+            self.open_or_focus_settings_tab();
+            return;
+        }
+
         self.workspace = workspace;
         self.placeholder_notice = match workspace {
             Workspace::LogAnalysis => "已切换到日志分析占位工作区".to_string(),
@@ -381,23 +377,14 @@ impl ArgusApp {
         };
     }
 
-    /// 打开设置模态框，并默认定位到关于页面。
+    /// 兼容旧入口：打开或聚焦设置标签页。
     pub fn open_settings_modal(&mut self) {
-        self.is_settings_modal_open = true;
-        self.active_settings_section = SettingsSection::About;
-        self.placeholder_notice = "已打开设置".to_string();
+        self.open_or_focus_settings_tab();
     }
 
-    /// 关闭设置模态框，保留已经修改的内存设置状态。
+    /// 兼容旧入口：设置页现在作为标签页展示，因此关闭模态框不再改变 UI 树。
     pub fn close_settings_modal(&mut self) {
-        self.is_settings_modal_open = false;
-        self.placeholder_notice = "已关闭设置".to_string();
-    }
-
-    /// 切换设置模态框左侧设置项。
-    pub fn select_settings_section(&mut self, section: SettingsSection) {
-        self.active_settings_section = section;
-        self.placeholder_notice = format!("已切换到{}设置", section.label());
+        self.placeholder_notice = "设置已作为标签页展示".to_string();
     }
 
     /// 持久化当前配置；失败时只更新提示，不回滚已经生效的 UI 状态。
@@ -929,22 +916,102 @@ impl ArgusApp {
         true
     }
 
-    /// 新增占位标签页并立即切换过去。
-    pub fn add_placeholder_tab(&mut self) {
+    /// 打开或聚焦唯一设置标签页。
+    pub fn open_or_focus_settings_tab(&mut self) {
+        self.workspace = Workspace::LogAnalysis;
+
+        if let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| matches!(tab.kind, TabKind::Settings))
+            .map(|tab| tab.id)
+        {
+            self.active_tab_id = tab_id;
+            self.placeholder_notice = "已切换到设置标签页".to_string();
+            return;
+        }
+
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
-        self.tabs.push(PlaceholderTab {
+        self.tabs.push(ArgusTab {
             id: tab_id,
-            title: format!("scratch-{tab_id}.log"),
+            title: "设置".to_string(),
+            kind: TabKind::Settings,
         });
         self.active_tab_id = tab_id;
-        self.placeholder_notice = "已新增占位标签页，不打开真实文件".to_string();
+        self.placeholder_notice = "已打开设置标签页".to_string();
     }
 
-    /// 切换到指定占位标签页。
+    /// 打开或聚焦指定日志来源标签页；不会读取日志正文。
+    pub fn open_or_focus_log_tab(&mut self, source_id: SourceId) {
+        let Some(selected_node) = self.source_registry.node(source_id).cloned() else {
+            self.placeholder_notice = "未找到来源节点".to_string();
+            return;
+        };
+        if !selected_node.kind.is_log_candidate() {
+            self.placeholder_notice = format!("{} 不是可打开的日志候选", selected_node.label);
+            return;
+        }
+
+        let path = selected_node.location.display_path();
+        if let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                matches!(
+                    tab.kind,
+                    TabKind::LogSource {
+                        source_id: existing_id,
+                        ..
+                    } if existing_id == source_id
+                )
+            })
+            .map(|tab| tab.id)
+        {
+            self.active_tab_id = tab_id;
+            self.content_state = ContentState::SourceNotRead {
+                source_id,
+                label: selected_node.label.clone(),
+                path: path.clone(),
+            };
+            self.placeholder_notice = format!("已切换到 {path}，日志内容读取尚未接入");
+            return;
+        }
+
+        let tab_id = if self.tabs.len() == 1 && matches!(self.tabs[0].kind, TabKind::Empty) {
+            self.tabs[0].id
+        } else {
+            let next_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(ArgusTab {
+                id: next_id,
+                title: String::new(),
+                kind: TabKind::Empty,
+            });
+            next_id
+        };
+
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.title = selected_node.label.clone();
+            tab.kind = TabKind::LogSource {
+                source_id,
+                path: path.clone(),
+            };
+        }
+        self.active_tab_id = tab_id;
+        self.content_state = ContentState::SourceNotRead {
+            source_id,
+            label: selected_node.label.clone(),
+            path: path.clone(),
+        };
+        self.placeholder_notice = format!("已打开 {path}，日志内容读取尚未接入");
+    }
+
+    /// 切换到指定标签页。
     pub fn activate_tab(&mut self, tab_id: usize) {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = tab_id;
+            self.sync_content_state_from_active_tab();
             self.placeholder_notice = format!("已切换到 {}", self.active_tab_title());
         }
     }
@@ -962,18 +1029,31 @@ impl ArgusApp {
     pub fn close_tab(&mut self, tab_id: usize) {
         if self.tabs.len() == 1 {
             if let Some(tab) = self.tabs.first_mut() {
-                tab.title = "未命名日志".to_string();
+                tab.title = "未选择日志".to_string();
+                tab.kind = TabKind::Empty;
             }
             self.active_tab_id = self.tabs[0].id;
-            self.placeholder_notice = "已清空最后一个占位标签".to_string();
+            self.content_state = ContentState::SourceNotSelected;
+            self.logs.clear();
+            self.placeholder_notice = "已清空最后一个标签".to_string();
             return;
         }
 
+        let closed_index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .unwrap_or(0);
         self.tabs.retain(|tab| tab.id != tab_id);
-        if self.active_tab_id == tab_id {
-            self.active_tab_id = self.tabs.first().map(|tab| tab.id).unwrap_or(1);
+        if self.hovered_tab_id == Some(tab_id) {
+            self.hovered_tab_id = None;
         }
-        self.placeholder_notice = "已关闭占位标签页".to_string();
+        if self.active_tab_id == tab_id {
+            let next_index = closed_index.min(self.tabs.len().saturating_sub(1));
+            self.active_tab_id = self.tabs[next_index].id;
+            self.sync_content_state_from_active_tab();
+        }
+        self.placeholder_notice = "已关闭标签页".to_string();
     }
 
     /// 根据节点 ID 选择来源树节点。
@@ -985,15 +1065,8 @@ impl ArgusApp {
 
         self.selected_log_line = None;
         if selected_node.kind.is_log_candidate() {
-            let path = selected_node.location.display_path();
-            self.content_state = ContentState::SourceNotRead {
-                source_id,
-                label: selected_node.label.clone(),
-                path: path.clone(),
-            };
             self.logs.clear();
-            self.update_active_tab_title(selected_node.label.clone());
-            self.placeholder_notice = format!("已选择 {path}，日志内容读取尚未接入");
+            self.open_or_focus_log_tab(source_id);
         } else {
             self.placeholder_notice = format!("已选择来源节点 {}", selected_node.label);
         }
@@ -1094,9 +1167,10 @@ impl ArgusApp {
         self.search_query.clear();
         self.hovered_tab_id = None;
 
-        self.tabs = vec![PlaceholderTab {
+        self.tabs = vec![ArgusTab {
             id: 1,
             title: "未选择日志".to_string(),
+            kind: TabKind::Empty,
         }];
         self.active_tab_id = 1;
         self.next_tab_id = 2;
@@ -1205,26 +1279,55 @@ impl ArgusApp {
         *generation
     }
 
-    /// 将当前激活标签标题同步为选中的来源名称。
-    fn update_active_tab_title(&mut self, title: String) {
-        if let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == self.active_tab_id)
-        {
-            tab.title = title;
+    /// 返回当前激活标签页。
+    pub fn active_tab(&self) -> Option<&ArgusTab> {
+        self.tabs.iter().find(|tab| tab.id == self.active_tab_id)
+    }
+
+    /// 返回当前激活标签类型；缺失时按空标签兜底。
+    pub fn active_tab_kind(&self) -> TabKind {
+        self.active_tab()
+            .map(|tab| tab.kind.clone())
+            .unwrap_or(TabKind::Empty)
+    }
+
+    /// 根据当前激活标签同步过渡期内容状态，供状态栏和旧测试继续使用。
+    fn sync_content_state_from_active_tab(&mut self) {
+        match self.active_tab_kind() {
+            TabKind::Empty => {
+                self.content_state = ContentState::SourceNotSelected;
+                self.logs.clear();
+                self.selected_log_line = None;
+            }
+            TabKind::Settings => {
+                self.content_state = ContentState::SourceNotSelected;
+                self.logs.clear();
+                self.selected_log_line = None;
+            }
+            TabKind::LogSource { source_id, path } => {
+                let label = self
+                    .source_registry
+                    .node(source_id)
+                    .map(|node| node.label.clone())
+                    .unwrap_or_else(|| self.active_tab_title().to_string());
+                self.content_state = ContentState::SourceNotRead {
+                    source_id,
+                    label,
+                    path,
+                };
+                self.logs.clear();
+                self.selected_log_line = None;
+            }
         }
     }
 
     /// 返回内容区路径文案，优先展示真实选中来源。
     pub fn content_path_label(&self) -> String {
-        match &self.content_state {
-            ContentState::SourceNotRead { path, .. } => path.clone(),
-            ContentState::SourceNotSelected if self.has_loaded_real_sources => {
-                "请选择日志来源".to_string()
-            }
-            ContentState::PlaceholderPreview => format!("logs / {}", self.active_tab_title()),
-            ContentState::SourceNotSelected => "未选择来源".to_string(),
+        match self.active_tab_kind() {
+            TabKind::LogSource { path, .. } => path,
+            TabKind::Settings => "Argus / 设置".to_string(),
+            TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
+            TabKind::Empty => "未选择来源".to_string(),
         }
     }
 
@@ -1533,6 +1636,8 @@ fn placeholder_source_registry() -> SourceRegistry {
         kind: SourceKind::ArchiveFile,
         location: SourceLocation::ArchiveEntry {
             archive_path: PathBuf::from("archive.zip"),
+            root_format: ArchiveFormat::Zip,
+            container_entries: Vec::new(),
             entry_path: "nested.log".into(),
             format: ArchiveFormat::Zip,
             archive_depth: 0,
@@ -1668,40 +1773,97 @@ mod tests {
         assert!(app.logs.is_empty());
         assert!(app.selected_log_line.is_none());
         assert_eq!(app.active_tab_title(), "未选择日志");
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
         assert!(matches!(app.content_state, ContentState::SourceNotSelected));
     }
 
-    /// 验证打开设置模态框时默认进入关于页面。
+    /// 验证打开设置入口时进入唯一设置标签页。
     #[test]
-    fn open_settings_modal_selects_about_section() {
+    fn open_settings_tab_creates_single_settings_tab() {
         let mut app = test_app();
-        app.active_settings_section = SettingsSection::Appearance;
 
-        app.open_settings_modal();
+        app.open_or_focus_settings_tab();
 
-        assert!(app.is_settings_modal_open);
-        assert_eq!(app.active_settings_section, SettingsSection::About);
+        assert_eq!(app.tabs.len(), 2);
+        assert!(matches!(app.active_tab_kind(), TabKind::Settings));
     }
 
-    /// 验证设置模态框左侧设置项切换只改变当前详情页。
+    /// 验证重复点击设置入口会复用同一个设置标签页。
     #[test]
-    fn select_settings_section_updates_active_section() {
-        let mut app = test_app();
+    fn settings_tab_is_reused() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
 
-        app.select_settings_section(SettingsSection::LogLoading);
+        app.open_or_focus_settings_tab();
+        let settings_tab_id = app.active_tab_id;
+        app.select_source(app_log_id);
+        app.open_or_focus_settings_tab();
 
-        assert_eq!(app.active_settings_section, SettingsSection::LogLoading);
+        assert_eq!(app.active_tab_id, settings_tab_id);
+        assert_eq!(
+            app.tabs
+                .iter()
+                .filter(|tab| matches!(tab.kind, TabKind::Settings))
+                .count(),
+            1
+        );
     }
 
-    /// 验证关闭设置模态框只影响弹窗显隐状态。
+    /// 验证同一日志来源重复点击时复用已有标签页。
     #[test]
-    fn close_settings_modal_hides_modal() {
-        let mut app = test_app();
-        app.open_settings_modal();
+    fn selecting_same_log_reuses_existing_tab() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
 
-        app.close_settings_modal();
+        app.select_source(app_log_id);
+        let tab_id = app.active_tab_id;
+        app.select_source(app_log_id);
 
-        assert!(!app.is_settings_modal_open);
+        assert_eq!(app.active_tab_id, tab_id);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(matches!(
+            app.active_tab_kind(),
+            TabKind::LogSource {
+                source_id,
+                ..
+            } if source_id == app_log_id
+        ));
+    }
+
+    /// 验证不同日志来源会打开独立标签页。
+    #[test]
+    fn selecting_different_logs_opens_different_tabs() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+
+        app.select_source(app_log_id);
+        app.select_source(error_log_id);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab_title(), "error.log");
+        assert!(app.tabs.iter().any(|tab| tab.title == "app.log"));
+        assert!(app.tabs.iter().any(|tab| tab.title == "error.log"));
+    }
+
+    /// 验证关闭当前标签后会激活相邻标签，关闭最后一个标签会回到空标签。
+    #[test]
+    fn close_tab_activates_neighbor_and_keeps_one_empty_tab() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        app.select_source(app_log_id);
+        app.open_or_focus_settings_tab();
+        let settings_tab_id = app.active_tab_id;
+
+        app.close_tab(settings_tab_id);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab_title(), "app.log");
+
+        let last_tab_id = app.active_tab_id;
+        app.close_tab(last_tab_id);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
+        assert_eq!(app.active_tab_title(), "未选择日志");
     }
 
     /// 验证日志内容字号会被限制在外观设置允许范围内。
@@ -1763,9 +1925,13 @@ mod tests {
         let mut app = app_with_placeholder_sources();
         app.has_loaded_real_sources = true;
         app.logs = placeholder_logs();
-        app.tabs.push(PlaceholderTab {
+        app.tabs.push(ArgusTab {
             id: 2,
             title: "old.log".to_string(),
+            kind: TabKind::LogSource {
+                source_id: SourceId(999),
+                path: "old.log".to_string(),
+            },
         });
         app.active_tab_id = 2;
         app.next_tab_id = 3;
@@ -1803,6 +1969,7 @@ mod tests {
         assert!(app.logs.is_empty());
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_tab_title(), "未选择日志");
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
         assert_eq!(app.next_tab_id, 2);
         assert!(matches!(app.content_state, ContentState::SourceNotSelected));
         assert!(!app.is_source_tree_search_open);

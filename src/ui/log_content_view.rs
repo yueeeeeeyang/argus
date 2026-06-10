@@ -4,11 +4,12 @@
 //! 作者：Argus 开发团队
 //! 主要功能：展示日志行预览和真实来源未读取提示。
 
-use crate::app::{ArgusApp, ContentState, LogLine};
+use crate::app::{ArgusApp, LogLine, TabKind};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon::render_icon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
+use crate::ui::settings_page;
 use gpui::{
     AnyElement, Context, IntoElement, KeyDownEvent, SharedString, div, prelude::*, px, rgb,
 };
@@ -38,8 +39,18 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
 
 /// 根据当前内容状态渲染主体区域。
 fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusApp>) -> AnyElement {
-    match &app.content_state {
-        ContentState::PlaceholderPreview => {
+    match app.active_tab_kind() {
+        TabKind::Settings => settings_page::render(app, cx).into_any_element(),
+        TabKind::LogSource { path, .. } => {
+            let label = app.active_tab_title().to_string();
+            render_empty_state(
+                &format!("{label} 已选中"),
+                &format!("真实来源路径：{path}。日志内容读取模块尚未接入，本轮只加载来源结构。"),
+                app,
+                theme,
+            )
+        }
+        TabKind::Empty if !app.logs.is_empty() => {
             let log_rows = app
                 .logs
                 .iter()
@@ -54,15 +65,9 @@ fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusA
                 .children(log_rows)
                 .into_any_element()
         }
-        ContentState::SourceNotSelected => render_empty_state(
+        TabKind::Empty => render_empty_state(
             "请选择日志来源",
             "左侧来源树已经接入真实结构，选择日志文件后会在此处显示未读取提示。",
-            app,
-            theme,
-        ),
-        ContentState::SourceNotRead { label, path, .. } => render_empty_state(
-            &format!("{label} 已选中"),
-            &format!("真实来源路径：{path}。日志内容读取模块尚未接入，本轮只加载来源结构。"),
             app,
             theme,
         ),

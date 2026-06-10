@@ -5,14 +5,15 @@
 //! 主要功能：使用 GPUI uniform_list 虚拟渲染大目录树，并提供纵向滚动条。
 
 use crate::app::ArgusApp;
-use crate::loader::log_source::{SourceKind, SourceTreeNode};
+use crate::loader::log_source::{SourceId, SourceKind, SourceTreeNode};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Render, SharedString, Window, canvas, div, point, prelude::*, px, rgb, uniform_list,
+    Animation, AnimationExt as _, AnyElement, Context, FontWeight, IntoElement, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Render, SharedString, Transformation, Window, canvas, div,
+    percentage, point, prelude::*, px, rgb, svg, uniform_list,
 };
-use std::ops::Range;
+use std::{ops::Range, time::Duration};
 
 use crate::utils::size_format::format_bytes;
 
@@ -85,6 +86,11 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     } else {
         ArgusIcon::Folder
     };
+    let empty_icon_element = if app.is_source_loading {
+        render_loading_icon(SourceId(usize::MAX), &theme)
+    } else {
+        render_icon(empty_icon, theme.foreground_muted, 28.0).into_any_element()
+    };
 
     div()
         .relative()
@@ -103,7 +109,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
                     .gap_2()
                     .text_xs()
                     .text_color(rgb(theme.foreground_muted))
-                    .child(render_icon(empty_icon, theme.foreground_muted, 28.0))
+                    .child(empty_icon_element)
                     .child(empty_message),
             )
         })
@@ -207,16 +213,15 @@ fn render_node(
                         .items_center()
                         .justify_center()
                         .when(can_expand, |this| {
-                            let icon = if source.metadata.is_loading {
-                                ArgusIcon::Refresh
+                            if source.metadata.is_loading {
+                                this.child(render_loading_icon(source_id, theme))
                             } else {
-                                expand_icon
-                            };
-                            this.child(render_icon(
-                                icon,
-                                theme.foreground_muted,
-                                SOURCE_TREE_ICON_SIZE,
-                            ))
+                                this.child(render_icon(
+                                    expand_icon,
+                                    theme.foreground_muted,
+                                    SOURCE_TREE_ICON_SIZE,
+                                ))
+                            }
                         }),
                 )
                 .child(render_icon(
@@ -270,6 +275,26 @@ fn render_node(
                     cx.notify();
                 })),
         )
+}
+
+/// 渲染后台加载中的旋转图标。
+///
+/// 参数说明：
+/// - `source_id`：正在加载的来源节点 ID，用于构造稳定动画 ID。
+/// - `theme`：当前主题令牌，用于图标颜色。
+///
+/// 返回值：带 repeat 动画的 SVG 元素。
+fn render_loading_icon(source_id: SourceId, theme: &AppTheme) -> AnyElement {
+    svg()
+        .path(ArgusIcon::Refresh.path())
+        .size(px(SOURCE_TREE_ICON_SIZE))
+        .text_color(rgb(theme.foreground_muted))
+        .with_animation(
+            ("source-loading-spinner", source_id.0),
+            Animation::new(Duration::from_millis(850)).repeat(),
+            |icon, progress| icon.with_transformation(Transformation::rotate(percentage(progress))),
+        )
+        .into_any_element()
 }
 
 /// 返回来源节点右侧元信息；目录显示子级数量，文件显示大小。

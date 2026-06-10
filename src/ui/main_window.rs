@@ -4,10 +4,9 @@
 //! 作者：Argus 开发团队
 //! 主要功能：渲染自定义标题栏、来源侧栏、日志内容区和设置页占位界面。
 
-use crate::app::{ArgusApp, Workspace};
+use crate::app::ArgusApp;
 use crate::ui::{
-    custom_title_bar, log_content_view, placeholder_dialog, settings_modal, settings_view,
-    source_panel, source_resizer,
+    custom_title_bar, log_content_view, placeholder_dialog, source_panel, source_resizer,
 };
 use gpui::{
     Animation, AnimationExt, Context, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent,
@@ -39,7 +38,8 @@ pub fn render(
         .bg(rgb(theme.background))
         .text_color(rgb(theme.foreground))
         .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _window, cx| {
-            if app.is_source_panel_resizing && app.resize_source_panel(event.position.x / px(1.0)) {
+            let pointer_x = event.position.x / px(1.0);
+            if app.is_source_panel_resizing && app.resize_source_panel(pointer_x) {
                 cx.notify();
             }
         }))
@@ -65,28 +65,15 @@ pub fn render(
                 .flex()
                 .flex_1()
                 .overflow_hidden()
-                .bg(rgb(if app.workspace == Workspace::LogAnalysis {
-                    theme.side_bar
-                } else {
-                    theme.background
-                }))
-                .when(app.workspace == Workspace::LogAnalysis, |this| {
-                    this.child(animated_source_panel(app, cx))
-                        .child(log_content_view::render(app, cx))
-                })
-                .when(app.workspace == Workspace::Settings, |this| {
-                    this.child(settings_view::render(app, cx))
-                }),
+                .bg(rgb(theme.side_bar))
+                .child(animated_source_panel(app, cx))
+                .child(log_content_view::render(app, cx)),
         )
-        .when(
-            app.workspace == Workspace::LogAnalysis && !app.is_source_panel_collapsed,
-            |this| this.child(source_resizer::render(app, "source-resizer", cx)),
-        )
+        .when(!app.is_source_panel_collapsed, |this| {
+            this.child(source_resizer::render(app, "source-resizer", cx))
+        })
         .when(app.active_dialog.is_some(), |this| {
             this.child(placeholder_dialog::render(app, cx))
-        })
-        .when(app.is_settings_modal_open, |this| {
-            this.child(settings_modal::render(app, cx))
         })
 }
 

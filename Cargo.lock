@@ -29,6 +29,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpubits",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -112,6 +113,8 @@ dependencies = [
  "flate2",
  "gpui",
  "icondata",
+ "memmap2",
+ "rars",
  "serde",
  "sevenz-rust",
  "tar",
@@ -4323,6 +4326,63 @@ name = "rangemap"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
+
+[[package]]
+name = "rars"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a2c2d762d5dd6030739bff2ec3644cc976948ac93073a60f2e043ff091492dc"
+dependencies = [
+ "rars-format",
+]
+
+[[package]]
+name = "rars-codec"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c000e5df998ac6001e4c17c0345d43a561f58b4cde85607693cd08f3c856af5"
+dependencies = [
+ "rars-crc32",
+]
+
+[[package]]
+name = "rars-crc32"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e70e4a25e4b09acc0351bb57d3b847900778eddff9429b1f7a75b1ebba0614ba"
+
+[[package]]
+name = "rars-crypto"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8dbc41cbd6f823734984eb3d4a8cc3517fbb7b3587317db773d91c6278d12339"
+dependencies = [
+ "aes 0.9.1",
+ "hmac 0.13.0",
+ "rars-crc32",
+ "sha1",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
+name = "rars-format"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a6693bb961aaccb804d8881fe086f29bfde8fbeea8d3ad4bb6ffffe69469155"
+dependencies = [
+ "getrandom 0.4.2",
+ "rars-codec",
+ "rars-crc32",
+ "rars-crypto",
+ "rars-recovery",
+]
+
+[[package]]
+name = "rars-recovery"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1da2f6b31b36030f332ec44767c4e290b23b299a615314edeea3a1fe6a2b8fa9"
 
 [[package]]
 name = "rav1e"

@@ -76,9 +76,13 @@ pub enum SourceLocation {
     ArchiveEntry {
         /// 外层压缩包真实路径。
         archive_path: PathBuf,
+        /// 最外层真实压缩包格式，用于从本地文件启动嵌套读取链路。
+        root_format: ArchiveFormat,
+        /// 从外层压缩包到当前容器之间的嵌套压缩包条目链路。
+        container_entries: Vec<String>,
         /// 内部条目路径，统一使用 `/` 分隔。
         entry_path: String,
-        /// 所属压缩包格式。
+        /// 当前条目所属容器的压缩格式。
         format: ArchiveFormat,
         /// 嵌套压缩包深度。
         archive_depth: usize,
@@ -92,9 +96,14 @@ impl SourceLocation {
             Self::LocalPath(path) => path.display().to_string(),
             Self::ArchiveEntry {
                 archive_path,
+                container_entries,
                 entry_path,
                 ..
-            } => crate::utils::path::archive_virtual_path(archive_path, entry_path),
+            } => crate::utils::path::archive_virtual_path(
+                archive_path,
+                container_entries,
+                entry_path,
+            ),
         }
     }
 }

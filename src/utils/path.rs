@@ -19,9 +19,20 @@ pub fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// 组合压缩包真实路径与内部条目路径，形成稳定的虚拟路径文案。
-pub fn archive_virtual_path(archive_path: &Path, entry_path: &str) -> String {
-    format!("{}!/{entry_path}", archive_path.display())
+/// 组合压缩包真实路径、嵌套容器链路与内部条目路径，形成稳定的虚拟路径文案。
+pub fn archive_virtual_path(
+    archive_path: &Path,
+    container_entries: &[String],
+    entry_path: &str,
+) -> String {
+    let mut display_path = archive_path.display().to_string();
+    for container_entry in container_entries {
+        display_path.push_str("!/");
+        display_path.push_str(container_entry);
+    }
+    display_path.push_str("!/");
+    display_path.push_str(entry_path);
+    display_path
 }
 
 /// 将压缩包条目路径规范化为统一的 `/` 分隔形式。

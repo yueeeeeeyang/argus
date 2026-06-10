@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：为原生 macOS 交通灯预留安全区，并展示左侧操作组、当前标签和贯通分割线。
 
-use crate::app::{ArgusApp, Workspace};
+use crate::app::{ArgusApp, TabKind, Workspace};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
@@ -162,7 +162,11 @@ fn title_control_group(
             theme,
             cx,
         ))
-        .child(settings_button(app.is_settings_modal_open, theme, cx))
+        .child(settings_button(
+            matches!(app.active_tab_kind(), TabKind::Settings),
+            theme,
+            cx,
+        ))
         .child(title_action_button(
             "title-source-toggle",
             ArgusIcon::Layout,
@@ -231,7 +235,7 @@ fn title_action_button(
     )
 }
 
-/// 渲染标题栏右侧设置入口，点击后打开设置模态框。
+/// 渲染标题栏右侧设置入口，点击后打开或聚焦设置标签页。
 fn settings_button(
     is_selected: bool,
     theme: &AppTheme,
@@ -250,7 +254,7 @@ fn settings_button(
                 IconButtonSize::Small,
                 theme,
                 cx.listener(|app, _, _, cx| {
-                    app.open_settings_modal();
+                    app.open_or_focus_settings_tab();
                     cx.notify();
                 }),
             )),
