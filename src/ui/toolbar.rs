@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-06-10
 //! 作者：Argus 开发团队
-//! 主要功能：提供加载日志、搜索、目录树折叠、导航和更多操作的占位按钮。
+//! 主要功能：提供加载日志、过滤、目录树折叠、导航和更多操作的占位按钮。
 
 use crate::app::ArgusApp;
 use crate::theme::AppTheme;
@@ -41,9 +41,9 @@ pub fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyE
             cx,
         ))
         .child(source_icon_button(
-            "source-search",
-            ArgusIcon::Search,
-            "搜索",
+            "source-filter",
+            ArgusIcon::Filter,
+            "过滤",
             &theme,
             cx,
         ))
@@ -136,7 +136,7 @@ fn source_icon_button(
         cx.listener(move |app, _, window, cx| {
             match action_name {
                 "加载日志" => app.request_load_sources(cx),
-                "搜索" => {
+                "过滤" => {
                     app.open_source_tree_search();
                     window.on_next_frame(|window, _| window.focus_next());
                 }
@@ -155,6 +155,7 @@ fn render_source_search_toolbar(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     div()
+        .w_full()
         .overflow_hidden()
         .child(render_input(
             Input {
@@ -168,8 +169,8 @@ fn render_source_search_toolbar(
                 size: InputSize::Compact,
                 leading_accessory: Some(InputAccessory {
                     id: "source-tree-search-leading",
-                    icon: ArgusIcon::Search,
-                    tooltip: "搜索",
+                    icon: ArgusIcon::Filter,
+                    tooltip: "过滤",
                 }),
                 trailing_accessory: Some(InputAccessory {
                     id: "source-tree-search-close",
@@ -203,10 +204,7 @@ fn render_source_search_toolbar(
                 app.source_tree_search_animation_generation,
             ),
             Animation::new(Duration::from_millis(140)).with_easing(gpui::ease_out_quint()),
-            |this, progress| {
-                this.opacity(progress)
-                    .w(px(44.0 + (216.0 - 44.0) * progress))
-            },
+            |this, progress| this.opacity(progress),
         )
 }
 

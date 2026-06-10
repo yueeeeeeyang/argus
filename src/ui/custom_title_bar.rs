@@ -15,6 +15,8 @@ use gpui::{ClickEvent, Context, IntoElement, Window, WindowControlArea, div, pre
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 /// 标签页与来源侧栏分割线之间的视觉留白。
 const TAB_LEFT_GAP: f32 = 16.0;
+/// 标签栏右侧固定按钮与窗口右边缘的间距。
+const TAB_RIGHT_GAP: f32 = 12.0;
 /// 标题栏非激活按钮 hover 背景的视觉垂直校正值。
 const TITLE_BUTTON_INACTIVE_Y_OFFSET: f32 = 1.0;
 
@@ -26,25 +28,22 @@ const TITLE_BUTTON_INACTIVE_Y_OFFSET: f32 = 1.0;
 /// - `cx`：应用上下文，用于创建标题栏按钮的占位回调。
 ///
 /// 返回值：GPUI 元素树；当前不执行真实搜索或打开文件逻辑。
-pub fn render(
-    app: &ArgusApp,
-    _window: &mut Window,
-    cx: &mut Context<ArgusApp>,
-) -> impl IntoElement {
+pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let show_source_boundary =
         app.workspace == Workspace::LogAnalysis && !app.is_source_panel_collapsed;
 
     if show_source_boundary {
-        render_split_title_bar(app, &theme, cx).into_any_element()
+        render_split_title_bar(app, window, &theme, cx).into_any_element()
     } else {
-        render_compact_title_bar(app, &theme, cx).into_any_element()
+        render_compact_title_bar(app, window, &theme, cx).into_any_element()
     }
 }
 
 /// 渲染带来源侧栏贯通分割线的标题栏。
 fn render_split_title_bar(
     app: &ArgusApp,
+    window: &mut Window,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -67,12 +66,13 @@ fn render_split_title_bar(
                 .child(title_control_group(app, theme, cx))
                 .child(title_drag_area("title-left-drag-area", cx)),
         )
-        .child(title_center(app, cx))
+        .child(title_center(app, window, cx))
 }
 
 /// 渲染没有来源侧栏分割线的紧凑标题栏。
 fn render_compact_title_bar(
     app: &ArgusApp,
+    window: &mut Window,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -85,24 +85,24 @@ fn render_compact_title_bar(
         .px_3()
         .gap_2()
         .child(title_control_group(app, theme, cx))
-        .child(title_center(app, cx))
+        .child(title_center(app, window, cx))
 }
 
 /// 渲染标题栏中心区域，保留标签和左右拖拽空白。
-fn title_center(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
-    div()
-        .h_full()
-        .flex_1()
-        .flex()
-        .items_center()
-        .child(
-            div()
-                .h_full()
-                .flex()
-                .pl(px(TAB_LEFT_GAP))
-                .child(tab_bar::render(app, cx)),
-        )
-        .child(title_drag_area("title-center-drag-area", cx))
+fn title_center(
+    app: &ArgusApp,
+    window: &mut Window,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    div().h_full().flex_1().flex().items_center().child(
+        div()
+            .h_full()
+            .flex_1()
+            .flex()
+            .pl(px(TAB_LEFT_GAP))
+            .pr(px(TAB_RIGHT_GAP))
+            .child(tab_bar::render(app, window, cx)),
+    )
 }
 
 /// 渲染标题栏可拖拽空白区域，并在双击时执行系统级最大化/还原。

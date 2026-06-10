@@ -22,6 +22,8 @@ pub enum ArgusIcon {
     FolderPlus,
     /// 全局搜索或搜索框。
     Search,
+    /// 来源树过滤。
+    Filter,
     /// 连接入口。
     Connection,
     /// 新增来源或增大数值。
@@ -88,6 +90,7 @@ impl ArgusIcon {
             Self::Open,
             Self::FolderPlus,
             Self::Search,
+            Self::Filter,
             Self::Connection,
             Self::Plus,
             Self::Minus,
@@ -132,6 +135,7 @@ impl ArgusIcon {
             Self::Open => "icons/open.svg",
             Self::FolderPlus => "icons/folder-plus.svg",
             Self::Search => "icons/search.svg",
+            Self::Filter => "icons/filter.svg",
             Self::Connection => "icons/connection.svg",
             Self::Plus => "icons/plus.svg",
             Self::Minus => "icons/minus.svg",
@@ -193,6 +197,7 @@ impl ArgusIcon {
             Self::Open => icondata::LuFolderOpen,
             Self::FolderPlus => icondata::LuFolderPlus,
             Self::Search => icondata::LuSearch,
+            Self::Filter => icondata::LuListFilter,
             Self::Connection => icondata::LuPlug,
             Self::Plus => icondata::LuPlus,
             Self::Minus => icondata::LuMinus,

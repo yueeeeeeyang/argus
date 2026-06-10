@@ -79,6 +79,12 @@ pub fn render_input(
         InputSize::Compact => (28.0, 12.0, 14.0, 8.0),
         InputSize::Regular => (30.0, 13.0, 16.0, 8.0),
     };
+    let trailing_button_size = 24.0_f32;
+    let right_padding = if input.trailing_accessory.is_some() {
+        ((height - trailing_button_size) / 2.0_f32).max(2.0_f32)
+    } else {
+        horizontal_padding
+    };
     let display_text = if input.value.is_empty() {
         input.placeholder.to_string()
     } else {
@@ -104,7 +110,8 @@ pub fn render_input(
         .id(input.id)
         .h(px(height))
         .w_full()
-        .px(px(horizontal_padding))
+        .pl(px(horizontal_padding))
+        .pr(px(right_padding))
         .flex()
         .items_center()
         .gap_2()

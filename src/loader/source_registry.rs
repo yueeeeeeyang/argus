@@ -176,6 +176,28 @@ impl SourceRegistry {
         selected
     }
 
+    /// 展开指定节点的所有祖先节点，确保外部激活日志标签后来源树能显示对应路径。
+    pub fn expand_ancestors(&mut self, id: SourceId) -> bool {
+        let ancestor_ids = self.ancestor_ids(id);
+        let mut has_changed = false;
+
+        for ancestor_id in ancestor_ids {
+            let Some(ancestor) = self.nodes.get_mut(&ancestor_id) else {
+                continue;
+            };
+            if ancestor.kind.can_expand() && !ancestor.expanded {
+                ancestor.expanded = true;
+                has_changed = true;
+            }
+        }
+
+        if has_changed {
+            self.rebuild_visible_index();
+        }
+
+        has_changed
+    }
+
     /// 切换节点展开状态，返回切换后的状态。
     pub fn toggle_expanded(&mut self, id: SourceId) -> Option<bool> {
         let node = self.nodes.get_mut(&id)?;
@@ -468,6 +490,31 @@ mod tests {
 
         registry.toggle_expanded(root_id);
         assert_eq!(registry.visible_source_ids().len(), 3);
+    }
+
+    /// 验证外部按日志标签页激活来源时，可展开祖先目录并恢复可见索引。
+    #[test]
+    fn expands_ancestors_for_hidden_child_node() {
+        let mut registry = SourceRegistry::new();
+        let root = test_node(&mut registry, None, 0, "root", false);
+        let root_id = root.id;
+        registry.insert_node(root);
+        let child = test_node(&mut registry, Some(root_id), 1, "child.log", false);
+        let child_id = child.id;
+        registry.insert_node(child);
+        registry.rebuild_all_indices();
+
+        assert_eq!(registry.visible_source_ids(), &[root_id]);
+
+        assert!(registry.expand_ancestors(child_id));
+
+        assert_eq!(registry.visible_source_ids(), &[root_id, child_id]);
+        assert!(
+            registry
+                .node(root_id)
+                .map(|source| source.expanded)
+                .unwrap_or(false)
+        );
     }
 
     /// 验证兄弟关系可用于 UI 连线裁剪，最后一个兄弟不应继续向下绘制竖线。

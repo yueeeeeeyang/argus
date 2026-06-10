@@ -16,6 +16,7 @@ use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceRegistry};
 #[cfg(test)]
 use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
 use crate::theme::{AppTheme, ThemeManager};
+use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::main_window;
 use gpui::{
     ClipboardItem, Context, IntoElement, Keystroke, PathPromptOptions, Pixels, Point, Render,
@@ -239,6 +240,10 @@ pub struct ArgusApp {
     pub next_tab_id: usize,
     /// 当前鼠标悬停的标签 ID，用于控制未激活标签的边框和关闭按钮。
     pub hovered_tab_id: Option<usize>,
+    /// 当前打开的上下文菜单或下拉菜单。
+    pub active_menu: Option<ActiveMenu>,
+    /// 标签菜单滚动句柄，用于多标签溢出菜单的固定高度滚动。
+    pub tab_menu_scroll: UniformListScrollHandle,
     /// 来源侧栏是否折叠。
     pub is_source_panel_collapsed: bool,
     /// 来源侧栏当前宽度，标题栏左段与内容区侧栏共用。
@@ -338,6 +343,8 @@ impl ArgusApp {
             active_tab_id: 1,
             next_tab_id: 2,
             hovered_tab_id: None,
+            active_menu: None,
+            tab_menu_scroll: UniformListScrollHandle::new(),
             is_source_panel_collapsed: false,
             source_panel_width: SOURCE_PANEL_DEFAULT_WIDTH,
             is_source_panel_resizing: false,
@@ -969,11 +976,7 @@ impl ArgusApp {
             .map(|tab| tab.id)
         {
             self.active_tab_id = tab_id;
-            self.content_state = ContentState::SourceNotRead {
-                source_id,
-                label: selected_node.label.clone(),
-                path: path.clone(),
-            };
+            self.sync_content_state_from_active_tab();
             self.placeholder_notice = format!("已切换到 {path}，日志内容读取尚未接入");
             return;
         }
@@ -999,11 +1002,7 @@ impl ArgusApp {
             };
         }
         self.active_tab_id = tab_id;
-        self.content_state = ContentState::SourceNotRead {
-            source_id,
-            label: selected_node.label.clone(),
-            path: path.clone(),
-        };
+        self.sync_content_state_from_active_tab();
         self.placeholder_notice = format!("已打开 {path}，日志内容读取尚未接入");
     }
 
@@ -1014,6 +1013,72 @@ impl ArgusApp {
             self.sync_content_state_from_active_tab();
             self.placeholder_notice = format!("已切换到 {}", self.active_tab_title());
         }
+    }
+
+    /// 在指定窗口坐标打开标签页右键菜单。
+    pub fn open_tab_context_menu(&mut self, tab_id: usize, anchor: Point<Pixels>) {
+        if !self.tabs.iter().any(|tab| tab.id == tab_id) {
+            self.placeholder_notice = "未找到可操作的标签页".to_string();
+            return;
+        }
+
+        self.tab_menu_scroll = UniformListScrollHandle::new();
+        self.active_menu = Some(ActiveMenu {
+            kind: ActiveMenuKind::TabContext { tab_id },
+            anchor,
+        });
+    }
+
+    /// 在指定窗口坐标打开全部标签页溢出菜单。
+    pub fn open_tab_overflow_menu(&mut self, anchor: Point<Pixels>) {
+        self.tab_menu_scroll = UniformListScrollHandle::new();
+        self.active_menu = Some(ActiveMenu {
+            kind: ActiveMenuKind::TabOverflow,
+            anchor,
+        });
+    }
+
+    /// 关闭当前活动菜单。
+    pub fn close_active_menu(&mut self) {
+        self.active_menu = None;
+    }
+
+    /// 返回当前活动菜单应展示的菜单项。
+    pub fn active_menu_entries(&self) -> Vec<MenuEntry> {
+        let Some(active_menu) = &self.active_menu else {
+            return Vec::new();
+        };
+
+        match active_menu.kind {
+            ActiveMenuKind::TabContext { tab_id } => vec![
+                MenuEntry::new("关闭当前", MenuAction::CloseTab { tab_id }),
+                MenuEntry::new("关闭其他", MenuAction::CloseOtherTabs { tab_id }),
+                MenuEntry::new("关闭全部", MenuAction::CloseAllTabs).danger(),
+            ],
+            ActiveMenuKind::TabOverflow => self
+                .tabs
+                .iter()
+                .map(|tab| {
+                    MenuEntry::new(
+                        tab.title.clone(),
+                        MenuAction::ActivateTab { tab_id: tab.id },
+                    )
+                    .selected(tab.id == self.active_tab_id)
+                })
+                .collect(),
+        }
+    }
+
+    /// 执行通用菜单动作，并在动作完成后关闭菜单。
+    pub fn handle_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::ActivateTab { tab_id } => self.activate_tab(tab_id),
+            MenuAction::CloseTab { tab_id } => self.close_tab(tab_id),
+            MenuAction::CloseOtherTabs { tab_id } => self.close_other_tabs(tab_id),
+            MenuAction::CloseAllTabs => self.close_all_tabs(),
+        }
+
+        self.close_active_menu();
     }
 
     /// 更新鼠标悬停标签，仅影响标题栏标签视觉状态。
@@ -1027,6 +1092,8 @@ impl ArgusApp {
 
     /// 关闭指定标签页，至少保留一个空标签。
     pub fn close_tab(&mut self, tab_id: usize) {
+        self.close_active_menu();
+
         if self.tabs.len() == 1 {
             if let Some(tab) = self.tabs.first_mut() {
                 tab.title = "未选择日志".to_string();
@@ -1054,6 +1121,40 @@ impl ArgusApp {
             self.sync_content_state_from_active_tab();
         }
         self.placeholder_notice = "已关闭标签页".to_string();
+    }
+
+    /// 关闭指定标签之外的其他标签，并激活保留标签。
+    pub fn close_other_tabs(&mut self, tab_id: usize) {
+        let Some(kept_tab) = self.tabs.iter().find(|tab| tab.id == tab_id).cloned() else {
+            self.placeholder_notice = "未找到需要保留的标签页".to_string();
+            return;
+        };
+
+        let removed_count = self.tabs.len().saturating_sub(1);
+        self.tabs = vec![kept_tab];
+        self.active_tab_id = tab_id;
+        self.hovered_tab_id = None;
+        self.sync_content_state_from_active_tab();
+        self.placeholder_notice = if removed_count == 0 {
+            "没有其他标签可关闭".to_string()
+        } else {
+            format!("已关闭 {removed_count} 个其他标签")
+        };
+    }
+
+    /// 关闭全部标签，并创建一个新的空标签保持界面可用。
+    pub fn close_all_tabs(&mut self) {
+        let empty_tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs = vec![ArgusTab {
+            id: empty_tab_id,
+            title: "未选择日志".to_string(),
+            kind: TabKind::Empty,
+        }];
+        self.active_tab_id = empty_tab_id;
+        self.hovered_tab_id = None;
+        self.sync_content_state_from_active_tab();
+        self.placeholder_notice = "已关闭全部标签".to_string();
     }
 
     /// 根据节点 ID 选择来源树节点。
@@ -1166,6 +1267,8 @@ impl ArgusApp {
         self.is_search_panel_open = false;
         self.search_query.clear();
         self.hovered_tab_id = None;
+        self.active_menu = None;
+        self.tab_menu_scroll = UniformListScrollHandle::new();
 
         self.tabs = vec![ArgusTab {
             id: 1,
@@ -1317,8 +1420,23 @@ impl ArgusApp {
                 };
                 self.logs.clear();
                 self.selected_log_line = None;
+                self.sync_source_tree_selection_from_active_log(source_id);
             }
         }
+    }
+
+    /// 根据当前日志标签同步左侧来源树的选中态，并尽量滚动到对应节点。
+    fn sync_source_tree_selection_from_active_log(&mut self, source_id: SourceId) {
+        if self.source_registry.select(source_id).is_none() {
+            return;
+        }
+
+        self.source_registry.expand_ancestors(source_id);
+        self.rebuild_filtered_source_ids();
+        if self.is_source_tree_filtering() && !self.filtered_source_ids.contains(&source_id) {
+            self.close_source_tree_search();
+        }
+        self.scroll_source_into_view(source_id);
     }
 
     /// 返回内容区路径文案，优先展示真实选中来源。
@@ -1846,6 +1964,51 @@ mod tests {
         assert!(app.tabs.iter().any(|tab| tab.title == "error.log"));
     }
 
+    /// 验证激活日志标签页时，左侧来源树会选中同一个日志并展开父级路径。
+    #[test]
+    fn activating_log_tab_selects_matching_source_tree_node() {
+        let mut app = app_with_placeholder_sources();
+        let logs_id = source_id_by_label(&app, "logs");
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+
+        app.select_source(app_log_id);
+        let app_tab_id = app.active_tab_id;
+        app.select_source(error_log_id);
+        if app
+            .source_registry
+            .node(logs_id)
+            .map(|source| source.expanded)
+            .unwrap_or(false)
+        {
+            app.source_registry.toggle_expanded(logs_id);
+        }
+
+        assert!(!app.visible_source_ids().contains(&app_log_id));
+
+        app.activate_tab(app_tab_id);
+
+        assert!(
+            app.source_registry
+                .node(app_log_id)
+                .map(|source| source.selected)
+                .unwrap_or(false)
+        );
+        assert!(
+            !app.source_registry
+                .node(error_log_id)
+                .map(|source| source.selected)
+                .unwrap_or(true)
+        );
+        assert!(
+            app.source_registry
+                .node(logs_id)
+                .map(|source| source.expanded)
+                .unwrap_or(false)
+        );
+        assert!(app.visible_source_ids().contains(&app_log_id));
+    }
+
     /// 验证关闭当前标签后会激活相邻标签，关闭最后一个标签会回到空标签。
     #[test]
     fn close_tab_activates_neighbor_and_keeps_one_empty_tab() {
@@ -1864,6 +2027,76 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert!(matches!(app.active_tab_kind(), TabKind::Empty));
         assert_eq!(app.active_tab_title(), "未选择日志");
+    }
+
+    /// 验证标签右键菜单会记录目标标签和窗口锚点。
+    #[test]
+    fn tab_context_menu_records_target_tab_and_anchor() {
+        let mut app = test_app();
+        let target_tab_id = app.active_tab_id;
+        let anchor = gpui::point(gpui::px(120.0), gpui::px(40.0));
+
+        app.open_tab_context_menu(target_tab_id, anchor);
+
+        let Some(active_menu) = app.active_menu.as_ref() else {
+            panic!("右键标签后应打开活动菜单");
+        };
+        assert!(matches!(
+            active_menu.kind,
+            ActiveMenuKind::TabContext { tab_id } if tab_id == target_tab_id
+        ));
+        assert_eq!(active_menu.anchor, anchor);
+    }
+
+    /// 验证关闭其他标签只保留目标标签并激活它。
+    #[test]
+    fn close_other_tabs_keeps_target_tab_active() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+
+        app.select_source(app_log_id);
+        let app_tab_id = app.active_tab_id;
+        app.select_source(error_log_id);
+        app.open_or_focus_settings_tab();
+        app.close_other_tabs(app_tab_id);
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab_id, app_tab_id);
+        assert_eq!(app.active_tab_title(), "app.log");
+    }
+
+    /// 验证关闭全部标签后仍保留一个空标签承接界面。
+    #[test]
+    fn close_all_tabs_keeps_single_empty_tab() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+
+        app.select_source(app_log_id);
+        app.open_or_focus_settings_tab();
+        app.close_all_tabs();
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab_title(), "未选择日志");
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
+    }
+
+    /// 验证标签溢出菜单项点击后会激活目标标签并关闭菜单。
+    #[test]
+    fn overflow_menu_action_activates_tab_and_closes_menu() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+
+        app.select_source(app_log_id);
+        let app_tab_id = app.active_tab_id;
+        app.select_source(error_log_id);
+        app.open_tab_overflow_menu(gpui::point(gpui::px(200.0), gpui::px(40.0)));
+        app.handle_menu_action(MenuAction::ActivateTab { tab_id: app_tab_id });
+
+        assert_eq!(app.active_tab_id, app_tab_id);
+        assert_eq!(app.active_tab_title(), "app.log");
+        assert!(app.active_menu.is_none());
     }
 
     /// 验证日志内容字号会被限制在外观设置允许范围内。
@@ -2000,6 +2233,34 @@ mod tests {
 
         assert!(!app.source_registry.node(logs_id).unwrap().expanded);
         assert_eq!(visible_labels(&app), vec!["logs", "app.log"]);
+    }
+
+    /// 验证切换到被当前过滤条件隐藏的日志标签时，会退出过滤并显示对应来源节点。
+    #[test]
+    fn activating_hidden_log_tab_clears_source_tree_filter() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+
+        app.select_source(app_log_id);
+        let app_tab_id = app.active_tab_id;
+        app.select_source(error_log_id);
+        app.open_source_tree_search();
+        app.update_source_tree_search_query("error".to_string());
+
+        assert_eq!(visible_labels(&app), vec!["logs", "error.log"]);
+
+        app.activate_tab(app_tab_id);
+
+        assert!(!app.is_source_tree_search_open);
+        assert!(app.source_tree_search_query.is_empty());
+        assert!(app.visible_source_ids().contains(&app_log_id));
+        assert!(
+            app.source_registry
+                .node(app_log_id)
+                .map(|source| source.selected)
+                .unwrap_or(false)
+        );
     }
 
     /// 验证输入框编辑状态按字符索引移动，避免中文被按字节截断。

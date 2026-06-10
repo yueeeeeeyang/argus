@@ -82,7 +82,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let empty_icon = if app.is_source_loading {
         ArgusIcon::Refresh
     } else if app.is_source_tree_filtering() {
-        ArgusIcon::Search
+        ArgusIcon::Filter
     } else {
         ArgusIcon::Folder
     };
@@ -96,7 +96,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
         .relative()
         .flex_1()
         .overflow_hidden()
-        .pt(px(6.0))
+        .pt(px(1.0))
         .pb_2()
         .when(visible_count == 0, |this| {
             this.child(

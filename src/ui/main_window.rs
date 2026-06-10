@@ -6,7 +6,8 @@
 
 use crate::app::ArgusApp;
 use crate::ui::{
-    custom_title_bar, log_content_view, placeholder_dialog, source_panel, source_resizer,
+    components::context_menu, custom_title_bar, log_content_view, placeholder_dialog, source_panel,
+    source_resizer,
 };
 use gpui::{
     Animation, AnimationExt, Context, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent,
@@ -74,6 +75,9 @@ pub fn render(
         })
         .when(app.active_dialog.is_some(), |this| {
             this.child(placeholder_dialog::render(app, cx))
+        })
+        .when(app.active_menu.is_some(), |this| {
+            this.child(context_menu::render_active_menu(app, cx))
         })
 }
 
