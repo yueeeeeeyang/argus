@@ -6,6 +6,7 @@
 
 pub mod app_config;
 pub mod config_manager;
+pub mod paths;
 
-pub use app_config::{AppConfig, LoaderConfig};
-pub use config_manager::ConfigManager;
+pub use app_config::{AppConfig, AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig};
+pub use config_manager::{ConfigError, ConfigManager};

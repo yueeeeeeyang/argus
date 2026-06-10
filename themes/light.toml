@@ -1,8 +1,30 @@
-# 文件职责：记录 Argus 内置浅色主题的占位主题文件。
+# 文件职责：定义 Argus 内置浅色主题令牌。
 # 创建日期：2026-06-09
+# 修改日期：2026-06-10
 # 作者：Argus 开发团队
-# 主要功能：为后续主题管理器读取 TOML 主题令牌预留文件路径。
+# 主要功能：保存当前浅色界面的颜色配置，运行时由主题管理器读取并生成 AppTheme。
 
 name = "Argus Light"
 mode = "light"
-description = "界面占位阶段的浅色主题文件，运行时暂未读取。"
+description = "Argus 默认浅色主题，颜色值来自当前已调校的界面实现。"
+
+[colors]
+background = "#f3f3f3"
+title_bar = "#e8e8e8"
+activity_bar = "#e6e6e6"
+side_bar = "#eeeeee"
+content = "#ffffff"
+status_bar = "#f2f2f2"
+foreground = "#242424"
+foreground_muted = "#6b6b6b"
+border = "#d0d0d0"
+selection = "#d7e8fb"
+current_line = "#ebf2f8"
+modal_overlay = "#e9edf3c2"
+
+[log_levels]
+debug = "#4f7a37"
+info = "#0969da"
+warning = "#9a6700"
+error = "#cf222e"
+success = "#1a7f37"

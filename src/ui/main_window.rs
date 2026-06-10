@@ -6,8 +6,8 @@
 
 use crate::app::{ArgusApp, Workspace};
 use crate::ui::{
-    custom_title_bar, log_content_view, placeholder_dialog, settings_view, source_panel,
-    source_resizer,
+    custom_title_bar, log_content_view, placeholder_dialog, settings_modal, settings_view,
+    source_panel, source_resizer,
 };
 use gpui::{
     Animation, AnimationExt, Context, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent,
@@ -84,6 +84,9 @@ pub fn render(
         )
         .when(app.active_dialog.is_some(), |this| {
             this.child(placeholder_dialog::render(app, cx))
+        })
+        .when(app.is_settings_modal_open, |this| {
+            this.child(settings_modal::render(app, cx))
         })
 }
 

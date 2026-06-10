@@ -14,6 +14,8 @@ pub enum ArgusIcon {
     Logs,
     /// 设置工作区。
     Settings,
+    /// 关于或信息。
+    Info,
     /// 打开来源。
     Open,
     /// 加载日志来源。
@@ -82,6 +84,7 @@ impl ArgusIcon {
         &[
             Self::Logs,
             Self::Settings,
+            Self::Info,
             Self::Open,
             Self::FolderPlus,
             Self::Search,
@@ -125,6 +128,7 @@ impl ArgusIcon {
         match self {
             Self::Logs => "icons/logs.svg",
             Self::Settings => "icons/settings.svg",
+            Self::Info => "icons/info.svg",
             Self::Open => "icons/open.svg",
             Self::FolderPlus => "icons/folder-plus.svg",
             Self::Search => "icons/search.svg",
@@ -185,6 +189,7 @@ impl ArgusIcon {
         match self {
             Self::Logs => icondata::LuLogs,
             Self::Settings => icondata::LuSettings,
+            Self::Info => icondata::LuInfo,
             Self::Open => icondata::LuFolderOpen,
             Self::FolderPlus => icondata::LuFolderPlus,
             Self::Search => icondata::LuSearch,

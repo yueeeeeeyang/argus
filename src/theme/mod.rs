@@ -13,3 +13,4 @@ pub mod theme;
 pub mod theme_manager;
 
 pub use theme::AppTheme;
+pub use theme_manager::{ThemeError, ThemeManager};

@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-06-10
 //! 作者：Argus 开发团队
-//! 主要功能：展示主题、编码、缓存和快捷键设置分组，但不持久化任何配置。
+//! 主要功能：展示主题、编码、缓存和快捷键设置分组，交互会同步持久化到用户配置。
 
 use crate::app::{ArgusApp, ThemeMode};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -80,7 +80,7 @@ fn setting_group(
         .rounded_sm()
         .border_1()
         .border_color(rgb(theme.border))
-        .bg(rgb(0x242424))
+        .bg(rgb(theme.current_line))
         .child(
             div()
                 .flex()
@@ -110,7 +110,7 @@ fn theme_group(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     setting_group(
         ArgusIcon::Palette,
         "主题",
-        "当前只改变设置页本地状态，不切换真实主题令牌。",
+        "主题选择会立即切换当前窗口的内置主题令牌。",
         app,
         div()
             .flex()
@@ -164,7 +164,7 @@ fn encoding_group(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElemen
     setting_group(
         ArgusIcon::Type,
         "编码",
-        "编码选择只保存在内存中，不触发日志重新解码。",
+        "编码选择会保存到用户配置；日志重新解码将在读取模块接入后生效。",
         app,
         div()
             .flex()
@@ -211,7 +211,7 @@ fn cache_group(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     setting_group(
         ArgusIcon::Database,
         "缓存",
-        "临时缓存设置只影响本地展示状态，不创建临时文件。",
+        "临时缓存设置会保存到用户配置；缓存模块接入后会按此策略执行。",
         app,
         div()
             .flex()

@@ -57,18 +57,23 @@ fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusA
         ContentState::SourceNotSelected => render_empty_state(
             "请选择日志来源",
             "左侧来源树已经接入真实结构，选择日志文件后会在此处显示未读取提示。",
+            app,
             theme,
         ),
         ContentState::SourceNotRead { label, path, .. } => render_empty_state(
             &format!("{label} 已选中"),
             &format!("真实来源路径：{path}。日志内容读取模块尚未接入，本轮只加载来源结构。"),
+            app,
             theme,
         ),
     }
 }
 
 /// 渲染内容区空状态或未读取提示。
-fn render_empty_state(title: &str, detail: &str, theme: &AppTheme) -> AnyElement {
+fn render_empty_state(title: &str, detail: &str, app: &ArgusApp, theme: &AppTheme) -> AnyElement {
+    let detail_font_size = app.log_content_font_size;
+    let title_font_size = detail_font_size + 4.0;
+
     div()
         .flex_1()
         .flex()
@@ -88,13 +93,13 @@ fn render_empty_state(title: &str, detail: &str, theme: &AppTheme) -> AnyElement
                 .text_center()
                 .child(
                     div()
-                        .text_size(px(18.0))
+                        .text_size(px(title_font_size))
                         .text_color(rgb(theme.foreground))
                         .child(title.to_string()),
                 )
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(detail_font_size))
                         .text_color(rgb(theme.foreground_muted))
                         .child(detail.to_string()),
                 ),
@@ -117,17 +122,18 @@ fn render_log_row(
         theme.content
     };
     let line_number = line.number;
+    let row_height = (app.log_content_font_size + 14.0).max(28.0);
 
     div()
         .id(SharedString::from(format!("log-row-{index}")))
-        .h(px(28.0))
+        .h(px(row_height))
         .flex()
         .items_center()
         .border_b_1()
-        .border_color(rgb(0x2b2b2b))
+        .border_color(rgb(theme.border))
         .bg(rgb(background))
         .overflow_hidden()
-        .text_sm()
+        .text_size(px(app.log_content_font_size))
         .cursor_pointer()
         .child(
             div()
@@ -178,7 +184,7 @@ fn render_search_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoE
         .border_b_1()
         .border_color(rgb(theme.border))
         .overflow_hidden()
-        .bg(rgb(0x242424))
+        .bg(rgb(theme.current_line))
         .child(render_icon(ArgusIcon::Search, theme.foreground_muted, 18.0))
         .child(
             div()

@@ -26,20 +26,26 @@ pub enum IconButtonSize {
 struct TooltipView {
     /// tooltip 展示文本。
     label: String,
+    /// tooltip 背景色。
+    background: u32,
+    /// tooltip 边框色。
+    border: u32,
+    /// tooltip 文本色。
+    foreground: u32,
 }
 
 impl Render for TooltipView {
-    /// 渲染紧凑深色 tooltip。
+    /// 渲染紧凑 tooltip，颜色跟随当前主题令牌。
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0x111111))
+            .bg(rgb(self.background))
             .border_1()
-            .border_color(rgb(0x3c3c3c))
+            .border_color(rgb(self.border))
             .text_xs()
-            .text_color(rgb(0xd4d4d4))
+            .text_color(rgb(self.foreground))
             .child(self.label.clone())
     }
 }
@@ -81,6 +87,9 @@ pub fn render_icon_button(
     } else {
         theme.foreground_muted
     };
+    let tooltip_background = theme.current_line;
+    let tooltip_border = theme.border;
+    let tooltip_foreground = theme.foreground;
 
     div()
         .id(id)
@@ -97,6 +106,9 @@ pub fn render_icon_button(
         .tooltip(move |_, cx| {
             cx.new(|_| TooltipView {
                 label: tooltip.to_string(),
+                background: tooltip_background,
+                border: tooltip_border,
+                foreground: tooltip_foreground,
             })
             .into()
         })

@@ -15,7 +15,7 @@ use crate::loader::archive::ArchiveFormat;
 use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceRegistry};
 #[cfg(test)]
 use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
-use crate::theme::AppTheme;
+use crate::theme::{AppTheme, ThemeManager};
 use crate::ui::main_window;
 use gpui::{
     ClipboardItem, Context, IntoElement, Keystroke, PathPromptOptions, Pixels, Point, Render,
@@ -29,6 +29,12 @@ pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 260.0;
 pub const SOURCE_PANEL_MIN_WIDTH: f32 = 244.0;
 /// 来源侧栏最大宽度，避免占位界面被侧栏挤压。
 pub const SOURCE_PANEL_MAX_WIDTH: f32 = 520.0;
+/// 日志内容字号最小值，避免主阅读区文字过小影响可读性。
+pub const LOG_CONTENT_FONT_SIZE_MIN: f32 = 12.0;
+/// 日志内容字号最大值，避免大字号破坏当前日志行布局。
+pub const LOG_CONTENT_FONT_SIZE_MAX: f32 = 20.0;
+/// 日志内容默认字号，延续现有 GPUI `text_sm` 的阅读密度。
+pub const LOG_CONTENT_FONT_SIZE_DEFAULT: f32 = 14.0;
 
 /// 当前界面工作区，仅保留日志分析和设置两个入口。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +63,46 @@ impl ThemeMode {
             Self::System => "跟随系统",
             Self::Dark => "深色",
             Self::Light => "浅色",
+        }
+    }
+
+    /// 返回持久化配置中使用的稳定字符串。
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    /// 从持久化配置值恢复主题模式，未知值回退深色主题。
+    pub fn from_config_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "system" => Self::System,
+            "light" => Self::Light,
+            _ => Self::Dark,
+        }
+    }
+}
+
+/// 设置模态框左侧导航分组。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingsSection {
+    /// 关于页面，仅展示程序版本。
+    About,
+    /// 外观页面，展示主题和日志内容字号设置。
+    Appearance,
+    /// 日志加载页面，展示加载策略占位设置。
+    LogLoading,
+}
+
+impl SettingsSection {
+    /// 返回设置分组展示文案。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::About => "关于",
+            Self::Appearance => "外观",
+            Self::LogLoading => "日志加载",
         }
     }
 }
@@ -149,6 +195,10 @@ pub enum ContentState {
 pub struct ArgusApp {
     /// 应用运行期配置。
     pub config: AppConfig,
+    /// 应用配置管理器，负责读取和保存 `~/.argus/settings.toml`。
+    pub config_manager: ConfigManager,
+    /// 主题管理器，负责从内置和用户 TOML 主题生成运行时主题令牌。
+    pub theme_manager: ThemeManager,
     /// 当前活动工作区。
     pub workspace: Workspace,
     /// 用户点击未实现操作后的占位提示。
@@ -227,8 +277,14 @@ pub struct ArgusApp {
     pub active_dialog: Option<PlaceholderDialog>,
     /// 打开来源弹窗中选中的来源类型。
     pub selected_placeholder_source: PlaceholderSourceKind,
+    /// 设置模态框是否打开。
+    pub is_settings_modal_open: bool,
+    /// 设置模态框当前选中的左侧设置项。
+    pub active_settings_section: SettingsSection,
     /// 设置页主题模式。
     pub theme_mode: ThemeMode,
+    /// 日志内容区字号，仅影响主阅读区域。
+    pub log_content_font_size: f32,
     /// 设置页编码选项。
     pub selected_encoding: String,
     /// 是否启用临时缓存。
@@ -240,12 +296,33 @@ pub struct ArgusApp {
 impl ArgusApp {
     /// 创建界面占位版应用状态。
     pub fn new() -> Self {
-        let config = ConfigManager::load_default();
+        Self::new_with_config_manager(ConfigManager::default())
+    }
+
+    /// 使用指定配置管理器创建应用状态，测试可借此隔离真实用户配置目录。
+    pub fn new_with_config_manager(config_manager: ConfigManager) -> Self {
+        let (mut config, config_warning) = config_manager.load_with_warning();
+        let theme_manager = ThemeManager::load_default();
+        let theme_mode = ThemeMode::from_config_value(&config.appearance.theme_mode);
+        let theme = theme_manager.theme_for_mode(theme_mode.config_value());
+        let log_content_font_size = config
+            .appearance
+            .log_content_font_size
+            .clamp(LOG_CONTENT_FONT_SIZE_MIN, LOG_CONTENT_FONT_SIZE_MAX);
+        let selected_encoding = config.encoding.selected.clone();
+        let is_cache_enabled = config.cache.enabled;
+        let cache_limit_mb = config.cache.limit_mb.clamp(128, 2048);
+        config.appearance.theme_mode = theme_mode.config_value().to_string();
+        config.appearance.log_content_font_size = log_content_font_size;
+        config.cache.limit_mb = cache_limit_mb;
         Self {
             config,
+            config_manager,
+            theme_manager,
             workspace: Workspace::LogAnalysis,
-            placeholder_notice: "界面占位模式：暂未接入真实日志读取".to_string(),
-            theme: AppTheme::dark(),
+            placeholder_notice: config_warning
+                .unwrap_or_else(|| "界面占位模式：暂未接入真实日志读取".to_string()),
+            theme,
             source_registry: SourceRegistry::new(),
             has_loaded_real_sources: false,
             is_source_loading: false,
@@ -259,11 +336,11 @@ impl ArgusApp {
             source_tree_search_animation_generation: 0,
             filtered_source_ids: Vec::new(),
             source_child_load_generations: HashMap::new(),
-            content_state: ContentState::PlaceholderPreview,
-            logs: placeholder_logs(),
+            content_state: ContentState::SourceNotSelected,
+            logs: Vec::new(),
             tabs: vec![PlaceholderTab {
                 id: 1,
-                title: "app.log".to_string(),
+                title: "未选择日志".to_string(),
             }],
             active_tab_id: 1,
             next_tab_id: 2,
@@ -282,13 +359,16 @@ impl ArgusApp {
             is_case_sensitive: false,
             is_regex_enabled: false,
             is_whole_word_enabled: false,
-            selected_log_line: Some(1),
+            selected_log_line: None,
             active_dialog: None,
             selected_placeholder_source: PlaceholderSourceKind::File,
-            theme_mode: ThemeMode::Dark,
-            selected_encoding: "UTF-8".to_string(),
-            is_cache_enabled: true,
-            cache_limit_mb: 512,
+            is_settings_modal_open: false,
+            active_settings_section: SettingsSection::About,
+            theme_mode,
+            log_content_font_size,
+            selected_encoding,
+            is_cache_enabled,
+            cache_limit_mb,
         }
     }
 
@@ -299,6 +379,32 @@ impl ArgusApp {
             Workspace::LogAnalysis => "已切换到日志分析占位工作区".to_string(),
             Workspace::Settings => "已切换到设置占位工作区".to_string(),
         };
+    }
+
+    /// 打开设置模态框，并默认定位到关于页面。
+    pub fn open_settings_modal(&mut self) {
+        self.is_settings_modal_open = true;
+        self.active_settings_section = SettingsSection::About;
+        self.placeholder_notice = "已打开设置".to_string();
+    }
+
+    /// 关闭设置模态框，保留已经修改的内存设置状态。
+    pub fn close_settings_modal(&mut self) {
+        self.is_settings_modal_open = false;
+        self.placeholder_notice = "已关闭设置".to_string();
+    }
+
+    /// 切换设置模态框左侧设置项。
+    pub fn select_settings_section(&mut self, section: SettingsSection) {
+        self.active_settings_section = section;
+        self.placeholder_notice = format!("已切换到{}设置", section.label());
+    }
+
+    /// 持久化当前配置；失败时只更新提示，不回滚已经生效的 UI 状态。
+    fn persist_config_or_report(&mut self) {
+        if let Err(error) = self.config_manager.save(&self.config) {
+            self.placeholder_notice = format!("{}；设置保存失败：{error}", self.placeholder_notice);
+        }
     }
 
     /// 记录用户触发了尚未实现的操作。
@@ -1201,7 +1307,25 @@ impl ArgusApp {
     /// 更新主题模式设置。
     pub fn set_theme_mode(&mut self, theme_mode: ThemeMode) {
         self.theme_mode = theme_mode;
-        self.placeholder_notice = format!("主题已切换为{}占位状态", theme_mode.label());
+        self.theme = self.theme_manager.theme_for_mode(theme_mode.config_value());
+        self.config.appearance.theme_mode = theme_mode.config_value().to_string();
+        self.placeholder_notice = match theme_mode {
+            ThemeMode::System => {
+                "主题已切换为跟随系统；当前系统监听未接入，暂按深色主题展示".to_string()
+            }
+            _ => format!("主题已切换为{}", theme_mode.label()),
+        };
+        self.persist_config_or_report();
+    }
+
+    /// 调整日志内容字号，并限制在外观设置允许的可读范围内。
+    pub fn adjust_log_content_font_size(&mut self, delta: f32) {
+        self.log_content_font_size = (self.log_content_font_size + delta)
+            .clamp(LOG_CONTENT_FONT_SIZE_MIN, LOG_CONTENT_FONT_SIZE_MAX);
+        self.config.appearance.log_content_font_size = self.log_content_font_size;
+        self.placeholder_notice =
+            format!("日志内容字号已调整为 {:.0}px", self.log_content_font_size);
+        self.persist_config_or_report();
     }
 
     /// 切换编码设置。
@@ -1211,17 +1335,21 @@ impl ArgusApp {
             "GBK" => "Latin-1".to_string(),
             _ => "UTF-8".to_string(),
         };
+        self.config.encoding.selected = self.selected_encoding.clone();
         self.placeholder_notice = format!("编码设置已切换为 {}", self.selected_encoding);
+        self.persist_config_or_report();
     }
 
     /// 切换临时缓存开关。
     pub fn toggle_cache_enabled(&mut self) {
         self.is_cache_enabled = !self.is_cache_enabled;
+        self.config.cache.enabled = self.is_cache_enabled;
         self.placeholder_notice = if self.is_cache_enabled {
             "已启用临时缓存占位设置".to_string()
         } else {
             "已关闭临时缓存占位设置".to_string()
         };
+        self.persist_config_or_report();
     }
 
     /// 调整缓存上限，始终限制在占位设置页可展示范围内。
@@ -1230,7 +1358,35 @@ impl ArgusApp {
             .cache_limit_mb
             .saturating_add_signed(delta)
             .clamp(128, 2048);
+        self.config.cache.limit_mb = self.cache_limit_mb;
         self.placeholder_notice = format!("缓存上限已调整为 {} MB", self.cache_limit_mb);
+        self.persist_config_or_report();
+    }
+
+    /// 调整嵌套压缩包最大展开深度，设置会影响后续来源加载任务。
+    pub fn adjust_max_archive_depth(&mut self, delta: isize) {
+        self.config.loader.max_archive_depth = self
+            .config
+            .loader
+            .max_archive_depth
+            .saturating_add_signed(delta)
+            .clamp(0, 8);
+        self.placeholder_notice = format!(
+            "嵌套压缩包深度已调整为 {} 层",
+            self.config.loader.max_archive_depth
+        );
+        self.persist_config_or_report();
+    }
+
+    /// 切换符号链接跟随策略，设置会影响后续目录来源加载任务。
+    pub fn toggle_follow_symlinks(&mut self) {
+        self.config.loader.follow_symlinks = !self.config.loader.follow_symlinks;
+        self.placeholder_notice = if self.config.loader.follow_symlinks {
+            "日志加载已允许跟随符号链接".to_string()
+        } else {
+            "日志加载已禁止跟随符号链接".to_string()
+        };
+        self.persist_config_or_report();
     }
 }
 
@@ -1396,6 +1552,7 @@ fn placeholder_source_registry() -> SourceRegistry {
 }
 
 /// 构造日志内容占位数据，覆盖常见日志等级视觉状态。
+#[cfg(test)]
 fn placeholder_logs() -> Vec<LogLine> {
     vec![
         LogLine {
@@ -1444,10 +1601,28 @@ fn placeholder_logs() -> Vec<LogLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 测试配置路径计数器，保证每个应用状态使用独立 settings.toml。
+    static NEXT_TEST_CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+
+    /// 构造隔离真实用户目录的配置管理器。
+    fn isolated_config_manager() -> ConfigManager {
+        let id = NEXT_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed);
+        let config_dir =
+            std::env::temp_dir().join(format!("argus-app-test-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        ConfigManager::new(config_dir.join("settings.toml"))
+    }
+
+    /// 构造使用临时配置路径的应用状态，避免测试污染 `~/.argus`。
+    fn test_app() -> ArgusApp {
+        ArgusApp::new_with_config_manager(isolated_config_manager())
+    }
 
     /// 构造带样例来源树的应用状态，避免单元测试依赖正式启动空态。
     fn app_with_placeholder_sources() -> ArgusApp {
-        let mut app = ArgusApp::new();
+        let mut app = test_app();
         app.source_registry = placeholder_source_registry();
         app
     }
@@ -1479,10 +1654,107 @@ mod tests {
     /// 验证正式启动时来源树为空，左侧由空态图标承接而非展示样例数据。
     #[test]
     fn new_app_starts_with_empty_source_tree() {
-        let app = ArgusApp::new();
+        let app = test_app();
 
         assert!(app.source_registry.is_empty());
         assert!(app.visible_source_ids().is_empty());
+    }
+
+    /// 验证正式启动时内容区只展示提示信息，不渲染样例日志行。
+    #[test]
+    fn new_app_starts_without_placeholder_log_rows() {
+        let app = test_app();
+
+        assert!(app.logs.is_empty());
+        assert!(app.selected_log_line.is_none());
+        assert_eq!(app.active_tab_title(), "未选择日志");
+        assert!(matches!(app.content_state, ContentState::SourceNotSelected));
+    }
+
+    /// 验证打开设置模态框时默认进入关于页面。
+    #[test]
+    fn open_settings_modal_selects_about_section() {
+        let mut app = test_app();
+        app.active_settings_section = SettingsSection::Appearance;
+
+        app.open_settings_modal();
+
+        assert!(app.is_settings_modal_open);
+        assert_eq!(app.active_settings_section, SettingsSection::About);
+    }
+
+    /// 验证设置模态框左侧设置项切换只改变当前详情页。
+    #[test]
+    fn select_settings_section_updates_active_section() {
+        let mut app = test_app();
+
+        app.select_settings_section(SettingsSection::LogLoading);
+
+        assert_eq!(app.active_settings_section, SettingsSection::LogLoading);
+    }
+
+    /// 验证关闭设置模态框只影响弹窗显隐状态。
+    #[test]
+    fn close_settings_modal_hides_modal() {
+        let mut app = test_app();
+        app.open_settings_modal();
+
+        app.close_settings_modal();
+
+        assert!(!app.is_settings_modal_open);
+    }
+
+    /// 验证日志内容字号会被限制在外观设置允许范围内。
+    #[test]
+    fn adjust_log_content_font_size_clamps_to_range() {
+        let mut app = test_app();
+
+        app.adjust_log_content_font_size(100.0);
+        assert_eq!(app.log_content_font_size, LOG_CONTENT_FONT_SIZE_MAX);
+
+        app.adjust_log_content_font_size(-100.0);
+        assert_eq!(app.log_content_font_size, LOG_CONTENT_FONT_SIZE_MIN);
+    }
+
+    /// 验证外观主题切换会立即替换运行时主题令牌。
+    #[test]
+    fn set_theme_mode_updates_runtime_theme_tokens() {
+        let mut app = test_app();
+
+        app.set_theme_mode(ThemeMode::Light);
+        assert_eq!(app.theme_mode, ThemeMode::Light);
+        assert_eq!(
+            app.theme.content,
+            app.theme_manager.theme_for_mode("light").content
+        );
+
+        app.set_theme_mode(ThemeMode::Dark);
+        assert_eq!(app.theme_mode, ThemeMode::Dark);
+        assert_eq!(
+            app.theme.content,
+            app.theme_manager.theme_for_mode("dark").content
+        );
+    }
+
+    /// 验证外观和加载设置修改后会立即写入配置文件。
+    #[test]
+    fn settings_changes_are_persisted_to_config_file() {
+        let config_manager = isolated_config_manager();
+        let settings_path = config_manager.settings_path().to_path_buf();
+        let mut app = ArgusApp::new_with_config_manager(config_manager);
+
+        app.set_theme_mode(ThemeMode::Light);
+        app.adjust_log_content_font_size(2.0);
+        app.adjust_max_archive_depth(1);
+        app.toggle_follow_symlinks();
+
+        let saved =
+            ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
+
+        assert_eq!(saved.appearance.theme_mode, "light");
+        assert_eq!(saved.appearance.log_content_font_size, 16.0);
+        assert_eq!(saved.loader.max_archive_depth, 3);
+        assert!(saved.loader.follow_symlinks);
     }
 
     /// 验证新日志来源加载成功后会替换旧来源，并清理旧日志相关界面状态。
@@ -1566,7 +1838,7 @@ mod tests {
     /// 验证输入框编辑状态按字符索引移动，避免中文被按字节截断。
     #[test]
     fn source_tree_search_editing_uses_character_indices() {
-        let mut app = ArgusApp::new();
+        let mut app = test_app();
 
         app.insert_source_tree_search_text("日a志");
         app.move_source_tree_search_left(false);
@@ -1583,7 +1855,7 @@ mod tests {
     /// 验证全选和删除操作会同步维护光标和选区。
     #[test]
     fn source_tree_search_selection_delete_updates_cursor() {
-        let mut app = ArgusApp::new();
+        let mut app = test_app();
 
         app.update_source_tree_search_query("archive.log".to_string());
         app.select_all_source_tree_search();
@@ -1596,7 +1868,7 @@ mod tests {
 
     /// 构造只有一个未加载目录的应用状态，用于验证懒加载状态机。
     fn app_with_loading_directory() -> (ArgusApp, SourceId) {
-        let mut app = ArgusApp::new();
+        let mut app = test_app();
         let mut registry = SourceRegistry::new();
         let id = registry.allocate_id();
         registry.insert_node(SourceTreeNode {

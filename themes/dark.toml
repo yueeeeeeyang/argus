@@ -1,8 +1,30 @@
-# 文件职责：记录 Argus 内置深色主题的占位主题文件。
+# 文件职责：定义 Argus 内置深色主题令牌。
 # 创建日期：2026-06-09
+# 修改日期：2026-06-10
 # 作者：Argus 开发团队
-# 主要功能：为后续主题管理器读取 TOML 主题令牌预留文件路径。
+# 主要功能：保存当前深色界面的颜色配置，运行时由主题管理器读取并生成 AppTheme。
 
 name = "Argus Dark"
 mode = "dark"
-description = "界面占位阶段的深色主题文件，运行时暂未读取。"
+description = "Argus 默认深色主题，颜色值来自当前已调校的界面实现。"
+
+[colors]
+background = "#1e1e1e"
+title_bar = "#333333"
+activity_bar = "#252526"
+side_bar = "#252526"
+content = "#1e1e1e"
+status_bar = "#202020"
+foreground = "#d4d4d4"
+foreground_muted = "#858585"
+border = "#3c3c3c"
+selection = "#264f78"
+current_line = "#2a2d2e"
+modal_overlay = "#1e1e1eb8"
+
+[log_levels]
+debug = "#b5cea8"
+info = "#75beff"
+warning = "#cca700"
+error = "#f48771"
+success = "#89d185"

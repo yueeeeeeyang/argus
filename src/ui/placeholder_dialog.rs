@@ -7,7 +7,7 @@
 use crate::app::{ArgusApp, PlaceholderSourceKind};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
-use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb, rgba};
 
 /// 渲染当前活动占位弹窗。
 ///
@@ -27,8 +27,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgb(0x101010))
-        .opacity(0.98)
+        .bg(rgba(theme.modal_overlay))
         .child(
             div()
                 .w(px(420.0))

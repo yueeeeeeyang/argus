@@ -1,9 +1,9 @@
 //! 文件职责：定义 Argus 界面使用的主题令牌。
 //! 创建日期：2026-06-09
 //! 作者：Argus 开发团队
-//! 主要功能：提供深色主题颜色、日志级别颜色和紧凑布局尺寸。
+//! 主要功能：提供运行期主题颜色、日志级别颜色和主题文件损坏时的紧急兜底令牌。
 
-/// 应用主题令牌，当前阶段只提供内置深色主题的占位值。
+/// 应用主题令牌，正常运行时由主题管理器读取 TOML 后生成。
 #[derive(Clone, Debug)]
 pub struct AppTheme {
     /// 主窗口背景色。
@@ -38,10 +38,12 @@ pub struct AppTheme {
     pub error: u32,
     /// 成功或就绪状态颜色。
     pub success: u32,
+    /// 模态框遮罩 RGBA 颜色，用于弱化背景但避免全黑压暗。
+    pub modal_overlay: u32,
 }
 
 impl AppTheme {
-    /// 构造设计文档中的内置深色主题。
+    /// 构造深色主题紧急兜底令牌；正常路径应优先读取 `themes/dark.toml`。
     pub fn dark() -> Self {
         Self {
             background: 0x1e1e1e,
@@ -60,6 +62,30 @@ impl AppTheme {
             warning: 0xcca700,
             error: 0xf48771,
             success: 0x89d185,
+            modal_overlay: 0x1e1e1eb8,
+        }
+    }
+
+    /// 构造浅色主题紧急兜底令牌；正常路径应优先读取 `themes/light.toml`。
+    pub fn light() -> Self {
+        Self {
+            background: 0xf3f3f3,
+            title_bar: 0xe8e8e8,
+            activity_bar: 0xe6e6e6,
+            side_bar: 0xeeeeee,
+            content: 0xffffff,
+            status_bar: 0xf2f2f2,
+            foreground: 0x242424,
+            foreground_muted: 0x6b6b6b,
+            border: 0xd0d0d0,
+            selection: 0xd7e8fb,
+            current_line: 0xebf2f8,
+            debug: 0x4f7a37,
+            info: 0x0969da,
+            warning: 0x9a6700,
+            error: 0xcf222e,
+            success: 0x1a7f37,
+            modal_overlay: 0xe9edf3c2,
         }
     }
 

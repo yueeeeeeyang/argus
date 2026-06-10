@@ -19,8 +19,10 @@ flate2 = "1.1.9"
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 icondata = { version = "0.7.0", default-features = false, features = ["lucide"] }
 sevenz-rust = "0.6.1"
+serde = { version = "1.0.228", features = ["derive"] }
 tar = "0.4.46"
 thiserror = "2.0.18"
+toml = "0.8.23"
 walkdir = "2.5.0"
 xz2 = "0.1.7"
 zip = "8.6.0"

@@ -10,6 +10,7 @@ pub mod dir_tree_panel;
 pub mod log_content_view;
 pub mod main_window;
 pub mod placeholder_dialog;
+pub mod settings_modal;
 pub mod settings_view;
 pub mod source_panel;
 pub mod source_resizer;

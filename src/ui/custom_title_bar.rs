@@ -9,7 +9,7 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::tab_bar;
-use gpui::{Context, IntoElement, Window, WindowControlArea, div, prelude::*, px, rgb};
+use gpui::{ClickEvent, Context, IntoElement, Window, WindowControlArea, div, prelude::*, px, rgb};
 
 /// 自定义标题栏高度，保持紧凑 Obsidian 风格。
 const TITLE_BAR_HEIGHT: f32 = 40.0;
@@ -65,12 +65,7 @@ fn render_split_title_bar(
                 .pl_3()
                 .pr_3()
                 .child(title_control_group(app, theme, cx))
-                .child(
-                    div()
-                        .h_full()
-                        .flex_1()
-                        .window_control_area(WindowControlArea::Drag),
-                ),
+                .child(title_drag_area("title-left-drag-area", cx)),
         )
         .child(title_center(app, cx))
 }
@@ -107,12 +102,26 @@ fn title_center(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement 
                 .pl(px(TAB_LEFT_GAP))
                 .child(tab_bar::render(app, cx)),
         )
-        .child(
-            div()
-                .h_full()
-                .flex_1()
-                .window_control_area(WindowControlArea::Drag),
-        )
+        .child(title_drag_area("title-center-drag-area", cx))
+}
+
+/// 渲染标题栏可拖拽空白区域，并在双击时执行系统级最大化/还原。
+fn title_drag_area(id: &'static str, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+    div()
+        .id(id)
+        .h_full()
+        .flex_1()
+        .window_control_area(WindowControlArea::Drag)
+        .on_click(cx.listener(|app, event: &ClickEvent, window, cx| {
+            if let ClickEvent::Mouse(mouse_event) = event
+                && mouse_event.up.click_count >= 2
+            {
+                window.zoom_window();
+                app.placeholder_notice = "已切换窗口最大化状态".to_string();
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
 }
 
 /// 渲染左侧标题栏操作组。
@@ -153,11 +162,7 @@ fn title_control_group(
             theme,
             cx,
         ))
-        .child(settings_button(
-            app.workspace == Workspace::Settings,
-            theme,
-            cx,
-        ))
+        .child(settings_button(app.is_settings_modal_open, theme, cx))
         .child(title_action_button(
             "title-source-toggle",
             ArgusIcon::Layout,
@@ -226,7 +231,7 @@ fn title_action_button(
     )
 }
 
-/// 渲染标题栏右侧设置入口，点击后切换到设置占位工作区。
+/// 渲染标题栏右侧设置入口，点击后打开设置模态框。
 fn settings_button(
     is_selected: bool,
     theme: &AppTheme,
@@ -245,7 +250,7 @@ fn settings_button(
                 IconButtonSize::Small,
                 theme,
                 cx.listener(|app, _, _, cx| {
-                    app.switch_workspace(Workspace::Settings);
+                    app.open_settings_modal();
                     cx.notify();
                 }),
             )),
