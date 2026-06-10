@@ -25,7 +25,7 @@ use gpui::{
 use gpui::{ScrollStrategy, UniformListScrollHandle};
 
 /// 来源侧栏默认宽度。
-pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 260.0;
+pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 300.0;
 /// 来源侧栏最小宽度，需保证标题栏左侧 4 个操作按钮和固定右侧间距完整展示。
 pub const SOURCE_PANEL_MIN_WIDTH: f32 = 244.0;
 /// 来源侧栏最大宽度，避免占位界面被侧栏挤压。

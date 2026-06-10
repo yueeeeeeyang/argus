@@ -236,10 +236,8 @@ fn render_menu_entry(
     };
     let foreground = if entry.is_danger {
         theme.error
-    } else if entry.is_selected {
-        theme.foreground
     } else {
-        theme.foreground_muted
+        theme.foreground
     };
 
     div()
