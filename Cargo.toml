@@ -1,0 +1,26 @@
+# 文件职责：定义 Argus 桌面客户端的 Cargo 包信息与依赖版本。
+# 创建日期：2026-06-09
+# 修改日期：2026-06-10
+# 作者：Argus 开发团队
+# 主要功能：配置 Rust 版本、包元信息以及 GPUI 界面依赖。
+
+[package]
+name = "argus"
+version = "0.1.0"
+edition = "2024"
+description = "Argus 高性能日志查看平台的界面占位框架"
+
+[dependencies]
+anyhow = "1.0.102"
+bzip2 = "0.6.1"
+flate2 = "1.1.9"
+# GPUI 0.2.2 在 macOS 默认会调用完整 Xcode 的 metal 工具预编译 shader。
+# 当前开发环境只有 Command Line Tools，因此启用 runtime_shaders 让 cargo check 可在本机完成。
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+icondata = { version = "0.7.0", default-features = false, features = ["lucide"] }
+sevenz-rust = "0.6.1"
+tar = "0.4.46"
+thiserror = "2.0.18"
+walkdir = "2.5.0"
+xz2 = "0.1.7"
+zip = "8.6.0"

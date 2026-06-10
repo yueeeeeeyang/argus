@@ -1,0 +1,1667 @@
+//! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
+//! 创建日期：2026-06-09
+//! 修改日期：2026-06-10
+//! 作者：Argus 开发团队
+//! 主要功能：提供工作区切换、真实来源树、未读取内容提示和保留的日志样例数据。
+
+use std::borrow::Borrow;
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::path::PathBuf;
+
+use crate::config::{AppConfig, ConfigManager};
+#[cfg(test)]
+use crate::loader::archive::ArchiveFormat;
+use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceRegistry};
+#[cfg(test)]
+use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
+use crate::theme::AppTheme;
+use crate::ui::main_window;
+use gpui::{
+    ClipboardItem, Context, IntoElement, Keystroke, PathPromptOptions, Pixels, Point, Render,
+    SharedString, Window,
+};
+use gpui::{ScrollStrategy, UniformListScrollHandle};
+
+/// 来源侧栏默认宽度。
+pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 260.0;
+/// 来源侧栏最小宽度，需保证标题栏左侧 4 个操作按钮和固定右侧间距完整展示。
+pub const SOURCE_PANEL_MIN_WIDTH: f32 = 244.0;
+/// 来源侧栏最大宽度，避免占位界面被侧栏挤压。
+pub const SOURCE_PANEL_MAX_WIDTH: f32 = 520.0;
+
+/// 当前界面工作区，仅保留日志分析和设置两个入口。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Workspace {
+    /// 日志分析工作区，用于展示来源侧栏和日志内容占位界面。
+    LogAnalysis,
+    /// 设置工作区，用于展示主题、编码、缓存、快捷键等占位配置。
+    Settings,
+}
+
+/// 设置页主题选项，只影响本地 UI 状态说明。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThemeMode {
+    /// 跟随系统主题。
+    System,
+    /// 深色主题。
+    Dark,
+    /// 浅色主题。
+    Light,
+}
+
+impl ThemeMode {
+    /// 返回设置页展示文案。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "跟随系统",
+            Self::Dark => "深色",
+            Self::Light => "浅色",
+        }
+    }
+}
+
+/// 打开来源占位弹窗中的来源类型。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaceholderSourceKind {
+    /// 本地日志文件。
+    File,
+    /// 本地目录。
+    Directory,
+    /// 压缩包来源。
+    Archive,
+}
+
+impl PlaceholderSourceKind {
+    /// 返回来源类型展示文案。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::File => "日志文件",
+            Self::Directory => "目录",
+            Self::Archive => "压缩包",
+        }
+    }
+}
+
+/// 占位弹窗类型，当前仅用于打开来源。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaceholderDialog {
+    /// 打开来源弹窗。
+    OpenSource,
+}
+
+/// 顶部标签页占位状态。
+#[derive(Clone, Debug)]
+pub struct PlaceholderTab {
+    /// 标签唯一 ID，用于选中、关闭和渲染。
+    pub id: usize,
+    /// 标签标题。
+    pub title: String,
+}
+
+/// 来源树占位节点，用于模拟文件、目录和压缩包结构。
+#[derive(Clone, Debug)]
+pub struct SourceNode {
+    /// 节点唯一 ID，用于本地选择与展开折叠。
+    pub id: usize,
+    /// 节点缩进层级，模拟目录树深度。
+    pub depth: usize,
+    /// 节点名称。
+    pub label: String,
+    /// 节点类型文案。
+    pub kind: String,
+    /// 是否为当前选中节点。
+    pub selected: bool,
+    /// 是否为已展开节点；叶子节点忽略该字段。
+    pub expanded: bool,
+}
+
+/// 日志行占位数据，用于模拟 INFO/WARN/ERROR 等等级日志。
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    /// 行号。
+    pub number: usize,
+    /// 日志等级。
+    pub level: String,
+    /// 日志文本。
+    pub message: String,
+}
+
+/// 内容区显示状态；本阶段真实来源只显示未读取提示，不读取日志正文。
+#[derive(Clone, Debug)]
+pub enum ContentState {
+    /// 初始样例预览，用于空项目首次启动时展示界面密度。
+    PlaceholderPreview,
+    /// 已接入真实来源树，但尚未选择日志候选节点。
+    SourceNotSelected,
+    /// 已选择真实来源节点，但日志正文读取模块尚未接入。
+    SourceNotRead {
+        /// 被选择的来源 ID。
+        source_id: SourceId,
+        /// 标签展示名称。
+        label: String,
+        /// 状态栏和内容区展示路径。
+        path: String,
+    },
+}
+
+/// Argus 根视图状态，驱动界面、真实来源加载和本地 UI 行为。
+pub struct ArgusApp {
+    /// 应用运行期配置。
+    pub config: AppConfig,
+    /// 当前活动工作区。
+    pub workspace: Workspace,
+    /// 用户点击未实现操作后的占位提示。
+    pub placeholder_notice: String,
+    /// 深色主题令牌。
+    pub theme: AppTheme,
+    /// 真实来源注册表，维护节点、父子关系和可见索引。
+    pub source_registry: SourceRegistry,
+    /// 是否已经加载过真实来源；用于首次加载替换启动样例。
+    pub has_loaded_real_sources: bool,
+    /// 是否正在加载来源。
+    pub is_source_loading: bool,
+    /// 来源树虚拟列表滚动句柄。
+    pub source_tree_scroll: UniformListScrollHandle,
+    /// 来源树自定义滚动条拖拽时鼠标在 thumb 内的相对位置。
+    pub source_scrollbar_drag_position: Option<Point<Pixels>>,
+    /// 来源树搜索工具栏是否处于输入模式。
+    pub is_source_tree_search_open: bool,
+    /// 来源树搜索框输入内容，仅过滤已加载的日志候选节点。
+    pub source_tree_search_query: String,
+    /// 来源树搜索框光标位置，使用字符索引而非字节索引以兼容中文。
+    pub source_tree_search_cursor: usize,
+    /// 来源树搜索框选区锚点；与光标不一致时表示存在选区。
+    pub source_tree_search_selection_anchor: Option<usize>,
+    /// 来源树搜索框是否处于聚焦状态，用于展示光标和选区。
+    pub is_source_tree_search_focused: bool,
+    /// 来源树搜索框显隐动画序号，每次开关递增以重启动画。
+    pub source_tree_search_animation_generation: usize,
+    /// 来源树过滤后的可见节点 ID，包含命中日志和必要祖先目录。
+    pub filtered_source_ids: Vec<SourceId>,
+    /// 来源树子级懒加载 generation，用于丢弃过期后台结果。
+    pub source_child_load_generations: HashMap<SourceId, usize>,
+    /// 当前内容区状态。
+    pub content_state: ContentState,
+    /// 日志行占位数据。
+    pub logs: Vec<LogLine>,
+    /// 当前打开的占位标签页。
+    pub tabs: Vec<PlaceholderTab>,
+    /// 当前激活的标签 ID。
+    pub active_tab_id: usize,
+    /// 下一个占位标签 ID。
+    pub next_tab_id: usize,
+    /// 当前鼠标悬停的标签 ID，用于控制未激活标签的边框和关闭按钮。
+    pub hovered_tab_id: Option<usize>,
+    /// 来源侧栏是否折叠。
+    pub is_source_panel_collapsed: bool,
+    /// 来源侧栏当前宽度，标题栏左段与内容区侧栏共用。
+    pub source_panel_width: f32,
+    /// 是否正在拖拽来源侧栏分割线。
+    pub is_source_panel_resizing: bool,
+    /// 鼠标是否悬停在来源侧栏分割线命中区。
+    pub is_source_resizer_hovered: bool,
+    /// 开始拖拽时鼠标的窗口横坐标。
+    pub source_resize_start_x: f32,
+    /// 开始拖拽时来源侧栏宽度。
+    pub source_resize_start_width: f32,
+    /// 来源侧栏宽度动画序号，每次收起或展开递增以重启动画。
+    pub source_panel_animation_generation: usize,
+    /// 来源侧栏动画起始宽度。
+    pub source_panel_animation_from_width: f32,
+    /// 来源侧栏动画目标宽度。
+    pub source_panel_animation_to_width: f32,
+    /// 搜索面板是否打开。
+    pub is_search_panel_open: bool,
+    /// 搜索框本地输入内容。
+    pub search_query: String,
+    /// 是否启用大小写敏感搜索。
+    pub is_case_sensitive: bool,
+    /// 是否启用正则搜索。
+    pub is_regex_enabled: bool,
+    /// 是否启用全词匹配。
+    pub is_whole_word_enabled: bool,
+    /// 当前选中日志行。
+    pub selected_log_line: Option<usize>,
+    /// 当前弹出的占位弹窗。
+    pub active_dialog: Option<PlaceholderDialog>,
+    /// 打开来源弹窗中选中的来源类型。
+    pub selected_placeholder_source: PlaceholderSourceKind,
+    /// 设置页主题模式。
+    pub theme_mode: ThemeMode,
+    /// 设置页编码选项。
+    pub selected_encoding: String,
+    /// 是否启用临时缓存。
+    pub is_cache_enabled: bool,
+    /// 缓存上限，单位 MB。
+    pub cache_limit_mb: usize,
+}
+
+impl ArgusApp {
+    /// 创建界面占位版应用状态。
+    pub fn new() -> Self {
+        let config = ConfigManager::load_default();
+        Self {
+            config,
+            workspace: Workspace::LogAnalysis,
+            placeholder_notice: "界面占位模式：暂未接入真实日志读取".to_string(),
+            theme: AppTheme::dark(),
+            source_registry: SourceRegistry::new(),
+            has_loaded_real_sources: false,
+            is_source_loading: false,
+            source_tree_scroll: UniformListScrollHandle::new(),
+            source_scrollbar_drag_position: None,
+            is_source_tree_search_open: false,
+            source_tree_search_query: String::new(),
+            source_tree_search_cursor: 0,
+            source_tree_search_selection_anchor: None,
+            is_source_tree_search_focused: false,
+            source_tree_search_animation_generation: 0,
+            filtered_source_ids: Vec::new(),
+            source_child_load_generations: HashMap::new(),
+            content_state: ContentState::PlaceholderPreview,
+            logs: placeholder_logs(),
+            tabs: vec![PlaceholderTab {
+                id: 1,
+                title: "app.log".to_string(),
+            }],
+            active_tab_id: 1,
+            next_tab_id: 2,
+            hovered_tab_id: None,
+            is_source_panel_collapsed: false,
+            source_panel_width: SOURCE_PANEL_DEFAULT_WIDTH,
+            is_source_panel_resizing: false,
+            is_source_resizer_hovered: false,
+            source_resize_start_x: 0.0,
+            source_resize_start_width: SOURCE_PANEL_DEFAULT_WIDTH,
+            source_panel_animation_generation: 0,
+            source_panel_animation_from_width: SOURCE_PANEL_DEFAULT_WIDTH,
+            source_panel_animation_to_width: SOURCE_PANEL_DEFAULT_WIDTH,
+            is_search_panel_open: false,
+            search_query: String::new(),
+            is_case_sensitive: false,
+            is_regex_enabled: false,
+            is_whole_word_enabled: false,
+            selected_log_line: Some(1),
+            active_dialog: None,
+            selected_placeholder_source: PlaceholderSourceKind::File,
+            theme_mode: ThemeMode::Dark,
+            selected_encoding: "UTF-8".to_string(),
+            is_cache_enabled: true,
+            cache_limit_mb: 512,
+        }
+    }
+
+    /// 切换标题栏工作区入口，并更新状态提示。
+    pub fn switch_workspace(&mut self, workspace: Workspace) {
+        self.workspace = workspace;
+        self.placeholder_notice = match workspace {
+            Workspace::LogAnalysis => "已切换到日志分析占位工作区".to_string(),
+            Workspace::Settings => "已切换到设置占位工作区".to_string(),
+        };
+    }
+
+    /// 记录用户触发了尚未实现的操作。
+    pub fn mark_placeholder_action(&mut self, action_name: &str) {
+        self.placeholder_notice = format!("{action_name} 功能暂未实现，仅保留界面占位");
+    }
+
+    /// 返回当前激活标签页标题。
+    pub fn active_tab_title(&self) -> &str {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == self.active_tab_id)
+            .map(|tab| tab.title.as_str())
+            .unwrap_or("未命名日志")
+    }
+
+    /// 打开或关闭搜索面板。
+    pub fn toggle_search_panel(&mut self) {
+        self.is_search_panel_open = !self.is_search_panel_open;
+        self.placeholder_notice = if self.is_search_panel_open {
+            "已打开本地搜索面板，占位搜索不会扫描真实文件".to_string()
+        } else {
+            "已关闭本地搜索面板".to_string()
+        };
+    }
+
+    /// 打开来源树搜索输入模式，并准备接收目录树过滤关键字。
+    pub fn open_source_tree_search(&mut self) {
+        self.is_source_tree_search_open = true;
+        self.source_tree_search_query.clear();
+        self.source_tree_search_cursor = 0;
+        self.source_tree_search_selection_anchor = None;
+        self.is_source_tree_search_focused = true;
+        self.source_tree_search_animation_generation =
+            self.source_tree_search_animation_generation.wrapping_add(1);
+        self.filtered_source_ids.clear();
+        self.placeholder_notice = "已打开来源树搜索，仅过滤已加载日志节点".to_string();
+    }
+
+    /// 关闭来源树搜索输入模式，清空过滤条件并恢复完整来源树。
+    pub fn close_source_tree_search(&mut self) {
+        self.is_source_tree_search_open = false;
+        self.source_tree_search_query.clear();
+        self.source_tree_search_cursor = 0;
+        self.source_tree_search_selection_anchor = None;
+        self.is_source_tree_search_focused = false;
+        self.source_tree_search_animation_generation =
+            self.source_tree_search_animation_generation.wrapping_add(1);
+        self.filtered_source_ids.clear();
+        self.placeholder_notice = "已关闭来源树搜索".to_string();
+    }
+
+    /// 更新来源树搜索关键字，并同步重建过滤后的可见节点索引。
+    pub fn update_source_tree_search_query(&mut self, query: String) {
+        self.source_tree_search_query = query;
+        self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
+        self.source_tree_search_selection_anchor = None;
+        self.rebuild_filtered_source_ids();
+
+        if self.source_tree_search_query.is_empty() {
+            self.placeholder_notice = "来源树搜索框为空，显示完整目录树".to_string();
+        } else {
+            self.placeholder_notice = format!(
+                "来源树搜索「{}」命中 {} 个可见节点",
+                self.source_tree_search_query,
+                self.filtered_source_ids.len()
+            );
+        }
+    }
+
+    /// 设置来源树搜索框焦点状态；聚焦时将光标放到当前文本末尾。
+    pub fn set_source_tree_search_focused(&mut self, is_focused: bool) {
+        self.is_source_tree_search_focused = is_focused;
+        if is_focused {
+            self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
+            self.source_tree_search_selection_anchor = None;
+        }
+    }
+
+    /// 处理来源树搜索框按键输入，只改变本地过滤状态，不读取日志正文。
+    pub fn handle_source_tree_search_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let key = keystroke.key.to_lowercase();
+
+        if keystroke.modifiers.secondary() {
+            match key.as_str() {
+                "a" => {
+                    self.select_all_source_tree_search();
+                    self.placeholder_notice = "已全选来源树搜索关键字".to_string();
+                }
+                "c" => {
+                    self.copy_source_tree_search_selection(cx);
+                }
+                "x" => {
+                    self.cut_source_tree_search_selection(cx);
+                }
+                "v" => {
+                    self.paste_source_tree_search_clipboard(cx);
+                }
+                "left" | "arrowleft" => {
+                    self.move_source_tree_search_cursor(0, keystroke.modifiers.shift);
+                }
+                "right" | "arrowright" => {
+                    let end = character_count(&self.source_tree_search_query);
+                    self.move_source_tree_search_cursor(end, keystroke.modifiers.shift);
+                }
+                _ => {}
+            }
+            self.rebuild_filtered_source_ids();
+            return;
+        }
+
+        match key.as_str() {
+            "backspace" => {
+                self.delete_source_tree_search_backward();
+            }
+            "delete" => self.delete_source_tree_search_forward(),
+            "escape" => {
+                self.close_source_tree_search();
+                return;
+            }
+            "enter" => {
+                self.placeholder_notice = if self.source_tree_search_query.is_empty() {
+                    "来源树搜索框为空，未执行过滤".to_string()
+                } else {
+                    format!(
+                        "来源树已按「{}」过滤当前已加载日志",
+                        self.source_tree_search_query
+                    )
+                };
+                return;
+            }
+            "left" | "arrowleft" => self.move_source_tree_search_left(keystroke.modifiers.shift),
+            "right" | "arrowright" => self.move_source_tree_search_right(keystroke.modifiers.shift),
+            "home" => self.move_source_tree_search_cursor(0, keystroke.modifiers.shift),
+            "end" => {
+                let end = character_count(&self.source_tree_search_query);
+                self.move_source_tree_search_cursor(end, keystroke.modifiers.shift);
+            }
+            _ => {
+                if let Some(key_char) = keystroke.key_char.as_ref()
+                    && !keystroke.modifiers.control
+                    && !keystroke.modifiers.alt
+                    && !keystroke.modifiers.platform
+                    && !keystroke.modifiers.function
+                    && !key_char.chars().any(char::is_control)
+                {
+                    self.insert_source_tree_search_text(key_char);
+                }
+            }
+        }
+
+        self.rebuild_filtered_source_ids();
+        if self.source_tree_search_query.is_empty() {
+            self.placeholder_notice = "来源树搜索框为空，显示完整目录树".to_string();
+        } else {
+            self.placeholder_notice = format!(
+                "来源树搜索「{}」命中 {} 个可见节点",
+                self.source_tree_search_query,
+                self.filtered_source_ids.len()
+            );
+        }
+    }
+
+    /// 返回来源树搜索框当前选区范围；没有有效选区时返回 `None`。
+    pub fn source_tree_search_selection_range(&self) -> Option<std::ops::Range<usize>> {
+        let anchor = self.source_tree_search_selection_anchor?;
+        if anchor == self.source_tree_search_cursor {
+            return None;
+        }
+
+        Some(anchor.min(self.source_tree_search_cursor)..anchor.max(self.source_tree_search_cursor))
+    }
+
+    /// 将来源树搜索框光标移动到指定字符位置，并根据 Shift 状态维护选区。
+    fn move_source_tree_search_cursor(&mut self, next_cursor: usize, should_select: bool) {
+        let previous_cursor = self.source_tree_search_cursor;
+        let text_length = character_count(&self.source_tree_search_query);
+        self.source_tree_search_cursor = next_cursor.min(text_length);
+
+        if should_select {
+            if self.source_tree_search_selection_anchor.is_none() {
+                self.source_tree_search_selection_anchor = Some(previous_cursor);
+            }
+        } else {
+            self.source_tree_search_selection_anchor = None;
+        }
+    }
+
+    /// 将来源树搜索框光标向左移动一个字符；存在选区时退到选区起点。
+    fn move_source_tree_search_left(&mut self, should_select: bool) {
+        if !should_select && let Some(selection_range) = self.source_tree_search_selection_range() {
+            self.move_source_tree_search_cursor(selection_range.start, false);
+            return;
+        }
+
+        self.move_source_tree_search_cursor(
+            self.source_tree_search_cursor.saturating_sub(1),
+            should_select,
+        );
+    }
+
+    /// 将来源树搜索框光标向右移动一个字符；存在选区时跳到选区终点。
+    fn move_source_tree_search_right(&mut self, should_select: bool) {
+        if !should_select && let Some(selection_range) = self.source_tree_search_selection_range() {
+            self.move_source_tree_search_cursor(selection_range.end, false);
+            return;
+        }
+
+        self.move_source_tree_search_cursor(self.source_tree_search_cursor + 1, should_select);
+    }
+
+    /// 删除来源树搜索框当前选区，并返回是否发生了删除。
+    fn delete_source_tree_search_selection(&mut self) -> bool {
+        let Some(selection_range) = self.source_tree_search_selection_range() else {
+            return false;
+        };
+
+        self.source_tree_search_query =
+            remove_character_range(&self.source_tree_search_query, selection_range.clone());
+        self.source_tree_search_cursor = selection_range.start;
+        self.source_tree_search_selection_anchor = None;
+        true
+    }
+
+    /// 在光标位置插入文本；插入前会替换现有选区。
+    fn insert_source_tree_search_text(&mut self, text: &str) {
+        self.delete_source_tree_search_selection();
+        self.source_tree_search_query = insert_text_at_character_index(
+            &self.source_tree_search_query,
+            self.source_tree_search_cursor,
+            text,
+        );
+        self.source_tree_search_cursor += character_count(text);
+        self.source_tree_search_selection_anchor = None;
+    }
+
+    /// 向后删除一个字符；若存在选区则删除整个选区。
+    fn delete_source_tree_search_backward(&mut self) {
+        if self.delete_source_tree_search_selection() || self.source_tree_search_cursor == 0 {
+            return;
+        }
+
+        let delete_range = self.source_tree_search_cursor - 1..self.source_tree_search_cursor;
+        self.source_tree_search_query =
+            remove_character_range(&self.source_tree_search_query, delete_range);
+        self.source_tree_search_cursor -= 1;
+    }
+
+    /// 向前删除一个字符；若存在选区则删除整个选区。
+    fn delete_source_tree_search_forward(&mut self) {
+        if self.delete_source_tree_search_selection() {
+            return;
+        }
+
+        let text_length = character_count(&self.source_tree_search_query);
+        if self.source_tree_search_cursor >= text_length {
+            return;
+        }
+
+        let delete_range = self.source_tree_search_cursor..self.source_tree_search_cursor + 1;
+        self.source_tree_search_query =
+            remove_character_range(&self.source_tree_search_query, delete_range);
+    }
+
+    /// 全选来源树搜索框文本。
+    pub fn select_all_source_tree_search(&mut self) {
+        self.source_tree_search_selection_anchor = Some(0);
+        self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
+    }
+
+    /// 返回来源树搜索框当前选中的文本。
+    fn selected_source_tree_search_text(&self) -> Option<String> {
+        let selection_range = self.source_tree_search_selection_range()?;
+        Some(slice_character_range(
+            &self.source_tree_search_query,
+            selection_range,
+        ))
+    }
+
+    /// 将来源树搜索框选区写入系统剪贴板。
+    fn copy_source_tree_search_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selected_text) = self.selected_source_tree_search_text() else {
+            self.placeholder_notice = "来源树搜索框没有可复制的选中文本".to_string();
+            return;
+        };
+
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
+        self.placeholder_notice = "已复制来源树搜索关键字选区".to_string();
+    }
+
+    /// 剪切来源树搜索框选区，并同步刷新过滤结果。
+    fn cut_source_tree_search_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selected_text) = self.selected_source_tree_search_text() else {
+            self.placeholder_notice = "来源树搜索框没有可剪切的选中文本".to_string();
+            return;
+        };
+
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
+        self.delete_source_tree_search_selection();
+        self.rebuild_filtered_source_ids();
+        self.placeholder_notice = "已剪切来源树搜索关键字选区".to_string();
+    }
+
+    /// 从系统剪贴板粘贴纯文本到来源树搜索框光标位置。
+    fn paste_source_tree_search_clipboard(&mut self, cx: &mut Context<Self>) {
+        let app_context: &gpui::App = (&*cx).borrow();
+        let Some(clipboard_text) = app_context
+            .read_from_clipboard()
+            .and_then(|clipboard_item| clipboard_item.text())
+        else {
+            self.placeholder_notice = "系统剪贴板没有可粘贴文本".to_string();
+            return;
+        };
+
+        self.insert_source_tree_search_text(&clipboard_text.replace(['\r', '\n'], " "));
+        self.rebuild_filtered_source_ids();
+        self.placeholder_notice = "已粘贴来源树搜索关键字".to_string();
+    }
+
+    /// 返回来源树当前是否正在使用非空关键字过滤。
+    pub fn is_source_tree_filtering(&self) -> bool {
+        self.is_source_tree_search_open && !self.source_tree_search_query.trim().is_empty()
+    }
+
+    /// 重建来源树过滤结果；只匹配已加载日志候选节点，并保留祖先目录上下文。
+    pub fn rebuild_filtered_source_ids(&mut self) {
+        self.filtered_source_ids.clear();
+
+        let query = self.source_tree_search_query.trim().to_lowercase();
+        if query.is_empty() {
+            return;
+        }
+
+        let ordered_source_ids = self.source_registry.tree_order_source_ids();
+        let mut included_ids = HashSet::new();
+
+        for source_id in ordered_source_ids.iter().copied() {
+            let Some(source) = self.source_registry.node(source_id) else {
+                continue;
+            };
+            if !source.kind.is_log_candidate()
+                || !self
+                    .source_registry
+                    .search_key(source_id)
+                    .map(|search_key| search_key.contains(&query))
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            included_ids.extend(self.source_registry.ancestor_ids(source_id));
+            included_ids.insert(source_id);
+        }
+
+        self.filtered_source_ids = ordered_source_ids
+            .iter()
+            .copied()
+            .filter(|source_id| included_ids.contains(source_id))
+            .collect();
+    }
+
+    /// 打开来源占位弹窗。
+    pub fn open_source_dialog(&mut self) {
+        self.active_dialog = Some(PlaceholderDialog::OpenSource);
+        self.placeholder_notice = "请使用来源工具栏的加载日志按钮打开系统文件选择器".to_string();
+    }
+
+    /// 请求系统路径选择器并在后台加载真实日志来源结构。
+    pub fn request_load_sources(&mut self, cx: &mut Context<Self>) {
+        if self.is_source_loading {
+            self.placeholder_notice = "日志来源正在加载中，请稍候".to_string();
+            return;
+        }
+
+        self.is_source_loading = true;
+        self.placeholder_notice = "正在打开系统路径选择器".to_string();
+
+        let app_context: &gpui::App = (&*cx).borrow();
+        let can_select_mixed = app_context.can_select_mixed_files_and_dirs();
+        let paths_rx = app_context.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: can_select_mixed,
+            multiple: true,
+            prompt: Some(SharedString::from(if can_select_mixed {
+                "选择日志文件、目录或压缩包"
+            } else {
+                "选择日志文件或压缩包"
+            })),
+        });
+        let loader_config = self.config.loader.clone();
+
+        cx.spawn(async move |view, cx| {
+            let paths = match paths_rx.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
+                Ok(Ok(_)) => {
+                    view.update(cx, |app, cx| {
+                        app.is_source_loading = false;
+                        app.placeholder_notice = "已取消加载日志来源".to_string();
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                Ok(Err(error)) => {
+                    view.update(cx, |app, cx| {
+                        app.is_source_loading = false;
+                        app.placeholder_notice = format!("打开系统路径选择器失败：{error}");
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                Err(error) => {
+                    view.update(cx, |app, cx| {
+                        app.is_source_loading = false;
+                        app.placeholder_notice = format!("路径选择器未返回结果：{error}");
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let report = cx
+                .background_executor()
+                .spawn(async move { LogSourceLoader::new(loader_config).load_paths(paths) })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_load_report(report);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 关闭当前占位弹窗。
+    pub fn close_dialog(&mut self) {
+        self.active_dialog = None;
+        self.placeholder_notice = "已关闭占位弹窗".to_string();
+    }
+
+    /// 选择打开来源弹窗中的来源类型。
+    pub fn select_placeholder_source(&mut self, source_kind: PlaceholderSourceKind) {
+        self.selected_placeholder_source = source_kind;
+        self.placeholder_notice = format!("已选择{}占位来源", source_kind.label());
+    }
+
+    /// 切换来源侧栏折叠状态。
+    pub fn toggle_source_panel(&mut self) {
+        let was_collapsed = self.is_source_panel_collapsed;
+        self.is_source_panel_collapsed = !self.is_source_panel_collapsed;
+        self.is_source_panel_resizing = false;
+        self.is_source_resizer_hovered = false;
+        self.source_panel_animation_generation =
+            self.source_panel_animation_generation.wrapping_add(1);
+        self.source_panel_animation_from_width = if was_collapsed {
+            0.0
+        } else {
+            self.source_panel_width
+        };
+        self.source_panel_animation_to_width = if self.is_source_panel_collapsed {
+            0.0
+        } else {
+            self.source_panel_width
+        };
+        self.placeholder_notice = if self.is_source_panel_collapsed {
+            "已折叠来源侧栏".to_string()
+        } else {
+            "已展开来源侧栏".to_string()
+        };
+    }
+
+    /// 开始拖拽来源侧栏分割线，记录初始鼠标位置和宽度。
+    pub fn begin_source_panel_resize(&mut self, pointer_x: f32) {
+        self.is_source_panel_resizing = true;
+        self.is_source_resizer_hovered = true;
+        self.source_resize_start_x = pointer_x;
+        self.source_resize_start_width = self.source_panel_width;
+    }
+
+    /// 更新来源侧栏分割线悬停状态。
+    pub fn set_source_resizer_hovered(&mut self, is_hovered: bool) -> bool {
+        if self.is_source_resizer_hovered == is_hovered {
+            return false;
+        }
+
+        self.is_source_resizer_hovered = is_hovered;
+        true
+    }
+
+    /// 根据当前鼠标位置更新来源侧栏宽度。
+    pub fn resize_source_panel(&mut self, pointer_x: f32) -> bool {
+        if !self.is_source_panel_resizing {
+            return false;
+        }
+
+        let delta = pointer_x - self.source_resize_start_x;
+        let next_width = (self.source_resize_start_width + delta)
+            .clamp(SOURCE_PANEL_MIN_WIDTH, SOURCE_PANEL_MAX_WIDTH);
+        if (next_width - self.source_panel_width).abs() < 0.5 {
+            return false;
+        }
+
+        self.source_panel_width = next_width;
+        self.source_panel_animation_from_width = next_width;
+        self.source_panel_animation_to_width = next_width;
+        true
+    }
+
+    /// 结束来源侧栏宽度拖拽，并写入占位状态提示。
+    pub fn finish_source_panel_resize(&mut self) -> bool {
+        if !self.is_source_panel_resizing {
+            return false;
+        }
+
+        self.is_source_panel_resizing = false;
+        self.placeholder_notice = format!("来源侧栏宽度已调整为 {:.0}px", self.source_panel_width);
+        true
+    }
+
+    /// 新增占位标签页并立即切换过去。
+    pub fn add_placeholder_tab(&mut self) {
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(PlaceholderTab {
+            id: tab_id,
+            title: format!("scratch-{tab_id}.log"),
+        });
+        self.active_tab_id = tab_id;
+        self.placeholder_notice = "已新增占位标签页，不打开真实文件".to_string();
+    }
+
+    /// 切换到指定占位标签页。
+    pub fn activate_tab(&mut self, tab_id: usize) {
+        if self.tabs.iter().any(|tab| tab.id == tab_id) {
+            self.active_tab_id = tab_id;
+            self.placeholder_notice = format!("已切换到 {}", self.active_tab_title());
+        }
+    }
+
+    /// 更新鼠标悬停标签，仅影响标题栏标签视觉状态。
+    pub fn set_hovered_tab(&mut self, tab_id: usize, is_hovered: bool) {
+        if is_hovered {
+            self.hovered_tab_id = Some(tab_id);
+        } else if self.hovered_tab_id == Some(tab_id) {
+            self.hovered_tab_id = None;
+        }
+    }
+
+    /// 关闭指定标签页，至少保留一个空标签。
+    pub fn close_tab(&mut self, tab_id: usize) {
+        if self.tabs.len() == 1 {
+            if let Some(tab) = self.tabs.first_mut() {
+                tab.title = "未命名日志".to_string();
+            }
+            self.active_tab_id = self.tabs[0].id;
+            self.placeholder_notice = "已清空最后一个占位标签".to_string();
+            return;
+        }
+
+        self.tabs.retain(|tab| tab.id != tab_id);
+        if self.active_tab_id == tab_id {
+            self.active_tab_id = self.tabs.first().map(|tab| tab.id).unwrap_or(1);
+        }
+        self.placeholder_notice = "已关闭占位标签页".to_string();
+    }
+
+    /// 根据节点 ID 选择来源树节点。
+    pub fn select_source(&mut self, source_id: SourceId) {
+        let Some(selected_node) = self.source_registry.select(source_id) else {
+            self.placeholder_notice = "未找到来源节点".to_string();
+            return;
+        };
+
+        self.selected_log_line = None;
+        if selected_node.kind.is_log_candidate() {
+            let path = selected_node.location.display_path();
+            self.content_state = ContentState::SourceNotRead {
+                source_id,
+                label: selected_node.label.clone(),
+                path: path.clone(),
+            };
+            self.logs.clear();
+            self.update_active_tab_title(selected_node.label.clone());
+            self.placeholder_notice = format!("已选择 {path}，日志内容读取尚未接入");
+        } else {
+            self.placeholder_notice = format!("已选择来源节点 {}", selected_node.label);
+        }
+    }
+
+    /// 展开或折叠目录、压缩包等来源节点。
+    pub fn toggle_source_expanded(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+        let Some(node) = self.source_registry.node(source_id).cloned() else {
+            self.placeholder_notice = "未找到可展开来源节点".to_string();
+            return;
+        };
+
+        if !node.kind.can_expand() {
+            self.placeholder_notice = format!("{} 没有可展开的子级", node.label);
+            return;
+        }
+
+        if node.metadata.is_loading {
+            if let Some(node) = self.source_registry.node_mut(source_id) {
+                node.expanded = !node.expanded;
+            }
+            self.source_registry.rebuild_visible_index();
+            self.rebuild_filtered_source_ids();
+            self.placeholder_notice = if node.expanded {
+                format!("已折叠 {}，后台加载完成后保持收起", node.label)
+            } else {
+                format!("已展开 {}，正在等待后台加载完成", node.label)
+            };
+            return;
+        }
+
+        if node.expanded {
+            self.source_registry.toggle_expanded(source_id);
+            self.rebuild_filtered_source_ids();
+            self.placeholder_notice = format!("已折叠 {}", node.label);
+            return;
+        }
+
+        if node.metadata.children_loaded {
+            self.source_registry.toggle_expanded(source_id);
+            self.rebuild_filtered_source_ids();
+            self.placeholder_notice = format!("已展开 {}", node.label);
+            return;
+        }
+
+        if let Some(node) = self.source_registry.node_mut(source_id) {
+            node.expanded = true;
+            node.metadata.is_loading = true;
+        }
+        self.source_registry.rebuild_visible_index();
+        self.rebuild_filtered_source_ids();
+        self.placeholder_notice = format!("正在加载 {} 的子级", node.label);
+
+        let loader_config = self.config.loader.clone();
+        let load_generation = self.next_source_child_load_generation(source_id);
+        cx.spawn(async move |view, cx| {
+            let report = cx
+                .background_executor()
+                .spawn(async move { LogSourceLoader::new(loader_config).load_children(&node) })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_child_load_report(source_id, load_generation, report);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 收起来源目录树中的所有可展开节点。
+    pub fn collapse_all_sources(&mut self) {
+        let collapsed_count = self.source_registry.collapse_all();
+        self.rebuild_filtered_source_ids();
+
+        self.placeholder_notice = if collapsed_count == 0 {
+            "目录树已处于全部收起状态".to_string()
+        } else {
+            format!("已收起 {collapsed_count} 个目录树节点")
+        };
+    }
+
+    /// 返回当前应渲染的来源节点 ID 列表。
+    pub fn visible_source_ids(&self) -> &[SourceId] {
+        if self.is_source_tree_filtering() {
+            &self.filtered_source_ids
+        } else {
+            self.source_registry.visible_source_ids()
+        }
+    }
+
+    /// 清理旧日志工作区状态，确保新来源不会继承旧日志的标签、筛选和内容选择。
+    fn reset_log_workspace_after_source_replace(&mut self) {
+        self.content_state = ContentState::SourceNotSelected;
+        self.logs.clear();
+        self.selected_log_line = None;
+        self.is_search_panel_open = false;
+        self.search_query.clear();
+        self.hovered_tab_id = None;
+
+        self.tabs = vec![PlaceholderTab {
+            id: 1,
+            title: "未选择日志".to_string(),
+        }];
+        self.active_tab_id = 1;
+        self.next_tab_id = 2;
+
+        self.is_source_tree_search_open = false;
+        self.source_tree_search_query.clear();
+        self.source_tree_search_cursor = 0;
+        self.source_tree_search_selection_anchor = None;
+        self.is_source_tree_search_focused = false;
+        self.filtered_source_ids.clear();
+        self.source_tree_scroll
+            .scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    /// 应用根来源加载报告。
+    ///
+    /// 每次成功加载真实来源都会替换旧来源，避免不同批次日志结构混在同一棵树中。
+    pub fn apply_load_report(&mut self, report: LoadReport) {
+        self.is_source_loading = false;
+        let added_count = report.added_count;
+
+        if report.registry.is_empty() {
+            self.placeholder_notice = if report.errors.is_empty() {
+                "未加载任何日志来源".to_string()
+            } else {
+                format!("来源加载失败：{}", report.errors.join("；"))
+            };
+            return;
+        }
+
+        self.source_registry = report.registry;
+        self.has_loaded_real_sources = true;
+        self.source_child_load_generations.clear();
+        self.reset_log_workspace_after_source_replace();
+
+        self.placeholder_notice = if report.errors.is_empty() {
+            format!("已加载 {added_count} 个来源节点，日志内容读取尚未接入")
+        } else {
+            format!(
+                "已加载 {added_count} 个来源节点，{} 项失败：{}",
+                report.errors.len(),
+                report.errors.join("；")
+            )
+        };
+    }
+
+    /// 应用懒加载子级报告，并挂回指定父节点。
+    pub fn apply_child_load_report(
+        &mut self,
+        parent_id: SourceId,
+        load_generation: usize,
+        report: LoadReport,
+    ) {
+        if self.source_child_load_generations.get(&parent_id).copied() != Some(load_generation) {
+            return;
+        }
+        self.source_child_load_generations.remove(&parent_id);
+
+        if report.registry.is_empty() && !report.errors.is_empty() {
+            let message = report.errors.join("；");
+            self.source_registry
+                .mark_children_load_failed(parent_id, message.clone());
+            self.rebuild_filtered_source_ids();
+            self.placeholder_notice = format!("子级加载失败：{message}");
+            return;
+        }
+
+        let should_keep_expanded = self
+            .source_registry
+            .node(parent_id)
+            .map(|node| node.expanded)
+            .unwrap_or(false);
+        let added_count = self.source_registry.append_children_registry(
+            parent_id,
+            report.registry,
+            should_keep_expanded,
+        );
+
+        if let Some(parent) = self.source_registry.node_mut(parent_id)
+            && !report.errors.is_empty()
+        {
+            parent.metadata.message = Some(report.errors.join("；"));
+        }
+        self.rebuild_filtered_source_ids();
+
+        self.placeholder_notice = if report.errors.is_empty() {
+            format!("已加载 {added_count} 个子节点")
+        } else if added_count == 0 {
+            format!("子级加载失败：{}", report.errors.join("；"))
+        } else {
+            format!(
+                "已加载 {added_count} 个子节点，{} 项失败：{}",
+                report.errors.len(),
+                report.errors.join("；")
+            )
+        };
+    }
+
+    /// 为指定来源节点生成下一次子级懒加载 generation。
+    fn next_source_child_load_generation(&mut self, source_id: SourceId) -> usize {
+        let generation = self
+            .source_child_load_generations
+            .entry(source_id)
+            .or_insert(0);
+        *generation = generation.wrapping_add(1);
+        *generation
+    }
+
+    /// 将当前激活标签标题同步为选中的来源名称。
+    fn update_active_tab_title(&mut self, title: String) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == self.active_tab_id)
+        {
+            tab.title = title;
+        }
+    }
+
+    /// 返回内容区路径文案，优先展示真实选中来源。
+    pub fn content_path_label(&self) -> String {
+        match &self.content_state {
+            ContentState::SourceNotRead { path, .. } => path.clone(),
+            ContentState::SourceNotSelected if self.has_loaded_real_sources => {
+                "请选择日志来源".to_string()
+            }
+            ContentState::PlaceholderPreview => format!("logs / {}", self.active_tab_title()),
+            ContentState::SourceNotSelected => "未选择来源".to_string(),
+        }
+    }
+
+    /// 请求来源树滚动到指定可见节点。
+    pub fn scroll_source_into_view(&mut self, source_id: SourceId) {
+        if let Some(index) = self
+            .visible_source_ids()
+            .iter()
+            .position(|visible_id| *visible_id == source_id)
+        {
+            self.source_tree_scroll
+                .scroll_to_item(index, ScrollStrategy::Center);
+        }
+    }
+
+    /// 选择日志行，仅更新本地高亮状态。
+    pub fn select_log_line(&mut self, line_number: usize) {
+        self.selected_log_line = Some(line_number);
+        self.placeholder_notice = format!("已选择第 {line_number} 行占位日志");
+    }
+
+    /// 切换大小写、正则或全词匹配等搜索开关。
+    pub fn toggle_search_option(&mut self, option_name: &str) {
+        match option_name {
+            "case" => {
+                self.is_case_sensitive = !self.is_case_sensitive;
+                self.placeholder_notice = "已切换大小写匹配选项".to_string();
+            }
+            "regex" => {
+                self.is_regex_enabled = !self.is_regex_enabled;
+                self.placeholder_notice = "已切换正则搜索选项".to_string();
+            }
+            "whole" => {
+                self.is_whole_word_enabled = !self.is_whole_word_enabled;
+                self.placeholder_notice = "已切换全词匹配选项".to_string();
+            }
+            _ => self.mark_placeholder_action("搜索选项"),
+        }
+    }
+
+    /// 处理搜索框按键输入，当前只维护本地字符串。
+    pub fn handle_search_key(&mut self, keystroke: &Keystroke) {
+        match keystroke.key.as_str() {
+            "backspace" => {
+                self.search_query.pop();
+            }
+            "escape" => {
+                self.is_search_panel_open = false;
+                self.placeholder_notice = "已关闭本地搜索面板".to_string();
+                return;
+            }
+            "enter" => {
+                self.placeholder_notice =
+                    format!("搜索「{}」为占位操作，未扫描真实日志", self.search_query);
+                return;
+            }
+            _ => {
+                if let Some(key_char) = keystroke.key_char.as_ref()
+                    && !keystroke.modifiers.platform
+                    && !key_char.chars().any(char::is_control)
+                {
+                    self.search_query.push_str(key_char);
+                }
+            }
+        }
+
+        if self.search_query.is_empty() {
+            self.placeholder_notice = "搜索框为空，占位搜索未执行".to_string();
+        } else {
+            self.placeholder_notice = format!("已输入搜索关键字：{}", self.search_query);
+        }
+    }
+
+    /// 清空搜索关键字。
+    pub fn clear_search_query(&mut self) {
+        self.search_query.clear();
+        self.placeholder_notice = "已清空搜索关键字".to_string();
+    }
+
+    /// 更新主题模式设置。
+    pub fn set_theme_mode(&mut self, theme_mode: ThemeMode) {
+        self.theme_mode = theme_mode;
+        self.placeholder_notice = format!("主题已切换为{}占位状态", theme_mode.label());
+    }
+
+    /// 切换编码设置。
+    pub fn cycle_encoding(&mut self) {
+        self.selected_encoding = match self.selected_encoding.as_str() {
+            "UTF-8" => "GBK".to_string(),
+            "GBK" => "Latin-1".to_string(),
+            _ => "UTF-8".to_string(),
+        };
+        self.placeholder_notice = format!("编码设置已切换为 {}", self.selected_encoding);
+    }
+
+    /// 切换临时缓存开关。
+    pub fn toggle_cache_enabled(&mut self) {
+        self.is_cache_enabled = !self.is_cache_enabled;
+        self.placeholder_notice = if self.is_cache_enabled {
+            "已启用临时缓存占位设置".to_string()
+        } else {
+            "已关闭临时缓存占位设置".to_string()
+        };
+    }
+
+    /// 调整缓存上限，始终限制在占位设置页可展示范围内。
+    pub fn adjust_cache_limit(&mut self, delta: isize) {
+        self.cache_limit_mb = self
+            .cache_limit_mb
+            .saturating_add_signed(delta)
+            .clamp(128, 2048);
+        self.placeholder_notice = format!("缓存上限已调整为 {} MB", self.cache_limit_mb);
+    }
+}
+
+impl Default for ArgusApp {
+    /// 构造默认应用状态，保持与显式 `new` 入口完全一致。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Render for ArgusApp {
+    /// 渲染 Argus 主界面，所有真实业务能力均保持占位。
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        main_window::render(self, window, cx)
+    }
+}
+
+/// 返回字符串的字符数量，避免中文等多字节字符破坏光标位置。
+fn character_count(text: &str) -> usize {
+    text.chars().count()
+}
+
+/// 将字符索引转换为 UTF-8 字节索引；越界时返回字符串末尾。
+fn byte_index_for_character(text: &str, character_index: usize) -> usize {
+    text.char_indices()
+        .map(|(byte_index, _)| byte_index)
+        .nth(character_index)
+        .unwrap_or(text.len())
+}
+
+/// 截取指定字符范围内的文本，供复制和选区渲染复用。
+fn slice_character_range(text: &str, range: std::ops::Range<usize>) -> String {
+    let start = byte_index_for_character(text, range.start);
+    let end = byte_index_for_character(text, range.end);
+    text[start..end].to_string()
+}
+
+/// 删除指定字符范围内的文本，并返回新字符串。
+fn remove_character_range(text: &str, range: std::ops::Range<usize>) -> String {
+    let start = byte_index_for_character(text, range.start);
+    let end = byte_index_for_character(text, range.end);
+    let mut next_text = String::with_capacity(text.len().saturating_sub(end - start));
+    next_text.push_str(&text[..start]);
+    next_text.push_str(&text[end..]);
+    next_text
+}
+
+/// 在指定字符位置插入文本，并返回新字符串。
+fn insert_text_at_character_index(
+    text: &str,
+    character_index: usize,
+    inserted_text: &str,
+) -> String {
+    let byte_index = byte_index_for_character(text, character_index);
+    let mut next_text = String::with_capacity(text.len() + inserted_text.len());
+    next_text.push_str(&text[..byte_index]);
+    next_text.push_str(inserted_text);
+    next_text.push_str(&text[byte_index..]);
+    next_text
+}
+
+/// 构造测试样例来源树，便于验证过滤和展开状态，不参与正式启动界面。
+#[cfg(test)]
+fn placeholder_source_registry() -> SourceRegistry {
+    let mut registry = SourceRegistry::new();
+    let logs_id = registry.allocate_id();
+    registry.insert_node(SourceTreeNode {
+        id: logs_id,
+        parent_id: None,
+        depth: 0,
+        label: "logs".into(),
+        kind: SourceKind::Directory,
+        location: SourceLocation::LocalPath(PathBuf::from("logs")),
+        metadata: SourceMetadata {
+            size: None,
+            children_loaded: true,
+            is_loading: false,
+            message: None,
+        },
+        selected: false,
+        expanded: true,
+    });
+
+    let app_id = registry.allocate_id();
+    registry.insert_node(SourceTreeNode {
+        id: app_id,
+        parent_id: Some(logs_id),
+        depth: 1,
+        label: "app.log".into(),
+        kind: SourceKind::LogFile,
+        location: SourceLocation::LocalPath(PathBuf::from("logs/app.log")),
+        metadata: SourceMetadata {
+            size: Some(7494),
+            children_loaded: true,
+            is_loading: false,
+            message: None,
+        },
+        selected: true,
+        expanded: false,
+    });
+
+    let error_id = registry.allocate_id();
+    registry.insert_node(SourceTreeNode {
+        id: error_id,
+        parent_id: Some(logs_id),
+        depth: 1,
+        label: "error.log".into(),
+        kind: SourceKind::LogFile,
+        location: SourceLocation::LocalPath(PathBuf::from("logs/error.log")),
+        metadata: SourceMetadata {
+            size: Some(2048),
+            children_loaded: true,
+            is_loading: false,
+            message: None,
+        },
+        selected: false,
+        expanded: false,
+    });
+
+    let archive_id = registry.allocate_id();
+    registry.insert_node(SourceTreeNode {
+        id: archive_id,
+        parent_id: None,
+        depth: 0,
+        label: "archive.zip".into(),
+        kind: SourceKind::Archive(ArchiveFormat::Zip),
+        location: SourceLocation::LocalPath(PathBuf::from("archive.zip")),
+        metadata: SourceMetadata {
+            size: Some(4096),
+            children_loaded: true,
+            is_loading: false,
+            message: None,
+        },
+        selected: false,
+        expanded: true,
+    });
+
+    let nested_id = registry.allocate_id();
+    registry.insert_node(SourceTreeNode {
+        id: nested_id,
+        parent_id: Some(archive_id),
+        depth: 1,
+        label: "nested.log".into(),
+        kind: SourceKind::ArchiveFile,
+        location: SourceLocation::ArchiveEntry {
+            archive_path: PathBuf::from("archive.zip"),
+            entry_path: "nested.log".into(),
+            format: ArchiveFormat::Zip,
+            archive_depth: 0,
+        },
+        metadata: SourceMetadata {
+            size: Some(1024),
+            children_loaded: true,
+            is_loading: false,
+            message: None,
+        },
+        selected: false,
+        expanded: false,
+    });
+
+    registry.rebuild_all_indices();
+    registry
+}
+
+/// 构造日志内容占位数据，覆盖常见日志等级视觉状态。
+fn placeholder_logs() -> Vec<LogLine> {
+    vec![
+        LogLine {
+            number: 1,
+            level: "INFO".into(),
+            message: "2024-01-15 10:23:45 [INFO] Application started".into(),
+        },
+        LogLine {
+            number: 2,
+            level: "DEBUG".into(),
+            message: "2024-01-15 10:23:46 [DEBUG] Loading config...".into(),
+        },
+        LogLine {
+            number: 3,
+            level: "INFO".into(),
+            message: "2024-01-15 10:23:46 [INFO] Config loaded".into(),
+        },
+        LogLine {
+            number: 4,
+            level: "WARN".into(),
+            message: "2024-01-15 10:23:47 [WARN] Deprecated API usage".into(),
+        },
+        LogLine {
+            number: 5,
+            level: "ERROR".into(),
+            message: "2024-01-15 10:23:48 [ERROR] Failed to connect".into(),
+        },
+        LogLine {
+            number: 6,
+            level: "INFO".into(),
+            message: "2024-01-15 10:23:48 [INFO] Retrying connection...".into(),
+        },
+        LogLine {
+            number: 7,
+            level: "DEBUG".into(),
+            message: "2024-01-15 10:23:49 [DEBUG] Connection established".into(),
+        },
+        LogLine {
+            number: 8,
+            level: "INFO".into(),
+            message: "2024-01-15 10:23:50 [INFO] Request received".into(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造带样例来源树的应用状态，避免单元测试依赖正式启动空态。
+    fn app_with_placeholder_sources() -> ArgusApp {
+        let mut app = ArgusApp::new();
+        app.source_registry = placeholder_source_registry();
+        app
+    }
+
+    /// 按当前可见索引返回节点名称，便于验证来源树过滤结果。
+    fn visible_labels(app: &ArgusApp) -> Vec<String> {
+        app.visible_source_ids()
+            .iter()
+            .filter_map(|source_id| app.source_registry.node(*source_id))
+            .map(|source| source.label.clone())
+            .collect()
+    }
+
+    /// 按名称查找测试来源 ID，避免测试依赖硬编码数字 ID。
+    fn source_id_by_label(app: &ArgusApp, label: &str) -> SourceId {
+        app.source_registry
+            .tree_order_source_ids()
+            .iter()
+            .copied()
+            .find(|source_id| {
+                app.source_registry
+                    .node(*source_id)
+                    .map(|source| source.label == label)
+                    .unwrap_or(false)
+            })
+            .expect("测试样例来源应存在")
+    }
+
+    /// 验证正式启动时来源树为空，左侧由空态图标承接而非展示样例数据。
+    #[test]
+    fn new_app_starts_with_empty_source_tree() {
+        let app = ArgusApp::new();
+
+        assert!(app.source_registry.is_empty());
+        assert!(app.visible_source_ids().is_empty());
+    }
+
+    /// 验证新日志来源加载成功后会替换旧来源，并清理旧日志相关界面状态。
+    #[test]
+    fn applying_new_load_report_replaces_old_log_workspace() {
+        let mut app = app_with_placeholder_sources();
+        app.has_loaded_real_sources = true;
+        app.logs = placeholder_logs();
+        app.tabs.push(PlaceholderTab {
+            id: 2,
+            title: "old.log".to_string(),
+        });
+        app.active_tab_id = 2;
+        app.next_tab_id = 3;
+        app.open_source_tree_search();
+        app.update_source_tree_search_query("old".to_string());
+
+        let mut registry = SourceRegistry::new();
+        let new_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: new_id,
+            parent_id: None,
+            depth: 0,
+            label: "new.log".to_string(),
+            kind: SourceKind::LogFile,
+            location: SourceLocation::LocalPath(PathBuf::from("new.log")),
+            metadata: SourceMetadata {
+                size: Some(128),
+                children_loaded: true,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: false,
+        });
+        registry.rebuild_all_indices();
+
+        app.apply_load_report(LoadReport {
+            registry,
+            added_count: 1,
+            skipped_count: 0,
+            errors: Vec::new(),
+        });
+
+        assert_eq!(visible_labels(&app), vec!["new.log"]);
+        assert!(app.logs.is_empty());
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab_title(), "未选择日志");
+        assert_eq!(app.next_tab_id, 2);
+        assert!(matches!(app.content_state, ContentState::SourceNotSelected));
+        assert!(!app.is_source_tree_search_open);
+        assert!(app.source_tree_search_query.is_empty());
+        assert!(app.filtered_source_ids.is_empty());
+    }
+
+    /// 验证来源树搜索只匹配日志候选节点，并保留其祖先目录上下文。
+    #[test]
+    fn source_tree_filter_matches_logs_and_keeps_ancestors() {
+        let mut app = app_with_placeholder_sources();
+
+        app.open_source_tree_search();
+        app.update_source_tree_search_query("APP".to_string());
+
+        assert_eq!(visible_labels(&app), vec!["logs", "app.log"]);
+    }
+
+    /// 验证来源树过滤不会改变真实目录树的展开状态。
+    #[test]
+    fn source_tree_filter_does_not_mutate_expansion_state() {
+        let mut app = app_with_placeholder_sources();
+        let logs_id = source_id_by_label(&app, "logs");
+
+        app.source_registry.toggle_expanded(logs_id);
+        app.open_source_tree_search();
+        app.update_source_tree_search_query("app".to_string());
+
+        assert!(!app.source_registry.node(logs_id).unwrap().expanded);
+        assert_eq!(visible_labels(&app), vec!["logs", "app.log"]);
+    }
+
+    /// 验证输入框编辑状态按字符索引移动，避免中文被按字节截断。
+    #[test]
+    fn source_tree_search_editing_uses_character_indices() {
+        let mut app = ArgusApp::new();
+
+        app.insert_source_tree_search_text("日a志");
+        app.move_source_tree_search_left(false);
+        app.move_source_tree_search_left(true);
+
+        assert_eq!(app.source_tree_search_cursor, 1);
+        assert_eq!(app.source_tree_search_selection_range(), Some(1..2));
+
+        app.insert_source_tree_search_text("b");
+        assert_eq!(app.source_tree_search_query, "日b志");
+        assert_eq!(app.source_tree_search_cursor, 2);
+    }
+
+    /// 验证全选和删除操作会同步维护光标和选区。
+    #[test]
+    fn source_tree_search_selection_delete_updates_cursor() {
+        let mut app = ArgusApp::new();
+
+        app.update_source_tree_search_query("archive.log".to_string());
+        app.select_all_source_tree_search();
+        app.delete_source_tree_search_backward();
+
+        assert!(app.source_tree_search_query.is_empty());
+        assert_eq!(app.source_tree_search_cursor, 0);
+        assert!(app.source_tree_search_selection_range().is_none());
+    }
+
+    /// 构造只有一个未加载目录的应用状态，用于验证懒加载状态机。
+    fn app_with_loading_directory() -> (ArgusApp, SourceId) {
+        let mut app = ArgusApp::new();
+        let mut registry = SourceRegistry::new();
+        let id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id,
+            parent_id: None,
+            depth: 0,
+            label: "logs".to_string(),
+            kind: SourceKind::Directory,
+            location: SourceLocation::LocalPath(PathBuf::from("logs")),
+            metadata: SourceMetadata {
+                size: None,
+                children_loaded: false,
+                is_loading: true,
+                message: None,
+            },
+            selected: false,
+            expanded: true,
+        });
+        registry.rebuild_all_indices();
+        app.source_registry = registry;
+        app.source_child_load_generations.insert(id, 1);
+        (app, id)
+    }
+
+    /// 验证子级加载失败后不会标记为已加载，用户后续点击仍可重试。
+    #[test]
+    fn child_load_failure_keeps_node_retryable() {
+        let (mut app, source_id) = app_with_loading_directory();
+        let report = LoadReport {
+            registry: SourceRegistry::new(),
+            added_count: 0,
+            skipped_count: 1,
+            errors: vec!["权限不足".to_string()],
+        };
+
+        app.apply_child_load_report(source_id, 1, report);
+
+        let node = app.source_registry.node(source_id).unwrap();
+        assert!(!node.metadata.children_loaded);
+        assert!(!node.metadata.is_loading);
+        assert!(!node.expanded);
+        assert_eq!(node.metadata.message.as_deref(), Some("权限不足"));
+        assert!(!app.source_child_load_generations.contains_key(&source_id));
+    }
+
+    /// 验证过期的后台懒加载结果不会覆盖当前节点状态。
+    #[test]
+    fn stale_child_load_report_is_ignored() {
+        let (mut app, source_id) = app_with_loading_directory();
+        app.source_child_load_generations.insert(source_id, 2);
+        let report = LoadReport {
+            registry: SourceRegistry::new(),
+            added_count: 0,
+            skipped_count: 1,
+            errors: vec!["旧结果".to_string()],
+        };
+
+        app.apply_child_load_report(source_id, 1, report);
+
+        let node = app.source_registry.node(source_id).unwrap();
+        assert!(node.metadata.is_loading);
+        assert!(node.expanded);
+        assert_eq!(
+            app.source_child_load_generations.get(&source_id).copied(),
+            Some(2)
+        );
+    }
+}

@@ -1,0 +1,105 @@
+//! 文件职责：提供统一的图标按钮与悬停提示组件。
+//! 创建日期：2026-06-09
+//! 修改日期：2026-06-10
+//! 作者：Argus 开发团队
+//! 主要功能：复用 Lucide 图标、按钮状态、点击交互和 tooltip 视觉样式。
+
+use crate::theme::AppTheme;
+use crate::ui::components::icon::{ArgusIcon, render_icon};
+use gpui::{
+    App, AppContext, ClickEvent, Context, ElementId, IntoElement, Render, Window, div, prelude::*,
+    px, rgb,
+};
+
+/// 图标按钮尺寸。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IconButtonSize {
+    /// 标题栏和内容工具栏中的小按钮。
+    Small,
+    /// 来源侧栏工具区中的 14px 图标按钮。
+    Tiny,
+    /// 左侧活动栏中的常规按钮。
+    Medium,
+}
+
+/// tooltip 视图状态，仅保存需要展示的说明文案。
+struct TooltipView {
+    /// tooltip 展示文本。
+    label: String,
+}
+
+impl Render for TooltipView {
+    /// 渲染紧凑深色 tooltip。
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0x111111))
+            .border_1()
+            .border_color(rgb(0x3c3c3c))
+            .text_xs()
+            .text_color(rgb(0xd4d4d4))
+            .child(self.label.clone())
+    }
+}
+
+/// 渲染统一图标按钮。
+///
+/// 参数说明：
+/// - `id`：稳定元素 ID，用于 GPUI 状态和后续测试定位。
+/// - `icon`：按钮内展示的 Lucide 图标。
+/// - `tooltip`：悬停提示文案。
+/// - `is_selected`：是否展示选中态。
+/// - `size`：按钮尺寸规格。
+/// - `theme`：主题令牌。
+/// - `on_click`：点击回调，可操作应用状态或窗口 API。
+///
+/// 返回值：GPUI 元素树；不会直接触发真实业务功能。
+pub fn render_icon_button(
+    id: impl Into<ElementId>,
+    icon: ArgusIcon,
+    tooltip: &'static str,
+    is_selected: bool,
+    size: IconButtonSize,
+    theme: &AppTheme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let (button_size, icon_size) = match size {
+        IconButtonSize::Small => (28.0, 16.0),
+        IconButtonSize::Tiny => (24.0, 14.0),
+        IconButtonSize::Medium => (36.0, 18.0),
+    };
+    let selected_background = theme.selection;
+    let hover_background = if is_selected {
+        theme.selection
+    } else {
+        theme.current_line
+    };
+    let foreground = if is_selected {
+        theme.foreground
+    } else {
+        theme.foreground_muted
+    };
+
+    div()
+        .id(id)
+        .w(px(button_size))
+        .h(px(button_size))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .when(is_selected, |this| this.bg(rgb(selected_background)))
+        .hover(move |this| this.bg(rgb(hover_background)))
+        .cursor_pointer()
+        .active(|this| this.opacity(0.82))
+        .tooltip(move |_, cx| {
+            cx.new(|_| TooltipView {
+                label: tooltip.to_string(),
+            })
+            .into()
+        })
+        .child(render_icon(icon, foreground, icon_size))
+        .on_click(on_click)
+}
