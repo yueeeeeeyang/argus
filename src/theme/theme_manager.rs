@@ -1,6 +1,6 @@
 //! 文件职责：实现 Argus 主题文件加载与校验管理。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-11
 //! 作者：Argus 开发团队
 //! 主要功能：从内置 TOML 和 `~/.argus/themes` 读取主题令牌，解析为运行期 AppTheme。
 
@@ -12,7 +12,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::config::paths::argus_theme_dir;
-use crate::theme::AppTheme;
+use crate::theme::{AppTheme, SyntaxTheme};
 
 /// 内置深色主题 TOML 内容，使用 include_str 保证打包后仍可读取。
 const BUILTIN_DARK_THEME_TOML: &str = include_str!("../../themes/dark.toml");
@@ -85,6 +85,8 @@ struct ThemeFile {
     colors: ThemeColorTokens,
     /// 日志级别与状态颜色。
     log_levels: ThemeLogLevelTokens,
+    /// 语法高亮颜色；用户旧主题缺失时使用对应主题模式默认值。
+    syntax: Option<ThemeSyntaxTokens>,
 }
 
 /// TOML 中的界面颜色 token。
@@ -112,6 +114,25 @@ struct ThemeLogLevelTokens {
     warning: String,
     error: String,
     success: String,
+}
+
+/// TOML 中的语法高亮 token；字段可选以兼容用户旧主题。
+#[derive(Debug, Default, Deserialize)]
+struct ThemeSyntaxTokens {
+    comment: Option<String>,
+    key: Option<String>,
+    string: Option<String>,
+    number: Option<String>,
+    boolean: Option<String>,
+    punctuation: Option<String>,
+    tag: Option<String>,
+    attribute: Option<String>,
+    timestamp: Option<String>,
+    thread: Option<String>,
+    class: Option<String>,
+    method: Option<String>,
+    lock: Option<String>,
+    exception: Option<String>,
 }
 
 impl ThemeManager {
@@ -238,12 +259,18 @@ impl Default for ThemeManager {
 /// 返回值：主题文件元信息和运行期主题令牌。
 fn parse_theme_toml(text: &str) -> Result<(ThemeFile, AppTheme), ThemeError> {
     let file = toml::from_str::<ThemeFile>(text)?;
-    if canonical_mode(&file.mode).is_none() {
+    let Some(canonical_mode) = canonical_mode(&file.mode) else {
         return Err(ThemeError::UnsupportedMode {
             name: file.name,
             mode: file.mode,
         });
-    }
+    };
+    let syntax_fallback = if canonical_mode == LIGHT_MODE {
+        SyntaxTheme::light()
+    } else {
+        SyntaxTheme::dark()
+    };
+    let syntax = parse_syntax_theme(file.syntax.as_ref(), syntax_fallback)?;
 
     let theme = AppTheme {
         background: parse_hex_color("colors.background", &file.colors.background)?,
@@ -266,6 +293,7 @@ fn parse_theme_toml(text: &str) -> Result<(ThemeFile, AppTheme), ThemeError> {
         error: parse_hex_color("log_levels.error", &file.log_levels.error)?,
         success: parse_hex_color("log_levels.success", &file.log_levels.success)?,
         modal_overlay: parse_hex_color("colors.modal_overlay", &file.colors.modal_overlay)?,
+        syntax,
     };
 
     Ok((file, theme))
@@ -294,6 +322,61 @@ fn parse_hex_color(token: &'static str, value: &str) -> Result<u32, ThemeError> 
     })
 }
 
+/// 解析可选语法高亮颜色；缺失字段沿用当前主题模式默认值。
+fn parse_syntax_theme(
+    tokens: Option<&ThemeSyntaxTokens>,
+    mut fallback: SyntaxTheme,
+) -> Result<SyntaxTheme, ThemeError> {
+    let Some(tokens) = tokens else {
+        return Ok(fallback);
+    };
+
+    apply_optional_color("syntax.comment", &tokens.comment, &mut fallback.comment)?;
+    apply_optional_color("syntax.key", &tokens.key, &mut fallback.key)?;
+    apply_optional_color("syntax.string", &tokens.string, &mut fallback.string)?;
+    apply_optional_color("syntax.number", &tokens.number, &mut fallback.number)?;
+    apply_optional_color("syntax.boolean", &tokens.boolean, &mut fallback.boolean)?;
+    apply_optional_color(
+        "syntax.punctuation",
+        &tokens.punctuation,
+        &mut fallback.punctuation,
+    )?;
+    apply_optional_color("syntax.tag", &tokens.tag, &mut fallback.tag)?;
+    apply_optional_color(
+        "syntax.attribute",
+        &tokens.attribute,
+        &mut fallback.attribute,
+    )?;
+    apply_optional_color(
+        "syntax.timestamp",
+        &tokens.timestamp,
+        &mut fallback.timestamp,
+    )?;
+    apply_optional_color("syntax.thread", &tokens.thread, &mut fallback.thread)?;
+    apply_optional_color("syntax.class", &tokens.class, &mut fallback.class)?;
+    apply_optional_color("syntax.method", &tokens.method, &mut fallback.method)?;
+    apply_optional_color("syntax.lock", &tokens.lock, &mut fallback.lock)?;
+    apply_optional_color(
+        "syntax.exception",
+        &tokens.exception,
+        &mut fallback.exception,
+    )?;
+
+    Ok(fallback)
+}
+
+/// 将可选颜色字段覆盖到目标 token 上。
+fn apply_optional_color(
+    token: &'static str,
+    value: &Option<String>,
+    target: &mut u32,
+) -> Result<(), ThemeError> {
+    if let Some(value) = value {
+        *target = parse_hex_color(token, value)?;
+    }
+    Ok(())
+}
+
 /// 规范化主题模式，避免配置文件大小写差异导致读取失败。
 fn normalize_mode(mode: &str) -> &str {
     canonical_mode(mode).unwrap_or(DARK_MODE)
@@ -320,6 +403,7 @@ mod tests {
         assert_eq!(theme.background, AppTheme::dark().background);
         assert_eq!(theme.title_bar, AppTheme::dark().title_bar);
         assert_eq!(theme.modal_overlay, AppTheme::dark().modal_overlay);
+        assert_eq!(theme.syntax.comment, AppTheme::dark().syntax.comment);
     }
 
     /// 验证内置浅色 TOML 解析结果等价于当前代码中的浅色 fallback。
@@ -330,6 +414,7 @@ mod tests {
         assert_eq!(theme.content, AppTheme::light().content);
         assert_eq!(theme.selection, AppTheme::light().selection);
         assert_eq!(theme.success, AppTheme::light().success);
+        assert_eq!(theme.syntax.string, AppTheme::light().syntax.string);
     }
 
     /// 验证 6 位和 8 位十六进制颜色都能解析。
@@ -345,6 +430,40 @@ mod tests {
         let error = parse_hex_color("colors.content", "112233").expect_err("缺少 # 应报错");
 
         assert!(matches!(error, ThemeError::InvalidColor { .. }));
+    }
+
+    /// 验证用户旧主题缺少 syntax 段时仍能加载，并自动使用对应模式默认语法颜色。
+    #[test]
+    fn missing_syntax_tokens_use_mode_fallback() {
+        let text = r##"
+name = "Legacy Light"
+mode = "light"
+
+[colors]
+background = "#f3f3f3"
+title_bar = "#e8e8e8"
+activity_bar = "#e6e6e6"
+side_bar = "#eeeeee"
+content = "#ffffff"
+status_bar = "#f2f2f2"
+foreground = "#242424"
+foreground_muted = "#6b6b6b"
+border = "#d0d0d0"
+selection = "#d7e8fb"
+current_line = "#ebf2f8"
+modal_overlay = "#e9edf3c2"
+
+[log_levels]
+debug = "#4f7a37"
+info = "#0969da"
+warning = "#9a6700"
+error = "#cf222e"
+success = "#1a7f37"
+"##;
+        let (_, theme) = parse_theme_toml(text).expect("旧主题缺少 syntax 段也应可解析");
+
+        assert_eq!(theme.syntax.comment, SyntaxTheme::light().comment);
+        assert_eq!(theme.syntax.exception, SyntaxTheme::light().exception);
     }
 
     /// 验证非法用户主题不会阻塞主题管理器创建。

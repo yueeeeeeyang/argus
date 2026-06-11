@@ -8,7 +8,9 @@ use crate::app::ArgusApp;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
-use crate::ui::components::input::{Input, InputAccessory, InputSize, render_input};
+use crate::ui::components::input::{
+    Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
+};
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, IntoElement, KeyDownEvent, div,
     prelude::*, px, rgb,
@@ -166,6 +168,7 @@ fn render_source_search_toolbar(
                 is_focused: app.is_source_tree_search_focused,
                 cursor_index: app.source_tree_search_cursor,
                 selection_range: app.source_tree_search_selection_range(),
+                is_pointer_selecting: app.source_tree_search_selection_drag.is_some(),
                 size: InputSize::Compact,
                 leading_accessory: Some(InputAccessory {
                     id: "source-tree-search-leading",
@@ -184,12 +187,20 @@ fn render_source_search_toolbar(
                 app.handle_source_tree_search_key(&event.keystroke, cx);
                 cx.notify();
             }),
-            cx.listener(|app, event: &ClickEvent, _, cx| {
+            cx.listener(|app, _event: &ClickEvent, _, cx| {
                 app.set_source_tree_search_focused(true);
-                if let ClickEvent::Mouse(mouse_event) = event
-                    && mouse_event.up.click_count >= 2
-                {
-                    app.select_all_source_tree_search();
+                cx.notify();
+            }),
+            cx.listener(|app, event: &InputPointerEvent, _, cx| {
+                match event.action {
+                    InputPointerAction::Begin => app.begin_source_tree_search_pointer_selection(
+                        event.character_index,
+                        event.granularity,
+                    ),
+                    InputPointerAction::Extend => {
+                        app.update_source_tree_search_pointer_selection(event.character_index)
+                    }
+                    InputPointerAction::Finish => app.finish_source_tree_search_pointer_selection(),
                 }
                 cx.notify();
             }),

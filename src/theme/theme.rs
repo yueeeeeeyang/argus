@@ -1,7 +1,83 @@
 //! 文件职责：定义 Argus 界面使用的主题令牌。
 //! 创建日期：2026-06-09
+//! 修改日期：2026-06-11
 //! 作者：Argus 开发团队
 //! 主要功能：提供运行期主题颜色、日志级别颜色和主题文件损坏时的紧急兜底令牌。
+
+/// 语法高亮主题令牌，供日志、配置文件和 Java 线程栈高亮复用。
+#[derive(Clone, Debug)]
+pub struct SyntaxTheme {
+    /// 注释颜色。
+    pub comment: u32,
+    /// 配置键或 JSON/YAML 属性名颜色。
+    pub key: u32,
+    /// 字符串颜色。
+    pub string: u32,
+    /// 数字颜色。
+    pub number: u32,
+    /// 布尔值和 null 颜色。
+    pub boolean: u32,
+    /// 标点符号颜色。
+    pub punctuation: u32,
+    /// XML 标签颜色。
+    pub tag: u32,
+    /// XML 属性名颜色。
+    pub attribute: u32,
+    /// 日志时间戳颜色。
+    pub timestamp: u32,
+    /// Java 线程名颜色。
+    pub thread: u32,
+    /// Java 类名颜色。
+    pub class: u32,
+    /// Java 方法名颜色。
+    pub method: u32,
+    /// Java 锁对象或等待目标颜色。
+    pub lock: u32,
+    /// 异常、错误和死锁提示颜色。
+    pub exception: u32,
+}
+
+impl SyntaxTheme {
+    /// 构造深色主题语法高亮紧急兜底令牌。
+    pub fn dark() -> Self {
+        Self {
+            comment: 0x6a9955,
+            key: 0x9cdcfe,
+            string: 0xce9178,
+            number: 0xb5cea8,
+            boolean: 0x569cd6,
+            punctuation: 0x808080,
+            tag: 0x569cd6,
+            attribute: 0x9cdcfe,
+            timestamp: 0x8cdcfe,
+            thread: 0xdcdcaa,
+            class: 0x4ec9b0,
+            method: 0xdcdcaa,
+            lock: 0xc586c0,
+            exception: 0xf48771,
+        }
+    }
+
+    /// 构造浅色主题语法高亮紧急兜底令牌。
+    pub fn light() -> Self {
+        Self {
+            comment: 0x008000,
+            key: 0x0451a5,
+            string: 0xa31515,
+            number: 0x098658,
+            boolean: 0x0000ff,
+            punctuation: 0x666666,
+            tag: 0x800000,
+            attribute: 0xff0000,
+            timestamp: 0x267f99,
+            thread: 0x795e26,
+            class: 0x267f99,
+            method: 0x795e26,
+            lock: 0xaf00db,
+            exception: 0xa1260d,
+        }
+    }
+}
 
 /// 应用主题令牌，正常运行时由主题管理器读取 TOML 后生成。
 #[derive(Clone, Debug)]
@@ -40,6 +116,8 @@ pub struct AppTheme {
     pub success: u32,
     /// 模态框遮罩 RGBA 颜色，用于弱化背景但避免全黑压暗。
     pub modal_overlay: u32,
+    /// 语法高亮颜色。
+    pub syntax: SyntaxTheme,
 }
 
 impl AppTheme {
@@ -63,6 +141,7 @@ impl AppTheme {
             error: 0xf48771,
             success: 0x89d185,
             modal_overlay: 0x1e1e1eb8,
+            syntax: SyntaxTheme::dark(),
         }
     }
 
@@ -86,6 +165,7 @@ impl AppTheme {
             error: 0xcf222e,
             success: 0x1a7f37,
             modal_overlay: 0xe9edf3c2,
+            syntax: SyntaxTheme::light(),
         }
     }
 

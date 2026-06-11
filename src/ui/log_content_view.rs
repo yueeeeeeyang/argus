@@ -11,6 +11,9 @@ use crate::app::{
     LogScrollbarDrag, TabKind, log_viewer_display_text, log_viewer_line_number_width,
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
+use crate::highlight::{
+    HighlightCache, HighlightLanguage, HighlightSpan, HighlightTokenKind, detect_highlight_language,
+};
 use crate::reader::log_file_reader::{
     DisplayedLogLine, LogDocument, LogOpenState, LogReaderHandle,
 };
@@ -135,9 +138,14 @@ fn render_log_document(
     handle: &LogReaderHandle,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
+    let language = detect_highlight_language(&handle.label, &handle.path);
     match handle.document() {
-        LogDocument::InMemory(_) => render_in_memory_log(app, theme, tab_id, source_id, handle, cx),
-        LogDocument::Paged(_) => render_paged_log(app, theme, tab_id, source_id, handle, cx),
+        LogDocument::InMemory(_) => {
+            render_in_memory_log(app, theme, tab_id, source_id, handle, language, cx)
+        }
+        LogDocument::Paged(_) => {
+            render_paged_log(app, theme, tab_id, source_id, handle, language, cx)
+        }
     }
 }
 
@@ -148,12 +156,14 @@ fn render_in_memory_log(
     tab_id: usize,
     source_id: crate::loader::SourceId,
     handle: &LogReaderHandle,
+    language: HighlightLanguage,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
     let Some(state) = app.log_tab_view_state(tab_id) else {
         return render_empty_state("日志视图未初始化", "请重新选择该日志。", app, theme);
     };
     let line_count = handle.line_count();
+    let line_number_width = log_viewer_line_number_width(line_count);
     let measure_line = handle
         .document()
         .longest_line_text()
@@ -191,7 +201,7 @@ fn render_in_memory_log(
                 SharedString::from(format!("log-lines-{tab_id}")),
                 line_count,
                 cx.processor(move |app, range: Range<usize>, _window, cx| {
-                    render_log_line_range(app, source_id, tab_id, range, cx)
+                    render_log_line_range(app, source_id, tab_id, range, language, cx)
                 }),
             )
             .with_width_from_item(Some(measure_line))
@@ -199,7 +209,13 @@ fn render_in_memory_log(
             .size_full()
             .track_scroll(state.scroll_handle.clone()),
         )
-        .children(render_in_memory_scrollbars(tab_id, state, theme, cx))
+        .children(render_in_memory_scrollbars(
+            tab_id,
+            state,
+            line_number_width,
+            theme,
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -210,6 +226,7 @@ fn render_paged_log(
     tab_id: usize,
     source_id: crate::loader::SourceId,
     handle: &LogReaderHandle,
+    language: HighlightLanguage,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
     let Some(state) = app.log_tab_view_state(tab_id) else {
@@ -245,6 +262,8 @@ fn render_paged_log(
                         theme,
                         tab_id,
                         line,
+                        language,
+                        &state.highlight_cache,
                         horizontal_offset,
                         px(0.0),
                         line_number_width,
@@ -300,6 +319,7 @@ fn render_log_line_range(
     source_id: crate::loader::SourceId,
     tab_id: usize,
     range: Range<usize>,
+    language: HighlightLanguage,
     cx: &mut Context<ArgusApp>,
 ) -> Vec<AnyElement> {
     let theme = app.theme.clone();
@@ -310,6 +330,10 @@ fn render_log_line_range(
         .lines(range.start, range.end.saturating_sub(range.start))
         .unwrap_or_default();
     let line_number_width = log_viewer_line_number_width(handle.line_count());
+    let Some(state) = app.log_tab_view_state(tab_id) else {
+        return Vec::new();
+    };
+    let highlight_cache = state.highlight_cache.clone();
     let line_number_offset = app
         .log_tab_view_state(tab_id)
         .map(|state| {
@@ -333,6 +357,8 @@ fn render_log_line_range(
                 &theme,
                 tab_id,
                 line,
+                language,
+                &highlight_cache,
                 px(0.0),
                 line_number_offset,
                 line_number_width,
@@ -349,6 +375,8 @@ fn render_log_line(
     theme: &AppTheme,
     tab_id: usize,
     line: DisplayedLogLine,
+    language: HighlightLanguage,
+    highlight_cache: &HighlightCache,
     horizontal_offset: gpui::Pixels,
     line_number_offset: gpui::Pixels,
     line_number_width: f32,
@@ -359,19 +387,14 @@ fn render_log_line(
     let display_text = log_viewer_display_text(&line.text).into_owned();
     let selection_range =
         app.log_text_selection_byte_range_for_line(tab_id, line.line_number, &line.text);
-    let text_element = if let Some(byte_range) = selection_range {
-        StyledText::new(display_text.clone())
-            .with_highlights([(
-                byte_range,
-                HighlightStyle {
-                    background_color: Some(rgb(theme.selection).into()),
-                    color: Some(rgb(theme.foreground).into()),
-                    ..Default::default()
-                },
-            )])
-            .into_any_element()
-    } else {
+    let syntax_spans = highlight_cache.highlight_line(line.line_number, language, &display_text);
+    let highlights = merge_syntax_and_selection_highlights(syntax_spans, selection_range, theme);
+    let text_element = if highlights.is_empty() {
         display_text.into_any_element()
+    } else {
+        StyledText::new(display_text.clone())
+            .with_highlights(highlights)
+            .into_any_element()
     };
 
     div()
@@ -388,20 +411,6 @@ fn render_log_line(
         .hover(|row| row.bg(rgb(theme.current_line)))
         .child(
             div()
-                .absolute()
-                .left(line_number_offset)
-                .top(px(0.0))
-                .h_full()
-                .w(px(line_number_width))
-                .pr(px(8.0))
-                .flex()
-                .items_center()
-                .justify_end()
-                .text_color(rgb(theme.foreground_muted))
-                .child((line.line_number + 1).to_string()),
-        )
-        .child(
-            div()
                 .relative()
                 .left(horizontal_offset)
                 .h_full()
@@ -412,15 +421,31 @@ fn render_log_line(
                 .whitespace_nowrap()
                 .child(text_element),
         )
+        .child(
+            div()
+                .absolute()
+                .left(line_number_offset)
+                .top(px(0.0))
+                .h_full()
+                .w(px(line_number_width + LOG_VIEWER_TEXT_LEFT_PADDING))
+                .bg(rgb(theme.content))
+                .pr(px(LOG_VIEWER_TEXT_LEFT_PADDING))
+                .flex()
+                .items_center()
+                .justify_end()
+                .text_color(rgb(theme.foreground_muted))
+                .child((line.line_number + 1).to_string()),
+        )
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                app.begin_log_text_selection(
+                app.begin_log_text_selection_with_click_count(
                     tab_id,
                     line.line_number,
                     &line_for_down,
                     event.position.x,
+                    event.click_count,
                     window,
                 );
                 cx.notify();
@@ -444,10 +469,120 @@ fn render_log_line(
         }))
 }
 
+/// 合并语法高亮和选区高亮；选区优先，避免 GPUI 收到重叠 highlight。
+fn merge_syntax_and_selection_highlights(
+    syntax_spans: Vec<HighlightSpan>,
+    selection_range: Option<Range<usize>>,
+    theme: &AppTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut highlights = Vec::new();
+
+    for span in syntax_spans {
+        let syntax_style = HighlightStyle {
+            color: Some(rgb(color_for_highlight_token(span.kind, theme)).into()),
+            ..Default::default()
+        };
+
+        if let Some(selection) = selection_range.as_ref()
+            && ranges_overlap(&span.range, selection)
+        {
+            push_syntax_piece_before_selection(
+                &mut highlights,
+                &span.range,
+                selection,
+                syntax_style.clone(),
+            );
+            push_syntax_piece_after_selection(
+                &mut highlights,
+                &span.range,
+                selection,
+                syntax_style,
+            );
+            continue;
+        }
+
+        highlights.push((span.range, syntax_style));
+    }
+
+    if let Some(selection) = selection_range {
+        highlights.push((
+            selection,
+            HighlightStyle {
+                background_color: Some(rgb(theme.selection).into()),
+                color: Some(rgb(theme.foreground).into()),
+                ..Default::default()
+            },
+        ));
+    }
+
+    highlights.sort_by_key(|(range, _)| range.start);
+    highlights
+}
+
+/// 保留选区左侧未被覆盖的语法颜色片段。
+fn push_syntax_piece_before_selection(
+    highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
+    syntax_range: &Range<usize>,
+    selection_range: &Range<usize>,
+    syntax_style: HighlightStyle,
+) {
+    let end = syntax_range.end.min(selection_range.start);
+    if syntax_range.start < end {
+        highlights.push((syntax_range.start..end, syntax_style));
+    }
+}
+
+/// 保留选区右侧未被覆盖的语法颜色片段。
+fn push_syntax_piece_after_selection(
+    highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
+    syntax_range: &Range<usize>,
+    selection_range: &Range<usize>,
+    syntax_style: HighlightStyle,
+) {
+    let start = syntax_range.start.max(selection_range.end);
+    if start < syntax_range.end {
+        highlights.push((start..syntax_range.end, syntax_style));
+    }
+}
+
+/// 判断两个半开区间是否重叠。
+fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
+    left.start < right.end && right.start < left.end
+}
+
+/// 根据高亮 token 返回当前主题下的显示颜色。
+fn color_for_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
+    match kind {
+        HighlightTokenKind::Trace => theme.foreground_muted,
+        HighlightTokenKind::Debug => theme.debug,
+        HighlightTokenKind::Info => theme.info,
+        HighlightTokenKind::Warning => theme.warning,
+        HighlightTokenKind::Error | HighlightTokenKind::Fatal => theme.error,
+        HighlightTokenKind::Timestamp => theme.syntax.timestamp,
+        HighlightTokenKind::Comment => theme.syntax.comment,
+        HighlightTokenKind::Key => theme.syntax.key,
+        HighlightTokenKind::Value => theme.syntax.string,
+        HighlightTokenKind::String => theme.syntax.string,
+        HighlightTokenKind::Number => theme.syntax.number,
+        HighlightTokenKind::Boolean => theme.syntax.boolean,
+        HighlightTokenKind::Punctuation => theme.syntax.punctuation,
+        HighlightTokenKind::Tag => theme.syntax.tag,
+        HighlightTokenKind::Attribute => theme.syntax.attribute,
+        HighlightTokenKind::ThreadName => theme.syntax.thread,
+        HighlightTokenKind::ThreadState => theme.warning,
+        HighlightTokenKind::StackClass => theme.syntax.class,
+        HighlightTokenKind::StackMethod => theme.syntax.method,
+        HighlightTokenKind::StackLocation => theme.foreground_muted,
+        HighlightTokenKind::Lock => theme.syntax.lock,
+        HighlightTokenKind::Exception => theme.syntax.exception,
+    }
+}
+
 /// 渲染小日志虚拟列表的横纵滚动条。
 fn render_in_memory_scrollbars(
     tab_id: usize,
     state: &crate::app::LogTabViewState,
+    line_number_width: f32,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> Vec<AnyElement> {
@@ -461,9 +596,13 @@ fn render_in_memory_scrollbars(
     drop(scroll_state);
 
     let mut scrollbars = Vec::new();
-    if let Some(metrics) =
-        scrollbar_metrics(size.item.height, size.contents.height, -offset.y, false)
-    {
+    if let Some(metrics) = scrollbar_metrics(
+        size.item.height,
+        size.contents.height,
+        -offset.y,
+        false,
+        px(0.0),
+    ) {
         scrollbars.push(render_scrollbar_thumb(
             tab_id,
             LogScrollbarAxis::Vertical,
@@ -475,8 +614,13 @@ fn render_in_memory_scrollbars(
             cx,
         ));
     }
-    if let Some(metrics) = scrollbar_metrics(size.item.width, size.contents.width, -offset.x, true)
-    {
+    if let Some(metrics) = scrollbar_metrics(
+        size.item.width,
+        size.contents.width,
+        -offset.x,
+        true,
+        px(line_number_width),
+    ) {
         scrollbars.push(render_scrollbar_thumb(
             tab_id,
             LogScrollbarAxis::Horizontal,
@@ -509,9 +653,10 @@ fn render_paged_scrollbars(
     }
 
     let estimated_char_width = (app.log_content_font_size * 0.62).max(6.0);
+    let line_number_width = log_viewer_line_number_width(handle.line_count());
     let content_width = px(handle.estimated_longest_display_columns() as f32
         * estimated_char_width
-        + log_viewer_line_number_width(handle.line_count())
+        + line_number_width
         + LOG_VIEWER_TEXT_LEFT_PADDING
         + LOG_VIEWER_TEXT_RIGHT_PADDING);
     let content_height = px(handle.line_count() as f32 * LOG_VIEWER_ROW_HEIGHT);
@@ -522,6 +667,7 @@ fn render_paged_scrollbars(
         content_height,
         px(state.paged_scroll.top_px as f32),
         false,
+        px(0.0),
     ) {
         scrollbars.push(render_scrollbar_thumb(
             tab_id,
@@ -539,6 +685,7 @@ fn render_paged_scrollbars(
         content_width,
         px(state.paged_scroll.left_px as f32),
         true,
+        px(line_number_width),
     ) {
         scrollbars.push(render_scrollbar_thumb(
             tab_id,
@@ -561,17 +708,18 @@ fn scrollbar_metrics(
     content_len: gpui::Pixels,
     scroll_offset: gpui::Pixels,
     horizontal: bool,
+    leading_gutter: gpui::Pixels,
 ) -> Option<LogScrollbarMetrics> {
     if viewport_len <= px(0.0) || content_len <= viewport_len {
         return None;
     }
     let max_scroll = content_len - viewport_len;
-    let track_start = px(LOG_SCROLLBAR_PADDING);
-    let reserved = if horizontal {
-        px(LOG_SCROLLBAR_PADDING * 2.0)
+    let track_start = if horizontal {
+        leading_gutter + px(LOG_SCROLLBAR_PADDING)
     } else {
-        px(LOG_SCROLLBAR_PADDING * 2.0)
+        px(LOG_SCROLLBAR_PADDING)
     };
+    let reserved = track_start + px(LOG_SCROLLBAR_PADDING);
     let track_length = (viewport_len - reserved).max(px(1.0));
     let min_thumb = px(LOG_SCROLLBAR_MIN_THUMB).min(track_length);
     let thumb_length = (viewport_len * (viewport_len / content_len)).clamp(min_thumb, track_length);
@@ -939,4 +1087,29 @@ fn render_search_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoE
                 cx.notify();
             }),
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证选区覆盖语法高亮中段时，只覆盖被选中的范围，两侧语法颜色仍会保留。
+    #[test]
+    fn selection_splits_overlapping_syntax_highlight() {
+        let theme = AppTheme::dark();
+        let highlights = merge_syntax_and_selection_highlights(
+            vec![HighlightSpan {
+                range: 0..15,
+                kind: HighlightTokenKind::StackClass,
+            }],
+            Some(5..9),
+            &theme,
+        );
+        let ranges = highlights
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ranges, vec![0..5, 5..9, 9..15]);
+    }
 }

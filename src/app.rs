@@ -4,15 +4,17 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、未读取内容提示和保留的日志样例数据。
 
+mod log_text;
+mod placeholder_data;
+mod source_search;
+
 use std::borrow::{Borrow, Cow};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
 
 use crate::config::{AppConfig, ConfigManager};
-use crate::fonts::ARGUS_LOG_FONT_FAMILY;
-#[cfg(test)]
-use crate::loader::archive::ArchiveFormat;
+use crate::highlight::HighlightCache;
 use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceLocation, SourceRegistry};
 #[cfg(test)]
 use crate::loader::{SourceKind, SourceMetadata, SourceTreeNode};
@@ -20,14 +22,20 @@ use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
 use crate::reader::read_mode::ReadMode;
+use crate::text_selection::TextSelectionGranularity;
+#[cfg(test)]
+use crate::text_selection::character_count;
 use crate::theme::{AppTheme, ThemeManager};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::main_window;
 use gpui::{
-    ClipboardItem, Context, IntoElement, Keystroke, PathPromptOptions, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, TextRun, Window, px,
+    Context, IntoElement, Keystroke, PathPromptOptions, Pixels, Point, Render, SharedString, Window,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
+#[cfg(test)]
+use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
+#[cfg(test)]
+use placeholder_data::{placeholder_logs, placeholder_source_registry};
 
 /// 来源侧栏默认宽度。
 pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 300.0;
@@ -226,6 +234,24 @@ impl LogTextSelection {
     }
 }
 
+/// 日志正文拖拽选择状态，记录起始选区和当前拖拽粒度。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogTextSelectionDrag {
+    /// 鼠标按下时形成的基础选区；双击为词，三击为整行。
+    pub anchor_range: LogTextSelection,
+    /// 当前拖拽粒度，决定后续移动时如何扩展选区。
+    pub granularity: TextSelectionGranularity,
+}
+
+/// 单行输入框拖拽选择状态，记录起始字符范围和当前拖拽粒度。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputTextSelectionDrag {
+    /// 鼠标按下时形成的基础字符范围。
+    pub anchor_range: std::ops::Range<usize>,
+    /// 当前拖拽粒度，决定移动时按字符、词或整行扩展。
+    pub granularity: TextSelectionGranularity,
+}
+
 /// 分页日志滚动状态，使用 f64 避免超大行数下的像素精度丢失。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PagedLogScrollState {
@@ -246,10 +272,12 @@ pub struct LogTabViewState {
     pub paged_scroll: PagedLogScrollState,
     /// 当前文本选区。
     pub selection: Option<LogTextSelection>,
-    /// 鼠标拖拽选区锚点；鼠标释放后清空。
-    pub selection_drag_anchor: Option<LogTextPosition>,
+    /// 鼠标拖拽选区状态；鼠标释放后清空。
+    pub selection_drag: Option<LogTextSelectionDrag>,
     /// 当前 tab 日志正文是否接收键盘复制等快捷键。
     pub is_focused: bool,
+    /// 当前 tab 的语法高亮缓存，避免滚动时重复扫描热点行。
+    pub highlight_cache: HighlightCache,
 }
 
 /// 日志正文滚动条方向。
@@ -280,8 +308,9 @@ impl Default for LogTabViewState {
             paged_viewport_handle: ScrollHandle::new(),
             paged_scroll: PagedLogScrollState::default(),
             selection: None,
-            selection_drag_anchor: None,
+            selection_drag: None,
             is_focused: false,
+            highlight_cache: HighlightCache::default(),
         }
     }
 }
@@ -364,6 +393,8 @@ pub struct ArgusApp {
     pub source_tree_search_cursor: usize,
     /// 来源树搜索框选区锚点；与光标不一致时表示存在选区。
     pub source_tree_search_selection_anchor: Option<usize>,
+    /// 来源树搜索框鼠标拖拽选择状态；鼠标释放后清空。
+    pub source_tree_search_selection_drag: Option<InputTextSelectionDrag>,
     /// 来源树搜索框是否处于聚焦状态，用于展示光标和选区。
     pub is_source_tree_search_focused: bool,
     /// 来源树搜索框显隐动画序号，每次开关递增以重启动画。
@@ -480,6 +511,7 @@ impl ArgusApp {
             source_tree_search_query: String::new(),
             source_tree_search_cursor: 0,
             source_tree_search_selection_anchor: None,
+            source_tree_search_selection_drag: None,
             is_source_tree_search_focused: false,
             source_tree_search_animation_generation: 0,
             filtered_source_ids: Vec::new(),
@@ -578,343 +610,6 @@ impl ArgusApp {
         } else {
             "已关闭本地搜索面板".to_string()
         };
-    }
-
-    /// 打开来源树搜索输入模式，并准备接收目录树过滤关键字。
-    pub fn open_source_tree_search(&mut self) {
-        self.is_source_tree_search_open = true;
-        self.source_tree_search_query.clear();
-        self.source_tree_search_cursor = 0;
-        self.source_tree_search_selection_anchor = None;
-        self.is_source_tree_search_focused = true;
-        self.source_tree_search_animation_generation =
-            self.source_tree_search_animation_generation.wrapping_add(1);
-        self.filtered_source_ids.clear();
-        self.placeholder_notice = "已打开来源树搜索，仅过滤已加载日志节点".to_string();
-    }
-
-    /// 关闭来源树搜索输入模式，清空过滤条件并恢复完整来源树。
-    pub fn close_source_tree_search(&mut self) {
-        self.is_source_tree_search_open = false;
-        self.source_tree_search_query.clear();
-        self.source_tree_search_cursor = 0;
-        self.source_tree_search_selection_anchor = None;
-        self.is_source_tree_search_focused = false;
-        self.source_tree_search_animation_generation =
-            self.source_tree_search_animation_generation.wrapping_add(1);
-        self.filtered_source_ids.clear();
-        self.placeholder_notice = "已关闭来源树搜索".to_string();
-    }
-
-    /// 更新来源树搜索关键字，并同步重建过滤后的可见节点索引。
-    pub fn update_source_tree_search_query(&mut self, query: String) {
-        self.source_tree_search_query = query;
-        self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
-        self.source_tree_search_selection_anchor = None;
-        self.rebuild_filtered_source_ids();
-
-        if self.source_tree_search_query.is_empty() {
-            self.placeholder_notice = "来源树搜索框为空，显示完整目录树".to_string();
-        } else {
-            self.placeholder_notice = format!(
-                "来源树搜索「{}」命中 {} 个可见节点",
-                self.source_tree_search_query,
-                self.filtered_source_ids.len()
-            );
-        }
-    }
-
-    /// 设置来源树搜索框焦点状态；聚焦时将光标放到当前文本末尾。
-    pub fn set_source_tree_search_focused(&mut self, is_focused: bool) {
-        self.is_source_tree_search_focused = is_focused;
-        if is_focused {
-            self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
-            self.source_tree_search_selection_anchor = None;
-        }
-    }
-
-    /// 处理来源树搜索框按键输入，只改变本地过滤状态，不读取日志正文。
-    pub fn handle_source_tree_search_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
-        let key = keystroke.key.to_lowercase();
-
-        if keystroke.modifiers.secondary() {
-            match key.as_str() {
-                "a" => {
-                    self.select_all_source_tree_search();
-                    self.placeholder_notice = "已全选来源树搜索关键字".to_string();
-                }
-                "c" => {
-                    self.copy_source_tree_search_selection(cx);
-                }
-                "x" => {
-                    self.cut_source_tree_search_selection(cx);
-                }
-                "v" => {
-                    self.paste_source_tree_search_clipboard(cx);
-                }
-                "left" | "arrowleft" => {
-                    self.move_source_tree_search_cursor(0, keystroke.modifiers.shift);
-                }
-                "right" | "arrowright" => {
-                    let end = character_count(&self.source_tree_search_query);
-                    self.move_source_tree_search_cursor(end, keystroke.modifiers.shift);
-                }
-                _ => {}
-            }
-            self.rebuild_filtered_source_ids();
-            return;
-        }
-
-        match key.as_str() {
-            "backspace" => {
-                self.delete_source_tree_search_backward();
-            }
-            "delete" => self.delete_source_tree_search_forward(),
-            "escape" => {
-                self.close_source_tree_search();
-                return;
-            }
-            "enter" => {
-                self.placeholder_notice = if self.source_tree_search_query.is_empty() {
-                    "来源树搜索框为空，未执行过滤".to_string()
-                } else {
-                    format!(
-                        "来源树已按「{}」过滤当前已加载日志",
-                        self.source_tree_search_query
-                    )
-                };
-                return;
-            }
-            "left" | "arrowleft" => self.move_source_tree_search_left(keystroke.modifiers.shift),
-            "right" | "arrowright" => self.move_source_tree_search_right(keystroke.modifiers.shift),
-            "home" => self.move_source_tree_search_cursor(0, keystroke.modifiers.shift),
-            "end" => {
-                let end = character_count(&self.source_tree_search_query);
-                self.move_source_tree_search_cursor(end, keystroke.modifiers.shift);
-            }
-            _ => {
-                if let Some(key_char) = keystroke.key_char.as_ref()
-                    && !keystroke.modifiers.control
-                    && !keystroke.modifiers.alt
-                    && !keystroke.modifiers.platform
-                    && !keystroke.modifiers.function
-                    && !key_char.chars().any(char::is_control)
-                {
-                    self.insert_source_tree_search_text(key_char);
-                }
-            }
-        }
-
-        self.rebuild_filtered_source_ids();
-        if self.source_tree_search_query.is_empty() {
-            self.placeholder_notice = "来源树搜索框为空，显示完整目录树".to_string();
-        } else {
-            self.placeholder_notice = format!(
-                "来源树搜索「{}」命中 {} 个可见节点",
-                self.source_tree_search_query,
-                self.filtered_source_ids.len()
-            );
-        }
-    }
-
-    /// 返回来源树搜索框当前选区范围；没有有效选区时返回 `None`。
-    pub fn source_tree_search_selection_range(&self) -> Option<std::ops::Range<usize>> {
-        let anchor = self.source_tree_search_selection_anchor?;
-        if anchor == self.source_tree_search_cursor {
-            return None;
-        }
-
-        Some(anchor.min(self.source_tree_search_cursor)..anchor.max(self.source_tree_search_cursor))
-    }
-
-    /// 将来源树搜索框光标移动到指定字符位置，并根据 Shift 状态维护选区。
-    fn move_source_tree_search_cursor(&mut self, next_cursor: usize, should_select: bool) {
-        let previous_cursor = self.source_tree_search_cursor;
-        let text_length = character_count(&self.source_tree_search_query);
-        self.source_tree_search_cursor = next_cursor.min(text_length);
-
-        if should_select {
-            if self.source_tree_search_selection_anchor.is_none() {
-                self.source_tree_search_selection_anchor = Some(previous_cursor);
-            }
-        } else {
-            self.source_tree_search_selection_anchor = None;
-        }
-    }
-
-    /// 将来源树搜索框光标向左移动一个字符；存在选区时退到选区起点。
-    fn move_source_tree_search_left(&mut self, should_select: bool) {
-        if !should_select && let Some(selection_range) = self.source_tree_search_selection_range() {
-            self.move_source_tree_search_cursor(selection_range.start, false);
-            return;
-        }
-
-        self.move_source_tree_search_cursor(
-            self.source_tree_search_cursor.saturating_sub(1),
-            should_select,
-        );
-    }
-
-    /// 将来源树搜索框光标向右移动一个字符；存在选区时跳到选区终点。
-    fn move_source_tree_search_right(&mut self, should_select: bool) {
-        if !should_select && let Some(selection_range) = self.source_tree_search_selection_range() {
-            self.move_source_tree_search_cursor(selection_range.end, false);
-            return;
-        }
-
-        self.move_source_tree_search_cursor(self.source_tree_search_cursor + 1, should_select);
-    }
-
-    /// 删除来源树搜索框当前选区，并返回是否发生了删除。
-    fn delete_source_tree_search_selection(&mut self) -> bool {
-        let Some(selection_range) = self.source_tree_search_selection_range() else {
-            return false;
-        };
-
-        self.source_tree_search_query =
-            remove_character_range(&self.source_tree_search_query, selection_range.clone());
-        self.source_tree_search_cursor = selection_range.start;
-        self.source_tree_search_selection_anchor = None;
-        true
-    }
-
-    /// 在光标位置插入文本；插入前会替换现有选区。
-    fn insert_source_tree_search_text(&mut self, text: &str) {
-        self.delete_source_tree_search_selection();
-        self.source_tree_search_query = insert_text_at_character_index(
-            &self.source_tree_search_query,
-            self.source_tree_search_cursor,
-            text,
-        );
-        self.source_tree_search_cursor += character_count(text);
-        self.source_tree_search_selection_anchor = None;
-    }
-
-    /// 向后删除一个字符；若存在选区则删除整个选区。
-    fn delete_source_tree_search_backward(&mut self) {
-        if self.delete_source_tree_search_selection() || self.source_tree_search_cursor == 0 {
-            return;
-        }
-
-        let delete_range = self.source_tree_search_cursor - 1..self.source_tree_search_cursor;
-        self.source_tree_search_query =
-            remove_character_range(&self.source_tree_search_query, delete_range);
-        self.source_tree_search_cursor -= 1;
-    }
-
-    /// 向前删除一个字符；若存在选区则删除整个选区。
-    fn delete_source_tree_search_forward(&mut self) {
-        if self.delete_source_tree_search_selection() {
-            return;
-        }
-
-        let text_length = character_count(&self.source_tree_search_query);
-        if self.source_tree_search_cursor >= text_length {
-            return;
-        }
-
-        let delete_range = self.source_tree_search_cursor..self.source_tree_search_cursor + 1;
-        self.source_tree_search_query =
-            remove_character_range(&self.source_tree_search_query, delete_range);
-    }
-
-    /// 全选来源树搜索框文本。
-    pub fn select_all_source_tree_search(&mut self) {
-        self.source_tree_search_selection_anchor = Some(0);
-        self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
-    }
-
-    /// 返回来源树搜索框当前选中的文本。
-    fn selected_source_tree_search_text(&self) -> Option<String> {
-        let selection_range = self.source_tree_search_selection_range()?;
-        Some(slice_character_range(
-            &self.source_tree_search_query,
-            selection_range,
-        ))
-    }
-
-    /// 将来源树搜索框选区写入系统剪贴板。
-    fn copy_source_tree_search_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(selected_text) = self.selected_source_tree_search_text() else {
-            self.placeholder_notice = "来源树搜索框没有可复制的选中文本".to_string();
-            return;
-        };
-
-        let app_context: &gpui::App = (&*cx).borrow();
-        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
-        self.placeholder_notice = "已复制来源树搜索关键字选区".to_string();
-    }
-
-    /// 剪切来源树搜索框选区，并同步刷新过滤结果。
-    fn cut_source_tree_search_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(selected_text) = self.selected_source_tree_search_text() else {
-            self.placeholder_notice = "来源树搜索框没有可剪切的选中文本".to_string();
-            return;
-        };
-
-        let app_context: &gpui::App = (&*cx).borrow();
-        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
-        self.delete_source_tree_search_selection();
-        self.rebuild_filtered_source_ids();
-        self.placeholder_notice = "已剪切来源树搜索关键字选区".to_string();
-    }
-
-    /// 从系统剪贴板粘贴纯文本到来源树搜索框光标位置。
-    fn paste_source_tree_search_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
-        let Some(clipboard_text) = app_context
-            .read_from_clipboard()
-            .and_then(|clipboard_item| clipboard_item.text())
-        else {
-            self.placeholder_notice = "系统剪贴板没有可粘贴文本".to_string();
-            return;
-        };
-
-        self.insert_source_tree_search_text(&clipboard_text.replace(['\r', '\n'], " "));
-        self.rebuild_filtered_source_ids();
-        self.placeholder_notice = "已粘贴来源树搜索关键字".to_string();
-    }
-
-    /// 返回来源树当前是否正在使用非空关键字过滤。
-    pub fn is_source_tree_filtering(&self) -> bool {
-        self.is_source_tree_search_open && !self.source_tree_search_query.trim().is_empty()
-    }
-
-    /// 重建来源树过滤结果；只匹配已加载日志候选节点，并保留祖先目录上下文。
-    pub fn rebuild_filtered_source_ids(&mut self) {
-        self.filtered_source_ids.clear();
-
-        let query = self.source_tree_search_query.trim().to_lowercase();
-        if query.is_empty() {
-            return;
-        }
-
-        let ordered_source_ids = self.source_registry.tree_order_source_ids();
-        let mut included_ids = HashSet::new();
-
-        for source_id in ordered_source_ids.iter().copied() {
-            let Some(source) = self.source_registry.node(source_id) else {
-                continue;
-            };
-            if !source.kind.is_log_candidate()
-                || !self
-                    .source_registry
-                    .search_key(source_id)
-                    .map(|search_key| search_key.contains(&query))
-                    .unwrap_or(false)
-            {
-                continue;
-            }
-
-            included_ids.extend(self.source_registry.ancestor_ids(source_id));
-            included_ids.insert(source_id);
-        }
-
-        self.filtered_source_ids = ordered_source_ids
-            .iter()
-            .copied()
-            .filter(|source_id| included_ids.contains(source_id))
-            .collect();
     }
 
     /// 打开来源占位弹窗。
@@ -1341,379 +1036,6 @@ impl ArgusApp {
         self.log_tab_view_states.get_mut(&tab_id)
     }
 
-    /// 返回指定日志 tab 当前是否处于文本拖拽选择过程中。
-    pub fn is_log_text_selection_drag_active(&self, tab_id: usize) -> bool {
-        self.log_tab_view_states
-            .get(&tab_id)
-            .and_then(|state| state.selection_drag_anchor)
-            .is_some()
-    }
-
-    /// 清理指定 tab 的日志文本选区和焦点状态。
-    fn reset_log_text_selection_for_tab(&mut self, tab_id: usize) {
-        if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
-            state.selection = None;
-            state.selection_drag_anchor = None;
-            state.is_focused = false;
-        }
-    }
-
-    /// 清理所有日志 tab 的选区和焦点状态，用于替换来源或关闭全部标签。
-    fn reset_log_text_selection(&mut self) {
-        for state in self.log_tab_view_states.values_mut() {
-            state.selection = None;
-            state.selection_drag_anchor = None;
-            state.is_focused = false;
-        }
-    }
-
-    /// 根据鼠标横坐标和 GPUI 字形布局计算行内字符列。
-    pub fn log_text_position_from_pointer(
-        &self,
-        tab_id: usize,
-        line_index: usize,
-        line: &str,
-        pointer_x: Pixels,
-        window: &mut Window,
-    ) -> LogTextPosition {
-        let Some(state) = self.log_tab_view_state(tab_id) else {
-            return LogTextPosition {
-                line_index,
-                column: 0,
-            };
-        };
-        let active_handle = self.active_log_handle();
-        let line_number_width = log_viewer_line_number_width(
-            active_handle.map(|handle| handle.line_count()).unwrap_or(0),
-        );
-        let horizontal_offset = match active_handle.map(|handle| handle.document()) {
-            Some(crate::reader::log_file_reader::LogDocument::Paged(_)) => {
-                px(-(state.paged_scroll.left_px as f32))
-            }
-            Some(crate::reader::log_file_reader::LogDocument::InMemory(_)) | None => {
-                state
-                    .scroll_handle
-                    .0
-                    .as_ref()
-                    .borrow()
-                    .base_handle
-                    .offset()
-                    .x
-            }
-        };
-        let bounds = match active_handle.map(|handle| handle.document()) {
-            Some(crate::reader::log_file_reader::LogDocument::Paged(_)) => {
-                state.paged_viewport_handle.bounds()
-            }
-            Some(crate::reader::log_file_reader::LogDocument::InMemory(_)) | None => {
-                state.scroll_handle.0.as_ref().borrow().base_handle.bounds()
-            }
-        };
-        let text_relative_x = pointer_x
-            - bounds.left()
-            - horizontal_offset
-            - px(line_number_width + LOG_VIEWER_TEXT_LEFT_PADDING);
-        let display_line = log_viewer_display_text(line);
-        if display_line.is_empty() || text_relative_x <= px(0.0) {
-            return LogTextPosition {
-                line_index,
-                column: 0,
-            };
-        }
-
-        let mut text_style = window.text_style();
-        text_style.font_family = ARGUS_LOG_FONT_FAMILY.into();
-        text_style.font_size = px(self.log_content_font_size).into();
-        let run = TextRun {
-            len: display_line.len(),
-            font: text_style.font(),
-            color: text_style.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let shaped_line = window.text_system().shape_line(
-            SharedString::from(display_line.to_string()),
-            font_size,
-            &[run],
-            None,
-        );
-        let byte_index = shaped_line.closest_index_for_x(text_relative_x);
-        let column = char_column_for_byte_index(&display_line, byte_index);
-
-        LogTextPosition { line_index, column }
-    }
-
-    /// 从指定行和鼠标位置开始选择日志文本。
-    pub fn begin_log_text_selection(
-        &mut self,
-        tab_id: usize,
-        line_index: usize,
-        line: &str,
-        pointer_x: Pixels,
-        window: &mut Window,
-    ) {
-        let position =
-            self.log_text_position_from_pointer(tab_id, line_index, line, pointer_x, window);
-        let state = self.log_tab_view_states.entry(tab_id).or_default();
-        state.selection = Some(LogTextSelection {
-            anchor: position,
-            focus: position,
-        });
-        state.selection_drag_anchor = Some(position);
-        state.is_focused = true;
-    }
-
-    /// 鼠标拖拽过程中更新日志文本选区。
-    pub fn update_log_text_selection(
-        &mut self,
-        tab_id: usize,
-        line_index: usize,
-        line: &str,
-        pointer_x: Pixels,
-        window: &mut Window,
-    ) {
-        let Some(anchor) = self
-            .log_tab_view_states
-            .get(&tab_id)
-            .and_then(|state| state.selection_drag_anchor)
-        else {
-            return;
-        };
-        let position =
-            self.log_text_position_from_pointer(tab_id, line_index, line, pointer_x, window);
-        if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
-            state.selection = Some(LogTextSelection {
-                anchor,
-                focus: position,
-            });
-            state.is_focused = true;
-        }
-    }
-
-    /// 结束日志文本鼠标选择；若没有选中内容则清理锚点。
-    pub fn finish_log_text_selection(&mut self, tab_id: usize) {
-        if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
-            state.selection_drag_anchor = None;
-            if state
-                .selection
-                .as_ref()
-                .is_some_and(LogTextSelection::is_empty)
-            {
-                state.selection = None;
-            }
-        }
-    }
-
-    /// 返回指定 tab 中某行的选区字节范围。
-    pub fn log_text_selection_byte_range_for_line(
-        &self,
-        tab_id: usize,
-        line_index: usize,
-        line: &str,
-    ) -> Option<std::ops::Range<usize>> {
-        let selection = self.log_tab_view_state(tab_id)?.selection.as_ref()?;
-        let (start, end) = selection.normalized();
-        if line_index < start.line_index || line_index > end.line_index {
-            return None;
-        }
-
-        let display_line = log_viewer_display_text(line);
-        let line_char_count = character_count(&display_line);
-        let start_column = if line_index == start.line_index {
-            start.column.min(line_char_count)
-        } else {
-            0
-        };
-        let end_column = if line_index == end.line_index {
-            end.column.min(line_char_count)
-        } else {
-            line_char_count
-        };
-        if start_column == end_column {
-            return None;
-        }
-
-        Some(
-            byte_index_for_character(&display_line, start_column)
-                ..byte_index_for_character(&display_line, end_column),
-        )
-    }
-
-    /// 全选当前日志文档，供 `Cmd/Ctrl+A` 使用。
-    pub fn select_all_log_text(&mut self) {
-        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
-            return;
-        };
-        let Some(handle) = self.active_log_handle() else {
-            return;
-        };
-        let line_count = handle.line_count();
-        if line_count == 0 {
-            return;
-        }
-        let last_line_text = handle
-            .lines(line_count.saturating_sub(1), 1)
-            .ok()
-            .and_then(|mut lines| lines.pop())
-            .map(|line| log_viewer_display_text(&line.text).into_owned())
-            .unwrap_or_default();
-        let state = self.log_tab_view_states.entry(tab_id).or_default();
-        state.selection = Some(LogTextSelection {
-            anchor: LogTextPosition {
-                line_index: 0,
-                column: 0,
-            },
-            focus: LogTextPosition {
-                line_index: line_count - 1,
-                column: character_count(&last_line_text),
-            },
-        });
-        state.selection_drag_anchor = None;
-        state.is_focused = true;
-        self.placeholder_notice = format!("已全选日志文本，共 {line_count} 行");
-    }
-
-    /// 返回日志文本当前选中的内容。
-    fn selected_log_text(&self) -> Option<String> {
-        let active_tab = self.active_tab()?;
-        let selection = self.log_tab_view_state(active_tab.id)?.selection.as_ref()?;
-        if selection.is_empty() {
-            return None;
-        }
-        let handle = self.active_log_handle()?;
-        let (start, end) = selection.normalized();
-        if start.line_index >= handle.line_count() {
-            return None;
-        }
-
-        let end_line = end.line_index.min(handle.line_count().saturating_sub(1));
-        let lines = handle
-            .lines(
-                start.line_index,
-                end_line.saturating_sub(start.line_index) + 1,
-            )
-            .ok()?;
-        let mut selected_text = String::new();
-        for displayed_line in lines {
-            if !selected_text.is_empty() {
-                selected_text.push('\n');
-            }
-            let line = log_viewer_display_text(&displayed_line.text).into_owned();
-            let line_char_count = character_count(&line);
-            let start_column = if displayed_line.line_number == start.line_index {
-                start.column.min(line_char_count)
-            } else {
-                0
-            };
-            let end_column = if displayed_line.line_number == end_line {
-                end.column.min(line_char_count)
-            } else {
-                line_char_count
-            };
-            if start_column < end_column {
-                selected_text.push_str(&slice_character_range(&line, start_column..end_column));
-            }
-        }
-
-        Some(selected_text)
-    }
-
-    /// 将日志文本选区写入系统剪贴板。
-    fn copy_log_text_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(selected_text) = self.selected_log_text() else {
-            self.placeholder_notice = "日志文本没有可复制的选区，请先选择文本".to_string();
-            return;
-        };
-
-        let selected_length = character_count(&selected_text);
-        let app_context: &gpui::App = (&*cx).borrow();
-        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
-        self.placeholder_notice = format!("已复制日志文本选区，共 {selected_length} 个字符");
-    }
-
-    /// 处理日志文本区域的粘贴快捷键；日志查看器只读，因此不会修改真实内容。
-    fn paste_log_text_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
-        let Some(clipboard_text) = app_context
-            .read_from_clipboard()
-            .and_then(|clipboard_item| clipboard_item.text())
-        else {
-            self.placeholder_notice = "系统剪贴板没有可粘贴文本".to_string();
-            return;
-        };
-
-        self.placeholder_notice = format!(
-            "日志内容为只读，已读取剪贴板中的 {} 个字符但未写入日志",
-            character_count(&clipboard_text)
-        );
-    }
-
-    /// 处理日志文本阅读区按键，仅维护只读查看器的选择和剪贴板行为。
-    pub fn handle_log_text_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
-        let Some(active_tab_id) = self.active_tab().map(|tab| tab.id) else {
-            return;
-        };
-        if !self
-            .log_tab_view_state(active_tab_id)
-            .is_some_and(|state| state.is_focused)
-        {
-            return;
-        }
-
-        let key = keystroke.key.to_lowercase();
-        if keystroke.modifiers.secondary() {
-            match key.as_str() {
-                "a" => self.select_all_log_text(),
-                "c" => self.copy_log_text_selection(cx),
-                "v" => self.paste_log_text_clipboard(cx),
-                _ => {}
-            }
-            return;
-        }
-
-        if key.as_str() == "escape" {
-            self.reset_log_text_selection_for_tab(active_tab_id);
-            self.placeholder_notice = "已取消日志文本选区".to_string();
-        }
-    }
-
-    /// 处理分页日志滚轮事件；大日志不交给 GPUI 完整滚动容器，避免巨大内容高度造成精度问题。
-    pub fn scroll_paged_log(
-        &mut self,
-        tab_id: usize,
-        source_id: SourceId,
-        event: &ScrollWheelEvent,
-    ) {
-        let Some(LogOpenState::Ready(handle)) = self.log_read_state(source_id) else {
-            return;
-        };
-        let line_count = handle.line_count();
-        let longest_display_columns = handle.estimated_longest_display_columns();
-        let Some(state) = self.log_tab_view_states.get_mut(&tab_id) else {
-            return;
-        };
-
-        let pixel_delta = event.delta.pixel_delta(px(LOG_VIEWER_ROW_HEIGHT));
-        let viewport = state.paged_viewport_handle.bounds().size;
-        let max_vertical = (line_count as f64 * LOG_VIEWER_ROW_HEIGHT as f64
-            - f64::from(viewport.height))
-        .max(0.0);
-        let estimated_char_width = (self.log_content_font_size * 0.62).max(6.0);
-        let content_width = longest_display_columns as f64 * estimated_char_width as f64
-            + f64::from(px(log_viewer_line_number_width(line_count)
-                + LOG_VIEWER_TEXT_LEFT_PADDING
-                + LOG_VIEWER_TEXT_RIGHT_PADDING));
-        let max_horizontal = (content_width - f64::from(viewport.width)).max(0.0);
-
-        state.paged_scroll.top_px =
-            (state.paged_scroll.top_px - f64::from(pixel_delta.y)).clamp(0.0, max_vertical);
-        state.paged_scroll.left_px =
-            (state.paged_scroll.left_px - f64::from(pixel_delta.x)).clamp(0.0, max_horizontal);
-        state.is_focused = true;
-    }
-
     /// 切换到指定标签页。
     pub fn activate_tab(&mut self, tab_id: usize) {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
@@ -2030,6 +1352,7 @@ impl ArgusApp {
         self.source_tree_search_query.clear();
         self.source_tree_search_cursor = 0;
         self.source_tree_search_selection_anchor = None;
+        self.source_tree_search_selection_drag = None;
         self.is_source_tree_search_focused = false;
         self.filtered_source_ids.clear();
         self.source_tree_scroll
@@ -2391,222 +1714,10 @@ impl Render for ArgusApp {
     }
 }
 
-/// 返回字符串的字符数量，避免中文等多字节字符破坏光标位置。
-fn character_count(text: &str) -> usize {
-    text.chars().count()
-}
-
-/// 将字符索引转换为 UTF-8 字节索引；越界时返回字符串末尾。
-fn byte_index_for_character(text: &str, character_index: usize) -> usize {
-    text.char_indices()
-        .map(|(byte_index, _)| byte_index)
-        .nth(character_index)
-        .unwrap_or(text.len())
-}
-
-/// 将 UTF-8 字节下标转换为字符列，避免 GPUI 命中结果落在多字节字符中间。
-fn char_column_for_byte_index(text: &str, byte_index: usize) -> usize {
-    let byte_index = byte_index.min(text.len());
-    let safe_byte_index = if text.is_char_boundary(byte_index) {
-        byte_index
-    } else {
-        text.char_indices()
-            .map(|(index, _)| index)
-            .take_while(|index| *index < byte_index)
-            .last()
-            .unwrap_or(0)
-    };
-
-    text[..safe_byte_index].chars().count()
-}
-
-/// 截取指定字符范围内的文本，供复制和选区渲染复用。
-fn slice_character_range(text: &str, range: std::ops::Range<usize>) -> String {
-    let start = byte_index_for_character(text, range.start);
-    let end = byte_index_for_character(text, range.end);
-    text[start..end].to_string()
-}
-
 /// 判断日志文本位置是否按文档顺序小于等于另一个位置。
 fn log_text_position_le(left: LogTextPosition, right: LogTextPosition) -> bool {
     left.line_index < right.line_index
         || (left.line_index == right.line_index && left.column <= right.column)
-}
-
-/// 删除指定字符范围内的文本，并返回新字符串。
-fn remove_character_range(text: &str, range: std::ops::Range<usize>) -> String {
-    let start = byte_index_for_character(text, range.start);
-    let end = byte_index_for_character(text, range.end);
-    let mut next_text = String::with_capacity(text.len().saturating_sub(end - start));
-    next_text.push_str(&text[..start]);
-    next_text.push_str(&text[end..]);
-    next_text
-}
-
-/// 在指定字符位置插入文本，并返回新字符串。
-fn insert_text_at_character_index(
-    text: &str,
-    character_index: usize,
-    inserted_text: &str,
-) -> String {
-    let byte_index = byte_index_for_character(text, character_index);
-    let mut next_text = String::with_capacity(text.len() + inserted_text.len());
-    next_text.push_str(&text[..byte_index]);
-    next_text.push_str(inserted_text);
-    next_text.push_str(&text[byte_index..]);
-    next_text
-}
-
-/// 构造测试样例来源树，便于验证过滤和展开状态，不参与正式启动界面。
-#[cfg(test)]
-fn placeholder_source_registry() -> SourceRegistry {
-    let mut registry = SourceRegistry::new();
-    let logs_id = registry.allocate_id();
-    registry.insert_node(SourceTreeNode {
-        id: logs_id,
-        parent_id: None,
-        depth: 0,
-        label: "logs".into(),
-        kind: SourceKind::Directory,
-        location: SourceLocation::LocalPath(PathBuf::from("logs")),
-        metadata: SourceMetadata {
-            size: None,
-            children_loaded: true,
-            is_loading: false,
-            message: None,
-        },
-        selected: false,
-        expanded: true,
-    });
-
-    let app_id = registry.allocate_id();
-    registry.insert_node(SourceTreeNode {
-        id: app_id,
-        parent_id: Some(logs_id),
-        depth: 1,
-        label: "app.log".into(),
-        kind: SourceKind::LogFile,
-        location: SourceLocation::LocalPath(PathBuf::from("logs/app.log")),
-        metadata: SourceMetadata {
-            size: Some(7494),
-            children_loaded: true,
-            is_loading: false,
-            message: None,
-        },
-        selected: true,
-        expanded: false,
-    });
-
-    let error_id = registry.allocate_id();
-    registry.insert_node(SourceTreeNode {
-        id: error_id,
-        parent_id: Some(logs_id),
-        depth: 1,
-        label: "error.log".into(),
-        kind: SourceKind::LogFile,
-        location: SourceLocation::LocalPath(PathBuf::from("logs/error.log")),
-        metadata: SourceMetadata {
-            size: Some(2048),
-            children_loaded: true,
-            is_loading: false,
-            message: None,
-        },
-        selected: false,
-        expanded: false,
-    });
-
-    let archive_id = registry.allocate_id();
-    registry.insert_node(SourceTreeNode {
-        id: archive_id,
-        parent_id: None,
-        depth: 0,
-        label: "archive.zip".into(),
-        kind: SourceKind::Archive(ArchiveFormat::Zip),
-        location: SourceLocation::LocalPath(PathBuf::from("archive.zip")),
-        metadata: SourceMetadata {
-            size: Some(4096),
-            children_loaded: true,
-            is_loading: false,
-            message: None,
-        },
-        selected: false,
-        expanded: true,
-    });
-
-    let nested_id = registry.allocate_id();
-    registry.insert_node(SourceTreeNode {
-        id: nested_id,
-        parent_id: Some(archive_id),
-        depth: 1,
-        label: "nested.log".into(),
-        kind: SourceKind::ArchiveFile,
-        location: SourceLocation::ArchiveEntry {
-            archive_path: PathBuf::from("archive.zip"),
-            root_format: ArchiveFormat::Zip,
-            container_entries: Vec::new(),
-            entry_path: "nested.log".into(),
-            format: ArchiveFormat::Zip,
-            archive_depth: 0,
-        },
-        metadata: SourceMetadata {
-            size: Some(1024),
-            children_loaded: true,
-            is_loading: false,
-            message: None,
-        },
-        selected: false,
-        expanded: false,
-    });
-
-    registry.rebuild_all_indices();
-    registry
-}
-
-/// 构造日志内容占位数据，覆盖常见日志等级视觉状态。
-#[cfg(test)]
-fn placeholder_logs() -> Vec<LogLine> {
-    vec![
-        LogLine {
-            number: 1,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:45 [INFO] Application started".into(),
-        },
-        LogLine {
-            number: 2,
-            level: "DEBUG".into(),
-            message: "2024-01-15 10:23:46 [DEBUG] Loading config...".into(),
-        },
-        LogLine {
-            number: 3,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:46 [INFO] Config loaded".into(),
-        },
-        LogLine {
-            number: 4,
-            level: "WARN".into(),
-            message: "2024-01-15 10:23:47 [WARN] Deprecated API usage".into(),
-        },
-        LogLine {
-            number: 5,
-            level: "ERROR".into(),
-            message: "2024-01-15 10:23:48 [ERROR] Failed to connect".into(),
-        },
-        LogLine {
-            number: 6,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:48 [INFO] Retrying connection...".into(),
-        },
-        LogLine {
-            number: 7,
-            level: "DEBUG".into(),
-            message: "2024-01-15 10:23:49 [DEBUG] Connection established".into(),
-        },
-        LogLine {
-            number: 8,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:50 [INFO] Request received".into(),
-        },
-    ]
 }
 
 #[cfg(test)]
@@ -3090,6 +2201,153 @@ mod tests {
         assert!(app.source_tree_search_query.is_empty());
         assert_eq!(app.source_tree_search_cursor, 0);
         assert!(app.source_tree_search_selection_range().is_none());
+    }
+
+    /// 验证输入框鼠标拖拽按字符索引生成选区，中文不会被截断。
+    #[test]
+    fn source_tree_search_pointer_drag_selects_character_range() {
+        let mut app = test_app();
+
+        app.update_source_tree_search_query("日a志".to_string());
+        app.begin_source_tree_search_pointer_selection(0, TextSelectionGranularity::Character);
+        app.update_source_tree_search_pointer_selection(2);
+        app.finish_source_tree_search_pointer_selection();
+
+        assert_eq!(app.source_tree_search_selection_range(), Some(0..2));
+        assert_eq!(
+            app.selected_source_tree_search_text(),
+            Some("日a".to_string())
+        );
+    }
+
+    /// 验证输入框双击按词选择常见日志令牌，点号会作为分隔符。
+    #[test]
+    fn source_tree_search_double_click_selects_word() {
+        let mut app = test_app();
+
+        app.update_source_tree_search_query("中文 thread_001.zip java.lang.Class".to_string());
+        app.begin_source_tree_search_pointer_selection(4, TextSelectionGranularity::Word);
+        app.finish_source_tree_search_pointer_selection();
+
+        assert_eq!(
+            app.selected_source_tree_search_text(),
+            Some("thread_001".to_string())
+        );
+    }
+
+    /// 验证输入框三击会选中整个单行输入值。
+    #[test]
+    fn source_tree_search_triple_click_selects_whole_line() {
+        let mut app = test_app();
+
+        app.update_source_tree_search_query("archive.log".to_string());
+        app.begin_source_tree_search_pointer_selection(3, TextSelectionGranularity::Line);
+        app.finish_source_tree_search_pointer_selection();
+
+        assert_eq!(
+            app.selected_source_tree_search_text(),
+            Some("archive.log".to_string())
+        );
+    }
+
+    /// 验证日志双击选词支持中文、下划线令牌和点号分隔的 Java 类名片段。
+    #[test]
+    fn log_word_selection_supports_common_log_tokens() {
+        let mut app = test_app();
+        let tab_id = app.active_tab_id;
+        let line = "中文 thread_001.zip java.lang.Class";
+
+        app.select_log_word_at(tab_id, 0, line, 0);
+        let selection = app
+            .log_tab_view_state(tab_id)
+            .and_then(|state| state.selection.as_ref())
+            .unwrap();
+        assert_eq!(selection.normalized().0.column, 0);
+        assert_eq!(selection.normalized().1.column, 2);
+
+        app.select_log_word_at(tab_id, 0, line, 4);
+        let selection = app
+            .log_tab_view_state(tab_id)
+            .and_then(|state| state.selection.as_ref())
+            .unwrap();
+        assert_eq!(selection.normalized().0.column, 3);
+        assert_eq!(selection.normalized().1.column, 13);
+
+        app.select_log_word_at(tab_id, 0, line, 20);
+        let selection = app
+            .log_tab_view_state(tab_id)
+            .and_then(|state| state.selection.as_ref())
+            .unwrap();
+        assert_eq!(selection.normalized().0.column, 18);
+        assert_eq!(selection.normalized().1.column, 22);
+    }
+
+    /// 验证日志三击会选中整行展示文本，包含制表符展开后的列宽。
+    #[test]
+    fn log_triple_click_selects_whole_display_line() {
+        let mut app = test_app();
+        let tab_id = app.active_tab_id;
+
+        app.select_log_text_line(tab_id, 7, "abc\tdef");
+        let selection = app
+            .log_tab_view_state(tab_id)
+            .and_then(|state| state.selection.as_ref())
+            .unwrap();
+        let (start, end) = selection.normalized();
+
+        assert_eq!(
+            start,
+            LogTextPosition {
+                line_index: 7,
+                column: 0
+            }
+        );
+        assert_eq!(end.line_index, 7);
+        assert_eq!(end.column, character_count("abc    def"));
+    }
+
+    /// 验证日志词级和行级拖拽会完整合并起始范围与当前范围。
+    #[test]
+    fn log_range_merge_expands_word_and_line_selection() {
+        let word_anchor =
+            log_text_range_for_granularity(0, "one two three", 1, TextSelectionGranularity::Word);
+        let word_focus =
+            log_text_range_for_granularity(0, "one two three", 5, TextSelectionGranularity::Word);
+        let (word_start, word_end) = merge_log_text_ranges(&word_anchor, &word_focus).normalized();
+        assert_eq!(
+            word_start,
+            LogTextPosition {
+                line_index: 0,
+                column: 0
+            }
+        );
+        assert_eq!(
+            word_end,
+            LogTextPosition {
+                line_index: 0,
+                column: 7
+            }
+        );
+
+        let line_anchor =
+            log_text_range_for_granularity(1, "first", 2, TextSelectionGranularity::Line);
+        let line_focus =
+            log_text_range_for_granularity(3, "third line", 4, TextSelectionGranularity::Line);
+        let (line_start, line_end) = merge_log_text_ranges(&line_anchor, &line_focus).normalized();
+        assert_eq!(
+            line_start,
+            LogTextPosition {
+                line_index: 1,
+                column: 0
+            }
+        );
+        assert_eq!(
+            line_end,
+            LogTextPosition {
+                line_index: 3,
+                column: 10
+            }
+        );
     }
 
     /// 构造只有一个未加载目录的应用状态，用于验证懒加载状态机。
