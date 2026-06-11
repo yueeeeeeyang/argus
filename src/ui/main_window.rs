@@ -29,6 +29,7 @@ pub fn render(
     window: &mut Window,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
+    app.sync_window_appearance_theme(window);
     let theme = app.theme.clone();
 
     div()

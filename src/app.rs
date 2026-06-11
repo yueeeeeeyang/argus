@@ -6,9 +6,10 @@
 
 mod log_text;
 mod placeholder_data;
+mod source_picker;
 mod source_search;
 
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -25,17 +26,18 @@ use crate::reader::read_mode::ReadMode;
 use crate::text_selection::TextSelectionGranularity;
 #[cfg(test)]
 use crate::text_selection::character_count;
+use crate::theme::system_theme::{label_for_window_appearance, theme_mode_for_window_appearance};
 use crate::theme::{AppTheme, ThemeManager};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::main_window;
-use gpui::{
-    Context, IntoElement, Keystroke, PathPromptOptions, Pixels, Point, Render, SharedString, Window,
-};
+use gpui::WindowAppearance;
+use gpui::{Context, IntoElement, Keystroke, Pixels, Point, Render, Window};
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 #[cfg(test)]
 use placeholder_data::{placeholder_logs, placeholder_source_registry};
+pub use source_picker::{SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState};
 
 /// 来源侧栏默认宽度。
 pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 300.0;
@@ -373,7 +375,7 @@ pub struct ArgusApp {
     pub workspace: Workspace,
     /// 用户点击未实现操作后的占位提示。
     pub placeholder_notice: String,
-    /// 深色主题令牌。
+    /// 当前主题令牌。
     pub theme: AppTheme,
     /// 真实来源注册表，维护节点、父子关系和可见索引。
     pub source_registry: SourceRegistry,
@@ -403,6 +405,8 @@ pub struct ArgusApp {
     pub filtered_source_ids: Vec<SourceId>,
     /// 来源树子级懒加载 generation，用于丢弃过期后台结果。
     pub source_child_load_generations: HashMap<SourceId, usize>,
+    /// 自定义日志来源选择器状态，用于替代系统路径选择器。
+    pub source_picker: SourcePickerState,
     /// 当前内容区状态。
     pub content_state: ContentState,
     /// 日志行占位数据。
@@ -516,6 +520,7 @@ impl ArgusApp {
             source_tree_search_animation_generation: 0,
             filtered_source_ids: Vec::new(),
             source_child_load_generations: HashMap::new(),
+            source_picker: SourcePickerState::default(),
             content_state: ContentState::SourceNotSelected,
             logs: Vec::new(),
             log_read_states: HashMap::new(),
@@ -615,77 +620,12 @@ impl ArgusApp {
     /// 打开来源占位弹窗。
     pub fn open_source_dialog(&mut self) {
         self.active_dialog = Some(PlaceholderDialog::OpenSource);
-        self.placeholder_notice = "请使用来源工具栏的加载日志按钮打开系统文件选择器".to_string();
+        self.placeholder_notice = "请使用来源工具栏的加载日志按钮打开自定义来源选择器".to_string();
     }
 
-    /// 请求系统路径选择器并在后台加载真实日志来源结构。
+    /// 打开自定义跨平台来源选择器，后续由选择器确认按钮触发真实加载。
     pub fn request_load_sources(&mut self, cx: &mut Context<Self>) {
-        if self.is_source_loading {
-            self.placeholder_notice = "日志来源正在加载中，请稍候".to_string();
-            return;
-        }
-
-        self.is_source_loading = true;
-        self.placeholder_notice = "正在打开系统路径选择器".to_string();
-
-        let app_context: &gpui::App = (&*cx).borrow();
-        let can_select_mixed = app_context.can_select_mixed_files_and_dirs();
-        let paths_rx = app_context.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: can_select_mixed,
-            multiple: true,
-            prompt: Some(SharedString::from(if can_select_mixed {
-                "选择日志文件、目录或压缩包"
-            } else {
-                "选择日志文件或压缩包"
-            })),
-        });
-        let loader_config = self.config.loader.clone();
-
-        cx.spawn(async move |view, cx| {
-            let paths = match paths_rx.await {
-                Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
-                Ok(Ok(_)) => {
-                    view.update(cx, |app, cx| {
-                        app.is_source_loading = false;
-                        app.placeholder_notice = "已取消加载日志来源".to_string();
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-                Ok(Err(error)) => {
-                    view.update(cx, |app, cx| {
-                        app.is_source_loading = false;
-                        app.placeholder_notice = format!("打开系统路径选择器失败：{error}");
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-                Err(error) => {
-                    view.update(cx, |app, cx| {
-                        app.is_source_loading = false;
-                        app.placeholder_notice = format!("路径选择器未返回结果：{error}");
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
-
-            let report = cx
-                .background_executor()
-                .spawn(async move { LogSourceLoader::new(loader_config).load_paths(paths) })
-                .await;
-
-            view.update(cx, |app, cx| {
-                app.apply_load_report(report);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.open_source_picker(cx);
     }
 
     /// 关闭当前占位弹窗。
@@ -1378,6 +1318,7 @@ impl ArgusApp {
         self.source_registry = report.registry;
         self.has_loaded_real_sources = true;
         self.source_child_load_generations.clear();
+        self.source_picker.selected_paths.clear();
         self.reset_log_workspace_after_source_replace();
 
         self.placeholder_notice = if report.errors.is_empty() {
@@ -1598,18 +1539,58 @@ impl ArgusApp {
         self.placeholder_notice = "已清空搜索关键字".to_string();
     }
 
-    /// 更新主题模式设置。
-    pub fn set_theme_mode(&mut self, theme_mode: ThemeMode) {
+    /// 在主窗口渲染前同步当前系统外观；跟随系统模式会据此选择深色或浅色主题。
+    pub fn sync_window_appearance_theme(&mut self, window: &Window) {
+        self.sync_theme_for_window_appearance(window.appearance(), false);
+    }
+
+    /// 更新主题模式设置，并在跟随系统时按当前窗口外观解析真实主题。
+    pub fn set_theme_mode(&mut self, theme_mode: ThemeMode, system_appearance: WindowAppearance) {
         self.theme_mode = theme_mode;
-        self.theme = self.theme_manager.theme_for_mode(theme_mode.config_value());
+        self.theme = self.theme_for_mode_with_system_appearance(theme_mode, system_appearance);
         self.config.appearance.theme_mode = theme_mode.config_value().to_string();
         self.placeholder_notice = match theme_mode {
-            ThemeMode::System => {
-                "主题已切换为跟随系统；当前系统监听未接入，暂按深色主题展示".to_string()
-            }
+            ThemeMode::System => format!(
+                "主题已切换为跟随系统；当前为{}主题",
+                label_for_window_appearance(system_appearance)
+            ),
             _ => format!("主题已切换为{}", theme_mode.label()),
         };
         self.persist_config_or_report();
+    }
+
+    /// 根据主题模式和系统外观返回应使用的运行期主题。
+    fn theme_for_mode_with_system_appearance(
+        &self,
+        theme_mode: ThemeMode,
+        system_appearance: WindowAppearance,
+    ) -> AppTheme {
+        let resolved_mode = match theme_mode {
+            ThemeMode::System => theme_mode_for_window_appearance(system_appearance),
+            _ => theme_mode.config_value(),
+        };
+        self.theme_manager.theme_for_mode(resolved_mode)
+    }
+
+    /// 在跟随系统模式下同步当前窗口外观；返回是否执行了同步。
+    fn sync_theme_for_window_appearance(
+        &mut self,
+        system_appearance: WindowAppearance,
+        should_report: bool,
+    ) -> bool {
+        if self.theme_mode != ThemeMode::System {
+            return false;
+        }
+
+        self.theme =
+            self.theme_for_mode_with_system_appearance(ThemeMode::System, system_appearance);
+        if should_report {
+            self.placeholder_notice = format!(
+                "系统主题已同步为{}主题",
+                label_for_window_appearance(system_appearance)
+            );
+        }
+        true
     }
 
     /// 调整日志内容字号，并限制在外观设置允许的可读范围内。
@@ -2025,15 +2006,34 @@ mod tests {
     fn set_theme_mode_updates_runtime_theme_tokens() {
         let mut app = test_app();
 
-        app.set_theme_mode(ThemeMode::Light);
+        app.set_theme_mode(ThemeMode::Light, WindowAppearance::Dark);
         assert_eq!(app.theme_mode, ThemeMode::Light);
         assert_eq!(
             app.theme.content,
             app.theme_manager.theme_for_mode("light").content
         );
 
-        app.set_theme_mode(ThemeMode::Dark);
+        app.set_theme_mode(ThemeMode::Dark, WindowAppearance::Light);
         assert_eq!(app.theme_mode, ThemeMode::Dark);
+        assert_eq!(
+            app.theme.content,
+            app.theme_manager.theme_for_mode("dark").content
+        );
+    }
+
+    /// 验证跟随系统模式会根据当前窗口外观解析到实际明暗主题。
+    #[test]
+    fn system_theme_mode_resolves_window_appearance() {
+        let mut app = test_app();
+
+        app.set_theme_mode(ThemeMode::System, WindowAppearance::Light);
+        assert_eq!(app.theme_mode, ThemeMode::System);
+        assert_eq!(
+            app.theme.content,
+            app.theme_manager.theme_for_mode("light").content
+        );
+
+        app.set_theme_mode(ThemeMode::System, WindowAppearance::Dark);
         assert_eq!(
             app.theme.content,
             app.theme_manager.theme_for_mode("dark").content
@@ -2047,7 +2047,7 @@ mod tests {
         let settings_path = config_manager.settings_path().to_path_buf();
         let mut app = ArgusApp::new_with_config_manager(config_manager);
 
-        app.set_theme_mode(ThemeMode::Light);
+        app.set_theme_mode(ThemeMode::Light, WindowAppearance::Dark);
         app.adjust_log_content_font_size(2.0);
         app.adjust_max_archive_depth(1);
         app.toggle_follow_symlinks();

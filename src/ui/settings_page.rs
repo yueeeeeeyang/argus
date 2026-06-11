@@ -265,7 +265,7 @@ fn theme_segment(
         })
         .child(mode.label())
         .on_click(cx.listener(move |app, _, _, cx| {
-            app.set_theme_mode(mode);
+            app.set_theme_mode(mode, cx.window_appearance());
             cx.notify();
         }))
 }

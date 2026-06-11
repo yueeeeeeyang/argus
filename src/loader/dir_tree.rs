@@ -80,7 +80,7 @@ impl LogSourceLoader {
     /// 加载多个本地来源路径。
     ///
     /// 参数说明：
-    /// - `paths`：来自系统文件选择器的文件、目录或压缩包路径。
+    /// - `paths`：来自自定义来源选择器的文件、目录或压缩包路径。
     ///
     /// 返回值：包含临时来源注册表的加载报告。
     pub fn load_paths(&self, paths: Vec<PathBuf>) -> LoadReport {

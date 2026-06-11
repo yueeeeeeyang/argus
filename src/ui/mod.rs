@@ -12,6 +12,7 @@ pub mod main_window;
 pub mod placeholder_dialog;
 pub mod settings_page;
 pub mod source_panel;
+pub mod source_picker;
 pub mod source_resizer;
 pub mod status_bar;
 pub mod tab_bar;

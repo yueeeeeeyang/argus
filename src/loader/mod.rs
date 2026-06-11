@@ -9,9 +9,11 @@ pub mod credential_store;
 pub mod dir_tree;
 pub mod file_watcher;
 pub mod log_source;
+pub mod path_browser;
 pub mod source_registry;
 pub mod spool_manager;
 
 pub use dir_tree::{LoadReport, LogSourceLoader};
 pub use log_source::{SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
+pub use path_browser::{BrowseEntry, BrowseEntryKind, BrowseLocation, BrowseResult, PathBrowser};
 pub use source_registry::SourceRegistry;

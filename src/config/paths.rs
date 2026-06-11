@@ -19,7 +19,7 @@ const ARGUS_SETTINGS_FILE_NAME: &str = "settings.toml";
 /// 返回值：优先使用 Unix/macOS 的 `HOME`，其次兼容 Windows 的 `USERPROFILE`
 /// 或 `HOMEDRIVE` + `HOMEPATH`，最后才回退当前目录下的 `.argus`。
 pub fn argus_config_dir() -> PathBuf {
-    home_dir()
+    user_home_dir()
         .map(|home| argus_config_dir_from_home(&home))
         .unwrap_or_else(|| PathBuf::from(ARGUS_CONFIG_DIR_NAME))
 }
@@ -54,7 +54,8 @@ pub fn argus_settings_file_from_config(config_dir: &Path) -> PathBuf {
 }
 
 /// 获取用户 home 目录；独立成函数便于说明跨平台路径回退策略。
-fn home_dir() -> Option<PathBuf> {
+/// 获取用户 home 目录，供配置、主题和跨平台文件选择器复用。
+pub fn user_home_dir() -> Option<PathBuf> {
     non_empty_env("HOME")
         .map(PathBuf::from)
         .or_else(|| non_empty_env("USERPROFILE").map(PathBuf::from))

@@ -23,7 +23,7 @@ use std::time::Duration;
 /// - `app`：应用状态，提供主题令牌。
 /// - `cx`：应用上下文，用于更新占位提示。
 ///
-/// 返回值：GPUI 元素树；加载按钮会打开系统路径选择器，其余按钮只更新本地状态。
+/// 返回值：GPUI 元素树；加载按钮会打开自定义来源选择器，其余按钮只更新本地状态。
 pub fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
     let theme = app.theme.clone();
 
