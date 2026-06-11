@@ -14,6 +14,9 @@ pub mod tar_adapter;
 pub mod unsupported;
 pub mod zip_adapter;
 
-pub use adapter::{ArchiveCapabilities, ArchiveEntryInfo, list_archive_entries};
+pub use adapter::{
+    ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, list_archive_entries,
+    stream_archive_entry,
+};
 pub use detector::{ArchiveFormat, detect_archive_format, detect_archive_format_by_name};
 pub use registry::{ArchiveAdapterRegistry, archive_registry};

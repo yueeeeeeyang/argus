@@ -5,6 +5,7 @@
 //! 主要功能：显示编码、来源树统计、内容读取状态和用户操作提示，且只属于内容区宽度。
 
 use crate::app::{ArgusApp, TabKind};
+use crate::reader::log_file_reader::LogOpenState;
 use gpui::{IntoElement, div, prelude::*, px, rgb};
 
 /// 渲染内容区状态栏。
@@ -18,7 +19,10 @@ pub fn render(app: &ArgusApp) -> impl IntoElement {
     let content_status = match app.active_tab_kind() {
         TabKind::Empty if !app.logs.is_empty() => format!("{} 行样例", app.logs.len()),
         TabKind::Empty => "未选择日志".to_string(),
-        TabKind::LogSource { .. } => "内容未读取".to_string(),
+        TabKind::LogSource { source_id, .. } => app
+            .log_read_state(source_id)
+            .map(LogOpenState::status_label)
+            .unwrap_or_else(|| "未读取".to_string()),
         TabKind::Settings => "设置".to_string(),
     };
 

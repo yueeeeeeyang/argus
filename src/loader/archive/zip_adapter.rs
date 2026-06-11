@@ -8,11 +8,11 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use zip::ZipArchive;
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -74,6 +74,30 @@ impl ArchiveAdapter for ZipArchiveAdapter {
         source_label: &str,
     ) -> Result<Vec<u8>> {
         read_zip_entry_bytes_from_reader(reader, entry_path, source_label)
+    }
+
+    /// 从本地 ZIP 流式读取指定条目内容。
+    fn stream_entry(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开 ZIP 压缩包：{}", path.display()))?;
+        stream_zip_entry_from_reader(file, entry_path, &path.display().to_string(), consumer)
+    }
+
+    /// 从内存 ZIP 流式读取指定条目内容。
+    fn stream_entry_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        entry_path: &str,
+        source_label: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        stream_zip_entry_from_reader(reader, entry_path, source_label, consumer)
     }
 }
 
@@ -143,9 +167,35 @@ pub fn read_zip_entry_bytes_from_reader<R>(
 where
     R: Read + Seek,
 {
+    let mut bytes = Vec::new();
+    stream_zip_entry_from_reader(reader, entry_path, source_label, &mut |chunk| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    Ok(bytes)
+}
+
+/// 从任意 ZIP 数据源流式读取指定条目。
+///
+/// 参数说明：
+/// - `reader`：ZIP 数据来源，可为本地文件或内存 Cursor。
+/// - `entry_path`：需要读取的内部条目路径。
+/// - `source_label`：错误提示中的来源名称。
+/// - `consumer`：接收解压后字节分片的回调。
+pub fn stream_zip_entry_from_reader<R>(
+    reader: R,
+    entry_path: &str,
+    source_label: &str,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
     let normalized_entry_path = normalize_archive_entry_path(entry_path);
     let mut archive =
         ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
+    let mut buffer = [0_u8; 64 * 1024];
+
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
@@ -154,12 +204,20 @@ where
         if current_path != normalized_entry_path {
             continue;
         }
+        if file.is_dir() {
+            bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
+        }
 
-        let mut bytes = Vec::with_capacity(file.size().try_into().unwrap_or(0));
-        file.read_to_end(&mut bytes).with_context(|| {
-            format!("无法读取 ZIP 条目内容 {normalized_entry_path}：{source_label}")
-        })?;
-        return Ok(bytes);
+        loop {
+            let read_count = file.read(&mut buffer).with_context(|| {
+                format!("无法读取 ZIP 条目内容 {normalized_entry_path}：{source_label}")
+            })?;
+            if read_count == 0 {
+                break;
+            }
+            consumer(&buffer[..read_count])?;
+        }
+        return Ok(());
     }
 
     anyhow::bail!("无法读取 ZIP 条目 {normalized_entry_path}：{source_label}")

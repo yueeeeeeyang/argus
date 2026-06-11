@@ -65,11 +65,11 @@ pub struct AppearanceConfig {
 }
 
 impl Default for AppearanceConfig {
-    /// 构造默认外观配置，沿用当前深色主题和 14px 日志阅读字号。
+    /// 构造默认外观配置，沿用当前深色主题和 12px 日志阅读字号。
     fn default() -> Self {
         Self {
             theme_mode: "dark".to_string(),
-            log_content_font_size: 14.0,
+            log_content_font_size: 12.0,
         }
     }
 }
@@ -159,5 +159,11 @@ mod tests {
         assert_eq!(config.loader.max_archive_depth, 8);
         assert_eq!(config.encoding.selected, "UTF-8");
         assert_eq!(config.cache.limit_mb, 128);
+    }
+
+    /// 验证新安装用户默认使用设计文档要求的 12px 日志字号。
+    #[test]
+    fn default_log_content_font_size_is_twelve() {
+        assert_eq!(AppearanceConfig::default().log_content_font_size, 12.0);
     }
 }

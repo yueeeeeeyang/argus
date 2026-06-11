@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -74,6 +74,30 @@ impl ArchiveAdapter for TarArchiveAdapter {
     ) -> Result<Vec<u8>> {
         read_tar_entry_bytes(reader, entry_path, source_label)
     }
+
+    /// 从本地 TAR 流式读取指定条目内容。
+    fn stream_entry(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
+        stream_tar_entry(file, entry_path, &path.display().to_string(), consumer)
+    }
+
+    /// 从内存 TAR 流式读取指定条目内容。
+    fn stream_entry_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        entry_path: &str,
+        source_label: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        stream_tar_entry(reader, entry_path, source_label, consumer)
+    }
 }
 
 /// 从任意读取器中枚举 TAR 条目，供普通 TAR 和压缩 TAR 复用。
@@ -122,8 +146,33 @@ pub fn read_tar_entry_bytes<R>(reader: R, entry_path: &str, source_label: &str) 
 where
     R: std::io::Read,
 {
+    let mut bytes = Vec::new();
+    stream_tar_entry(reader, entry_path, source_label, &mut |chunk| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    Ok(bytes)
+}
+
+/// 从任意读取器中流式读取 TAR 指定条目的字节。
+///
+/// 参数说明：
+/// - `reader`：TAR 数据来源。
+/// - `entry_path`：目标条目路径，统一使用 `/` 分隔。
+/// - `source_label`：错误提示中的来源名称。
+/// - `consumer`：接收解压后字节分片的回调。
+pub fn stream_tar_entry<R>(
+    reader: R,
+    entry_path: &str,
+    source_label: &str,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()>
+where
+    R: std::io::Read,
+{
     let normalized_entry_path = normalize_archive_entry_path(entry_path);
     let mut archive = tar::Archive::new(reader);
+    let mut buffer = [0_u8; 64 * 1024];
 
     for entry in archive
         .entries()
@@ -138,11 +187,16 @@ where
             bail!("TAR 条目是目录，无法读取内容：{normalized_entry_path}");
         }
 
-        let mut bytes = Vec::with_capacity(entry.size().try_into().unwrap_or(0));
-        entry
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("无法读取 TAR 条目内容：{normalized_entry_path}"))?;
-        return Ok(bytes);
+        loop {
+            let read_count = entry
+                .read(&mut buffer)
+                .with_context(|| format!("无法读取 TAR 条目内容：{normalized_entry_path}"))?;
+            if read_count == 0 {
+                break;
+            }
+            consumer(&buffer[..read_count])?;
+        }
+        return Ok(());
     }
 
     bail!("未找到 TAR 条目：{normalized_entry_path}")

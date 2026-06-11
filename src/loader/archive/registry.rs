@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use anyhow::{Context as _, Result};
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::compressed_tar::CompressedTarArchiveAdapter;
 use crate::loader::archive::detector::ArchiveFormat;
@@ -180,6 +180,38 @@ impl ArchiveAdapterRegistry {
         adapter
             .read_entry_bytes_from_reader(reader, reader_len, entry_path, source_label)
             .with_context(|| format!("{label} 内存条目读取失败：{source_label}!/{entry_path}"))
+    }
+
+    /// 从本地压缩包流式读取指定条目并统一补充错误上下文。
+    pub fn stream_entry(
+        &self,
+        format: ArchiveFormat,
+        path: &Path,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let adapter = self.require_adapter(format)?;
+        let label = adapter.capabilities().label;
+        adapter
+            .stream_entry(path, entry_path, consumer)
+            .with_context(|| format!("{label} 条目流式读取失败：{}!/{entry_path}", path.display()))
+    }
+
+    /// 从内存压缩包流式读取指定条目并统一补充错误上下文。
+    pub fn stream_entry_from_reader(
+        &self,
+        format: ArchiveFormat,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        entry_path: &str,
+        source_label: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let adapter = self.require_adapter(format)?;
+        let label = adapter.capabilities().label;
+        adapter
+            .stream_entry_from_reader(reader, reader_len, entry_path, source_label, consumer)
+            .with_context(|| format!("{label} 内存条目流式读取失败：{source_label}!/{entry_path}"))
     }
 
     /// 通过文件头识别本地压缩包格式。

@@ -7,6 +7,7 @@
 pub mod app;
 pub mod assets;
 pub mod config;
+pub mod fonts;
 pub mod loader;
 pub mod reader;
 pub mod search;

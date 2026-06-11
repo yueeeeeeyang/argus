@@ -4,25 +4,30 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、未读取内容提示和保留的日志样例数据。
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::path::PathBuf;
 
 use crate::config::{AppConfig, ConfigManager};
+use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 #[cfg(test)]
 use crate::loader::archive::ArchiveFormat;
-use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceRegistry};
+use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceLocation, SourceRegistry};
 #[cfg(test)]
-use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
+use crate::loader::{SourceKind, SourceMetadata, SourceTreeNode};
+use crate::reader::log_file_reader::{
+    LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
+};
+use crate::reader::read_mode::ReadMode;
 use crate::theme::{AppTheme, ThemeManager};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::main_window;
 use gpui::{
     ClipboardItem, Context, IntoElement, Keystroke, PathPromptOptions, Pixels, Point, Render,
-    SharedString, Window,
+    ScrollWheelEvent, SharedString, TextRun, Window, px,
 };
-use gpui::{ScrollStrategy, UniformListScrollHandle};
+use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 
 /// 来源侧栏默认宽度。
 pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 300.0;
@@ -34,8 +39,53 @@ pub const SOURCE_PANEL_MAX_WIDTH: f32 = 520.0;
 pub const LOG_CONTENT_FONT_SIZE_MIN: f32 = 12.0;
 /// 日志内容字号最大值，避免大字号破坏当前日志行布局。
 pub const LOG_CONTENT_FONT_SIZE_MAX: f32 = 20.0;
-/// 日志内容默认字号，延续现有 GPUI `text_sm` 的阅读密度。
-pub const LOG_CONTENT_FONT_SIZE_DEFAULT: f32 = 14.0;
+/// 日志内容默认字号，匹配设计文档要求的高密度 12px 阅读区。
+pub const LOG_CONTENT_FONT_SIZE_DEFAULT: f32 = 12.0;
+/// 日志正文左侧内边距；命中测试和渲染必须保持一致。
+pub const LOG_VIEWER_TEXT_LEFT_PADDING: f32 = 16.0;
+/// 日志正文右侧内边距；横向滚动范围和渲染必须保持一致。
+pub const LOG_VIEWER_TEXT_RIGHT_PADDING: f32 = 16.0;
+/// 日志正文固定行高；分页滚动和 UI 渲染必须保持一致。
+pub const LOG_VIEWER_ROW_HEIGHT: f32 = 20.0;
+/// 行号栏最小宽度，保证小文件也有稳定的视觉留白。
+pub const LOG_VIEWER_LINE_NUMBER_MIN_WIDTH: f32 = 44.0;
+/// 行号栏最大宽度，避免超大文件行号挤占正文区域。
+pub const LOG_VIEWER_LINE_NUMBER_MAX_WIDTH: f32 = 96.0;
+/// 行号栏单个数字的估算宽度，用于无布局测量时的稳定宽度计算。
+pub const LOG_VIEWER_LINE_NUMBER_DIGIT_WIDTH: f32 = 7.0;
+/// 行号栏左右留白总和，保证行号和正文之间有清晰间隔。
+pub const LOG_VIEWER_LINE_NUMBER_PADDING: f32 = 18.0;
+/// 日志正文中的制表符展示为空格时的固定宽度。
+pub const LOG_VIEWER_TAB_DISPLAY_SPACES: &str = "    ";
+
+/// 根据日志总行数计算行号栏宽度。
+///
+/// 参数说明：
+/// - `line_count`：当前日志文档的总行数。
+///
+/// 返回值：可直接用于日志渲染和鼠标命中的行号栏像素宽度。
+pub fn log_viewer_line_number_width(line_count: usize) -> f32 {
+    let display_line_count = line_count.max(1);
+    let digits = display_line_count.ilog10() as f32 + 1.0;
+    (digits * LOG_VIEWER_LINE_NUMBER_DIGIT_WIDTH + LOG_VIEWER_LINE_NUMBER_PADDING).clamp(
+        LOG_VIEWER_LINE_NUMBER_MIN_WIDTH,
+        LOG_VIEWER_LINE_NUMBER_MAX_WIDTH,
+    )
+}
+
+/// 将日志原文转换为阅读区展示文本。
+///
+/// 参数说明：
+/// - `text`：读取器返回的原始单行日志文本。
+///
+/// 返回值：没有制表符时借用原文本；存在制表符时返回已展开为 4 个空格的新字符串。
+pub fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
+    if text.contains('\t') {
+        Cow::Owned(text.replace('\t', LOG_VIEWER_TAB_DISPLAY_SPACES))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
 
 /// 当前界面工作区，仅保留日志分析和设置两个入口。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +192,100 @@ pub struct ArgusTab {
     pub kind: TabKind,
 }
 
+/// 日志正文中的文本位置，使用行号和字符列表达。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LogTextPosition {
+    /// 0 基日志行号。
+    pub line_index: usize,
+    /// 行内字符列，按 Unicode 标量值计数，避免中文被字节下标截断。
+    pub column: usize,
+}
+
+/// 日志正文选区，支持跨行复制。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogTextSelection {
+    /// 鼠标按下时的选区锚点。
+    pub anchor: LogTextPosition,
+    /// 当前拖拽或键盘扩展到的焦点位置。
+    pub focus: LogTextPosition,
+}
+
+impl LogTextSelection {
+    /// 返回选区是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.focus
+    }
+
+    /// 返回按文档顺序排列后的起止位置。
+    pub fn normalized(&self) -> (LogTextPosition, LogTextPosition) {
+        if log_text_position_le(self.anchor, self.focus) {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+}
+
+/// 分页日志滚动状态，使用 f64 避免超大行数下的像素精度丢失。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PagedLogScrollState {
+    /// 纵向滚动像素。
+    pub top_px: f64,
+    /// 横向滚动像素。
+    pub left_px: f64,
+}
+
+/// 单个日志 tab 的阅读区 UI 状态。
+#[derive(Clone, Debug)]
+pub struct LogTabViewState {
+    /// 小日志 uniform_list 滚动句柄。
+    pub scroll_handle: UniformListScrollHandle,
+    /// 大日志分页视口测量句柄。
+    pub paged_viewport_handle: ScrollHandle,
+    /// 大日志分页滚动状态。
+    pub paged_scroll: PagedLogScrollState,
+    /// 当前文本选区。
+    pub selection: Option<LogTextSelection>,
+    /// 鼠标拖拽选区锚点；鼠标释放后清空。
+    pub selection_drag_anchor: Option<LogTextPosition>,
+    /// 当前 tab 日志正文是否接收键盘复制等快捷键。
+    pub is_focused: bool,
+}
+
+/// 日志正文滚动条方向。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogScrollbarAxis {
+    /// 纵向滚动条。
+    Vertical,
+    /// 横向滚动条。
+    Horizontal,
+}
+
+/// 日志正文滚动条拖拽状态。
+#[derive(Clone, Copy, Debug)]
+pub struct LogScrollbarDrag {
+    /// 被拖动的标签页 ID。
+    pub tab_id: usize,
+    /// 当前拖动方向。
+    pub axis: LogScrollbarAxis,
+    /// 鼠标按下点在 thumb 内的相对偏移。
+    pub cursor_offset: Pixels,
+}
+
+impl Default for LogTabViewState {
+    /// 创建默认阅读区状态。
+    fn default() -> Self {
+        Self {
+            scroll_handle: UniformListScrollHandle::new(),
+            paged_viewport_handle: ScrollHandle::new(),
+            paged_scroll: PagedLogScrollState::default(),
+            selection: None,
+            selection_drag_anchor: None,
+            is_focused: false,
+        }
+    }
+}
+
 /// 来源树占位节点，用于模拟文件、目录和压缩包结构。
 #[derive(Clone, Debug)]
 pub struct SourceNode {
@@ -177,7 +321,7 @@ pub enum ContentState {
     PlaceholderPreview,
     /// 已接入真实来源树，但尚未选择日志候选节点。
     SourceNotSelected,
-    /// 已选择真实来源节点，但日志正文读取模块尚未接入。
+    /// 已选择真实来源节点，正文读取状态由 `log_read_states` 继续描述。
     SourceNotRead {
         /// 被选择的来源 ID。
         source_id: SourceId,
@@ -232,6 +376,14 @@ pub struct ArgusApp {
     pub content_state: ContentState,
     /// 日志行占位数据。
     pub logs: Vec<LogLine>,
+    /// 日志读取状态，以来源 ID 为键复用已打开的 reader。
+    pub log_read_states: HashMap<SourceId, LogOpenState>,
+    /// 日志读取 generation，用于丢弃后台任务返回的过期结果。
+    pub log_reader_generations: HashMap<SourceId, usize>,
+    /// 每个日志 tab 的滚动、选区和焦点状态。
+    pub log_tab_view_states: HashMap<usize, LogTabViewState>,
+    /// 日志正文滚动条拖拽状态。
+    pub log_scrollbar_drag: Option<LogScrollbarDrag>,
     /// 当前打开的标签页。
     pub tabs: Vec<ArgusTab>,
     /// 当前激活的标签 ID。
@@ -317,8 +469,7 @@ impl ArgusApp {
             config_manager,
             theme_manager,
             workspace: Workspace::LogAnalysis,
-            placeholder_notice: config_warning
-                .unwrap_or_else(|| "界面占位模式：暂未接入真实日志读取".to_string()),
+            placeholder_notice: config_warning.unwrap_or_else(|| "请选择日志来源".to_string()),
             theme,
             source_registry: SourceRegistry::new(),
             has_loaded_real_sources: false,
@@ -335,6 +486,10 @@ impl ArgusApp {
             source_child_load_generations: HashMap::new(),
             content_state: ContentState::SourceNotSelected,
             logs: Vec::new(),
+            log_read_states: HashMap::new(),
+            log_reader_generations: HashMap::new(),
+            log_tab_view_states: HashMap::new(),
+            log_scrollbar_drag: None,
             tabs: vec![ArgusTab {
                 id: 1,
                 title: "未选择日志".to_string(),
@@ -949,7 +1104,7 @@ impl ArgusApp {
         self.placeholder_notice = "已打开设置标签页".to_string();
     }
 
-    /// 打开或聚焦指定日志来源标签页；不会读取日志正文。
+    /// 打开或聚焦指定日志来源标签页；读取正文由 UI 入口随后触发后台任务。
     pub fn open_or_focus_log_tab(&mut self, source_id: SourceId) {
         let Some(selected_node) = self.source_registry.node(source_id).cloned() else {
             self.placeholder_notice = "未找到来源节点".to_string();
@@ -976,8 +1131,12 @@ impl ArgusApp {
             .map(|tab| tab.id)
         {
             self.active_tab_id = tab_id;
+            self.ensure_log_tab_view_state(tab_id);
             self.sync_content_state_from_active_tab();
-            self.placeholder_notice = format!("已切换到 {path}，日志内容读取尚未接入");
+            self.log_read_states
+                .entry(source_id)
+                .or_insert(LogOpenState::Idle);
+            self.placeholder_notice = format!("已切换到 {path}");
             return;
         }
 
@@ -1002,8 +1161,557 @@ impl ArgusApp {
             };
         }
         self.active_tab_id = tab_id;
+        self.ensure_log_tab_view_state(tab_id);
         self.sync_content_state_from_active_tab();
-        self.placeholder_notice = format!("已打开 {path}，日志内容读取尚未接入");
+        self.log_read_states
+            .entry(source_id)
+            .or_insert(LogOpenState::Idle);
+        self.placeholder_notice = format!("已打开 {path}，准备读取日志内容");
+    }
+
+    /// 为指定日志来源启动后台读取任务；同一来源处于读取中或已就绪时直接复用。
+    ///
+    /// 参数说明：
+    /// - `source_id`：来源树中的日志候选节点 ID。
+    /// - `cx`：GPUI 上下文，用于把耗时读取派发到后台线程。
+    pub fn request_open_log_content(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+        if matches!(
+            self.log_read_states.get(&source_id),
+            Some(LogOpenState::Loading { .. } | LogOpenState::Ready(_))
+        ) {
+            return;
+        }
+
+        let Some(source_node) = self.source_registry.node(source_id).cloned() else {
+            self.log_read_states.insert(
+                source_id,
+                LogOpenState::Failed {
+                    mode: None,
+                    message: "未找到来源节点".to_string(),
+                },
+            );
+            return;
+        };
+        if !source_node.kind.is_log_candidate() {
+            self.log_read_states.insert(
+                source_id,
+                LogOpenState::Failed {
+                    mode: None,
+                    message: format!("{} 不是可读取的日志候选", source_node.label),
+                },
+            );
+            return;
+        }
+
+        let read_mode = read_mode_for_location(&source_node.location);
+        let request = OpenLogRequest {
+            source_id,
+            location: source_node.location.clone(),
+            label: source_node.label.clone(),
+            default_encoding: self.selected_encoding.clone(),
+        };
+        let generation = self.next_log_reader_generation(source_id);
+        self.log_read_states.insert(
+            source_id,
+            LogOpenState::Loading {
+                mode: read_mode,
+                message: format!("正在读取 {}", source_node.location.display_path()),
+            },
+        );
+        self.placeholder_notice = format!("正在读取 {}", source_node.label);
+
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { LogFileReader::open(request) })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_log_open_result(source_id, generation, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 应用后台日志读取结果，过期 generation 会被丢弃。
+    fn apply_log_open_result(
+        &mut self,
+        source_id: SourceId,
+        generation: usize,
+        result: anyhow::Result<LogReaderHandle>,
+    ) {
+        if self.log_reader_generations.get(&source_id).copied() != Some(generation) {
+            return;
+        }
+
+        match result {
+            Ok(handle) => {
+                let line_count = handle.line_count();
+                let label = handle.label.clone();
+                self.log_read_states
+                    .insert(source_id, LogOpenState::Ready(handle));
+                self.placeholder_notice = format!("已读取 {label}，共 {line_count} 行");
+            }
+            Err(error) => {
+                let read_mode = self
+                    .source_registry
+                    .node(source_id)
+                    .map(|node| read_mode_for_location(&node.location));
+                self.log_read_states.insert(
+                    source_id,
+                    LogOpenState::Failed {
+                        mode: read_mode,
+                        message: error.to_string(),
+                    },
+                );
+                self.placeholder_notice = format!("日志读取失败：{error}");
+            }
+        }
+    }
+
+    /// 为指定日志来源生成下一次读取 generation。
+    fn next_log_reader_generation(&mut self, source_id: SourceId) -> usize {
+        let generation = self.log_reader_generations.entry(source_id).or_insert(0);
+        *generation = generation.wrapping_add(1);
+        *generation
+    }
+
+    /// 释放某个标签页对应的日志读取状态，避免关闭 tab 后继续占用内存。
+    fn release_reader_for_tab_kind(&mut self, kind: &TabKind) {
+        if let Some(source_id) = source_id_for_tab_kind(kind) {
+            self.log_read_states.remove(&source_id);
+            self.log_reader_generations.remove(&source_id);
+        }
+    }
+
+    /// 只保留指定来源的日志读取状态；设置或空 tab 会清空全部读取结果。
+    fn retain_reader_for_source(&mut self, kept_source_id: Option<SourceId>) {
+        match kept_source_id {
+            Some(source_id) => {
+                self.log_read_states.retain(|id, _| *id == source_id);
+                self.log_reader_generations.retain(|id, _| *id == source_id);
+            }
+            None => {
+                self.log_read_states.clear();
+                self.log_reader_generations.clear();
+            }
+        }
+    }
+
+    /// 返回指定来源的日志读取状态。
+    pub fn log_read_state(&self, source_id: SourceId) -> Option<&LogOpenState> {
+        self.log_read_states.get(&source_id)
+    }
+
+    /// 返回当前激活日志标签的读取状态。
+    pub fn active_log_read_state(&self) -> Option<&LogOpenState> {
+        let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
+            return None;
+        };
+
+        self.log_read_state(source_id)
+    }
+
+    /// 返回当前激活日志标签页的读取句柄。
+    pub fn active_log_handle(&self) -> Option<&LogReaderHandle> {
+        let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
+            return None;
+        };
+
+        match self.log_read_state(source_id)? {
+            LogOpenState::Ready(handle) => Some(handle),
+            LogOpenState::Idle | LogOpenState::Loading { .. } | LogOpenState::Failed { .. } => None,
+        }
+    }
+
+    /// 确保指定 tab 拥有日志阅读区视图状态。
+    pub fn ensure_log_tab_view_state(&mut self, tab_id: usize) {
+        self.log_tab_view_states.entry(tab_id).or_default();
+    }
+
+    /// 返回指定 tab 的阅读区视图状态。
+    pub fn log_tab_view_state(&self, tab_id: usize) -> Option<&LogTabViewState> {
+        self.log_tab_view_states.get(&tab_id)
+    }
+
+    /// 返回指定 tab 的可变阅读区视图状态。
+    pub fn log_tab_view_state_mut(&mut self, tab_id: usize) -> Option<&mut LogTabViewState> {
+        self.log_tab_view_states.get_mut(&tab_id)
+    }
+
+    /// 返回指定日志 tab 当前是否处于文本拖拽选择过程中。
+    pub fn is_log_text_selection_drag_active(&self, tab_id: usize) -> bool {
+        self.log_tab_view_states
+            .get(&tab_id)
+            .and_then(|state| state.selection_drag_anchor)
+            .is_some()
+    }
+
+    /// 清理指定 tab 的日志文本选区和焦点状态。
+    fn reset_log_text_selection_for_tab(&mut self, tab_id: usize) {
+        if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
+            state.selection = None;
+            state.selection_drag_anchor = None;
+            state.is_focused = false;
+        }
+    }
+
+    /// 清理所有日志 tab 的选区和焦点状态，用于替换来源或关闭全部标签。
+    fn reset_log_text_selection(&mut self) {
+        for state in self.log_tab_view_states.values_mut() {
+            state.selection = None;
+            state.selection_drag_anchor = None;
+            state.is_focused = false;
+        }
+    }
+
+    /// 根据鼠标横坐标和 GPUI 字形布局计算行内字符列。
+    pub fn log_text_position_from_pointer(
+        &self,
+        tab_id: usize,
+        line_index: usize,
+        line: &str,
+        pointer_x: Pixels,
+        window: &mut Window,
+    ) -> LogTextPosition {
+        let Some(state) = self.log_tab_view_state(tab_id) else {
+            return LogTextPosition {
+                line_index,
+                column: 0,
+            };
+        };
+        let active_handle = self.active_log_handle();
+        let line_number_width = log_viewer_line_number_width(
+            active_handle.map(|handle| handle.line_count()).unwrap_or(0),
+        );
+        let horizontal_offset = match active_handle.map(|handle| handle.document()) {
+            Some(crate::reader::log_file_reader::LogDocument::Paged(_)) => {
+                px(-(state.paged_scroll.left_px as f32))
+            }
+            Some(crate::reader::log_file_reader::LogDocument::InMemory(_)) | None => {
+                state
+                    .scroll_handle
+                    .0
+                    .as_ref()
+                    .borrow()
+                    .base_handle
+                    .offset()
+                    .x
+            }
+        };
+        let bounds = match active_handle.map(|handle| handle.document()) {
+            Some(crate::reader::log_file_reader::LogDocument::Paged(_)) => {
+                state.paged_viewport_handle.bounds()
+            }
+            Some(crate::reader::log_file_reader::LogDocument::InMemory(_)) | None => {
+                state.scroll_handle.0.as_ref().borrow().base_handle.bounds()
+            }
+        };
+        let text_relative_x = pointer_x
+            - bounds.left()
+            - horizontal_offset
+            - px(line_number_width + LOG_VIEWER_TEXT_LEFT_PADDING);
+        let display_line = log_viewer_display_text(line);
+        if display_line.is_empty() || text_relative_x <= px(0.0) {
+            return LogTextPosition {
+                line_index,
+                column: 0,
+            };
+        }
+
+        let mut text_style = window.text_style();
+        text_style.font_family = ARGUS_LOG_FONT_FAMILY.into();
+        text_style.font_size = px(self.log_content_font_size).into();
+        let run = TextRun {
+            len: display_line.len(),
+            font: text_style.font(),
+            color: text_style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let shaped_line = window.text_system().shape_line(
+            SharedString::from(display_line.to_string()),
+            font_size,
+            &[run],
+            None,
+        );
+        let byte_index = shaped_line.closest_index_for_x(text_relative_x);
+        let column = char_column_for_byte_index(&display_line, byte_index);
+
+        LogTextPosition { line_index, column }
+    }
+
+    /// 从指定行和鼠标位置开始选择日志文本。
+    pub fn begin_log_text_selection(
+        &mut self,
+        tab_id: usize,
+        line_index: usize,
+        line: &str,
+        pointer_x: Pixels,
+        window: &mut Window,
+    ) {
+        let position =
+            self.log_text_position_from_pointer(tab_id, line_index, line, pointer_x, window);
+        let state = self.log_tab_view_states.entry(tab_id).or_default();
+        state.selection = Some(LogTextSelection {
+            anchor: position,
+            focus: position,
+        });
+        state.selection_drag_anchor = Some(position);
+        state.is_focused = true;
+    }
+
+    /// 鼠标拖拽过程中更新日志文本选区。
+    pub fn update_log_text_selection(
+        &mut self,
+        tab_id: usize,
+        line_index: usize,
+        line: &str,
+        pointer_x: Pixels,
+        window: &mut Window,
+    ) {
+        let Some(anchor) = self
+            .log_tab_view_states
+            .get(&tab_id)
+            .and_then(|state| state.selection_drag_anchor)
+        else {
+            return;
+        };
+        let position =
+            self.log_text_position_from_pointer(tab_id, line_index, line, pointer_x, window);
+        if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
+            state.selection = Some(LogTextSelection {
+                anchor,
+                focus: position,
+            });
+            state.is_focused = true;
+        }
+    }
+
+    /// 结束日志文本鼠标选择；若没有选中内容则清理锚点。
+    pub fn finish_log_text_selection(&mut self, tab_id: usize) {
+        if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
+            state.selection_drag_anchor = None;
+            if state
+                .selection
+                .as_ref()
+                .is_some_and(LogTextSelection::is_empty)
+            {
+                state.selection = None;
+            }
+        }
+    }
+
+    /// 返回指定 tab 中某行的选区字节范围。
+    pub fn log_text_selection_byte_range_for_line(
+        &self,
+        tab_id: usize,
+        line_index: usize,
+        line: &str,
+    ) -> Option<std::ops::Range<usize>> {
+        let selection = self.log_tab_view_state(tab_id)?.selection.as_ref()?;
+        let (start, end) = selection.normalized();
+        if line_index < start.line_index || line_index > end.line_index {
+            return None;
+        }
+
+        let display_line = log_viewer_display_text(line);
+        let line_char_count = character_count(&display_line);
+        let start_column = if line_index == start.line_index {
+            start.column.min(line_char_count)
+        } else {
+            0
+        };
+        let end_column = if line_index == end.line_index {
+            end.column.min(line_char_count)
+        } else {
+            line_char_count
+        };
+        if start_column == end_column {
+            return None;
+        }
+
+        Some(
+            byte_index_for_character(&display_line, start_column)
+                ..byte_index_for_character(&display_line, end_column),
+        )
+    }
+
+    /// 全选当前日志文档，供 `Cmd/Ctrl+A` 使用。
+    pub fn select_all_log_text(&mut self) {
+        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
+            return;
+        };
+        let Some(handle) = self.active_log_handle() else {
+            return;
+        };
+        let line_count = handle.line_count();
+        if line_count == 0 {
+            return;
+        }
+        let last_line_text = handle
+            .lines(line_count.saturating_sub(1), 1)
+            .ok()
+            .and_then(|mut lines| lines.pop())
+            .map(|line| log_viewer_display_text(&line.text).into_owned())
+            .unwrap_or_default();
+        let state = self.log_tab_view_states.entry(tab_id).or_default();
+        state.selection = Some(LogTextSelection {
+            anchor: LogTextPosition {
+                line_index: 0,
+                column: 0,
+            },
+            focus: LogTextPosition {
+                line_index: line_count - 1,
+                column: character_count(&last_line_text),
+            },
+        });
+        state.selection_drag_anchor = None;
+        state.is_focused = true;
+        self.placeholder_notice = format!("已全选日志文本，共 {line_count} 行");
+    }
+
+    /// 返回日志文本当前选中的内容。
+    fn selected_log_text(&self) -> Option<String> {
+        let active_tab = self.active_tab()?;
+        let selection = self.log_tab_view_state(active_tab.id)?.selection.as_ref()?;
+        if selection.is_empty() {
+            return None;
+        }
+        let handle = self.active_log_handle()?;
+        let (start, end) = selection.normalized();
+        if start.line_index >= handle.line_count() {
+            return None;
+        }
+
+        let end_line = end.line_index.min(handle.line_count().saturating_sub(1));
+        let lines = handle
+            .lines(
+                start.line_index,
+                end_line.saturating_sub(start.line_index) + 1,
+            )
+            .ok()?;
+        let mut selected_text = String::new();
+        for displayed_line in lines {
+            if !selected_text.is_empty() {
+                selected_text.push('\n');
+            }
+            let line = log_viewer_display_text(&displayed_line.text).into_owned();
+            let line_char_count = character_count(&line);
+            let start_column = if displayed_line.line_number == start.line_index {
+                start.column.min(line_char_count)
+            } else {
+                0
+            };
+            let end_column = if displayed_line.line_number == end_line {
+                end.column.min(line_char_count)
+            } else {
+                line_char_count
+            };
+            if start_column < end_column {
+                selected_text.push_str(&slice_character_range(&line, start_column..end_column));
+            }
+        }
+
+        Some(selected_text)
+    }
+
+    /// 将日志文本选区写入系统剪贴板。
+    fn copy_log_text_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selected_text) = self.selected_log_text() else {
+            self.placeholder_notice = "日志文本没有可复制的选区，请先选择文本".to_string();
+            return;
+        };
+
+        let selected_length = character_count(&selected_text);
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
+        self.placeholder_notice = format!("已复制日志文本选区，共 {selected_length} 个字符");
+    }
+
+    /// 处理日志文本区域的粘贴快捷键；日志查看器只读，因此不会修改真实内容。
+    fn paste_log_text_clipboard(&mut self, cx: &mut Context<Self>) {
+        let app_context: &gpui::App = (&*cx).borrow();
+        let Some(clipboard_text) = app_context
+            .read_from_clipboard()
+            .and_then(|clipboard_item| clipboard_item.text())
+        else {
+            self.placeholder_notice = "系统剪贴板没有可粘贴文本".to_string();
+            return;
+        };
+
+        self.placeholder_notice = format!(
+            "日志内容为只读，已读取剪贴板中的 {} 个字符但未写入日志",
+            character_count(&clipboard_text)
+        );
+    }
+
+    /// 处理日志文本阅读区按键，仅维护只读查看器的选择和剪贴板行为。
+    pub fn handle_log_text_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let Some(active_tab_id) = self.active_tab().map(|tab| tab.id) else {
+            return;
+        };
+        if !self
+            .log_tab_view_state(active_tab_id)
+            .is_some_and(|state| state.is_focused)
+        {
+            return;
+        }
+
+        let key = keystroke.key.to_lowercase();
+        if keystroke.modifiers.secondary() {
+            match key.as_str() {
+                "a" => self.select_all_log_text(),
+                "c" => self.copy_log_text_selection(cx),
+                "v" => self.paste_log_text_clipboard(cx),
+                _ => {}
+            }
+            return;
+        }
+
+        if key.as_str() == "escape" {
+            self.reset_log_text_selection_for_tab(active_tab_id);
+            self.placeholder_notice = "已取消日志文本选区".to_string();
+        }
+    }
+
+    /// 处理分页日志滚轮事件；大日志不交给 GPUI 完整滚动容器，避免巨大内容高度造成精度问题。
+    pub fn scroll_paged_log(
+        &mut self,
+        tab_id: usize,
+        source_id: SourceId,
+        event: &ScrollWheelEvent,
+    ) {
+        let Some(LogOpenState::Ready(handle)) = self.log_read_state(source_id) else {
+            return;
+        };
+        let line_count = handle.line_count();
+        let longest_display_columns = handle.estimated_longest_display_columns();
+        let Some(state) = self.log_tab_view_states.get_mut(&tab_id) else {
+            return;
+        };
+
+        let pixel_delta = event.delta.pixel_delta(px(LOG_VIEWER_ROW_HEIGHT));
+        let viewport = state.paged_viewport_handle.bounds().size;
+        let max_vertical = (line_count as f64 * LOG_VIEWER_ROW_HEIGHT as f64
+            - f64::from(viewport.height))
+        .max(0.0);
+        let estimated_char_width = (self.log_content_font_size * 0.62).max(6.0);
+        let content_width = longest_display_columns as f64 * estimated_char_width as f64
+            + f64::from(px(log_viewer_line_number_width(line_count)
+                + LOG_VIEWER_TEXT_LEFT_PADDING
+                + LOG_VIEWER_TEXT_RIGHT_PADDING));
+        let max_horizontal = (content_width - f64::from(viewport.width)).max(0.0);
+
+        state.paged_scroll.top_px =
+            (state.paged_scroll.top_px - f64::from(pixel_delta.y)).clamp(0.0, max_vertical);
+        state.paged_scroll.left_px =
+            (state.paged_scroll.left_px - f64::from(pixel_delta.x)).clamp(0.0, max_horizontal);
+        state.is_focused = true;
     }
 
     /// 切换到指定标签页。
@@ -1102,6 +1810,12 @@ impl ArgusApp {
             self.active_tab_id = self.tabs[0].id;
             self.content_state = ContentState::SourceNotSelected;
             self.logs.clear();
+            self.log_read_states.clear();
+            self.log_reader_generations.clear();
+            self.log_tab_view_states.clear();
+            self.ensure_log_tab_view_state(self.active_tab_id);
+            self.reset_log_text_selection();
+            self.log_scrollbar_drag = None;
             self.placeholder_notice = "已清空最后一个标签".to_string();
             return;
         }
@@ -1111,9 +1825,24 @@ impl ArgusApp {
             .iter()
             .position(|tab| tab.id == tab_id)
             .unwrap_or(0);
+        let closed_tab_kind = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.kind.clone());
         self.tabs.retain(|tab| tab.id != tab_id);
+        self.log_tab_view_states.remove(&tab_id);
+        if let Some(kind) = closed_tab_kind {
+            self.release_reader_for_tab_kind(&kind);
+        }
         if self.hovered_tab_id == Some(tab_id) {
             self.hovered_tab_id = None;
+        }
+        if self
+            .log_scrollbar_drag
+            .is_some_and(|drag| drag.tab_id == tab_id)
+        {
+            self.log_scrollbar_drag = None;
         }
         if self.active_tab_id == tab_id {
             let next_index = closed_index.min(self.tabs.len().saturating_sub(1));
@@ -1131,9 +1860,15 @@ impl ArgusApp {
         };
 
         let removed_count = self.tabs.len().saturating_sub(1);
+        let kept_source_id = source_id_for_tab_kind(&kept_tab.kind);
         self.tabs = vec![kept_tab];
+        self.log_tab_view_states
+            .retain(|existing_tab_id, _| *existing_tab_id == tab_id);
+        self.ensure_log_tab_view_state(tab_id);
+        self.retain_reader_for_source(kept_source_id);
         self.active_tab_id = tab_id;
         self.hovered_tab_id = None;
+        self.log_scrollbar_drag = None;
         self.sync_content_state_from_active_tab();
         self.placeholder_notice = if removed_count == 0 {
             "没有其他标签可关闭".to_string()
@@ -1151,8 +1886,14 @@ impl ArgusApp {
             title: "未选择日志".to_string(),
             kind: TabKind::Empty,
         }];
+        self.log_read_states.clear();
+        self.log_reader_generations.clear();
+        self.log_tab_view_states.clear();
+        self.ensure_log_tab_view_state(empty_tab_id);
         self.active_tab_id = empty_tab_id;
         self.hovered_tab_id = None;
+        self.reset_log_text_selection();
+        self.log_scrollbar_drag = None;
         self.sync_content_state_from_active_tab();
         self.placeholder_notice = "已关闭全部标签".to_string();
     }
@@ -1263,11 +2004,17 @@ impl ArgusApp {
     fn reset_log_workspace_after_source_replace(&mut self) {
         self.content_state = ContentState::SourceNotSelected;
         self.logs.clear();
+        self.log_read_states.clear();
+        self.log_reader_generations.clear();
+        self.log_tab_view_states.clear();
+        self.reset_log_text_selection();
+        self.log_scrollbar_drag = None;
         self.selected_log_line = None;
         self.is_search_panel_open = false;
         self.search_query.clear();
         self.hovered_tab_id = None;
         self.active_menu = None;
+        self.log_scrollbar_drag = None;
         self.tab_menu_scroll = UniformListScrollHandle::new();
 
         self.tabs = vec![ArgusTab {
@@ -1277,6 +2024,7 @@ impl ArgusApp {
         }];
         self.active_tab_id = 1;
         self.next_tab_id = 2;
+        self.ensure_log_tab_view_state(1);
 
         self.is_source_tree_search_open = false;
         self.source_tree_search_query.clear();
@@ -1310,7 +2058,7 @@ impl ArgusApp {
         self.reset_log_workspace_after_source_replace();
 
         self.placeholder_notice = if report.errors.is_empty() {
-            format!("已加载 {added_count} 个来源节点，日志内容读取尚未接入")
+            format!("已加载 {added_count} 个来源节点，请选择日志")
         } else {
             format!(
                 "已加载 {added_count} 个来源节点，{} 项失败：{}",
@@ -1401,6 +2149,7 @@ impl ArgusApp {
                 self.content_state = ContentState::SourceNotSelected;
                 self.logs.clear();
                 self.selected_log_line = None;
+                self.reset_log_text_selection_for_tab(self.active_tab_id);
             }
             TabKind::Settings => {
                 self.content_state = ContentState::SourceNotSelected;
@@ -1408,6 +2157,7 @@ impl ArgusApp {
                 self.selected_log_line = None;
             }
             TabKind::LogSource { source_id, path } => {
+                self.ensure_log_tab_view_state(self.active_tab_id);
                 let label = self
                     .source_registry
                     .node(source_id)
@@ -1464,7 +2214,7 @@ impl ArgusApp {
     /// 选择日志行，仅更新本地高亮状态。
     pub fn select_log_line(&mut self, line_number: usize) {
         self.selected_log_line = Some(line_number);
-        self.placeholder_notice = format!("已选择第 {line_number} 行占位日志");
+        self.placeholder_notice = format!("已选择第 {line_number} 行日志");
     }
 
     /// 切换大小写、正则或全词匹配等搜索开关。
@@ -1611,6 +2361,22 @@ impl ArgusApp {
     }
 }
 
+/// 从标签类型中提取日志来源 ID；非日志标签返回 `None`。
+fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
+    match kind {
+        TabKind::LogSource { source_id, .. } => Some(*source_id),
+        TabKind::Empty | TabKind::Settings => None,
+    }
+}
+
+/// 根据来源位置选择读取模式，避免 UI 或状态栏分散判断来源类型。
+fn read_mode_for_location(location: &SourceLocation) -> ReadMode {
+    match location {
+        SourceLocation::LocalPath(_) => ReadMode::MmapPaged,
+        SourceLocation::ArchiveEntry { .. } => ReadMode::ArchiveStreaming,
+    }
+}
+
 impl Default for ArgusApp {
     /// 构造默认应用状态，保持与显式 `new` 入口完全一致。
     fn default() -> Self {
@@ -1638,11 +2404,33 @@ fn byte_index_for_character(text: &str, character_index: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+/// 将 UTF-8 字节下标转换为字符列，避免 GPUI 命中结果落在多字节字符中间。
+fn char_column_for_byte_index(text: &str, byte_index: usize) -> usize {
+    let byte_index = byte_index.min(text.len());
+    let safe_byte_index = if text.is_char_boundary(byte_index) {
+        byte_index
+    } else {
+        text.char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index < byte_index)
+            .last()
+            .unwrap_or(0)
+    };
+
+    text[..safe_byte_index].chars().count()
+}
+
 /// 截取指定字符范围内的文本，供复制和选区渲染复用。
 fn slice_character_range(text: &str, range: std::ops::Range<usize>) -> String {
     let start = byte_index_for_character(text, range.start);
     let end = byte_index_for_character(text, range.end);
     text[start..end].to_string()
+}
+
+/// 判断日志文本位置是否按文档顺序小于等于另一个位置。
+fn log_text_position_le(left: LogTextPosition, right: LogTextPosition) -> bool {
+    left.line_index < right.line_index
+        || (left.line_index == right.line_index && left.column <= right.column)
 }
 
 /// 删除指定字符范围内的文本，并返回新字符串。
@@ -1841,6 +2629,16 @@ mod tests {
     /// 构造使用临时配置路径的应用状态，避免测试污染 `~/.argus`。
     fn test_app() -> ArgusApp {
         ArgusApp::new_with_config_manager(isolated_config_manager())
+    }
+
+    /// 日志阅读区展示文本会把制表符固定展开为 4 个空格。
+    #[test]
+    fn log_display_text_expands_tab_to_four_spaces() {
+        assert_eq!(log_viewer_display_text("a\tb").as_ref(), "a    b");
+        assert_eq!(
+            log_viewer_display_text("\tlevel\tmessage").as_ref(),
+            "    level    message"
+        );
     }
 
     /// 构造带样例来源树的应用状态，避免单元测试依赖正式启动空态。
@@ -2147,7 +2945,7 @@ mod tests {
             ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
 
         assert_eq!(saved.appearance.theme_mode, "light");
-        assert_eq!(saved.appearance.log_content_font_size, 16.0);
+        assert_eq!(saved.appearance.log_content_font_size, 14.0);
         assert_eq!(saved.loader.max_archive_depth, 3);
         assert!(saved.loader.follow_symlinks);
     }

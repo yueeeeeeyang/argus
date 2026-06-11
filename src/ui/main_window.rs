@@ -5,13 +5,14 @@
 //! 主要功能：渲染自定义标题栏、来源侧栏、日志内容区和设置页占位界面。
 
 use crate::app::ArgusApp;
+use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::ui::{
     components::context_menu, custom_title_bar, log_content_view, placeholder_dialog, source_panel,
     source_resizer,
 };
 use gpui::{
-    Animation, AnimationExt, Context, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent,
-    Window, div, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, Context, IntoElement, MouseButton, MouseMoveEvent,
+    MouseUpEvent, Window, div, prelude::*, px, rgb,
 };
 use std::time::Duration;
 
@@ -37,6 +38,7 @@ pub fn render(
         .flex()
         .flex_col()
         .bg(rgb(theme.background))
+        .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _window, cx| {
             let pointer_x = event.position.x / px(1.0);
@@ -82,16 +84,24 @@ pub fn render(
 }
 
 /// 渲染可动画宽度的来源侧栏容器；内容保持原宽度，外层负责裁剪。
-fn animated_source_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+fn animated_source_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
     let from_width = app.source_panel_animation_from_width;
     let to_width = app.source_panel_animation_to_width;
-
-    div()
+    let panel = div()
         .id("animated-source-panel")
         .h_full()
         .flex_none()
         .overflow_hidden()
-        .child(source_panel::render(app, cx))
+        .child(source_panel::render(app, cx));
+
+    if app.is_source_panel_resizing {
+        return panel
+            .w(px(app.source_panel_width.max(0.0)))
+            .opacity(1.0)
+            .into_any_element();
+    }
+
+    panel
         .with_animation(
             ("source-panel-width", app.source_panel_animation_generation),
             Animation::new(Duration::from_millis(170)).with_easing(gpui::ease_out_quint()),
@@ -104,4 +114,5 @@ fn animated_source_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl Int
                 })
             },
         )
+        .into_any_element()
 }

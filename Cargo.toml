@@ -13,6 +13,7 @@ description = "Argus 高性能日志查看平台的界面占位框架"
 [dependencies]
 anyhow = "1.0.102"
 bzip2 = "0.6.1"
+encoding_rs = "0.8.35"
 flate2 = "1.1.9"
 # GPUI 0.2.2 在 macOS 默认会调用完整 Xcode 的 metal 工具预编译 shader。
 # 当前开发环境只有 Command Line Tools，因此启用 runtime_shaders 让 cargo check 可在本机完成。

@@ -8,12 +8,12 @@ use crate::app::ArgusApp;
 use crate::loader::log_source::{SourceId, SourceKind, SourceTreeNode};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::ui::components::loading_spinner::render_loading_spinner;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, FontWeight, IntoElement, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Render, SharedString, Transformation, Window, canvas, div,
-    percentage, point, prelude::*, px, rgb, svg, uniform_list,
+    AnyElement, Context, FontWeight, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Render, SharedString, Window, canvas, div, point, prelude::*, px, rgb, uniform_list,
 };
-use std::{ops::Range, time::Duration};
+use std::ops::Range;
 
 use crate::utils::size_format::format_bytes;
 
@@ -270,6 +270,7 @@ fn render_node(
                         app.toggle_source_expanded(source_id, cx);
                     } else {
                         app.select_source(source_id);
+                        app.request_open_log_content(source_id, cx);
                         app.scroll_source_into_view(source_id);
                     }
                     cx.notify();
@@ -285,16 +286,11 @@ fn render_node(
 ///
 /// 返回值：带 repeat 动画的 SVG 元素。
 fn render_loading_icon(source_id: SourceId, theme: &AppTheme) -> AnyElement {
-    svg()
-        .path(ArgusIcon::Refresh.path())
-        .size(px(SOURCE_TREE_ICON_SIZE))
-        .text_color(rgb(theme.foreground_muted))
-        .with_animation(
-            ("source-loading-spinner", source_id.0),
-            Animation::new(Duration::from_millis(850)).repeat(),
-            |icon, progress| icon.with_transformation(Transformation::rotate(percentage(progress))),
-        )
-        .into_any_element()
+    render_loading_spinner(
+        ("source-loading-spinner", source_id.0),
+        theme.foreground_muted,
+        SOURCE_TREE_ICON_SIZE,
+    )
 }
 
 /// 返回来源节点右侧元信息；目录显示子级数量，文件显示大小。

@@ -14,10 +14,12 @@ use flate2::read::GzDecoder;
 use xz2::read::XzDecoder;
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::detector::ArchiveFormat;
-use crate::loader::archive::tar_adapter::{list_tar_entries, read_tar_entry_bytes};
+use crate::loader::archive::tar_adapter::{
+    list_tar_entries, read_tar_entry_bytes, stream_tar_entry,
+};
 
 /// tar.gz 可识别扩展名。
 const TAR_GZ_EXTENSIONS: &[&str] = &[".tar.gz", ".tgz"];
@@ -113,6 +115,36 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
     ) -> Result<Vec<u8>> {
         read_compressed_tar_entry_bytes(reader, self.format, entry_path, source_label)
     }
+
+    /// 从本地压缩 TAR 流式读取指定条目内容。
+    fn stream_entry(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let file = File::open(path)
+            .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
+        stream_compressed_tar_entry(
+            file,
+            self.format,
+            entry_path,
+            &path.display().to_string(),
+            consumer,
+        )
+    }
+
+    /// 从内存压缩 TAR 流式读取指定条目内容。
+    fn stream_entry_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        entry_path: &str,
+        source_label: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        stream_compressed_tar_entry(reader, self.format, entry_path, source_label, consumer)
+    }
 }
 
 /// 从任意读取器中枚举压缩 TAR 条目。
@@ -158,6 +190,38 @@ where
         }
         ArchiveFormat::TarXz => {
             read_tar_entry_bytes(XzDecoder::new(reader), entry_path, source_label)
+        }
+        _ => bail!("{} 不是压缩 TAR 格式", format.label()),
+    }
+}
+
+/// 从任意读取器中流式读取压缩 TAR 指定条目的字节。
+///
+/// 参数说明：
+/// - `reader`：压缩 TAR 数据来源。
+/// - `format`：压缩 TAR 外层编码格式。
+/// - `entry_path`：目标 TAR 条目路径。
+/// - `source_label`：错误提示中的来源名称。
+/// - `consumer`：接收解压后字节分片的回调。
+pub fn stream_compressed_tar_entry<R>(
+    reader: R,
+    format: ArchiveFormat,
+    entry_path: &str,
+    source_label: &str,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()>
+where
+    R: Read,
+{
+    match format {
+        ArchiveFormat::TarGz => {
+            stream_tar_entry(GzDecoder::new(reader), entry_path, source_label, consumer)
+        }
+        ArchiveFormat::TarBz2 => {
+            stream_tar_entry(BzDecoder::new(reader), entry_path, source_label, consumer)
+        }
+        ArchiveFormat::TarXz => {
+            stream_tar_entry(XzDecoder::new(reader), entry_path, source_label, consumer)
         }
         _ => bail!("{} 不是压缩 TAR 格式", format.label()),
     }

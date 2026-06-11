@@ -51,6 +51,9 @@ pub trait ArchiveReadSeek: Read + Seek {}
 
 impl<T> ArchiveReadSeek for T where T: Read + Seek {}
 
+/// 压缩包条目流式输出回调；适配器每读取到一段解压后字节就调用一次。
+pub type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
+
 /// 压缩包适配器统一接口；每个格式自行声明识别规则、能力和读写入口。
 pub trait ArchiveAdapter: Sync {
     /// 返回当前适配器的能力声明。
@@ -103,6 +106,34 @@ pub trait ArchiveAdapter: Sync {
         entry_path: &str,
         source_label: &str,
     ) -> Result<Vec<u8>>;
+
+    /// 从本地压缩包流式输出指定条目内容。
+    ///
+    /// 默认实现会复用完整字节读取能力，保证新增格式只实现旧接口也能工作；
+    /// ZIP、TAR、压缩 TAR、7Z 等内置适配器会覆盖为真正的 chunk 回调。
+    fn stream_entry(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let bytes = self.read_entry_bytes(path, entry_path)?;
+        consumer(&bytes)
+    }
+
+    /// 从内存或其他可 seek 数据源流式输出指定条目内容。
+    fn stream_entry_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        entry_path: &str,
+        source_label: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let bytes =
+            self.read_entry_bytes_from_reader(reader, reader_len, entry_path, source_label)?;
+        consumer(&bytes)
+    }
 }
 
 /// 根据注册表中的压缩适配器枚举压缩包条目。
@@ -198,6 +229,55 @@ pub fn read_archive_entry_bytes(
     )
 }
 
+/// 从本地压缩包及其嵌套容器链路流式读取目标日志条目。
+///
+/// 参数说明：
+/// - `archive_path`：最外层真实压缩包路径。
+/// - `root_format`：最外层压缩包格式。
+/// - `container_entries`：内嵌容器链路，必要时短期在内存中持有中间容器字节。
+/// - `entry_path`：最终需要读取的日志条目路径。
+/// - `consumer`：接收解压后字节分片的回调。
+///
+/// 返回值：读取成功返回 `Ok(())`；正文读取不创建临时文件。
+pub fn stream_archive_entry(
+    archive_path: &Path,
+    root_format: ArchiveFormat,
+    container_entries: &[String],
+    entry_path: &str,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()> {
+    if container_entries.is_empty() {
+        return archive_registry().stream_entry(root_format, archive_path, entry_path, consumer);
+    }
+
+    let first_container = &container_entries[0];
+    let mut current_format = root_format;
+    let mut bytes =
+        archive_registry().read_entry_bytes(current_format, archive_path, first_container)?;
+    let mut current_label = format!("{}!/{first_container}", archive_path.display());
+    current_format = detect_container_format(first_container)?;
+
+    for container_entry in &container_entries[1..] {
+        bytes = read_archive_entry_bytes_from_reader(
+            Cursor::new(bytes),
+            current_format,
+            container_entry,
+            &current_label,
+        )?;
+        current_label.push_str("!/");
+        current_label.push_str(container_entry);
+        current_format = detect_container_format(container_entry)?;
+    }
+
+    stream_archive_entry_from_reader(
+        Cursor::new(bytes),
+        current_format,
+        entry_path,
+        &current_label,
+        consumer,
+    )
+}
+
 /// 从任意压缩包数据源读取指定条目字节。
 fn read_archive_entry_bytes_from_reader<R>(
     mut reader: R,
@@ -221,6 +301,34 @@ where
         reader_len,
         entry_path,
         source_label,
+    )
+}
+
+/// 从任意压缩包数据源流式读取指定条目字节。
+fn stream_archive_entry_from_reader<R>(
+    mut reader: R,
+    format: ArchiveFormat,
+    entry_path: &str,
+    source_label: &str,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
+    let reader_len = reader
+        .seek(std::io::SeekFrom::End(0))
+        .with_context(|| format!("无法读取压缩包大小：{source_label}"))?;
+    reader
+        .seek(std::io::SeekFrom::Start(0))
+        .with_context(|| format!("无法重置压缩包读取位置：{source_label}"))?;
+
+    archive_registry().stream_entry_from_reader(
+        format,
+        &mut reader,
+        reader_len,
+        entry_path,
+        source_label,
+        consumer,
     )
 }
 

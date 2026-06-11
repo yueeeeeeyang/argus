@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, bail};
 use sevenz_rust::{Error as SevenzError, Password, SevenZReader};
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -88,6 +88,40 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
     ) -> Result<Vec<u8>> {
         read_sevenz_entry_bytes_from_reader(reader, reader_len, entry_path, source_label)
     }
+
+    /// 从本地 7Z 流式读取指定条目内容。
+    fn stream_entry(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开 7Z 压缩包：{}", path.display()))?;
+        let reader_len = file
+            .metadata()
+            .with_context(|| format!("无法读取 7Z 文件大小：{}", path.display()))?
+            .len();
+        stream_sevenz_entry_from_reader(
+            file,
+            reader_len,
+            entry_path,
+            &path.display().to_string(),
+            consumer,
+        )
+    }
+
+    /// 从内存 7Z 流式读取指定条目内容。
+    fn stream_entry_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        entry_path: &str,
+        source_label: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        stream_sevenz_entry_from_reader(reader, reader_len, entry_path, source_label, consumer)
+    }
 }
 
 /// 从任意可读可 seek 的输入枚举 7Z 条目。
@@ -135,11 +169,32 @@ pub fn read_sevenz_entry_bytes_from_reader<R>(
 where
     R: Read + Seek,
 {
+    let mut bytes = Vec::new();
+    stream_sevenz_entry_from_reader(reader, reader_len, entry_path, source_label, &mut |chunk| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    Ok(bytes)
+}
+
+/// 从任意 7Z 数据源流式读取指定条目。
+pub fn stream_sevenz_entry_from_reader<R>(
+    reader: R,
+    reader_len: u64,
+    entry_path: &str,
+    source_label: &str,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
     let normalized_entry_path = normalize_archive_entry_path(entry_path);
     let mut reader = SevenZReader::new(reader, reader_len, Password::empty())
         .with_context(|| format!("无法解析 7Z 压缩包：{source_label}"))?;
-    let mut found_bytes = None;
+    let mut found_entry = false;
     let mut found_directory = false;
+    let mut callback_error = None;
+    let mut buffer = [0_u8; 64 * 1024];
 
     reader
         .for_each_entries(|entry, entry_reader| {
@@ -147,23 +202,37 @@ where
             if current_path != normalized_entry_path {
                 return Ok(true);
             }
+            found_entry = true;
             if entry.is_directory() {
                 found_directory = true;
                 return Ok(false);
             }
 
-            let mut bytes = Vec::with_capacity(entry.size().try_into().unwrap_or(0));
-            entry_reader
-                .read_to_end(&mut bytes)
-                .map_err(SevenzError::io)?;
-            found_bytes = Some(bytes);
+            loop {
+                let read_count = entry_reader.read(&mut buffer).map_err(SevenzError::io)?;
+                if read_count == 0 {
+                    break;
+                }
+                if let Err(error) = consumer(&buffer[..read_count]) {
+                    callback_error = Some(error);
+                    return Ok(false);
+                }
+            }
             Ok(false)
         })
         .with_context(|| format!("无法读取 7Z 条目：{normalized_entry_path}"))?;
+
+    if let Some(error) = callback_error {
+        return Err(error).with_context(|| format!("无法消费 7Z 条目：{normalized_entry_path}"));
+    }
 
     if found_directory {
         bail!("7Z 条目是目录，无法读取内容：{normalized_entry_path}");
     }
 
-    found_bytes.with_context(|| format!("未找到 7Z 条目：{normalized_entry_path}"))
+    if !found_entry {
+        bail!("未找到 7Z 条目：{normalized_entry_path}");
+    }
+
+    Ok(())
 }
