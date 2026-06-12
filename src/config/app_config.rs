@@ -1,6 +1,6 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-12
 //! 作者：Argus 开发团队
 //! 主要功能：提供外观、日志加载、编码和缓存设置的默认值、校验和 TOML 序列化结构。
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// 应用配置根对象，字段结构与 `~/.argus/settings.toml` 保持一致。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
-    /// 外观配置，控制主题模式和日志阅读区域字号。
+    /// 外观配置，控制主题文件选择和日志阅读区域字号。
     #[serde(default)]
     pub appearance: AppearanceConfig,
     /// 日志来源加载配置，控制目录和压缩包的展开策略。
@@ -28,9 +28,17 @@ impl AppConfig {
     ///
     /// 返回值：所有数值型配置均被限制在当前 UI 可展示范围内，避免坏配置破坏界面状态。
     pub fn normalized(mut self) -> Self {
-        self.appearance.theme_mode = match self.appearance.theme_mode.trim().to_ascii_lowercase() {
-            value if value == "system" || value == "light" => value,
-            _ => "dark".to_string(),
+        self.appearance.theme_mode = match self.appearance.theme_mode.trim() {
+            "" => "dark.toml".to_string(),
+            value
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "system" | "light" | "dark"
+                ) =>
+            {
+                "dark.toml".to_string()
+            }
+            value => value.to_string(),
         };
         self.appearance.log_content_font_size =
             self.appearance.log_content_font_size.clamp(12.0, 20.0);
@@ -55,10 +63,10 @@ impl Default for AppConfig {
     }
 }
 
-/// 外观配置，持久化设置页中的主题和日志内容字号。
+/// 外观配置，持久化设置页中的主题文件和日志内容字号。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppearanceConfig {
-    /// 主题模式标识，合法值为 `system`、`dark`、`light`。
+    /// 主题文件标识，内置主题为 `dark.toml`，用户主题为 `~/.argus/themes` 下的 TOML 文件名。
     pub theme_mode: String,
     /// 日志内容区字号，仅影响主阅读区域和未读取提示。
     pub log_content_font_size: f32,
@@ -68,7 +76,7 @@ impl Default for AppearanceConfig {
     /// 构造默认外观配置，沿用当前深色主题和 12px 日志阅读字号。
     fn default() -> Self {
         Self {
-            theme_mode: "dark".to_string(),
+            theme_mode: "dark.toml".to_string(),
             log_content_font_size: 12.0,
         }
     }
@@ -137,7 +145,7 @@ mod tests {
     fn normalized_clamps_numeric_settings() {
         let config = AppConfig {
             appearance: AppearanceConfig {
-                theme_mode: "dark".to_string(),
+                theme_mode: "light".to_string(),
                 log_content_font_size: 99.0,
             },
             loader: LoaderConfig {
@@ -155,7 +163,7 @@ mod tests {
         .normalized();
 
         assert_eq!(config.appearance.log_content_font_size, 20.0);
-        assert_eq!(config.appearance.theme_mode, "dark");
+        assert_eq!(config.appearance.theme_mode, "dark.toml");
         assert_eq!(config.loader.max_archive_depth, 8);
         assert_eq!(config.encoding.selected, "UTF-8");
         assert_eq!(config.cache.limit_mb, 128);

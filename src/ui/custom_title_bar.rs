@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：为原生 macOS 交通灯预留安全区，并展示左侧操作组、当前标签和贯通分割线。
 
-use crate::app::{ArgusApp, TabKind, Workspace};
+use crate::app::{ArgusApp, Workspace};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
@@ -172,11 +172,7 @@ fn title_control_group(
             theme,
             cx,
         ))
-        .child(settings_button(
-            matches!(app.active_tab_kind(), TabKind::Settings),
-            theme,
-            cx,
-        ))
+        .child(settings_button(app, theme, cx))
         .child(title_action_button(
             "title-source-toggle",
             ArgusIcon::Layout,
@@ -234,7 +230,7 @@ fn title_action_button(
                 theme,
                 cx.listener(move |app, _, _, cx| {
                     match action_name {
-                        "日志分析" => app.switch_workspace(Workspace::LogAnalysis),
+                        "日志分析" => app.switch_workspace(Workspace::LogAnalysis, cx),
                         "连接" => app.mark_placeholder_action("连接"),
                         "收起左侧菜单" | "展开左侧菜单" => app.toggle_source_panel(),
                         _ => app.mark_placeholder_action(action_name),
@@ -245,12 +241,13 @@ fn title_action_button(
     )
 }
 
-/// 渲染标题栏右侧设置入口，点击后打开或聚焦设置标签页。
+/// 渲染标题栏右侧设置入口，点击后打开或聚焦独立设置窗口。
 fn settings_button(
-    is_selected: bool,
+    app: &ArgusApp,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
+    let is_selected = app.is_settings_window_open;
     div().h_full().flex().items_center().child(
         div()
             .when(!is_selected, |this| {
@@ -264,7 +261,7 @@ fn settings_button(
                 IconButtonSize::Small,
                 theme,
                 cx.listener(|app, _, _, cx| {
-                    app.open_or_focus_settings_tab();
+                    app.open_settings_window(cx);
                     cx.notify();
                 }),
             )),

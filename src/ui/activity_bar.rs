@@ -68,7 +68,7 @@ fn activity_button(
         IconButtonSize::Medium,
         theme,
         cx.listener(move |app, _, _, cx| {
-            app.switch_workspace(workspace);
+            app.switch_workspace(workspace, cx);
             cx.notify();
         }),
     )

@@ -24,6 +24,37 @@ use crate::text_selection::{
 };
 
 impl ArgusApp {
+    /// 返回当前是否存在可搜索的日志标签页。
+    ///
+    /// 返回值：只要标签列表中包含日志来源标签即返回 `true`；设置页和空标签不计入。
+    pub fn has_open_log_tab(&self) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| matches!(tab.kind, TabKind::LogSource { .. }))
+    }
+
+    /// 确保搜索功能拥有一个活动日志标签页。
+    ///
+    /// 返回值：当前已经是日志标签，或成功切换到第一个已打开日志标签时返回 `true`。
+    pub fn ensure_active_log_tab_for_search(&mut self) -> bool {
+        if matches!(self.active_tab_kind(), TabKind::LogSource { .. }) {
+            return true;
+        }
+
+        let Some(tab_id) = self.tabs.iter().find_map(|tab| {
+            if matches!(tab.kind, TabKind::LogSource { .. }) {
+                Some(tab.id)
+            } else {
+                None
+            }
+        }) else {
+            return false;
+        };
+
+        self.activate_tab(tab_id);
+        true
+    }
+
     /// 返回当前活动日志内容区是否拥有业务焦点，用于限制日志搜索快捷键的触发范围。
     pub fn is_active_log_view_focused(&self) -> bool {
         let Some(active_tab) = self.active_tab() else {

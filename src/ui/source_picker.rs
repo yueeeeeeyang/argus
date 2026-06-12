@@ -469,6 +469,10 @@ fn render_sort_header_cell(
         SourcePickerSortKey::Name => "source-picker-sort-name",
         SourcePickerSortKey::Modified => "source-picker-sort-modified",
     };
+    let icon = match sort_key {
+        SourcePickerSortKey::Name => ArgusIcon::File,
+        SourcePickerSortKey::Modified => ArgusIcon::Refresh,
+    };
     let app_handle = app_handle.clone();
 
     div()
@@ -479,6 +483,7 @@ fn render_sort_header_cell(
         .rounded_sm()
         .px_1()
         .py(px(2.0))
+        .line_height(px(20.0))
         .text_color(rgb(if is_active {
             theme.foreground
         } else {
@@ -491,6 +496,15 @@ fn render_sort_header_cell(
                 app.set_source_picker_sort(sort_key);
             });
         })
+        .child(render_icon(
+            icon,
+            if is_active {
+                theme.foreground
+            } else {
+                theme.foreground_muted
+            },
+            12.0,
+        ))
         .child(format!("{label}{indicator}"))
 }
 
@@ -717,6 +731,7 @@ fn render_footer(
                 .justify_between()
                 .child(div().flex().items_center().gap_2().child(text_button(
                     "source-picker-clear",
+                    ArgusIcon::Close,
                     "清空选择",
                     theme,
                     move |_, _, cx| {
@@ -732,6 +747,7 @@ fn render_footer(
                         .gap_2()
                         .child(text_button(
                             "source-picker-cancel",
+                            ArgusIcon::Close,
                             "取消",
                             theme,
                             move |_, window, cx| {
@@ -743,6 +759,7 @@ fn render_footer(
                         ))
                         .child(primary_button(
                             "source-picker-confirm",
+                            ArgusIcon::FolderPlus,
                             "加载",
                             selected_count > 0,
                             theme,
@@ -862,6 +879,7 @@ where
 /// 渲染普通文本按钮。
 fn text_button<F>(
     id: &'static str,
+    icon: ArgusIcon,
     label: &'static str,
     theme: &AppTheme,
     on_click: F,
@@ -876,19 +894,23 @@ where
         .flex()
         .items_center()
         .justify_center()
+        .gap_1()
         .rounded_sm()
         .text_size(px(12.0))
+        .line_height(px(30.0))
         .text_color(rgb(theme.foreground))
         .bg(rgb(theme.current_line))
         .hover(|this| this.bg(rgb(theme.selection)))
         .cursor_pointer()
         .on_click(on_click)
+        .child(render_icon(icon, theme.foreground_muted, 13.0))
         .child(label)
 }
 
 /// 渲染主操作按钮。
 fn primary_button<F>(
     id: &'static str,
+    icon: ArgusIcon,
     label: &'static str,
     is_enabled: bool,
     theme: &AppTheme,
@@ -904,8 +926,10 @@ where
         .flex()
         .items_center()
         .justify_center()
+        .gap_1()
         .rounded_sm()
         .text_size(px(12.0))
+        .line_height(px(30.0))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(theme.foreground))
         .bg(rgb(if is_enabled {
@@ -919,6 +943,15 @@ where
                 .on_click(on_click)
         })
         .when(!is_enabled, |this| this.opacity(0.55))
+        .child(render_icon(
+            icon,
+            if is_enabled {
+                theme.foreground
+            } else {
+                theme.foreground_muted
+            },
+            13.0,
+        ))
         .child(label)
 }
 

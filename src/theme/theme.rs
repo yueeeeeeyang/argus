@@ -1,6 +1,6 @@
 //! 文件职责：定义 Argus 界面使用的主题令牌。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-12
 //! 作者：Argus 开发团队
 //! 主要功能：提供运行期主题颜色、日志级别颜色和主题文件损坏时的紧急兜底令牌。
 
@@ -55,26 +55,6 @@ impl SyntaxTheme {
             method: 0xdcdcaa,
             lock: 0xc586c0,
             exception: 0xf48771,
-        }
-    }
-
-    /// 构造浅色主题语法高亮紧急兜底令牌。
-    pub fn light() -> Self {
-        Self {
-            comment: 0x008000,
-            key: 0x0451a5,
-            string: 0xa31515,
-            number: 0x098658,
-            boolean: 0x0000ff,
-            punctuation: 0x666666,
-            tag: 0x800000,
-            attribute: 0xff0000,
-            timestamp: 0x267f99,
-            thread: 0x795e26,
-            class: 0x267f99,
-            method: 0x795e26,
-            lock: 0xaf00db,
-            exception: 0xa1260d,
         }
     }
 }
@@ -142,30 +122,6 @@ impl AppTheme {
             success: 0x89d185,
             modal_overlay: 0x1e1e1eb8,
             syntax: SyntaxTheme::dark(),
-        }
-    }
-
-    /// 构造浅色主题紧急兜底令牌；正常路径应优先读取 `themes/light.toml`。
-    pub fn light() -> Self {
-        Self {
-            background: 0xf3f3f3,
-            title_bar: 0xe8e8e8,
-            activity_bar: 0xe6e6e6,
-            side_bar: 0xeeeeee,
-            content: 0xffffff,
-            status_bar: 0xf2f2f2,
-            foreground: 0x242424,
-            foreground_muted: 0x6b6b6b,
-            border: 0xd0d0d0,
-            selection: 0xd7e8fb,
-            current_line: 0xebf2f8,
-            debug: 0x4f7a37,
-            info: 0x0969da,
-            warning: 0x9a6700,
-            error: 0xcf222e,
-            success: 0x1a7f37,
-            modal_overlay: 0xe9edf3c2,
-            syntax: SyntaxTheme::light(),
         }
     }
 

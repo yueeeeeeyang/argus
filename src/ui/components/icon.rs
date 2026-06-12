@@ -38,8 +38,12 @@ pub enum ArgusIcon {
     More,
     /// 后退。
     ArrowLeft,
+    /// 向上跳转。
+    ArrowUp,
     /// 前进。
     ArrowRight,
+    /// 向下跳转。
+    ArrowDown,
     /// 刷新。
     Refresh,
     /// 折叠或向上收起。
@@ -98,7 +102,9 @@ impl ArgusIcon {
             Self::Layout,
             Self::More,
             Self::ArrowLeft,
+            Self::ArrowUp,
             Self::ArrowRight,
+            Self::ArrowDown,
             Self::Refresh,
             Self::Collapse,
             Self::ListCollapse,
@@ -143,7 +149,9 @@ impl ArgusIcon {
             Self::Layout => "icons/layout.svg",
             Self::More => "icons/more.svg",
             Self::ArrowLeft => "icons/arrow-left.svg",
+            Self::ArrowUp => "icons/arrow-up.svg",
             Self::ArrowRight => "icons/arrow-right.svg",
+            Self::ArrowDown => "icons/arrow-down.svg",
             Self::Refresh => "icons/refresh.svg",
             Self::Collapse => "icons/collapse.svg",
             Self::ListCollapse => "icons/list-collapse.svg",
@@ -205,7 +213,9 @@ impl ArgusIcon {
             Self::Layout => icondata::LuPanelLeft,
             Self::More => icondata::LuEllipsis,
             Self::ArrowLeft => icondata::LuArrowLeft,
+            Self::ArrowUp => icondata::LuArrowUp,
             Self::ArrowRight => icondata::LuArrowRight,
+            Self::ArrowDown => icondata::LuArrowDown,
             Self::Refresh => icondata::LuRefreshCw,
             Self::Collapse => icondata::LuChevronDown,
             Self::ListCollapse => icondata::LuListCollapse,

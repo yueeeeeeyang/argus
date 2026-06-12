@@ -61,7 +61,10 @@ fn open_argus_main_window(cx: &mut App) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 前置观察主窗口日志阅读快捷键；只有日志正文拥有业务焦点时才处理搜索和复制。
+/// 前置观察主窗口日志阅读快捷键。
+///
+/// 说明：搜索窗口属于全局日志操作，只要已有日志标签即可触发；复制仍限制在日志正文焦点内，
+/// 避免抢走输入框、下拉框等普通控件的复制快捷键。
 fn observe_log_view_shortcuts(cx: &mut App, window_handle: gpui::WindowHandle<ArgusApp>) {
     let main_window_id = window_handle.window_id();
     cx.intercept_keystrokes(move |event, window, cx| {
@@ -77,17 +80,31 @@ fn observe_log_view_shortcuts(cx: &mut App, window_handle: gpui::WindowHandle<Ar
         let Some(Some(app_entity)) = window.root::<ArgusApp>() else {
             return;
         };
-        app_entity.update(cx, |app, cx| {
-            if !app.is_active_log_view_focused() {
-                return;
-            }
+        let handled = app_entity.update(cx, |app, cx| {
             if is_search_shortcut {
+                if !app.has_open_log_tab() {
+                    return false;
+                }
                 app.open_log_search_window(cx);
-            } else if is_copy_shortcut {
-                app.copy_active_log_text_selection(cx);
+                cx.notify();
+                return true;
             }
-            cx.notify();
+
+            if is_copy_shortcut {
+                if !app.is_active_log_view_focused() {
+                    return false;
+                }
+                app.copy_active_log_text_selection(cx);
+                cx.notify();
+                return true;
+            }
+
+            false
         });
+
+        if handled {
+            cx.stop_propagation();
+        }
     })
     .detach();
 }

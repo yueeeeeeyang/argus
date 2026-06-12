@@ -1369,6 +1369,7 @@ fn render_search_results_panel(
                 .when(is_running, |this| {
                     this.child(action_text_button(
                         "log-search-results-cancel",
+                        ArgusIcon::Close,
                         "取消",
                         theme,
                         cx.listener(|app, _, _, cx| {
@@ -1908,6 +1909,7 @@ fn render_search_result_scrollbar_thumb(
 /// 渲染结果面板文本按钮。
 fn action_text_button(
     id: &'static str,
+    icon: ArgusIcon,
     label: &'static str,
     theme: &AppTheme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -1918,12 +1920,15 @@ fn action_text_button(
         .px_2()
         .flex()
         .items_center()
+        .gap_1()
         .rounded_sm()
         .text_size(px(12.0))
+        .line_height(px(24.0))
         .text_color(rgb(theme.foreground))
         .bg(rgb(theme.current_line))
         .hover(|this| this.bg(rgb(theme.selection)))
         .cursor_pointer()
+        .child(render_icon(icon, theme.foreground_muted, 12.0))
         .child(label)
         .on_click(on_click)
 }

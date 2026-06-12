@@ -7,6 +7,7 @@
 mod log_search;
 mod log_text;
 mod placeholder_data;
+mod settings_window;
 mod source_picker;
 mod source_search;
 
@@ -31,12 +32,11 @@ use crate::search::search_task::SearchTaskState;
 use crate::text_selection::TextSelectionGranularity;
 #[cfg(test)]
 use crate::text_selection::character_count;
-use crate::theme::system_theme::{label_for_window_appearance, theme_mode_for_window_appearance};
-use crate::theme::{AppTheme, ThemeManager};
+use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::log_search_window::LogSearchWindow;
 use crate::ui::main_window;
-use gpui::WindowAppearance;
+use crate::ui::settings_window::SettingsWindow;
 use gpui::{Context, IntoElement, Keystroke, Pixels, Point, Render, Window, WindowHandle};
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -116,46 +116,6 @@ pub enum Workspace {
     LogAnalysis,
     /// 设置工作区，用于展示主题、编码、缓存、快捷键等占位配置。
     Settings,
-}
-
-/// 设置页主题选项，只影响本地 UI 状态说明。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ThemeMode {
-    /// 跟随系统主题。
-    System,
-    /// 深色主题。
-    Dark,
-    /// 浅色主题。
-    Light,
-}
-
-impl ThemeMode {
-    /// 返回设置页展示文案。
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::System => "跟随系统",
-            Self::Dark => "深色",
-            Self::Light => "浅色",
-        }
-    }
-
-    /// 返回持久化配置中使用的稳定字符串。
-    pub fn config_value(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::Dark => "dark",
-            Self::Light => "light",
-        }
-    }
-
-    /// 从持久化配置值恢复主题模式，未知值回退深色主题。
-    pub fn from_config_value(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "system" => Self::System,
-            "light" => Self::Light,
-            _ => Self::Dark,
-        }
-    }
 }
 
 /// 打开来源占位弹窗中的来源类型。
@@ -709,8 +669,14 @@ pub struct ArgusApp {
     pub active_dialog: Option<PlaceholderDialog>,
     /// 打开来源弹窗中选中的来源类型。
     pub selected_placeholder_source: PlaceholderSourceKind,
-    /// 设置页主题模式。
-    pub theme_mode: ThemeMode,
+    /// 当前选择的主题 ID；内置和用户主题都使用 TOML 文件名。
+    pub selected_theme_id: String,
+    /// 设置窗口主题下拉框是否展开。
+    pub is_theme_dropdown_open: bool,
+    /// 设置窗口是否处于打开状态。
+    pub is_settings_window_open: bool,
+    /// 设置窗口句柄，用于重复点击设置按钮时置前已有窗口。
+    pub settings_window_handle: Option<WindowHandle<SettingsWindow>>,
     /// 日志内容区字号，仅影响主阅读区域。
     pub log_content_font_size: f32,
     /// 设置页编码选项。
@@ -731,8 +697,8 @@ impl ArgusApp {
     pub fn new_with_config_manager(config_manager: ConfigManager) -> Self {
         let (mut config, config_warning) = config_manager.load_with_warning();
         let theme_manager = ThemeManager::load_default();
-        let theme_mode = ThemeMode::from_config_value(&config.appearance.theme_mode);
-        let theme = theme_manager.theme_for_mode(theme_mode.config_value());
+        let selected_theme_id = theme_manager.resolve_theme_id(&config.appearance.theme_mode);
+        let theme = theme_manager.theme_for_id(&selected_theme_id);
         let log_content_font_size = config
             .appearance
             .log_content_font_size
@@ -740,7 +706,7 @@ impl ArgusApp {
         let selected_encoding = config.encoding.selected.clone();
         let is_cache_enabled = config.cache.enabled;
         let cache_limit_mb = config.cache.limit_mb.clamp(128, 2048);
-        config.appearance.theme_mode = theme_mode.config_value().to_string();
+        config.appearance.theme_mode = selected_theme_id.clone();
         config.appearance.log_content_font_size = log_content_font_size;
         config.cache.limit_mb = cache_limit_mb;
         Self {
@@ -801,7 +767,10 @@ impl ArgusApp {
             selected_log_line: None,
             active_dialog: None,
             selected_placeholder_source: PlaceholderSourceKind::File,
-            theme_mode,
+            selected_theme_id,
+            is_theme_dropdown_open: false,
+            is_settings_window_open: false,
+            settings_window_handle: None,
             log_content_font_size,
             selected_encoding,
             is_cache_enabled,
@@ -810,9 +779,9 @@ impl ArgusApp {
     }
 
     /// 切换标题栏工作区入口，并更新状态提示。
-    pub fn switch_workspace(&mut self, workspace: Workspace) {
+    pub fn switch_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
         if workspace == Workspace::Settings {
-            self.open_or_focus_settings_tab();
+            self.open_settings_window(cx);
             return;
         }
 
@@ -823,14 +792,14 @@ impl ArgusApp {
         };
     }
 
-    /// 兼容旧入口：打开或聚焦设置标签页。
-    pub fn open_settings_modal(&mut self) {
-        self.open_or_focus_settings_tab();
+    /// 兼容旧入口：打开或聚焦独立设置窗口。
+    pub fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
+        self.open_settings_window(cx);
     }
 
-    /// 兼容旧入口：设置页现在作为标签页展示，因此关闭模态框不再改变 UI 树。
+    /// 兼容旧入口：关闭独立设置窗口状态。
     pub fn close_settings_modal(&mut self) {
-        self.placeholder_notice = "设置已作为标签页展示".to_string();
+        self.close_settings_window();
     }
 
     /// 持久化当前配置；失败时只更新提示，不回滚已经生效的 UI 状态。
@@ -960,30 +929,9 @@ impl ArgusApp {
         true
     }
 
-    /// 打开或聚焦唯一设置标签页。
+    /// 兼容旧测试入口：设置页已迁移为独立窗口，标签页路径不再由 UI 触发。
     pub fn open_or_focus_settings_tab(&mut self) {
-        self.workspace = Workspace::LogAnalysis;
-
-        if let Some(tab_id) = self
-            .tabs
-            .iter()
-            .find(|tab| matches!(tab.kind, TabKind::Settings))
-            .map(|tab| tab.id)
-        {
-            self.active_tab_id = tab_id;
-            self.placeholder_notice = "已切换到设置标签页".to_string();
-            return;
-        }
-
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
-        self.tabs.push(ArgusTab {
-            id: tab_id,
-            title: "设置".to_string(),
-            kind: TabKind::Settings,
-        });
-        self.active_tab_id = tab_id;
-        self.placeholder_notice = "已打开设置标签页".to_string();
+        self.placeholder_notice = "设置已迁移到独立窗口，请从标题栏设置按钮打开".to_string();
     }
 
     /// 打开或聚焦指定日志来源标签页；读取正文由 UI 入口随后触发后台任务。
@@ -1759,58 +1707,44 @@ impl ArgusApp {
         self.placeholder_notice = "已清空搜索关键字".to_string();
     }
 
-    /// 在主窗口渲染前同步当前系统外观；跟随系统模式会据此选择深色或浅色主题。
-    pub fn sync_window_appearance_theme(&mut self, window: &Window) {
-        self.sync_theme_for_window_appearance(window.appearance(), false);
+    /// 在主窗口渲染前保留主题同步入口；当前仅支持暗色主题，因此不随系统外观切换。
+    pub fn sync_window_appearance_theme(&mut self, _window: &Window) {}
+
+    /// 返回设置下拉框中的主题选项。
+    pub fn theme_options(&self) -> Vec<ThemeOption> {
+        self.theme_manager.theme_options()
     }
 
-    /// 更新主题模式设置，并在跟随系统时按当前窗口外观解析真实主题。
-    pub fn set_theme_mode(&mut self, theme_mode: ThemeMode, system_appearance: WindowAppearance) {
-        self.theme_mode = theme_mode;
-        self.theme = self.theme_for_mode_with_system_appearance(theme_mode, system_appearance);
-        self.config.appearance.theme_mode = theme_mode.config_value().to_string();
-        self.placeholder_notice = match theme_mode {
-            ThemeMode::System => format!(
-                "主题已切换为跟随系统；当前为{}主题",
-                label_for_window_appearance(system_appearance)
-            ),
-            _ => format!("主题已切换为{}", theme_mode.label()),
-        };
+    /// 返回当前主题在下拉框中的展示文案。
+    pub fn selected_theme_label(&self) -> String {
+        self.theme_manager
+            .label_for_theme_id(&self.selected_theme_id)
+    }
+
+    /// 切换设置窗口中的主题下拉框展开状态。
+    pub fn toggle_theme_dropdown(&mut self) {
+        if self.is_theme_dropdown_open {
+            self.close_theme_dropdown();
+            return;
+        }
+
+        self.is_theme_dropdown_open = true;
+    }
+
+    /// 关闭设置窗口中的主题下拉框。
+    pub fn close_theme_dropdown(&mut self) {
+        self.is_theme_dropdown_open = false;
+    }
+
+    /// 按主题 TOML 文件名选择主题，并立即持久化设置。
+    pub fn select_theme(&mut self, theme_id: String) {
+        let resolved_theme_id = self.theme_manager.resolve_theme_id(&theme_id);
+        self.selected_theme_id = resolved_theme_id.clone();
+        self.theme = self.theme_manager.theme_for_id(&resolved_theme_id);
+        self.config.appearance.theme_mode = resolved_theme_id.clone();
+        self.is_theme_dropdown_open = false;
+        self.placeholder_notice = format!("主题已切换为 {resolved_theme_id}");
         self.persist_config_or_report();
-    }
-
-    /// 根据主题模式和系统外观返回应使用的运行期主题。
-    fn theme_for_mode_with_system_appearance(
-        &self,
-        theme_mode: ThemeMode,
-        system_appearance: WindowAppearance,
-    ) -> AppTheme {
-        let resolved_mode = match theme_mode {
-            ThemeMode::System => theme_mode_for_window_appearance(system_appearance),
-            _ => theme_mode.config_value(),
-        };
-        self.theme_manager.theme_for_mode(resolved_mode)
-    }
-
-    /// 在跟随系统模式下同步当前窗口外观；返回是否执行了同步。
-    fn sync_theme_for_window_appearance(
-        &mut self,
-        system_appearance: WindowAppearance,
-        should_report: bool,
-    ) -> bool {
-        if self.theme_mode != ThemeMode::System {
-            return false;
-        }
-
-        self.theme =
-            self.theme_for_mode_with_system_appearance(ThemeMode::System, system_appearance);
-        if should_report {
-            self.placeholder_notice = format!(
-                "系统主题已同步为{}主题",
-                label_for_window_appearance(system_appearance)
-            );
-        }
-        true
     }
 
     /// 调整日志内容字号，并限制在外观设置允许的可读范围内。
@@ -2005,35 +1939,35 @@ mod tests {
         assert!(matches!(app.content_state, ContentState::SourceNotSelected));
     }
 
-    /// 验证打开设置入口时进入唯一设置标签页。
+    /// 验证旧设置标签入口不再创建设置标签页。
     #[test]
-    fn open_settings_tab_creates_single_settings_tab() {
+    fn legacy_settings_tab_entry_does_not_create_tab() {
         let mut app = test_app();
 
         app.open_or_focus_settings_tab();
 
-        assert_eq!(app.tabs.len(), 2);
-        assert!(matches!(app.active_tab_kind(), TabKind::Settings));
+        assert_eq!(app.tabs.len(), 1);
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
+        assert!(app.placeholder_notice.contains("独立窗口"));
     }
 
-    /// 验证重复点击设置入口会复用同一个设置标签页。
+    /// 验证旧设置标签入口不会影响当前日志标签。
     #[test]
-    fn settings_tab_is_reused() {
+    fn legacy_settings_tab_entry_keeps_active_log_tab() {
         let mut app = app_with_placeholder_sources();
         let app_log_id = source_id_by_label(&app, "app.log");
 
-        app.open_or_focus_settings_tab();
-        let settings_tab_id = app.active_tab_id;
         app.select_source(app_log_id);
+        let app_tab_id = app.active_tab_id;
         app.open_or_focus_settings_tab();
 
-        assert_eq!(app.active_tab_id, settings_tab_id);
+        assert_eq!(app.active_tab_id, app_tab_id);
         assert_eq!(
             app.tabs
                 .iter()
                 .filter(|tab| matches!(tab.kind, TabKind::Settings))
                 .count(),
-            1
+            0
         );
     }
 
@@ -2088,7 +2022,7 @@ mod tests {
         app.focus_log_text_view(app.active_tab_id);
         assert!(app.is_active_log_view_focused());
 
-        app.open_or_focus_settings_tab();
+        app.close_tab(app.active_tab_id);
         assert!(!app.is_active_log_view_focused());
     }
 
@@ -2151,11 +2085,12 @@ mod tests {
     fn close_tab_activates_neighbor_and_keeps_one_empty_tab() {
         let mut app = app_with_placeholder_sources();
         let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
         app.select_source(app_log_id);
-        app.open_or_focus_settings_tab();
-        let settings_tab_id = app.active_tab_id;
+        app.select_source(error_log_id);
+        let error_tab_id = app.active_tab_id;
 
-        app.close_tab(settings_tab_id);
+        app.close_tab(error_tab_id);
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_tab_title(), "app.log");
 
@@ -2195,7 +2130,6 @@ mod tests {
         app.select_source(app_log_id);
         let app_tab_id = app.active_tab_id;
         app.select_source(error_log_id);
-        app.open_or_focus_settings_tab();
         app.close_other_tabs(app_tab_id);
 
         assert_eq!(app.tabs.len(), 1);
@@ -2210,7 +2144,6 @@ mod tests {
         let app_log_id = source_id_by_label(&app, "app.log");
 
         app.select_source(app_log_id);
-        app.open_or_focus_settings_tab();
         app.close_all_tabs();
 
         assert_eq!(app.tabs.len(), 1);
@@ -2248,43 +2181,28 @@ mod tests {
         assert_eq!(app.log_content_font_size, LOG_CONTENT_FONT_SIZE_MIN);
     }
 
-    /// 验证外观主题切换会立即替换运行时主题令牌。
+    /// 验证外观主题文件切换会立即替换运行时主题令牌。
     #[test]
-    fn set_theme_mode_updates_runtime_theme_tokens() {
+    fn select_theme_updates_runtime_theme_tokens() {
         let mut app = test_app();
 
-        app.set_theme_mode(ThemeMode::Light, WindowAppearance::Dark);
-        assert_eq!(app.theme_mode, ThemeMode::Light);
+        app.select_theme("dark.toml".to_string());
+        assert_eq!(app.selected_theme_id, "dark.toml");
         assert_eq!(
             app.theme.content,
-            app.theme_manager.theme_for_mode("light").content
-        );
-
-        app.set_theme_mode(ThemeMode::Dark, WindowAppearance::Light);
-        assert_eq!(app.theme_mode, ThemeMode::Dark);
-        assert_eq!(
-            app.theme.content,
-            app.theme_manager.theme_for_mode("dark").content
+            app.theme_manager.theme_for_id("dark.toml").content
         );
     }
 
-    /// 验证跟随系统模式会根据当前窗口外观解析到实际明暗主题。
+    /// 验证旧版 light/system 配置会迁移到内置暗色主题文件。
     #[test]
-    fn system_theme_mode_resolves_window_appearance() {
+    fn legacy_theme_modes_resolve_to_dark_theme_file() {
         let mut app = test_app();
 
-        app.set_theme_mode(ThemeMode::System, WindowAppearance::Light);
-        assert_eq!(app.theme_mode, ThemeMode::System);
-        assert_eq!(
-            app.theme.content,
-            app.theme_manager.theme_for_mode("light").content
-        );
+        app.select_theme("light".to_string());
 
-        app.set_theme_mode(ThemeMode::System, WindowAppearance::Dark);
-        assert_eq!(
-            app.theme.content,
-            app.theme_manager.theme_for_mode("dark").content
-        );
+        assert_eq!(app.selected_theme_id, "dark.toml");
+        assert_eq!(app.config.appearance.theme_mode, "dark.toml");
     }
 
     /// 验证外观和加载设置修改后会立即写入配置文件。
@@ -2294,7 +2212,7 @@ mod tests {
         let settings_path = config_manager.settings_path().to_path_buf();
         let mut app = ArgusApp::new_with_config_manager(config_manager);
 
-        app.set_theme_mode(ThemeMode::Light, WindowAppearance::Dark);
+        app.select_theme("dark.toml".to_string());
         app.adjust_log_content_font_size(2.0);
         app.adjust_max_archive_depth(1);
         app.toggle_follow_symlinks();
@@ -2302,7 +2220,7 @@ mod tests {
         let saved =
             ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
 
-        assert_eq!(saved.appearance.theme_mode, "light");
+        assert_eq!(saved.appearance.theme_mode, "dark.toml");
         assert_eq!(saved.appearance.log_content_font_size, 14.0);
         assert_eq!(saved.loader.max_archive_depth, 3);
         assert!(saved.loader.follow_symlinks);

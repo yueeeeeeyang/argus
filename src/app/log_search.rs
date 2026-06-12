@@ -59,6 +59,23 @@ const SEARCH_RESULT_ASCII_CHAR_WIDTH_ESTIMATE: f32 = 7.4;
 /// 搜索结果中文等非 ASCII 字符宽度估算；避免混排结果低估宽度导致横向滚动条缺失。
 const SEARCH_RESULT_WIDE_CHAR_WIDTH_ESTIMATE: f32 = 13.0;
 
+/// 计算分页日志跳转命中行时的垂直滚动偏移。
+///
+/// 参数说明：
+/// - `line_number`：0 基命中行号。
+/// - `line_count`：日志总行数。
+/// - `viewport_height`：当前日志视口高度。
+///
+/// 返回值：将命中行尽量放到视口中间的滚动偏移，并限制在可滚动范围内。
+fn centered_paged_scroll_top(line_number: usize, line_count: usize, viewport_height: f64) -> f64 {
+    let row_height = LOG_VIEWER_ROW_HEIGHT as f64;
+    let total_height = line_count as f64 * row_height;
+    let max_top = (total_height - viewport_height).max(0.0);
+    let target = line_number as f64 * row_height - viewport_height / 2.0 + row_height / 2.0;
+
+    target.clamp(0.0, max_top)
+}
+
 /// 后台搜索线程向 UI 线程回传的事件。
 enum SearchWorkerEvent {
     /// 目录搜索目标已在后台补齐并准备完成。
@@ -106,6 +123,11 @@ impl ArgusApp {
     /// 参数说明：
     /// - `cx`：GPUI 上下文，用于创建独立无标题栏窗口。
     pub fn open_log_search_window(&mut self, cx: &mut Context<Self>) {
+        if !self.ensure_active_log_tab_for_search() {
+            self.placeholder_notice = "请先打开日志再搜索".to_string();
+            return;
+        }
+
         if self.log_search.is_window_open {
             if let Some(window_handle) = self.log_search.window_handle.clone()
                 && window_handle
@@ -1590,20 +1612,24 @@ impl ArgusApp {
         else {
             return false;
         };
-        let Some(is_paged_document) = self.active_log_handle().map(|handle| {
-            matches!(
-                handle.document(),
-                crate::reader::log_file_reader::LogDocument::Paged(_)
-            )
-        }) else {
+        let Some(handle) = self.active_log_handle() else {
             return false;
         };
+        let is_paged_document = matches!(
+            handle.document(),
+            crate::reader::log_file_reader::LogDocument::Paged(_)
+        );
+        let line_count = handle.line_count();
         let Some(state) = self.log_tab_view_states.get_mut(&tab_id) else {
             return false;
         };
 
         if is_paged_document {
-            state.paged_scroll.top_px = result.line_number as f64 * LOG_VIEWER_ROW_HEIGHT as f64;
+            state.paged_scroll.top_px = centered_paged_scroll_top(
+                result.line_number,
+                line_count,
+                f64::from(state.paged_viewport_handle.bounds().size.height),
+            );
         } else {
             state
                 .scroll_handle
@@ -2123,6 +2149,21 @@ mod tests {
             std::env::temp_dir().join(format!("argus-log-search-test-{}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&config_dir);
         ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
+    }
+
+    #[test]
+    fn paged_search_jump_centers_result_line() {
+        let row_height = LOG_VIEWER_ROW_HEIGHT as f64;
+
+        assert_eq!(centered_paged_scroll_top(0, 200, row_height * 20.0), 0.0);
+        assert_eq!(
+            centered_paged_scroll_top(50, 200, row_height * 20.0),
+            row_height * 40.5
+        );
+        assert_eq!(
+            centered_paged_scroll_top(199, 200, row_height * 20.0),
+            row_height * 180.0
+        );
     }
 
     /// 构造包含一个目录和两个日志文件的来源树。

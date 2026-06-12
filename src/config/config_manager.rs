@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-12
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -143,7 +143,7 @@ mod tests {
 
         let config = ConfigManager::load_from_path(&path).expect("缺失配置文件应回退默认配置");
 
-        assert_eq!(config.appearance.theme_mode, "dark");
+        assert_eq!(config.appearance.theme_mode, "dark.toml");
         assert_eq!(config.loader.max_archive_depth, 2);
     }
 
@@ -153,7 +153,7 @@ mod tests {
         let path = test_settings_path("round-trip");
         let config = AppConfig {
             appearance: AppearanceConfig {
-                theme_mode: "light".to_string(),
+                theme_mode: "custom_dark.toml".to_string(),
                 log_content_font_size: 16.0,
             },
             loader: LoaderConfig {
@@ -172,7 +172,7 @@ mod tests {
         ConfigManager::save_to_path(&path, &config).expect("测试配置应可写入临时目录");
         let loaded = ConfigManager::load_from_path(&path).expect("测试配置应可再次读取");
 
-        assert_eq!(loaded.appearance.theme_mode, "light");
+        assert_eq!(loaded.appearance.theme_mode, "custom_dark.toml");
         assert_eq!(loaded.appearance.log_content_font_size, 16.0);
         assert_eq!(loaded.loader.max_archive_depth, 4);
         assert!(loaded.loader.follow_symlinks);
@@ -207,7 +207,7 @@ mod tests {
 
         let (config, warning) = manager.load_with_warning();
 
-        assert_eq!(config.appearance.theme_mode, "dark");
+        assert_eq!(config.appearance.theme_mode, "dark.toml");
         assert!(warning.is_some());
     }
 }

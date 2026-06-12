@@ -249,14 +249,17 @@ fn render_scope_segment(
         .map(|scope| {
             let is_active = scope == active_scope;
             let app = app_handle.clone();
+            let icon = icon_for_search_scope(scope);
             div()
                 .id(SharedString::from(format!("log-search-scope-{scope:?}")))
                 .h(px(26.0))
                 .px_3()
                 .flex()
                 .items_center()
+                .gap_1()
                 .rounded_sm()
                 .text_size(px(12.0))
+                .line_height(px(26.0))
                 .cursor_pointer()
                 .text_color(rgb(if is_active {
                     theme.foreground
@@ -270,9 +273,29 @@ fn render_scope_segment(
                         app.set_log_search_scope(scope);
                     });
                 })
+                .child(render_button_icon(icon, is_active, &theme))
                 .child(scope.label())
         }),
     )
+}
+
+/// 返回搜索范围按钮前置图标，便于用户快速区分搜索范围。
+fn icon_for_search_scope(scope: SearchScope) -> ArgusIcon {
+    match scope {
+        SearchScope::CurrentFile => ArgusIcon::FileText,
+        SearchScope::Directory => ArgusIcon::Folder,
+        SearchScope::SelectedFiles => ArgusIcon::Logs,
+    }
+}
+
+/// 渲染和文字按钮状态一致的紧凑图标。
+fn render_button_icon(icon: ArgusIcon, is_active: bool, theme: &AppTheme) -> impl IntoElement {
+    let color = if is_active {
+        theme.foreground
+    } else {
+        theme.foreground_muted
+    };
+    crate::ui::components::icon::render_icon(icon, color, 13.0)
 }
 
 /// 渲染搜索选项切换按钮。
@@ -298,6 +321,7 @@ fn render_search_option_toggle(
         .justify_center()
         .rounded_sm()
         .text_size(px(12.0))
+        .line_height(px(26.0))
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
         .text_color(rgb(if is_active {
@@ -477,6 +501,7 @@ fn render_progress_and_actions(
         .when(search.task_state.is_running(), |this| {
             this.child(action_button(
                 "log-search-cancel",
+                ArgusIcon::Close,
                 "取消",
                 &theme,
                 move |_, _, cx| {
@@ -489,6 +514,7 @@ fn render_progress_and_actions(
         .when(!search.task_state.is_running(), |this| {
             this.child(action_button(
                 "log-search-count",
+                ArgusIcon::Search,
                 "计数",
                 &theme,
                 move |_, _, cx| {
@@ -499,7 +525,8 @@ fn render_progress_and_actions(
             ))
             .child(action_button(
                 "log-search-previous",
-                "上一个",
+                ArgusIcon::ArrowUp,
+                "",
                 &theme,
                 move |_, _, cx| {
                     update_search_app(&previous_app, cx, |app, app_cx| {
@@ -509,6 +536,7 @@ fn render_progress_and_actions(
             ))
             .child(action_button(
                 "log-search-next",
+                ArgusIcon::ArrowDown,
                 "下一个",
                 &theme,
                 move |_, _, cx| {
@@ -519,6 +547,7 @@ fn render_progress_and_actions(
             ))
             .child(action_button(
                 "log-search-start",
+                ArgusIcon::Search,
                 "搜索",
                 &theme,
                 move |_, _, cx| {
@@ -533,6 +562,7 @@ fn render_progress_and_actions(
 /// 渲染搜索窗口操作按钮。
 fn action_button(
     id: &'static str,
+    icon: ArgusIcon,
     label: &'static str,
     theme: &AppTheme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -540,16 +570,25 @@ fn action_button(
     div()
         .id(id)
         .h(px(28.0))
-        .px_3()
+        .when(label.is_empty(), |this| this.w(px(38.0)))
+        .when(!label.is_empty(), |this| this.px_3())
         .flex()
         .items_center()
         .justify_center()
+        .gap_1()
         .rounded_sm()
         .bg(rgb(theme.current_line))
         .hover(|this| this.bg(rgb(theme.selection)))
         .text_size(px(12.0))
+        .line_height(px(28.0))
+        .text_color(rgb(theme.foreground))
         .cursor_pointer()
-        .child(label)
+        .child(crate::ui::components::icon::render_icon(
+            icon,
+            theme.foreground_muted,
+            13.0,
+        ))
+        .when(!label.is_empty(), |this| this.child(label))
         .on_click(on_click)
 }
 
