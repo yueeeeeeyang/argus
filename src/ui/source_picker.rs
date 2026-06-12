@@ -29,8 +29,8 @@ use crate::utils::time_format::format_modified_time;
 const SOURCE_PICKER_LOCATION_WIDTH: f32 = 164.0;
 /// 文件列表固定行高。
 const SOURCE_PICKER_ROW_HEIGHT: f32 = 32.0;
-/// 无标题栏窗口顶部留白，和底部操作区留白保持更接近的呼吸感。
-const SOURCE_PICKER_TOP_PADDING: f32 = 24.0;
+/// 无标题栏窗口顶部留白，给右上角关闭按钮和路径栏保留清晰层次。
+const SOURCE_PICKER_TOP_PADDING: f32 = 34.0;
 /// 修改日期列宽度。
 const SOURCE_PICKER_MODIFIED_WIDTH: f32 = 128.0;
 /// 大小列宽度。
@@ -107,10 +107,12 @@ fn render_window_content(
     cx: &mut Context<SourcePickerWindow>,
 ) -> impl IntoElement + use<> {
     let theme = snapshot.theme.clone();
+    let close_app = app_handle.clone();
 
     div()
         .id("source-picker-window-root")
         .size_full()
+        .relative()
         .flex()
         .flex_col()
         .bg(rgb(theme.content))
@@ -124,6 +126,26 @@ fn render_window_content(
                 .flex()
                 .child(render_locations(snapshot, &theme, app_handle))
                 .child(render_browser(snapshot, &theme, app_handle, cx)),
+        )
+        .child(
+            div()
+                .id("source-picker-window-close")
+                .absolute()
+                .top(px(14.0))
+                .right(px(14.0))
+                .w(px(28.0))
+                .h(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|this| this.bg(rgb(theme.current_line)))
+                .child(render_icon(ArgusIcon::Close, theme.foreground_muted, 16.0))
+                .on_click(move |_, window, cx| {
+                    update_picker_app(&close_app, cx, |app, _| app.close_source_picker());
+                    window.remove_window();
+                }),
         )
 }
 
@@ -220,14 +242,16 @@ fn render_header(
     let input_key_app = app_handle.clone();
     let input_click_app = app_handle.clone();
     let input_pointer_app = app_handle.clone();
-    let close_app = app_handle.clone();
+    let refresh_app = app_handle.clone();
+    let refresh_dir = snapshot.source_picker.current_dir.clone();
 
     div()
         .h(px(64.0))
         .flex()
         .items_center()
         .gap_2()
-        .px_4()
+        .pl_4()
+        .pr_4()
         .bg(rgb(theme.content))
         .child(picker_icon_button(
             "source-picker-up",
@@ -294,14 +318,15 @@ fn render_header(
             },
         )))
         .child(picker_icon_button(
-            "source-picker-close",
-            ArgusIcon::Close,
-            "关闭",
+            "source-picker-refresh",
+            ArgusIcon::Refresh,
+            "刷新当前目录",
             true,
             theme,
-            move |_, window, cx| {
-                update_picker_app(&close_app, cx, |app, _| app.close_source_picker());
-                window.remove_window();
+            move |_, _, cx| {
+                update_picker_app(&refresh_app, cx, |app, app_cx| {
+                    app.navigate_source_picker(refresh_dir.clone(), app_cx);
+                });
             },
         ))
 }

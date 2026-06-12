@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod compressed_tar;
 pub mod detector;
+pub mod gzip_adapter;
 pub mod rar_adapter;
 pub mod registry;
 pub mod sevenz_adapter;

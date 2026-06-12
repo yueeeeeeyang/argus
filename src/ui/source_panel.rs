@@ -19,12 +19,17 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
 
     div()
+        .id("argus-source-panel")
         .w(px(app.source_panel_width))
         .h_full()
         .flex()
         .flex_none()
         .flex_col()
         .bg(rgb(theme.side_bar))
+        .on_click(cx.listener(|app, _, _, cx| {
+            app.clear_log_text_focus();
+            cx.notify();
+        }))
         .child(
             div()
                 .h(px(40.0))

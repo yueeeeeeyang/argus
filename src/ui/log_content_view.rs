@@ -8,14 +8,17 @@ use std::ops::Range;
 
 use crate::app::{
     ArgusApp, LOG_VIEWER_TEXT_LEFT_PADDING, LOG_VIEWER_TEXT_RIGHT_PADDING, LogScrollbarAxis,
-    LogScrollbarDrag, TabKind, log_viewer_display_text, log_viewer_line_number_width,
+    LogScrollbarDrag, SearchResultListItem, SearchResultScrollbarAxis, SearchResultScrollbarDrag,
+    TabKind, log_viewer_display_text, log_viewer_line_number_width,
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
     HighlightCache, HighlightLanguage, HighlightSpan, HighlightTokenKind, detect_highlight_language,
 };
-use crate::reader::log_file_reader::{
-    DisplayedLogLine, LogDocument, LogOpenState, LogReaderHandle,
+use crate::reader::log_file_reader::{LogDocument, LogOpenState, LogReaderHandle};
+use crate::search::search_task::SearchTaskState;
+use crate::text_selection::{
+    byte_index_for_character, char_column_for_byte_index, character_count, slice_character_range,
 };
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
@@ -39,6 +42,26 @@ const LOG_SCROLLBAR_WIDTH: f32 = 5.0;
 const LOG_SCROLLBAR_PADDING: f32 = 4.0;
 /// 自绘滚动条最小滑块长度。
 const LOG_SCROLLBAR_MIN_THUMB: f32 = 32.0;
+/// 搜索结果面板固定行高。
+const SEARCH_RESULT_ROW_HEIGHT: f32 = 34.0;
+/// 搜索结果列表最小内容宽度，超出面板宽度时启用横向滚动条。
+const SEARCH_RESULT_ROW_MIN_WIDTH: f32 = 760.0;
+/// 搜索结果行左侧行号列宽度。
+const SEARCH_RESULT_LINE_LABEL_WIDTH: f32 = 78.0;
+/// 搜索结果行横向内边距总和。
+const SEARCH_RESULT_ROW_HORIZONTAL_PADDING: f32 = 24.0;
+/// 搜索结果行固定列间距。
+const SEARCH_RESULT_ROW_GAP_WIDTH: f32 = 8.0;
+/// 搜索结果中 ASCII 字符的宽度估算，用于提前撑开横向滚动内容。
+const SEARCH_RESULT_ASCII_CHAR_WIDTH: f32 = 7.4;
+/// 搜索结果中中文等宽字符的宽度估算，避免混排内容在面板中提前换行。
+const SEARCH_RESULT_WIDE_CHAR_WIDTH: f32 = 13.0;
+/// 搜索结果预览最大字符数；不截断结果数量，只限制单行预览渲染成本。
+const SEARCH_RESULT_PREVIEW_MAX_CHARS: usize = 420;
+/// 搜索结果预览中命中点前后的上下文字符数。
+const SEARCH_RESULT_PREVIEW_CONTEXT_CHARS: usize = 160;
+/// 分页日志横向切片的额外字符缓冲，避免轻微估算误差导致滚动边缘露白。
+const PAGED_LOG_HORIZONTAL_OVERSCAN_COLUMNS: usize = 96;
 
 /// 滚动条渲染和拖拽所需的度量数据。
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +76,15 @@ struct LogScrollbarMetrics {
     track_length: gpui::Pixels,
     /// 最大滚动距离。
     max_scroll: gpui::Pixels,
+}
+
+/// 分页日志单行实际交给 GPUI 渲染的可见文本切片。
+#[derive(Clone, Debug)]
+struct LogVisibleText {
+    /// 当前切片文本。
+    text: String,
+    /// 当前切片在完整展示文本中的字符范围。
+    char_range: Range<usize>,
 }
 
 /// 渲染日志内容区。
@@ -72,10 +104,18 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
         .flex_col()
         .overflow_hidden()
         .bg(rgb(theme.content))
-        .when(app.is_search_panel_open, |this| {
-            this.child(render_search_panel(app, cx))
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(render_content_body(app, &theme, cx)),
+        )
+        .when(app.should_show_log_search_results(), |this| {
+            this.child(render_search_results_panel(app, &theme, cx))
         })
-        .child(render_content_body(app, &theme, cx))
 }
 
 /// 根据当前内容状态渲染主体区域。
@@ -177,6 +217,10 @@ fn render_in_memory_log(
         .overflow_hidden()
         .bg(rgb(theme.content))
         .focusable()
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.focus_log_text_view(tab_id);
+            cx.notify();
+        }))
         .on_key_down(cx.listener(|app, event: &KeyDownEvent, _, cx| {
             cx.stop_propagation();
             app.handle_log_text_key(&event.keystroke, cx);
@@ -243,34 +287,40 @@ fn render_paged_log(
     let lines = handle
         .lines(first_line_index, visible_rows)
         .unwrap_or_default();
-    let horizontal_offset = px(-(state.paged_scroll.left_px as f32));
     let line_number_width = log_viewer_line_number_width(line_count);
+    let (visible_char_range, horizontal_offset) = paged_visible_text_range(
+        state.paged_scroll.left_px,
+        viewport_bounds.size.width,
+        line_number_width,
+        app.log_content_font_size,
+    );
     let rows = lines
         .into_iter()
-        .filter_map(|line| {
+        .map(|line| {
             let row_offset = line.line_number.saturating_sub(first_line_index);
             let top = row_offset as f32 * LOG_VIEWER_ROW_HEIGHT - fractional_top;
-            Some(
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .top(px(top))
-                    .h(px(LOG_VIEWER_ROW_HEIGHT))
-                    .child(render_log_line(
-                        app,
-                        theme,
-                        tab_id,
-                        line,
-                        language,
-                        &state.highlight_cache,
-                        horizontal_offset,
-                        px(0.0),
-                        line_number_width,
-                        cx,
-                    ))
-                    .into_any_element(),
-            )
+            div()
+                .absolute()
+                .left(px(0.0))
+                .right(px(0.0))
+                .top(px(top))
+                .h(px(LOG_VIEWER_ROW_HEIGHT))
+                .child(render_log_line(
+                    app,
+                    theme,
+                    tab_id,
+                    line.line_number,
+                    &line.text,
+                    language,
+                    &state.highlight_cache,
+                    horizontal_offset,
+                    px(0.0),
+                    line_number_width,
+                    Some(visible_char_range.clone()),
+                    true,
+                    cx,
+                ))
+                .into_any_element()
         })
         .collect::<Vec<_>>();
 
@@ -282,6 +332,10 @@ fn render_paged_log(
         .bg(rgb(theme.content))
         .focusable()
         .track_scroll(&state.paged_viewport_handle)
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.focus_log_text_view(tab_id);
+            cx.notify();
+        }))
         .on_scroll_wheel(cx.listener(move |app, event: &ScrollWheelEvent, _, cx| {
             cx.stop_propagation();
             app.scroll_paged_log(tab_id, source_id, event);
@@ -356,12 +410,15 @@ fn render_log_line_range(
                 app,
                 &theme,
                 tab_id,
-                line,
+                line.line_number,
+                &line.text,
                 language,
                 &highlight_cache,
                 px(0.0),
                 line_number_offset,
                 line_number_width,
+                None,
+                true,
                 cx,
             )
             .into_any_element()
@@ -374,25 +431,90 @@ fn render_log_line(
     app: &ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
-    line: DisplayedLogLine,
+    line_number: usize,
+    line_text: &str,
     language: HighlightLanguage,
     highlight_cache: &HighlightCache,
     horizontal_offset: gpui::Pixels,
     line_number_offset: gpui::Pixels,
     line_number_width: f32,
+    visible_char_range: Option<Range<usize>>,
+    enable_syntax_highlight: bool,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
-    let line_for_down = line.text.clone();
-    let line_for_move = line.text.clone();
-    let display_text = log_viewer_display_text(&line.text).into_owned();
     let selection_range =
-        app.log_text_selection_byte_range_for_line(tab_id, line.line_number, &line.text);
-    let syntax_spans = highlight_cache.highlight_line(line.line_number, language, &display_text);
-    let highlights = merge_syntax_and_selection_highlights(syntax_spans, selection_range, theme);
-    let text_element = if highlights.is_empty() {
-        display_text.into_any_element()
+        app.log_text_selection_byte_range_for_line(tab_id, line_number, line_text);
+    let active_match = app
+        .log_tab_view_state(tab_id)
+        .and_then(|state| state.active_search_match.as_ref())
+        .filter(|active_match| active_match.line_number == line_number);
+    let has_overlay_ranges = selection_range.is_some() || active_match.is_some();
+    let (visible_text, selection_range, search_ranges, active_search_range) = if has_overlay_ranges
+    {
+        let full_display_text = log_viewer_display_text(line_text).into_owned();
+        let visible_text = visible_log_text(&full_display_text, visible_char_range.as_ref());
+        let search_ranges = active_match.map(|active_match| {
+            search_ranges_for_display(line_text, &full_display_text, &active_match.match_ranges)
+        });
+        let active_search_range = active_match.and_then(|active_match| {
+            active_match.active_range.as_ref().and_then(|range| {
+                search_ranges_for_display(line_text, &full_display_text, &active_match.match_ranges)
+                    .into_iter()
+                    .zip(active_match.match_ranges.iter())
+                    .find_map(|(display_range, original_range)| {
+                        if original_range == range {
+                            Some(display_range)
+                        } else {
+                            None
+                        }
+                    })
+            })
+        });
+        let selection_range = selection_range.and_then(|range| {
+            clip_display_range_to_visible(&full_display_text, &visible_text, range)
+        });
+        let search_ranges = search_ranges.map(|ranges| {
+            ranges
+                .into_iter()
+                .filter_map(|range| {
+                    clip_display_range_to_visible(&full_display_text, &visible_text, range)
+                })
+                .collect::<Vec<_>>()
+        });
+        let active_search_range = active_search_range.and_then(|range| {
+            clip_display_range_to_visible(&full_display_text, &visible_text, range)
+        });
+
+        (
+            visible_text,
+            selection_range,
+            search_ranges,
+            active_search_range,
+        )
     } else {
-        StyledText::new(display_text.clone())
+        (
+            visible_log_text_from_raw(line_text, visible_char_range.as_ref()),
+            None,
+            None,
+            None,
+        )
+    };
+    let syntax_spans = if enable_syntax_highlight {
+        highlight_cache.highlight_line(line_number, language, &visible_text.text)
+    } else {
+        Vec::new()
+    };
+    let highlights = merge_log_line_highlights(
+        syntax_spans,
+        selection_range,
+        search_ranges,
+        active_search_range,
+        theme,
+    );
+    let text_element = if highlights.is_empty() {
+        visible_text.text.into_any_element()
+    } else {
+        StyledText::new(visible_text.text)
             .with_highlights(highlights)
             .into_any_element()
     };
@@ -400,7 +522,7 @@ fn render_log_line(
     div()
         .id(SharedString::from(format!(
             "log-line-{}-{}",
-            tab_id, line.line_number
+            tab_id, line_number
         )))
         .relative()
         .h(px(LOG_VIEWER_ROW_HEIGHT))
@@ -408,6 +530,12 @@ fn render_log_line(
         .line_height(px(LOG_VIEWER_ROW_HEIGHT))
         .font_family(ARGUS_LOG_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
+        .when(
+            app.log_tab_view_state(tab_id)
+                .and_then(|state| state.active_search_match.as_ref())
+                .is_some_and(|active_match| active_match.line_number == line_number),
+            |row| row.bg(rgb(theme.current_line)),
+        )
         .hover(|row| row.bg(rgb(theme.current_line)))
         .child(
             div()
@@ -434,21 +562,23 @@ fn render_log_line(
                 .items_center()
                 .justify_end()
                 .text_color(rgb(theme.foreground_muted))
-                .child((line.line_number + 1).to_string()),
+                .child((line_number + 1).to_string()),
         )
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                app.begin_log_text_selection_with_click_count(
-                    tab_id,
-                    line.line_number,
-                    &line_for_down,
-                    event.position.x,
-                    event.click_count,
-                    window,
-                );
-                cx.notify();
+                if let Some(line_text) = app.log_line_text_for_tab(tab_id, line_number) {
+                    app.begin_log_text_selection_with_click_count(
+                        tab_id,
+                        line_number,
+                        &line_text,
+                        event.position.x,
+                        event.click_count,
+                        window,
+                    );
+                    cx.notify();
+                }
             }),
         )
         .on_mouse_move(cx.listener(move |app, event: &MouseMoveEvent, window, cx| {
@@ -457,25 +587,165 @@ fn render_log_line(
                     return;
                 }
                 cx.stop_propagation();
-                app.update_log_text_selection(
-                    tab_id,
-                    line.line_number,
-                    &line_for_move,
-                    event.position.x,
-                    window,
-                );
-                cx.notify();
+                if let Some(line_text) = app.log_line_text_for_tab(tab_id, line_number) {
+                    app.update_log_text_selection(
+                        tab_id,
+                        line_number,
+                        &line_text,
+                        event.position.x,
+                        window,
+                    );
+                    cx.notify();
+                }
             }
         }))
 }
 
-/// 合并语法高亮和选区高亮；选区优先，避免 GPUI 收到重叠 highlight。
-fn merge_syntax_and_selection_highlights(
+/// 根据分页日志横向滚动位置计算当前需要渲染的字符范围。
+///
+/// 说明：GPUI 对超长 `StyledText` 的 shaping 成本很高。分页日志只渲染横向可视范围附近
+/// 的文本片段，选择和复制仍使用完整行文本，避免切 tab 时被超长行拖慢。
+fn paged_visible_text_range(
+    scroll_left: f64,
+    viewport_width: gpui::Pixels,
+    line_number_width: f32,
+    font_size: f32,
+) -> (Range<usize>, gpui::Pixels) {
+    let estimated_char_width = estimated_log_char_width(font_size) as f64;
+    let text_viewport_width = (f32::from(viewport_width)
+        - line_number_width
+        - LOG_VIEWER_TEXT_LEFT_PADDING
+        - LOG_VIEWER_TEXT_RIGHT_PADDING)
+        .max(0.0);
+    let first_visible_column = (scroll_left / estimated_char_width).floor().max(0.0) as usize;
+    let start_column = first_visible_column.saturating_sub(PAGED_LOG_HORIZONTAL_OVERSCAN_COLUMNS);
+    let visible_columns = (text_viewport_width / estimated_char_width as f32).ceil() as usize;
+    let end_column = first_visible_column
+        .saturating_add(visible_columns)
+        .saturating_add(PAGED_LOG_HORIZONTAL_OVERSCAN_COLUMNS * 2)
+        .max(start_column);
+    let residual_offset = scroll_left - start_column as f64 * estimated_char_width;
+
+    (start_column..end_column, px(-(residual_offset as f32)))
+}
+
+/// 返回日志字体的横向宽度估算，供分页切片和横向滚动范围共用。
+fn estimated_log_char_width(font_size: f32) -> f32 {
+    (font_size * 0.62).max(6.0)
+}
+
+/// 从完整展示文本中截取本次真正需要渲染的片段。
+fn visible_log_text(full_text: &str, visible_char_range: Option<&Range<usize>>) -> LogVisibleText {
+    let full_char_count = character_count(full_text);
+    let Some(range) = visible_char_range else {
+        return LogVisibleText {
+            text: full_text.to_string(),
+            char_range: 0..full_char_count,
+        };
+    };
+
+    let start = range.start.min(full_char_count);
+    let end = range.end.min(full_char_count).max(start);
+    LogVisibleText {
+        text: slice_character_range(full_text, start..end),
+        char_range: start..end,
+    }
+}
+
+/// 从原始日志行中按展示列截取可见片段，避免分页长行先展开整行再切片。
+///
+/// 处理原因：
+/// - 分页日志常见单行很长，切 tab 或首帧显示时如果先构造整行展示文本，
+///   即使最终只显示横向可见区域，也会在 UI 线程产生明显停顿。
+/// - 当前日志显示规则只要求 `\t` 展开为 4 个空格，因此可以线性扫描到可见结束列后立即停止。
+fn visible_log_text_from_raw(
+    raw_text: &str,
+    visible_char_range: Option<&Range<usize>>,
+) -> LogVisibleText {
+    let Some(range) = visible_char_range else {
+        let display_text = log_viewer_display_text(raw_text).into_owned();
+        let char_count = character_count(&display_text);
+        return LogVisibleText {
+            text: display_text,
+            char_range: 0..char_count,
+        };
+    };
+
+    let mut display_column = 0_usize;
+    let mut text = String::new();
+    for character in raw_text.chars() {
+        if display_column >= range.end {
+            break;
+        }
+
+        if character == '\t' {
+            let tab_end = display_column + 4;
+            let start = range.start.max(display_column);
+            let end = range.end.min(tab_end);
+            if start < end {
+                text.extend(std::iter::repeat(' ').take(end - start));
+            }
+            display_column = tab_end;
+            continue;
+        }
+
+        if display_column >= range.start {
+            text.push(character);
+        }
+        display_column += 1;
+    }
+
+    let clipped_start = range.start.min(display_column);
+    let clipped_end = range.end.min(display_column).max(clipped_start);
+    LogVisibleText {
+        text,
+        char_range: clipped_start..clipped_end,
+    }
+}
+
+/// 将完整展示文本上的 byte range 裁剪并平移到当前可见切片上。
+fn clip_display_range_to_visible(
+    full_text: &str,
+    visible_text: &LogVisibleText,
+    range: Range<usize>,
+) -> Option<Range<usize>> {
+    if range.start >= range.end {
+        return None;
+    }
+
+    let start_column = char_column_for_byte_index(full_text, range.start);
+    let end_column = char_column_for_byte_index(full_text, range.end);
+    let clipped_start = start_column.max(visible_text.char_range.start);
+    let clipped_end = end_column.min(visible_text.char_range.end);
+    if clipped_start >= clipped_end {
+        return None;
+    }
+
+    let local_start = clipped_start - visible_text.char_range.start;
+    let local_end = clipped_end - visible_text.char_range.start;
+    Some(
+        byte_index_for_character(&visible_text.text, local_start)
+            ..byte_index_for_character(&visible_text.text, local_end),
+    )
+}
+
+/// 合并语法高亮、搜索命中和选区高亮；选区优先，避免 GPUI 收到重叠 highlight。
+fn merge_log_line_highlights(
     syntax_spans: Vec<HighlightSpan>,
     selection_range: Option<Range<usize>>,
+    search_ranges: Option<Vec<Range<usize>>>,
+    active_search_range: Option<Range<usize>>,
     theme: &AppTheme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut highlights = Vec::new();
+    let search_ranges = search_ranges.unwrap_or_default();
+    let mut protected_ranges = search_ranges.clone();
+    if let Some(active_range) = active_search_range.clone() {
+        protected_ranges.push(active_range);
+    }
+    if let Some(selection) = selection_range.clone() {
+        protected_ranges.push(selection);
+    }
 
     for span in syntax_spans {
         let syntax_style = HighlightStyle {
@@ -483,25 +753,41 @@ fn merge_syntax_and_selection_highlights(
             ..Default::default()
         };
 
-        if let Some(selection) = selection_range.as_ref()
-            && ranges_overlap(&span.range, selection)
-        {
-            push_syntax_piece_before_selection(
-                &mut highlights,
-                &span.range,
-                selection,
-                syntax_style.clone(),
-            );
-            push_syntax_piece_after_selection(
-                &mut highlights,
-                &span.range,
-                selection,
-                syntax_style,
-            );
+        for visible_range in subtract_ranges(span.range, &protected_ranges) {
+            highlights.push((visible_range, syntax_style.clone()));
+        }
+    }
+
+    for range in search_ranges
+        .into_iter()
+        .filter(|range| range.start < range.end)
+    {
+        if active_search_range.as_ref() == Some(&range) {
             continue;
         }
+        push_non_overlapping_highlight(
+            &mut highlights,
+            range,
+            selection_range.as_ref(),
+            HighlightStyle {
+                background_color: Some(rgb(theme.current_line).into()),
+                color: Some(rgb(theme.foreground).into()),
+                ..Default::default()
+            },
+        );
+    }
 
-        highlights.push((span.range, syntax_style));
+    if let Some(active_range) = active_search_range.filter(|range| range.start < range.end) {
+        push_non_overlapping_highlight(
+            &mut highlights,
+            active_range,
+            selection_range.as_ref(),
+            HighlightStyle {
+                background_color: Some(rgb(theme.warning).into()),
+                color: Some(rgb(theme.background).into()),
+                ..Default::default()
+            },
+        );
     }
 
     if let Some(selection) = selection_range {
@@ -519,30 +805,64 @@ fn merge_syntax_and_selection_highlights(
     highlights
 }
 
-/// 保留选区左侧未被覆盖的语法颜色片段。
-fn push_syntax_piece_before_selection(
-    highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
-    syntax_range: &Range<usize>,
-    selection_range: &Range<usize>,
-    syntax_style: HighlightStyle,
-) {
-    let end = syntax_range.end.min(selection_range.start);
-    if syntax_range.start < end {
-        highlights.push((syntax_range.start..end, syntax_style));
-    }
+/// 保持旧单元测试可读性的二元合并入口。
+#[cfg(test)]
+fn merge_syntax_and_selection_highlights(
+    syntax_spans: Vec<HighlightSpan>,
+    selection_range: Option<Range<usize>>,
+    theme: &AppTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    merge_log_line_highlights(syntax_spans, selection_range, None, None, theme)
 }
 
-/// 保留选区右侧未被覆盖的语法颜色片段。
-fn push_syntax_piece_after_selection(
+/// 将一段搜索高亮加入现有集合，并避开选区范围。
+fn push_non_overlapping_highlight(
     highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
-    syntax_range: &Range<usize>,
-    selection_range: &Range<usize>,
-    syntax_style: HighlightStyle,
+    range: Range<usize>,
+    selection_range: Option<&Range<usize>>,
+    style: HighlightStyle,
 ) {
-    let start = syntax_range.start.max(selection_range.end);
-    if start < syntax_range.end {
-        highlights.push((start..syntax_range.end, syntax_style));
+    if let Some(selection) = selection_range
+        && ranges_overlap(&range, selection)
+    {
+        if range.start < selection.start {
+            highlights.push((range.start..range.end.min(selection.start), style.clone()));
+        }
+        if selection.end < range.end {
+            highlights.push((range.start.max(selection.end)..range.end, style));
+        }
+        return;
     }
+
+    highlights.push((range, style));
+}
+
+/// 从基础范围中扣除保护范围，返回可以继续使用语法色的非重叠片段。
+fn subtract_ranges(range: Range<usize>, protected_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut pieces = vec![range];
+    for protected in protected_ranges {
+        pieces = pieces
+            .into_iter()
+            .flat_map(|piece| subtract_single_range(piece, protected))
+            .collect();
+    }
+    pieces
+}
+
+/// 从单个范围中扣除一个保护范围。
+fn subtract_single_range(range: Range<usize>, protected: &Range<usize>) -> Vec<Range<usize>> {
+    if !ranges_overlap(&range, protected) {
+        return vec![range];
+    }
+
+    let mut pieces = Vec::new();
+    if range.start < protected.start {
+        pieces.push(range.start..range.end.min(protected.start));
+    }
+    if protected.end < range.end {
+        pieces.push(range.start.max(protected.end)..range.end);
+    }
+    pieces
 }
 
 /// 判断两个半开区间是否重叠。
@@ -576,6 +896,92 @@ fn color_for_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 
         HighlightTokenKind::Lock => theme.syntax.lock,
         HighlightTokenKind::Exception => theme.syntax.exception,
     }
+}
+
+/// 构造搜索结果行预览；长行只截取命中附近文本，避免列表滚动时处理整条超长日志。
+fn search_result_preview_text(
+    result: &crate::search::search_engine::SearchResult,
+) -> (String, Vec<Range<usize>>) {
+    let total_chars = character_count(&result.line_text);
+    if total_chars <= SEARCH_RESULT_PREVIEW_MAX_CHARS {
+        return (result.line_text.clone(), result.match_ranges.clone());
+    }
+
+    let first_match_column = result
+        .match_ranges
+        .first()
+        .map(|range| char_column_for_byte_index(&result.line_text, range.start))
+        .unwrap_or(0);
+    let mut preview_start = first_match_column.saturating_sub(SEARCH_RESULT_PREVIEW_CONTEXT_CHARS);
+    let mut preview_end = (preview_start + SEARCH_RESULT_PREVIEW_MAX_CHARS).min(total_chars);
+    if preview_end == total_chars {
+        preview_start = total_chars.saturating_sub(SEARCH_RESULT_PREVIEW_MAX_CHARS);
+        preview_end = total_chars;
+    }
+
+    let has_prefix = preview_start > 0;
+    let has_suffix = preview_end < total_chars;
+    let prefix = if has_prefix { "..." } else { "" };
+    let suffix = if has_suffix { "..." } else { "" };
+    let prefix_len = character_count(prefix);
+    let mut preview_text = String::new();
+    preview_text.push_str(prefix);
+    preview_text.push_str(&slice_character_range(
+        &result.line_text,
+        preview_start..preview_end,
+    ));
+    preview_text.push_str(suffix);
+
+    let preview_ranges = result
+        .match_ranges
+        .iter()
+        .filter_map(|range| {
+            let start_column = char_column_for_byte_index(&result.line_text, range.start);
+            let end_column = char_column_for_byte_index(&result.line_text, range.end);
+            let clipped_start = start_column.max(preview_start);
+            let clipped_end = end_column.min(preview_end);
+            if clipped_start >= clipped_end {
+                return None;
+            }
+
+            let local_start = clipped_start - preview_start + prefix_len;
+            let local_end = clipped_end - preview_start + prefix_len;
+            let start = byte_index_for_character(&preview_text, local_start);
+            let end = byte_index_for_character(&preview_text, local_end);
+            (start < end).then_some(start..end)
+        })
+        .collect();
+
+    (preview_text, preview_ranges)
+}
+
+/// 将基于原始日志行的搜索字节范围转换为展示文本范围；制表符展开后需要重新映射。
+fn search_ranges_for_display(
+    raw_text: &str,
+    display_text: &str,
+    ranges: &[Range<usize>],
+) -> Vec<Range<usize>> {
+    ranges
+        .iter()
+        .filter_map(|range| {
+            let raw_start_column = char_column_for_byte_index(raw_text, range.start);
+            let raw_end_column = char_column_for_byte_index(raw_text, range.end);
+            let display_start_column = display_column_for_raw_column(raw_text, raw_start_column);
+            let display_end_column = display_column_for_raw_column(raw_text, raw_end_column);
+            let start = byte_index_for_character(display_text, display_start_column);
+            let end = byte_index_for_character(display_text, display_end_column);
+            (start < end).then_some(start..end)
+        })
+        .collect()
+}
+
+/// 根据原始行字符列计算制表符展开后的展示列。
+fn display_column_for_raw_column(raw_text: &str, raw_column: usize) -> usize {
+    raw_text
+        .chars()
+        .take(raw_column)
+        .map(|ch| if ch == '\t' { 4 } else { 1 })
+        .sum()
 }
 
 /// 渲染小日志虚拟列表的横纵滚动条。
@@ -652,7 +1058,7 @@ fn render_paged_scrollbars(
         return Vec::new();
     }
 
-    let estimated_char_width = (app.log_content_font_size * 0.62).max(6.0);
+    let estimated_char_width = estimated_log_char_width(app.log_content_font_size);
     let line_number_width = log_viewer_line_number_width(handle.line_count());
     let content_width = px(handle.estimated_longest_display_columns() as f32
         * estimated_char_width
@@ -892,6 +1298,666 @@ fn render_scrollbar_thumb(
         .into_any_element()
 }
 
+/// 渲染日志搜索结果底部面板。
+fn render_search_results_panel(
+    app: &ArgusApp,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let result_count = app.log_search.results.len();
+    let visible_item_count = app.log_search.visible_result_items.len();
+    let is_running = app.log_search.task_state.is_running();
+    let panel_title = match app.log_search.task_state {
+        SearchTaskState::Idle => "搜索结果".to_string(),
+        SearchTaskState::Running => "正在搜索".to_string(),
+        SearchTaskState::Finished => "搜索完成".to_string(),
+        SearchTaskState::Cancelled => "搜索已取消".to_string(),
+        SearchTaskState::Failed(ref message) => format!("搜索失败：{message}"),
+    };
+    let status_text = if is_running {
+        search_progress_text(app)
+    } else {
+        format!("共 {result_count} 条结果")
+    };
+
+    div()
+        .id("log-search-results-panel")
+        .relative()
+        .h(px(app.log_search.result_panel_height))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .border_t_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.status_bar))
+        .occlude()
+        .child(render_search_results_resize_handle(theme, cx))
+        .child(
+            div()
+                .h(px(36.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(if is_running {
+                            render_loading_spinner(
+                                ("log-search-results-spinner", 0),
+                                theme.foreground_muted,
+                                14.0,
+                            )
+                            .into_any_element()
+                        } else {
+                            render_icon(ArgusIcon::Search, theme.foreground_muted, 14.0)
+                                .into_any_element()
+                        })
+                        .child(panel_title),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .truncate()
+                        .text_color(rgb(theme.foreground_muted))
+                        .child(status_text),
+                )
+                .when(is_running, |this| {
+                    this.child(action_text_button(
+                        "log-search-results-cancel",
+                        "取消",
+                        theme,
+                        cx.listener(|app, _, _, cx| {
+                            app.cancel_log_search();
+                            cx.notify();
+                        }),
+                    ))
+                })
+                .child(render_icon_button(
+                    "log-search-results-close",
+                    ArgusIcon::Close,
+                    "关闭结果",
+                    false,
+                    IconButtonSize::Small,
+                    theme,
+                    cx.listener(|app, _, _, cx| {
+                        app.close_log_search_results_panel();
+                        cx.notify();
+                    }),
+                )),
+        )
+        .when(result_count == 0, |this| {
+            this.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.foreground_muted))
+                    .child(
+                        app.log_search
+                            .message
+                            .clone()
+                            .unwrap_or_else(|| "暂无搜索结果".to_string()),
+                    ),
+            )
+        })
+        .when(result_count > 0 && visible_item_count > 0, |this| {
+            this.child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(
+                        uniform_list(
+                            "log-search-result-list",
+                            visible_item_count,
+                            cx.processor(|app, range: Range<usize>, _window, cx| {
+                                let theme = app.theme.clone();
+                                let items = app.log_search.visible_result_items[range].to_vec();
+                                items
+                                    .iter()
+                                    .map(|item| render_search_result_item(app, *item, &theme, cx))
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .with_width_from_item(Some(0))
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .size_full()
+                        .block_mouse_except_scroll()
+                        .track_scroll(app.log_search.result_scroll.clone()),
+                    )
+                    .children(render_search_results_scrollbars(app, theme, cx)),
+            )
+        })
+}
+
+/// 渲染搜索结果面板顶部拖拽条，用于调整底部面板高度。
+fn render_search_results_resize_handle(
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let entity = cx.entity();
+
+    div()
+        .id("log-search-results-resize-handle")
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .h(px(6.0))
+        .cursor_pointer()
+        .occlude()
+        .hover(|this| this.bg(rgb(theme.border)))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window: &mut Window, _| {
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseDownEvent, phase, _, cx| {
+                            if !phase.bubble()
+                                || event.button != MouseButton::Left
+                                || !bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            entity.update(cx, |app, _| {
+                                app.begin_search_result_panel_resize(event.position.y);
+                            });
+                            cx.notify(entity.entity_id());
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseUpEvent, phase, _, cx| {
+                            if !phase.bubble() || event.button != MouseButton::Left {
+                                return;
+                            }
+                            let handled =
+                                entity.update(cx, |app, _| app.finish_search_result_panel_resize());
+                            if handled {
+                                cx.stop_propagation();
+                                cx.notify(entity.entity_id());
+                            }
+                        }
+                    });
+
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if !phase.bubble() || !event.dragging() {
+                            return;
+                        }
+                        let handled = entity.update(cx, |app, _| {
+                            app.resize_search_result_panel(event.position.y)
+                        });
+                        if handled {
+                            cx.stop_propagation();
+                            cx.notify(entity.entity_id());
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+}
+
+/// 根据虚拟列表行类型分派渲染搜索分组或命中结果。
+fn render_search_result_item(
+    app: &ArgusApp,
+    item: SearchResultListItem,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    match item {
+        SearchResultListItem::Group(group_index) => {
+            render_search_result_group_row(app, group_index, theme, cx).into_any_element()
+        }
+        SearchResultListItem::Result(result_index) => {
+            let Some(result) = app.log_search.results.get(result_index) else {
+                return div().h(px(SEARCH_RESULT_ROW_HEIGHT)).into_any_element();
+            };
+            render_search_result_row(app, result_index, result, theme, cx).into_any_element()
+        }
+    }
+}
+
+/// 渲染搜索结果文件分组行。
+fn render_search_result_group_row(
+    app: &ArgusApp,
+    group_index: usize,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let Some(group) = app.log_search.result_groups.get(group_index) else {
+        return div().h(px(SEARCH_RESULT_ROW_HEIGHT)).into_any_element();
+    };
+    let is_collapsed = app
+        .log_search
+        .collapsed_result_groups
+        .contains(&group.source_id);
+    let result_count = group.end_index.saturating_sub(group.start_index);
+    let group_intrinsic_width = SEARCH_RESULT_ROW_HORIZONTAL_PADDING
+        + 14.0
+        + 14.0
+        + 76.0
+        + SEARCH_RESULT_ROW_GAP_WIDTH * 3.0
+        + estimated_search_result_text_width(&group.label)
+        + estimated_search_result_text_width(&group.path);
+    let row_width = search_result_row_width(app, group_intrinsic_width);
+
+    div()
+        .id(SharedString::from(format!(
+            "log-search-result-group-{group_index}"
+        )))
+        .h(px(SEARCH_RESULT_ROW_HEIGHT))
+        .w(px(row_width))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_2()
+        .whitespace_nowrap()
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(theme.foreground))
+        .bg(rgb(theme.current_line))
+        .hover(|this| this.bg(rgb(theme.selection)))
+        .cursor_pointer()
+        .child(render_icon(
+            if is_collapsed {
+                ArgusIcon::Expand
+            } else {
+                ArgusIcon::Collapse
+            },
+            theme.foreground_muted,
+            14.0,
+        ))
+        .child(render_icon(
+            ArgusIcon::FileText,
+            theme.foreground_muted,
+            14.0,
+        ))
+        .child(
+            div()
+                .flex_none()
+                .max_w(px(220.0))
+                .truncate()
+                .child(group.label.clone()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_color(rgb(theme.foreground_muted))
+                .child(group.path.clone()),
+        )
+        .child(
+            div()
+                .w(px(76.0))
+                .text_right()
+                .text_color(rgb(theme.foreground_muted))
+                .child(format!("{result_count} 条")),
+        )
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.toggle_search_result_group(group_index);
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+/// 渲染搜索结果中的一行。
+fn render_search_result_row(
+    app: &ArgusApp,
+    index: usize,
+    result: &crate::search::search_engine::SearchResult,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let is_active = app.log_search.active_result_index == Some(index);
+    let (preview_text, preview_match_ranges) = search_result_preview_text(result);
+    let display_text = log_viewer_display_text(&preview_text).into_owned();
+    let match_ranges =
+        search_ranges_for_display(&preview_text, &display_text, &preview_match_ranges);
+    let text_width = estimated_search_result_text_width(&display_text);
+    let row_width = search_result_row_width(
+        app,
+        SEARCH_RESULT_ROW_HORIZONTAL_PADDING
+            + SEARCH_RESULT_LINE_LABEL_WIDTH
+            + SEARCH_RESULT_ROW_GAP_WIDTH
+            + text_width,
+    );
+    let text_element = StyledText::new(display_text)
+        .with_highlights(
+            match_ranges
+                .into_iter()
+                .map(|range| {
+                    (
+                        range,
+                        HighlightStyle {
+                            background_color: Some(rgb(theme.warning).into()),
+                            color: Some(rgb(theme.background).into()),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_any_element();
+
+    div()
+        .id(SharedString::from(format!("log-search-result-{index}")))
+        .h(px(34.0))
+        .w(px(row_width))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_2()
+        .whitespace_nowrap()
+        .text_size(px(12.0))
+        .cursor_pointer()
+        .when(is_active, |this| this.bg(rgb(theme.selection)))
+        .hover(|this| this.bg(rgb(theme.current_line)))
+        .child(
+            div()
+                .w(px(78.0))
+                .flex_none()
+                .text_color(rgb(theme.foreground_muted))
+                .child(format!("第 {} 行", result.line_number + 1)),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(text_width.max(1.0)))
+                .whitespace_nowrap()
+                .font_family(ARGUS_LOG_FONT_FAMILY)
+                .text_color(rgb(theme.foreground))
+                .child(text_element),
+        )
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.activate_search_result(index, cx);
+            cx.notify();
+        }))
+}
+
+/// 返回搜索结果行实际渲染宽度：至少撑满当前视口，内容更宽时交给横向滚动条。
+fn search_result_row_width(app: &ArgusApp, intrinsic_width: f32) -> f32 {
+    let viewport_width = search_result_viewport_width(app);
+    app.log_search
+        .result_list_content_width
+        .max(SEARCH_RESULT_ROW_MIN_WIDTH)
+        .max(viewport_width)
+        .max(intrinsic_width)
+}
+
+/// 读取搜索结果列表当前可视宽度；首帧尚未测量时返回 0，由最小宽度兜底。
+fn search_result_viewport_width(app: &ArgusApp) -> f32 {
+    let scroll_state = app.log_search.result_scroll.0.borrow();
+    f32::from(scroll_state.base_handle.bounds().size.width)
+}
+
+/// 估算搜索结果单行文本宽度，中文和其它非 ASCII 字符按更宽字形处理，避免提前换行。
+fn estimated_search_result_text_width(text: &str) -> f32 {
+    text.chars()
+        .map(|character| {
+            if character.is_ascii() {
+                SEARCH_RESULT_ASCII_CHAR_WIDTH
+            } else {
+                SEARCH_RESULT_WIDE_CHAR_WIDTH
+            }
+        })
+        .sum()
+}
+
+/// 渲染搜索结果面板自定义横纵滚动条。
+fn render_search_results_scrollbars(
+    app: &ArgusApp,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> Vec<AnyElement> {
+    let scroll_state = app.log_search.result_scroll.0.borrow();
+    let bounds = scroll_state.base_handle.bounds();
+    let offset = scroll_state.base_handle.offset();
+    let scroll_handle = scroll_state.base_handle.clone();
+    let size = scroll_state.last_item_size;
+    drop(scroll_state);
+
+    let Some(size) = size else {
+        return Vec::new();
+    };
+
+    let mut scrollbars = Vec::new();
+    if let Some(metrics) = scrollbar_metrics(
+        size.item.height,
+        size.contents.height,
+        -offset.y,
+        false,
+        px(0.0),
+    ) {
+        scrollbars.push(render_search_result_scrollbar_thumb(
+            SearchResultScrollbarAxis::Vertical,
+            metrics,
+            bounds,
+            scroll_handle.clone(),
+            theme,
+            cx,
+        ));
+    }
+
+    let content_width = size
+        .contents
+        .width
+        .max(px(app.log_search.result_list_content_width));
+    if let Some(metrics) =
+        scrollbar_metrics(bounds.size.width, content_width, -offset.x, true, px(0.0))
+    {
+        scrollbars.push(render_search_result_scrollbar_thumb(
+            SearchResultScrollbarAxis::Horizontal,
+            metrics,
+            bounds,
+            scroll_handle,
+            theme,
+            cx,
+        ));
+    }
+
+    scrollbars
+}
+
+/// 渲染搜索结果面板单个滚动条。
+fn render_search_result_scrollbar_thumb(
+    axis: SearchResultScrollbarAxis,
+    metrics: LogScrollbarMetrics,
+    viewport_bounds: gpui::Bounds<gpui::Pixels>,
+    scroll_handle: gpui::ScrollHandle,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    let entity = cx.entity();
+    let is_horizontal = axis == SearchResultScrollbarAxis::Horizontal;
+    let mut thumb = div()
+        .id(SharedString::from(format!(
+            "log-search-result-scrollbar-{axis:?}"
+        )))
+        .absolute()
+        .rounded_lg()
+        .bg(rgb(theme.foreground_muted))
+        .opacity(0.42)
+        .hover(|this| this.opacity(0.76))
+        .occlude();
+
+    thumb = if is_horizontal {
+        thumb
+            .left(metrics.thumb_start)
+            .bottom(px(3.0))
+            .w(metrics.thumb_length)
+            .h(px(LOG_SCROLLBAR_WIDTH))
+    } else {
+        thumb
+            .top(metrics.thumb_start)
+            .right(px(3.0))
+            .w(px(LOG_SCROLLBAR_WIDTH))
+            .h(metrics.thumb_length)
+    };
+
+    thumb
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |thumb_bounds, _, window: &mut Window, _| {
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseDownEvent, phase, _, cx| {
+                            if !phase.bubble()
+                                || event.button != MouseButton::Left
+                                || !thumb_bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            entity.update(cx, |app, _| {
+                                let pointer = if is_horizontal {
+                                    event.position.x
+                                } else {
+                                    event.position.y
+                                };
+                                let thumb_start = if is_horizontal {
+                                    thumb_bounds.origin.x
+                                } else {
+                                    thumb_bounds.origin.y
+                                };
+                                app.log_search.result_scrollbar_drag =
+                                    Some(SearchResultScrollbarDrag {
+                                        axis,
+                                        cursor_offset: pointer - thumb_start,
+                                    });
+                            });
+                            cx.notify(entity.entity_id());
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseUpEvent, phase, _, cx| {
+                            if !phase.bubble() || event.button != MouseButton::Left {
+                                return;
+                            }
+                            let handled = entity.update(cx, |app, _| {
+                                let handled = app.log_search.result_scrollbar_drag.is_some();
+                                app.log_search.result_scrollbar_drag = None;
+                                handled
+                            });
+                            if handled {
+                                cx.stop_propagation();
+                                cx.notify(entity.entity_id());
+                            }
+                        }
+                    });
+
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if !phase.bubble() || !event.dragging() {
+                            return;
+                        }
+                        let handled = entity.update(cx, |app, _| {
+                            let Some(drag) = app.log_search.result_scrollbar_drag else {
+                                return false;
+                            };
+                            if drag.axis != axis {
+                                return false;
+                            }
+                            let pointer = if is_horizontal {
+                                event.position.x - viewport_bounds.left()
+                            } else {
+                                event.position.y - viewport_bounds.top()
+                            };
+                            let movable =
+                                (metrics.track_length - metrics.thumb_length).max(px(1.0));
+                            let thumb_start = (pointer - drag.cursor_offset)
+                                .clamp(metrics.track_start, metrics.track_start + movable);
+                            let ratio = (thumb_start - metrics.track_start) / movable;
+                            let scroll = metrics.max_scroll * ratio;
+                            let current = scroll_handle.offset();
+                            if is_horizontal {
+                                scroll_handle.set_offset(point(-scroll, current.y));
+                            } else {
+                                scroll_handle.set_offset(point(current.x, -scroll));
+                            }
+                            true
+                        });
+                        if handled {
+                            cx.stop_propagation();
+                            cx.notify(entity.entity_id());
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// 渲染结果面板文本按钮。
+fn action_text_button(
+    id: &'static str,
+    label: &'static str,
+    theme: &AppTheme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(24.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .text_size(px(12.0))
+        .text_color(rgb(theme.foreground))
+        .bg(rgb(theme.current_line))
+        .hover(|this| this.bg(rgb(theme.selection)))
+        .cursor_pointer()
+        .child(label)
+        .on_click(on_click)
+}
+
+/// 返回搜索结果面板进度文案。
+fn search_progress_text(app: &ArgusApp) -> String {
+    let progress = &app.log_search.progress;
+    let scope = app.log_search.scope;
+    let progress_part = match scope {
+        crate::search::search_engine::SearchScope::CurrentFile => {
+            format!("行进度 {}/{}", progress.scanned_lines, progress.total_lines)
+        }
+        crate::search::search_engine::SearchScope::Directory
+        | crate::search::search_engine::SearchScope::SelectedFiles => {
+            format!(
+                "文件进度 {}/{}",
+                progress.scanned_files, progress.total_files
+            )
+        }
+    };
+    let current = progress
+        .current_path
+        .as_ref()
+        .map(|path| format!("，当前：{path}"))
+        .unwrap_or_default();
+    format!(
+        "{}，{}，结果 {} 条{}",
+        scope.label(),
+        progress_part,
+        app.log_search.results.len(),
+        current
+    )
+}
+
 /// 渲染内容区空状态或未读取提示。
 fn render_empty_state(title: &str, detail: &str, app: &ArgusApp, theme: &AppTheme) -> AnyElement {
     render_empty_state_with_leading(title, detail, None, app, theme)
@@ -992,103 +2058,6 @@ fn longest_line_index(document: &LogDocument) -> usize {
     }
 }
 
-/// 渲染本地可输入的搜索面板，不执行真实日志扫描。
-fn render_search_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
-    let theme = app.theme.clone();
-    let query_text = if app.search_query.is_empty() {
-        "输入关键字后按 Enter 预览占位搜索".to_string()
-    } else {
-        app.search_query.clone()
-    };
-    let query_color = if app.search_query.is_empty() {
-        theme.foreground_muted
-    } else {
-        theme.foreground
-    };
-
-    div()
-        .h(px(46.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .gap_2()
-        .border_b_1()
-        .border_color(rgb(theme.border))
-        .overflow_hidden()
-        .bg(rgb(theme.current_line))
-        .child(render_icon(ArgusIcon::Search, theme.foreground_muted, 18.0))
-        .child(
-            div()
-                .id("search-input")
-                .flex_1()
-                .h(px(30.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .rounded_sm()
-                .border_1()
-                .border_color(rgb(theme.border))
-                .bg(rgb(theme.content))
-                .text_sm()
-                .text_color(rgb(query_color))
-                .focusable()
-                .on_key_down(cx.listener(|app, event: &KeyDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    app.handle_search_key(&event.keystroke);
-                    cx.notify();
-                }))
-                .child(query_text),
-        )
-        .child(render_icon_button(
-            "search-case",
-            ArgusIcon::CaseSensitive,
-            "大小写匹配",
-            app.is_case_sensitive,
-            IconButtonSize::Small,
-            &theme,
-            cx.listener(|app, _, _, cx| {
-                app.toggle_search_option("case");
-                cx.notify();
-            }),
-        ))
-        .child(render_icon_button(
-            "search-regex",
-            ArgusIcon::Regex,
-            "正则表达式",
-            app.is_regex_enabled,
-            IconButtonSize::Small,
-            &theme,
-            cx.listener(|app, _, _, cx| {
-                app.toggle_search_option("regex");
-                cx.notify();
-            }),
-        ))
-        .child(render_icon_button(
-            "search-word",
-            ArgusIcon::WholeWord,
-            "全词匹配",
-            app.is_whole_word_enabled,
-            IconButtonSize::Small,
-            &theme,
-            cx.listener(|app, _, _, cx| {
-                app.toggle_search_option("whole");
-                cx.notify();
-            }),
-        ))
-        .child(render_icon_button(
-            "search-clear",
-            ArgusIcon::Close,
-            "清空搜索",
-            false,
-            IconButtonSize::Small,
-            &theme,
-            cx.listener(|app, _, _, cx| {
-                app.clear_search_query();
-                cx.notify();
-            }),
-        ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,5 +2080,14 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ranges, vec![0..5, 5..9, 9..15]);
+    }
+
+    /// 验证分页长行可按展示列直接截取，并保持 tab 展开为 4 个空格。
+    #[test]
+    fn paged_visible_text_slices_raw_line_without_full_expansion() {
+        let visible = visible_log_text_from_raw("ab\tcdef", Some(&(2..8)));
+
+        assert_eq!(visible.text, "    cd");
+        assert_eq!(visible.char_range, 2..8);
     }
 }

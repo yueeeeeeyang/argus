@@ -48,11 +48,16 @@ fn render_split_title_bar(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     div()
+        .id("argus-split-title-bar")
         .h(px(TITLE_BAR_HEIGHT))
         .w_full()
         .flex()
         .items_center()
         .bg(rgb(theme.title_bar))
+        .on_click(cx.listener(|app, _, _, cx| {
+            app.clear_log_text_focus();
+            cx.notify();
+        }))
         .child(
             div()
                 .w(px(app.source_panel_width))
@@ -77,11 +82,16 @@ fn render_compact_title_bar(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     div()
+        .id("argus-compact-title-bar")
         .h(px(TITLE_BAR_HEIGHT))
         .w_full()
         .flex()
         .items_center()
         .bg(rgb(theme.title_bar))
+        .on_click(cx.listener(|app, _, _, cx| {
+            app.clear_log_text_focus();
+            cx.notify();
+        }))
         .px_3()
         .gap_2()
         .child(title_control_group(app, theme, cx))

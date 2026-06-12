@@ -4,7 +4,11 @@
 //! 作者：Argus 开发团队
 //! 主要功能：识别 BOM、UTF-8、编码声明与中文本地编码，并按用户配置编码兜底解码日志正文。
 
-use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
+use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
+use encoding_rs::{BIG5, Encoding, GB18030, GBK, UTF_8, UTF_16BE, UTF_16LE};
+
+/// 自动编码检测最多读取的样本大小；与分页日志采样策略保持一致，避免小日志整文件多轮扫描。
+const LOG_ENCODING_SAMPLE_BYTES: usize = 4 * 1024 * 1024;
 
 /// 解码后的日志文本和实际采用的编码标签。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,7 +23,7 @@ pub struct DecodedText {
 ///
 /// 参数说明：
 /// - `bytes`：日志原始字节，可来自 mmap 或压缩包流。
-/// - `preferred_encoding`：用户设置中的默认编码名称，UTF-8 校验失败时作为兜底。
+/// - `preferred_encoding`：自动识别完全失败时使用的用户配置兜底编码。
 ///
 /// 返回值：解码文本与实际编码标签；无法精确识别时使用 UTF-8 有损兜底。
 pub fn decode_log_bytes(bytes: &[u8], preferred_encoding: &str) -> DecodedText {
@@ -33,20 +37,32 @@ pub fn decode_log_bytes(bytes: &[u8], preferred_encoding: &str) -> DecodedText {
         return decode_with_encoding(UTF_16BE, &bytes[2..], "UTF-16BE");
     }
 
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return DecodedText {
-            text: text.to_string(),
-            encoding_label: "UTF-8".to_string(),
-        };
+    let sample_len = bytes.len().min(LOG_ENCODING_SAMPLE_BYTES);
+    let detection_sample = &bytes[..sample_len];
+
+    if let Some(encoding) = detect_log_encoding(detection_sample) {
+        let label = encoding.name().to_string();
+        let primary = decode_with_encoding_attempt(encoding, bytes, &label);
+
+        if primary.has_decode_damage() {
+            // 样本可能只有 ASCII 前缀，导致自动识别为 UTF-8；只有整文件解码真的出现
+            // 替换字符时，才退回全量检测，避免每次打开小日志都多轮扫描整份文件。
+            if let Some(rechecked_encoding) = detect_log_encoding(bytes) {
+                let rechecked_label = rechecked_encoding.name().to_string();
+                let rechecked =
+                    decode_with_encoding_attempt(rechecked_encoding, bytes, &rechecked_label);
+                if rechecked.replacement_count < primary.replacement_count {
+                    return rechecked.into_decoded_text();
+                }
+            }
+        }
+
+        return primary.into_decoded_text();
     }
 
-    if let Some(encoding) = detect_declared_encoding(bytes) {
+    if let Some(encoding) = Encoding::for_label(preferred_encoding.trim().as_bytes()) {
         let label = encoding.name().to_string();
         return decode_with_encoding(encoding, bytes, &label);
-    }
-
-    if let Some(decoded) = decode_with_best_fallback(bytes, preferred_encoding) {
-        return decoded;
     }
 
     let text = String::from_utf8_lossy(bytes).into_owned();
@@ -78,7 +94,16 @@ pub fn decode_log_bytes_with_known_encoding(
 
     if let Some(encoding) = Encoding::for_label(encoding_label.trim().as_bytes()) {
         let label = encoding.name().to_string();
-        return decode_with_encoding(encoding, bytes, &label);
+        let primary = decode_with_encoding_attempt(encoding, bytes, &label);
+        if primary.has_decode_damage() {
+            // 大日志分页读取时，首个采样块可能只有 ASCII，导致整份文件的已知编码被误判为
+            // UTF-8。逐行解码一旦出现替换字符，就重新执行自动识别，避免后续中文长期乱码。
+            let repaired = decode_log_bytes(bytes, fallback_encoding);
+            if count_replacement_characters(&repaired.text) < primary.replacement_count {
+                return repaired;
+            }
+        }
+        return primary.into_decoded_text();
     }
 
     decode_log_bytes(bytes, fallback_encoding)
@@ -86,190 +111,140 @@ pub fn decode_log_bytes_with_known_encoding(
 
 /// 使用指定 `encoding_rs` 编码执行解码，并统一包装返回结构。
 fn decode_with_encoding(encoding: &'static Encoding, bytes: &[u8], label: &str) -> DecodedText {
-    let (decoded, _, _) = encoding.decode(bytes);
-    DecodedText {
-        text: decoded.into_owned(),
-        encoding_label: label.to_string(),
-    }
+    decode_with_encoding_attempt(encoding, bytes, label).into_decoded_text()
 }
 
-/// 从 ASCII 兼容的日志样本中识别 `encoding`、`charset` 或 `encode` 声明。
-fn detect_declared_encoding(bytes: &[u8]) -> Option<&'static Encoding> {
-    let sample_len = bytes.len().min(64 * 1024);
-    let mut normalized = Vec::with_capacity(sample_len);
-    for byte in &bytes[..sample_len] {
-        normalized.push(byte.to_ascii_lowercase());
-    }
-
-    for key in [
-        b"charset".as_slice(),
-        b"encoding".as_slice(),
-        b"encode".as_slice(),
-    ] {
-        let mut search_from = 0_usize;
-        while let Some(relative) = find_ascii(&normalized[search_from..], key) {
-            let key_start = search_from + relative;
-            if let Some(label_start) = skip_encoding_separator(&normalized, key_start + key.len()) {
-                let label_end = normalized[label_start..]
-                    .iter()
-                    .position(|byte| !is_encoding_label_byte(*byte))
-                    .map(|offset| label_start + offset)
-                    .unwrap_or(normalized.len());
-                if label_end > label_start {
-                    if let Some(encoding) = Encoding::for_label(&normalized[label_start..label_end])
-                    {
-                        return Some(encoding);
-                    }
-                }
-            }
-            search_from = key_start.saturating_add(key.len());
-        }
-    }
-
-    None
-}
-
-/// 查找 ASCII 子串；样本很小，直接窗口扫描更直观，也避免引入正则依赖。
-fn find_ascii(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-/// 跳过编码声明键和值之间的空白、等号、冒号和引号。
-fn skip_encoding_separator(bytes: &[u8], mut index: usize) -> Option<usize> {
-    while let Some(byte) = bytes.get(index) {
-        match *byte {
-            b' ' | b'\t' | b'=' | b':' | b'"' | b'\'' => index += 1,
-            _ => break,
-        }
-    }
-    (index < bytes.len()).then_some(index)
-}
-
-/// 判断字节是否可以作为编码标签的一部分。
-fn is_encoding_label_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-}
-
-/// 在严格 UTF-8 失败后，通过多候选解码评分选择最不像乱码的编码。
-fn decode_with_best_fallback(bytes: &[u8], preferred_encoding: &str) -> Option<DecodedText> {
-    let mut candidates = Vec::new();
-    push_encoding_candidate(&mut candidates, preferred_encoding);
-    push_encoding_candidate(&mut candidates, "GBK");
-    push_encoding_candidate(&mut candidates, "GB18030");
-    push_encoding_candidate(&mut candidates, "Big5");
-    push_encoding_candidate(&mut candidates, "windows-1252");
-
-    candidates
-        .into_iter()
-        .enumerate()
-        .map(|(order, encoding)| score_decoded_candidate(order, encoding, bytes))
-        .min_by_key(|candidate| candidate.sort_key())
-        .map(|candidate| DecodedText {
-            text: candidate.text,
-            encoding_label: candidate.label,
-        })
-}
-
-/// 添加候选编码并按编码规范名称去重。
-fn push_encoding_candidate(candidates: &mut Vec<&'static Encoding>, label: &str) {
-    let Some(encoding) = Encoding::for_label(label.trim().as_bytes()) else {
-        return;
-    };
-    if candidates
-        .iter()
-        .any(|existing| existing.name().eq_ignore_ascii_case(encoding.name()))
-    {
-        return;
-    }
-    candidates.push(encoding);
-}
-
-/// 解码候选及其评分结果；分数越低越可信。
+/// 单次解码尝试及其质量信号，用于在分页逐行读取阶段自修复误判编码。
 #[derive(Debug)]
-struct DecodedCandidate {
-    /// 候选顺序，用于评分完全相同时保持优先级稳定。
-    order: usize,
+struct DecodeAttempt {
     /// 解码后的文本。
     text: String,
-    /// 编码标签。
+    /// 本次尝试使用的编码标签。
     label: String,
-    /// 是否发生解码错误。
+    /// `encoding_rs` 是否报告解码错误。
     had_errors: bool,
-    /// U+FFFD 替换字符数量，越多越可能是乱码。
+    /// U+FFFD 替换字符数量，直接反映用户看到的乱码程度。
     replacement_count: usize,
-    /// 非换行制表的控制字符数量。
-    control_count: usize,
-    /// 常见 CJK 字符数量，用于识别中文日志。
-    cjk_count: usize,
 }
 
-impl DecodedCandidate {
-    /// 返回排序分数；优先减少替换字符和控制字符，再偏向包含中文的候选。
-    fn sort_key(&self) -> (usize, usize, usize, usize, usize) {
-        let error_penalty = usize::from(self.had_errors);
-        let cjk_bonus = self.cjk_count.min(1024);
-        (
-            self.replacement_count.saturating_mul(10_000),
-            error_penalty,
-            self.control_count.saturating_mul(128),
-            usize::MAX.saturating_sub(cjk_bonus),
-            self.order,
-        )
+impl DecodeAttempt {
+    /// 判断本次解码是否出现可见损伤。
+    fn has_decode_damage(&self) -> bool {
+        self.had_errors || self.replacement_count > 0
+    }
+
+    /// 转换为公开返回结构。
+    fn into_decoded_text(self) -> DecodedText {
+        DecodedText {
+            text: self.text,
+            encoding_label: self.label,
+        }
     }
 }
 
-/// 对指定编码执行解码并统计乱码特征。
-fn score_decoded_candidate(
-    order: usize,
+/// 使用指定编码执行一次解码，并统计替换字符数量。
+fn decode_with_encoding_attempt(
     encoding: &'static Encoding,
     bytes: &[u8],
-) -> DecodedCandidate {
-    let (decoded, _, had_errors) = encoding.decode(bytes);
+    label: &str,
+) -> DecodeAttempt {
+    let (decoded, had_errors) = encoding.decode_without_bom_handling(bytes);
     let text = decoded.into_owned();
-    let mut replacement_count = 0_usize;
-    let mut control_count = 0_usize;
-    let mut cjk_count = 0_usize;
+    let replacement_count = count_replacement_characters(&text);
 
-    for character in text.chars() {
-        if character == '\u{FFFD}' {
-            replacement_count += 1;
-        } else if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
-            control_count += 1;
-        } else if is_cjk_character(character) {
-            cjk_count += 1;
+    DecodeAttempt {
+        text,
+        label: label.to_string(),
+        had_errors,
+        replacement_count,
+    }
+}
+
+/// 统计替换字符数量，作为编码误判后是否需要自修复的直接依据。
+fn count_replacement_characters(text: &str) -> usize {
+    text.chars()
+        .filter(|character| *character == '\u{FFFD}')
+        .count()
+}
+
+/// 参考 logclinic3 的自动识别策略，在受控编码集合内选择最可靠的日志编码。
+///
+/// 识别顺序：
+/// - 严格 UTF-8 成功时直接返回 UTF-8。
+/// - 使用 chardetng 做统计检测，但只接受 UTF-8、GBK、GB18030、Big5。
+/// - GBK 与 GB18030 重叠时，发现 GB18030 四字节序列会提升为 GB18030。
+/// - 统计结果不可用时，再尝试中文日志常见编码兜底。
+fn detect_log_encoding(bytes: &[u8]) -> Option<&'static Encoding> {
+    if decode_without_replacement(bytes, UTF_8) {
+        return Some(UTF_8);
+    }
+
+    let mut detector = EncodingDetector::new(Iso2022JpDetection::Deny);
+    detector.feed(bytes, true);
+    let guessed = detector.guess(None, Utf8Detection::Allow);
+
+    if let Some(candidate) = encoding_from_detector_guess(guessed) {
+        if candidate == GBK
+            && contains_gb18030_four_byte_sequence(bytes)
+            && decode_without_replacement(bytes, GB18030)
+        {
+            return Some(GB18030);
+        }
+
+        if candidate == GBK
+            && !decode_without_replacement(bytes, GBK)
+            && decode_without_replacement(bytes, GB18030)
+        {
+            return Some(GB18030);
+        }
+
+        if decode_without_replacement(bytes, candidate) {
+            return Some(candidate);
         }
     }
 
-    DecodedCandidate {
-        order,
-        text,
-        label: encoding.name().to_string(),
-        had_errors,
-        replacement_count,
-        control_count,
-        cjk_count,
+    [GB18030, GBK, BIG5]
+        .into_iter()
+        .find(|candidate| decode_without_replacement(bytes, candidate))
+}
+
+/// 判断指定编码能否无替换字符地解码样本。
+fn decode_without_replacement(bytes: &[u8], encoding: &'static Encoding) -> bool {
+    let (_, had_errors) = encoding.decode_without_bom_handling(bytes);
+    !had_errors
+}
+
+/// 将 chardetng 的猜测结果收敛到 Argus 明确支持的日志编码集合。
+fn encoding_from_detector_guess(encoding: &'static Encoding) -> Option<&'static Encoding> {
+    if encoding == UTF_8 {
+        Some(UTF_8)
+    } else if encoding == GBK {
+        Some(GBK)
+    } else if encoding == GB18030 {
+        Some(GB18030)
+    } else if encoding == BIG5 {
+        Some(BIG5)
+    } else {
+        None
     }
 }
 
-/// 判断字符是否属于常见中文、日文、韩文统一表意文字范围。
-fn is_cjk_character(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xF900..=0xFAFF
-            | 0x20000..=0x2A6DF
-            | 0x2A700..=0x2B73F
-            | 0x2B740..=0x2B81F
-            | 0x2B820..=0x2CEAF
-    )
+/// 判断字节流是否包含 GB18030 独有的四字节编码形态。
+///
+/// GB18030 兼容 GBK 的双字节区间，仅靠“能否解码”会把部分 GB18030 误标为 GBK；
+/// 四字节序列 `81-FE 30-39 81-FE 30-39` 是强信号，发现后提升为 GB18030。
+fn contains_gb18030_four_byte_sequence(bytes: &[u8]) -> bool {
+    bytes.windows(4).any(|window| {
+        matches!(window[0], 0x81..=0xFE)
+            && matches!(window[1], 0x30..=0x39)
+            && matches!(window[2], 0x81..=0xFE)
+            && matches!(window[3], 0x30..=0x39)
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::decode_log_bytes;
+    use super::{decode_log_bytes, decode_log_bytes_with_known_encoding};
     use encoding_rs::Encoding;
 
     /// 验证 UTF-8 BOM 会被识别并从正文中移除。
@@ -281,13 +256,13 @@ mod tests {
         assert_eq!(decoded.encoding_label, "UTF-8");
     }
 
-    /// 验证非法 UTF-8 会按用户配置编码兜底，而不是直接失败。
+    /// 验证非法 UTF-8 会进入中文本地编码自动识别，而不是直接失败。
     #[test]
-    fn falls_back_to_preferred_encoding() {
+    fn detects_chinese_local_encoding_for_invalid_utf8() {
         let decoded = decode_log_bytes(&[0xC4, 0xE3, 0xBA, 0xC3], "gbk");
 
         assert_eq!(decoded.text, "你好");
-        assert_eq!(decoded.encoding_label, "GBK");
+        assert_eq!(decoded.encoding_label, "gb18030");
     }
 
     /// 验证默认编码仍为 UTF-8 时，非法 UTF-8 的 GBK 中文日志会自动识别为 GBK。
@@ -298,17 +273,29 @@ mod tests {
         let decoded = decode_log_bytes(&bytes, "UTF-8");
 
         assert_eq!(decoded.text, "#缓存数量\nrecordcount=120000\n");
-        assert_eq!(decoded.encoding_label, "GBK");
+        assert_eq!(decoded.encoding_label, "gb18030");
     }
 
-    /// 验证日志内显式声明 `encode=GBK` 时会优先使用声明编码。
+    /// 验证 GBK 日志中出现 `encode=GBK` 普通文本时仍按内容自动识别，而不是解析声明。
     #[test]
-    fn detects_declared_gbk_encoding() {
+    fn detects_gbk_even_when_text_mentions_encode_label() {
         let gbk = Encoding::for_label(b"gbk").expect("GBK 编码应存在");
         let (bytes, _, _) = gbk.encode("encode=GBK\n#缓存策略\n");
         let decoded = decode_log_bytes(&bytes, "UTF-8");
 
         assert_eq!(decoded.text, "encode=GBK\n#缓存策略\n");
+        assert_eq!(decoded.encoding_label, "gb18030");
+    }
+
+    /// 验证 GBK 日志正文中出现误导性的 `charset=UTF-8` 字样时不会被强制按 UTF-8 解码。
+    #[test]
+    fn detects_gbk_when_text_mentions_charset_utf8() {
+        let gbk = Encoding::for_label(b"gbk").expect("GBK 编码应存在");
+        let expected = "request charset=UTF-8\n==OA->MES工单定时查询生产001==";
+        let (bytes, _, _) = gbk.encode(expected);
+        let decoded = decode_log_bytes(&bytes, "UTF-8");
+
+        assert_eq!(decoded.text, expected);
         assert_eq!(decoded.encoding_label, "GBK");
     }
 
@@ -321,12 +308,58 @@ mod tests {
         assert_eq!(decoded.encoding_label, "UTF-8");
     }
 
-    /// 验证业务文本中出现 `encode=GBK` 时，合法 UTF-8 文件仍按 UTF-8 显示。
+    /// 验证合法 UTF-8 日志中出现 `encode=GBK` 字样时，不会被误当成编码声明。
     #[test]
     fn keeps_valid_utf8_even_when_text_mentions_gbk() {
-        let decoded = decode_log_bytes("encode=GBK\n#缓存策略\n".as_bytes(), "UTF-8");
+        let decoded = decode_log_bytes("encode=GBK\nrecordcount=120000\n".as_bytes(), "UTF-8");
 
-        assert_eq!(decoded.text, "encode=GBK\n#缓存策略\n");
+        assert_eq!(decoded.text, "encode=GBK\nrecordcount=120000\n");
         assert_eq!(decoded.encoding_label, "UTF-8");
+    }
+
+    /// 验证 GB18030 四字节扩展字符不会被误标为 GBK。
+    #[test]
+    fn detects_gb18030_four_byte_extension() {
+        let gb18030 = Encoding::for_label(b"gb18030").expect("GB18030 编码应存在");
+        let (bytes, _, _) = gb18030.encode("INFO 𠀀\n");
+        let decoded = decode_log_bytes(&bytes, "UTF-8");
+
+        assert_eq!(decoded.text, "INFO 𠀀\n");
+        assert_eq!(decoded.encoding_label, "gb18030");
+    }
+
+    /// 验证 Big5 繁体中文样本能通过统计检测识别。
+    #[test]
+    fn detects_big5_when_default_encoding_is_utf8() {
+        let big5 = Encoding::for_label(b"big5").expect("Big5 编码应存在");
+        let (bytes, _, _) = big5.encode("WARN 繁體日誌\n");
+        let decoded = decode_log_bytes(&bytes, "UTF-8");
+
+        assert_eq!(decoded.text, "WARN 繁體日誌\n");
+        assert_eq!(decoded.encoding_label, "Big5");
+    }
+
+    /// 验证分页逐行读取时，已知编码误判为 UTF-8 后能根据替换字符自修复为 GBK。
+    #[test]
+    fn known_utf8_line_repairs_to_gbk_when_replacements_appear() {
+        let gbk = Encoding::for_label(b"gbk").expect("GBK 编码应存在");
+        let expected = "定时任务同步党组织人员信息开始";
+        let (bytes, _, _) = gbk.encode(expected);
+        let decoded = decode_log_bytes_with_known_encoding(&bytes, "UTF-8", "UTF-8");
+
+        assert_eq!(decoded.text, expected);
+        assert_eq!(decoded.encoding_label, "GBK");
+    }
+
+    /// 验证分页逐行读取时，错误的繁体编码标签也能根据替换字符自修复为 GBK。
+    #[test]
+    fn known_big5_line_repairs_to_gbk_when_replacements_appear() {
+        let gbk = Encoding::for_label(b"gbk").expect("GBK 编码应存在");
+        let expected = "ERROR 定时任务同步党组织人员信息结束";
+        let (bytes, _, _) = gbk.encode(expected);
+        let decoded = decode_log_bytes_with_known_encoding(&bytes, "Big5", "UTF-8");
+
+        assert_eq!(decoded.text, expected);
+        assert_eq!(decoded.encoding_label, "GBK");
     }
 }

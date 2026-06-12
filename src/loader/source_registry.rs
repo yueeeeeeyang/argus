@@ -32,12 +32,16 @@ pub struct SourceRegistry {
     children: HashMap<SourceId, Vec<SourceId>>,
     /// 当前展开状态下应渲染的扁平节点 ID 列表。
     visible_source_ids: Vec<SourceId>,
+    /// 可见节点到行号的索引，供外部滚动定位 O(1) 查询。
+    visible_source_positions: HashMap<SourceId, usize>,
     /// 已加载节点的稳定树形顺序，不受展开状态影响。
     tree_order_source_ids: Vec<SourceId>,
     /// 来源节点搜索用小写关键字，避免每次输入时重复分配字符串。
     search_keys: HashMap<SourceId, String>,
     /// 来源树行渲染元数据缓存，供虚拟列表滚动时直接读取。
     row_meta: HashMap<SourceId, SourceRowMeta>,
+    /// 当前单选高亮节点；用于 O(1) 切换选中态，避免大目录树 tab 切换时遍历全部节点。
+    selected_id: Option<SourceId>,
 }
 
 impl Default for SourceRegistry {
@@ -49,9 +53,11 @@ impl Default for SourceRegistry {
             nodes: HashMap::new(),
             children: HashMap::new(),
             visible_source_ids: Vec::new(),
+            visible_source_positions: HashMap::new(),
             tree_order_source_ids: Vec::new(),
             search_keys: HashMap::new(),
             row_meta: HashMap::new(),
+            selected_id: None,
         }
     }
 }
@@ -135,6 +141,11 @@ impl SourceRegistry {
         &self.visible_source_ids
     }
 
+    /// 返回节点在当前可见列表中的位置。
+    pub fn visible_index_of(&self, id: SourceId) -> Option<usize> {
+        self.visible_source_positions.get(&id).copied()
+    }
+
     /// 返回所有已加载节点的树形顺序 ID 列表，不受展开状态影响。
     pub fn tree_order_source_ids(&self) -> &[SourceId] {
         &self.tree_order_source_ids
@@ -162,18 +173,25 @@ impl SourceRegistry {
         ancestors
     }
 
-    /// 选择指定节点，并取消其他节点选中态。
+    /// 选择指定节点，并取消之前节点选中态。
+    ///
+    /// 说明：来源树可能包含几万甚至几十万个节点，不能在 tab 切换时遍历所有节点。
     pub fn select(&mut self, selected_id: SourceId) -> Option<SourceTreeNode> {
-        let mut selected = None;
-
-        for node in self.nodes.values_mut() {
-            node.selected = node.id == selected_id;
-            if node.selected {
-                selected = Some(node.clone());
-            }
+        if !self.nodes.contains_key(&selected_id) {
+            return None;
         }
 
-        selected
+        if let Some(previous_id) = self.selected_id
+            && previous_id != selected_id
+            && let Some(previous) = self.nodes.get_mut(&previous_id)
+        {
+            previous.selected = false;
+        }
+
+        let selected = self.nodes.get_mut(&selected_id)?;
+        selected.selected = true;
+        self.selected_id = Some(selected_id);
+        Some(selected.clone())
     }
 
     /// 展开指定节点的所有祖先节点，确保外部激活日志标签后来源树能显示对应路径。
@@ -279,9 +297,11 @@ impl SourceRegistry {
         self.nodes.clear();
         self.children.clear();
         self.visible_source_ids.clear();
+        self.visible_source_positions.clear();
         self.tree_order_source_ids.clear();
         self.search_keys.clear();
         self.row_meta.clear();
+        self.selected_id = None;
         self.next_id = 1;
     }
 
@@ -297,6 +317,12 @@ impl SourceRegistry {
         for root_id in self.root_ids.iter().copied() {
             self.collect_visible(root_id, &mut visible);
         }
+        self.visible_source_positions = visible
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, source_id)| (source_id, index))
+            .collect();
         self.visible_source_ids = visible;
     }
 
@@ -413,6 +439,9 @@ impl SourceRegistry {
         self.nodes.remove(&id);
         self.search_keys.remove(&id);
         self.row_meta.remove(&id);
+        if self.selected_id == Some(id) {
+            self.selected_id = None;
+        }
     }
 }
 

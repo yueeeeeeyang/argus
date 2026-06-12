@@ -584,6 +584,8 @@ mod tests {
     use crate::loader::dir_tree::LogSourceLoader;
     use crate::loader::log_source::SourceKind;
     use crate::loader::source_registry::SourceRegistry;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use rars::{ArchiveVersion, FeatureSet, rar15_40};
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
@@ -624,6 +626,13 @@ mod tests {
             builder.finish().expect("应能完成 TAR 写入");
         }
         bytes
+    }
+
+    /// 构造 GZIP 单文件压缩字节，便于验证压缩包内 `.gz` 能继续展开。
+    fn build_gzip(content: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(content).expect("应能写入 GZIP 内容");
+        encoder.finish().expect("应能完成 GZIP 写入")
     }
 
     /// 构造只包含存储模式文件块的 RAR4 字节；用于验证 RAR 内嵌压缩包读取链路。
@@ -833,6 +842,64 @@ mod tests {
             nested_log.location.display_path(),
             format!("{}!/inner.zip!/nested.log", outer_path.display())
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 验证 ZIP 内嵌普通 GZIP 单文件压缩包时会生成可展开节点并显示解压后的日志条目。
+    #[test]
+    fn expands_gzip_entry_inside_zip_archive() {
+        let root = temp_root("expands_gzip_entry_inside_zip_archive");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("应能创建测试目录");
+        let outer_path = root.join("outer.zip");
+        let inner_gzip = build_gzip(b"INFO nested gzip");
+        let outer_zip = build_zip(vec![("nested.log.gz", inner_gzip)]);
+        fs::write(&outer_path, outer_zip).expect("应能写入外层 ZIP");
+
+        let loader = LogSourceLoader::new(LoaderConfig::default());
+        let root_report = loader.load_paths(vec![outer_path.clone()]);
+        let outer_node = root_report
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .find_map(|id| root_report.registry.node(*id))
+            .expect("应生成外层 ZIP 节点")
+            .clone();
+        let first_level_report = loader.load_children(&outer_node);
+        assert!(
+            first_level_report.errors.is_empty(),
+            "外层 ZIP 第一层应能加载：{:?}",
+            first_level_report.errors
+        );
+        let gzip_node = first_level_report
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|id| first_level_report.registry.node(*id))
+            .find(|node| node.label == "nested.log.gz")
+            .expect("应生成内层 GZIP 节点")
+            .clone();
+        assert!(matches!(
+            gzip_node.kind,
+            SourceKind::Archive(ArchiveFormat::Gzip)
+        ));
+
+        let nested_report = loader.load_children(&gzip_node);
+        assert!(
+            nested_report.errors.is_empty(),
+            "ZIP 内层 GZIP 应能展开：{:?}",
+            nested_report.errors
+        );
+        let labels = nested_report
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|id| nested_report.registry.node(*id))
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["nested.log"]);
 
         let _ = fs::remove_dir_all(&root);
     }

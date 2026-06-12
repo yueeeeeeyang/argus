@@ -12,7 +12,7 @@ use gpui::{
 
 use super::{
     ArgusApp, LOG_VIEWER_ROW_HEIGHT, LOG_VIEWER_TEXT_LEFT_PADDING, LOG_VIEWER_TEXT_RIGHT_PADDING,
-    LogTextPosition, LogTextSelection, LogTextSelectionDrag, log_text_position_le,
+    LogTextPosition, LogTextSelection, LogTextSelectionDrag, TabKind, log_text_position_le,
     log_viewer_display_text, log_viewer_line_number_width,
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
@@ -24,6 +24,65 @@ use crate::text_selection::{
 };
 
 impl ArgusApp {
+    /// 返回当前活动日志内容区是否拥有业务焦点，用于限制日志搜索快捷键的触发范围。
+    pub fn is_active_log_view_focused(&self) -> bool {
+        let Some(active_tab) = self.active_tab() else {
+            return false;
+        };
+        if !matches!(active_tab.kind, TabKind::LogSource { .. }) {
+            return false;
+        }
+
+        self.log_tab_view_state(active_tab.id)
+            .is_some_and(|state| state.is_focused)
+    }
+
+    /// 标记指定日志 tab 获得内容焦点；不改变现有选区。
+    pub fn focus_log_text_view(&mut self, tab_id: usize) {
+        for (state_tab_id, state) in self.log_tab_view_states.iter_mut() {
+            state.is_focused = *state_tab_id == tab_id;
+        }
+        self.log_tab_view_states
+            .entry(tab_id)
+            .or_default()
+            .is_focused = true;
+    }
+
+    /// 清理所有日志内容焦点；保留选区本身，避免切换焦点时丢失已选文本。
+    pub fn clear_log_text_focus(&mut self) {
+        for state in self.log_tab_view_states.values_mut() {
+            state.is_focused = false;
+        }
+    }
+
+    /// 按标签页和行号读取一行日志文本，用于鼠标事件按需命中测试。
+    ///
+    /// 参数说明：
+    /// - `tab_id`：日志标签页 ID。
+    /// - `line_number`：需要读取的 0 基行号。
+    ///
+    /// 返回值：该行原始日志文本；标签不是日志、日志未读取完成或读取失败时返回 `None`。
+    pub fn log_line_text_for_tab(&self, tab_id: usize, line_number: usize) -> Option<String> {
+        let source_id = self.tabs.iter().find_map(|tab| {
+            if tab.id != tab_id {
+                return None;
+            }
+            match tab.kind {
+                TabKind::LogSource { source_id, .. } => Some(source_id),
+                TabKind::Empty | TabKind::Settings => None,
+            }
+        })?;
+        let LogOpenState::Ready(handle) = self.log_read_state(source_id)? else {
+            return None;
+        };
+
+        handle
+            .lines(line_number, 1)
+            .ok()
+            .and_then(|mut lines| lines.pop())
+            .map(|line| line.text)
+    }
+
     /// 返回指定日志 tab 当前是否处于文本拖拽选择过程中。
     pub fn is_log_text_selection_drag_active(&self, tab_id: usize) -> bool {
         self.log_tab_view_states
@@ -314,8 +373,8 @@ impl ArgusApp {
         self.placeholder_notice = format!("已全选日志文本，共 {line_count} 行");
     }
 
-    /// 返回日志文本当前选中的内容。
-    fn selected_log_text(&self) -> Option<String> {
+    /// 返回日志文本当前选中的内容，供复制和搜索关键字预填复用。
+    pub(crate) fn selected_log_text(&self) -> Option<String> {
         let active_tab = self.active_tab()?;
         let selection = self.log_tab_view_state(active_tab.id)?.selection.as_ref()?;
         if selection.is_empty() {
@@ -357,6 +416,11 @@ impl ArgusApp {
         }
 
         Some(selected_text)
+    }
+
+    /// 复制当前活动日志选区；主窗口快捷键拦截层也会调用该入口，避免 GPUI 子元素焦点丢失时复制失效。
+    pub fn copy_active_log_text_selection(&mut self, cx: &mut Context<Self>) {
+        self.copy_log_text_selection(cx);
     }
 
     /// 将日志文本选区写入系统剪贴板。
@@ -402,6 +466,11 @@ impl ArgusApp {
         }
 
         let key = keystroke.key.to_lowercase();
+        if keystroke.modifiers.secondary() && key == "f" {
+            self.open_log_search_window(cx);
+            return;
+        }
+
         if keystroke.modifiers.secondary() {
             match key.as_str() {
                 "a" => self.select_all_log_text(),

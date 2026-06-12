@@ -8,6 +8,7 @@ pub mod components;
 pub mod custom_title_bar;
 pub mod dir_tree_panel;
 pub mod log_content_view;
+pub mod log_search_window;
 pub mod main_window;
 pub mod placeholder_dialog;
 pub mod settings_page;

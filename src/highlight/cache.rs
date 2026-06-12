@@ -63,7 +63,6 @@ impl HighlightCache {
             return SyntaxHighlighter::highlight(line, language);
         };
         if let Some(spans) = inner.entries.get(&key).cloned() {
-            inner.touch(key);
             return spans;
         }
 
@@ -103,16 +102,11 @@ struct HighlightCacheInner {
 }
 
 impl HighlightCacheInner {
-    /// 刷新缓存访问顺序。
-    fn touch(&mut self, key: HighlightCacheKey) {
-        self.order.retain(|existing| *existing != key);
-        self.order.push_back(key);
-    }
-
     /// 插入缓存并淘汰最久未使用的行。
     fn insert(&mut self, key: HighlightCacheKey, spans: Vec<HighlightSpan>) {
-        self.entries.insert(key, spans);
-        self.touch(key);
+        if self.entries.insert(key, spans).is_none() {
+            self.order.push_back(key);
+        }
         while self.entries.len() > self.capacity {
             let Some(old_key) = self.order.pop_front() else {
                 break;

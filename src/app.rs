@@ -4,15 +4,18 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、未读取内容提示和保留的日志样例数据。
 
+mod log_search;
 mod log_text;
 mod placeholder_data;
 mod source_picker;
 mod source_search;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::ops::Range;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::config::{AppConfig, ConfigManager};
 use crate::highlight::HighlightCache;
@@ -23,15 +26,18 @@ use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
 use crate::reader::read_mode::ReadMode;
+use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
+use crate::search::search_task::SearchTaskState;
 use crate::text_selection::TextSelectionGranularity;
 #[cfg(test)]
 use crate::text_selection::character_count;
 use crate::theme::system_theme::{label_for_window_appearance, theme_mode_for_window_appearance};
 use crate::theme::{AppTheme, ThemeManager};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
+use crate::ui::log_search_window::LogSearchWindow;
 use crate::ui::main_window;
 use gpui::WindowAppearance;
-use gpui::{Context, IntoElement, Keystroke, Pixels, Point, Render, Window};
+use gpui::{Context, IntoElement, Keystroke, Pixels, Point, Render, Window, WindowHandle};
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
@@ -39,8 +45,8 @@ use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 use placeholder_data::{placeholder_logs, placeholder_source_registry};
 pub use source_picker::{SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState};
 
-/// 来源侧栏默认宽度。
-pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 300.0;
+/// 来源侧栏默认宽度；主窗口默认宽度同步增加，避免挤占右侧日志阅读区。
+pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 350.0;
 /// 来源侧栏最小宽度，需保证标题栏左侧 4 个操作按钮和固定右侧间距完整展示。
 pub const SOURCE_PANEL_MIN_WIDTH: f32 = 244.0;
 /// 来源侧栏最大宽度，避免占位界面被侧栏挤压。
@@ -51,6 +57,12 @@ pub const LOG_CONTENT_FONT_SIZE_MIN: f32 = 12.0;
 pub const LOG_CONTENT_FONT_SIZE_MAX: f32 = 20.0;
 /// 日志内容默认字号，匹配设计文档要求的高密度 12px 阅读区。
 pub const LOG_CONTENT_FONT_SIZE_DEFAULT: f32 = 12.0;
+/// 搜索结果面板默认高度。
+pub const SEARCH_RESULT_PANEL_HEIGHT_DEFAULT: f32 = 220.0;
+/// 搜索结果面板最小高度，保证标题和至少几行结果可见。
+pub const SEARCH_RESULT_PANEL_HEIGHT_MIN: f32 = 140.0;
+/// 搜索结果面板最大高度，避免拖拽时挤掉主要日志阅读区。
+pub const SEARCH_RESULT_PANEL_HEIGHT_MAX: f32 = 520.0;
 /// 日志正文左侧内边距；命中测试和渲染必须保持一致。
 pub const LOG_VIEWER_TEXT_LEFT_PADDING: f32 = 16.0;
 /// 日志正文右侧内边距；横向滚动范围和渲染必须保持一致。
@@ -254,6 +266,229 @@ pub struct InputTextSelectionDrag {
     pub granularity: TextSelectionGranularity,
 }
 
+/// 日志搜索窗口输入框类型，用于复用同一套输入状态处理。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogSearchInputKind {
+    /// 关键字输入框。
+    Keyword,
+    /// 来源树目录输入框。
+    Directory,
+}
+
+/// 日志搜索窗口中的单行输入框状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogSearchInputState {
+    /// 输入框当前文本。
+    pub value: String,
+    /// 光标字符位置。
+    pub cursor: usize,
+    /// 选区锚点；与光标不一致时表示存在选区。
+    pub selection_anchor: Option<usize>,
+    /// 鼠标拖拽选区状态。
+    pub selection_drag: Option<InputTextSelectionDrag>,
+    /// 是否处于焦点状态。
+    pub is_focused: bool,
+}
+
+impl Default for LogSearchInputState {
+    /// 创建空输入框状态。
+    fn default() -> Self {
+        Self {
+            value: String::new(),
+            cursor: 0,
+            selection_anchor: None,
+            selection_drag: None,
+            is_focused: false,
+        }
+    }
+}
+
+/// 日志正文中当前被搜索结果激活的命中位置。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveSearchMatch {
+    /// 命中所在来源节点。
+    pub source_id: SourceId,
+    /// 0 基行号。
+    pub line_number: usize,
+    /// 命中关键字的字节范围。
+    pub match_ranges: Vec<Range<usize>>,
+    /// 当前通过上/下一个定位到的单个命中范围；为空时高亮整行所有命中。
+    pub active_range: Option<Range<usize>>,
+}
+
+/// 当前日志快速查找缓存键，避免关键字、选项或日志变化后复用过期结果。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuickMatchKey {
+    /// 当前日志来源节点。
+    pub source_id: SourceId,
+    /// 当前关键字。
+    pub keyword: String,
+    /// 是否区分大小写。
+    pub case_sensitive: bool,
+    /// 是否启用正则。
+    pub regex_enabled: bool,
+}
+
+/// 搜索结果文件分组，记录结果在全量列表中的连续范围。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchResultGroup {
+    /// 分组对应的来源节点。
+    pub source_id: SourceId,
+    /// 文件展示名称。
+    pub label: String,
+    /// 文件展示路径。
+    pub path: String,
+    /// 分组内第一条结果的全量索引。
+    pub start_index: usize,
+    /// 分组内最后一条结果之后的位置。
+    pub end_index: usize,
+}
+
+/// 搜索结果面板虚拟列表中的可见行。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchResultListItem {
+    /// 文件分组标题行。
+    Group(usize),
+    /// 单条命中结果行。
+    Result(usize),
+}
+
+/// 搜索结果面板自绘滚动条方向。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchResultScrollbarAxis {
+    /// 纵向结果滚动。
+    Vertical,
+    /// 横向预览滚动。
+    Horizontal,
+}
+
+/// 搜索结果面板滚动条拖拽状态。
+#[derive(Clone, Copy, Debug)]
+pub struct SearchResultScrollbarDrag {
+    /// 当前拖动方向。
+    pub axis: SearchResultScrollbarAxis,
+    /// 鼠标按下点在 thumb 内的相对偏移。
+    pub cursor_offset: Pixels,
+}
+
+/// 搜索结果面板高度拖拽状态。
+#[derive(Clone, Copy, Debug)]
+pub struct SearchResultPanelResizeDrag {
+    /// 鼠标按下时的窗口 y 坐标。
+    pub start_y: Pixels,
+    /// 鼠标按下时的面板高度。
+    pub start_height: f32,
+}
+
+/// 独立日志搜索窗口和结果面板共享的运行期状态。
+#[derive(Clone, Debug)]
+pub struct LogSearchState {
+    /// 搜索窗口是否已打开。
+    pub is_window_open: bool,
+    /// 搜索窗口句柄；再次打开时用于置前。
+    pub window_handle: Option<WindowHandle<LogSearchWindow>>,
+    /// 当前搜索范围。
+    pub scope: SearchScope,
+    /// 关键字输入框状态。
+    pub keyword_input: LogSearchInputState,
+    /// 目录输入框状态。
+    pub directory_input: LogSearchInputState,
+    /// 目录输入框对应的来源树目录节点。
+    pub directory_source_id: Option<SourceId>,
+    /// 是否区分大小写；同时影响普通关键字和正则搜索。
+    pub case_sensitive: bool,
+    /// 是否启用正则表达式搜索。
+    pub regex_enabled: bool,
+    /// 当前搜索进度。
+    pub progress: SearchProgress,
+    /// 当前任务状态。
+    pub task_state: SearchTaskState,
+    /// 搜索 generation，用于丢弃过期后台事件。
+    pub generation: usize,
+    /// 当前搜索取消令牌。
+    pub cancel_token: Option<Arc<AtomicBool>>,
+    /// 当前日志快速查找 generation，用于丢弃过期计数结果。
+    pub quick_match_generation: usize,
+    /// 当前日志快速查找缓存键。
+    pub quick_match_key: Option<QuickMatchKey>,
+    /// 当前日志快速查找取消令牌。
+    pub quick_cancel_token: Option<Arc<AtomicBool>>,
+    /// 当前日志按行缓存的快速查找结果。
+    pub quick_matches: Vec<SearchResult>,
+    /// 当前日志关键字出现总次数。
+    pub quick_match_count: usize,
+    /// 当前激活的快速查找命中序号，按出现次数计数。
+    pub active_quick_match_index: Option<usize>,
+    /// 当前日志快速查找提示。
+    pub quick_match_message: Option<String>,
+    /// 是否正在扫描当前日志用于计数或定位。
+    pub is_quick_counting: bool,
+    /// 全量搜索结果；不做数量截断，UI 通过虚拟列表渲染。
+    pub results: Vec<SearchResult>,
+    /// 按文件聚合后的搜索结果分组。
+    pub result_groups: Vec<SearchResultGroup>,
+    /// 当前展开状态下虚拟列表需要渲染的行。
+    pub visible_result_items: Vec<SearchResultListItem>,
+    /// 已折叠的搜索结果文件分组。
+    pub collapsed_result_groups: BTreeSet<SourceId>,
+    /// 搜索结果列表估算内容宽度，用于横向滚动条。
+    pub result_list_content_width: f32,
+    /// 搜索结果面板当前高度。
+    pub result_panel_height: f32,
+    /// 搜索结果面板高度拖拽状态。
+    pub result_panel_resize_drag: Option<SearchResultPanelResizeDrag>,
+    /// 搜索结果面板滚动句柄。
+    pub result_scroll: UniformListScrollHandle,
+    /// 搜索结果面板自绘滚动条拖拽状态。
+    pub result_scrollbar_drag: Option<SearchResultScrollbarDrag>,
+    /// 当前激活的结果索引。
+    pub active_result_index: Option<usize>,
+    /// 点击结果但日志尚未读取完成时的待跳转结果。
+    pub pending_activation: Option<SearchResult>,
+    /// 最近一次搜索错误或提示。
+    pub message: Option<String>,
+}
+
+impl Default for LogSearchState {
+    /// 创建空闲搜索状态。
+    fn default() -> Self {
+        Self {
+            is_window_open: false,
+            window_handle: None,
+            scope: SearchScope::CurrentFile,
+            keyword_input: LogSearchInputState::default(),
+            directory_input: LogSearchInputState::default(),
+            directory_source_id: None,
+            case_sensitive: false,
+            regex_enabled: false,
+            progress: SearchProgress::default(),
+            task_state: SearchTaskState::Idle,
+            generation: 0,
+            cancel_token: None,
+            quick_match_generation: 0,
+            quick_match_key: None,
+            quick_cancel_token: None,
+            quick_matches: Vec::new(),
+            quick_match_count: 0,
+            active_quick_match_index: None,
+            quick_match_message: None,
+            is_quick_counting: false,
+            results: Vec::new(),
+            result_groups: Vec::new(),
+            visible_result_items: Vec::new(),
+            collapsed_result_groups: BTreeSet::new(),
+            result_list_content_width: 0.0,
+            result_panel_height: SEARCH_RESULT_PANEL_HEIGHT_DEFAULT,
+            result_panel_resize_drag: None,
+            result_scroll: UniformListScrollHandle::new(),
+            result_scrollbar_drag: None,
+            active_result_index: None,
+            pending_activation: None,
+            message: None,
+        }
+    }
+}
+
 /// 分页日志滚动状态，使用 f64 避免超大行数下的像素精度丢失。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PagedLogScrollState {
@@ -280,6 +515,8 @@ pub struct LogTabViewState {
     pub is_focused: bool,
     /// 当前 tab 的语法高亮缓存，避免滚动时重复扫描热点行。
     pub highlight_cache: HighlightCache,
+    /// 当前搜索结果激活后需要在正文中强调的命中行和片段。
+    pub active_search_match: Option<ActiveSearchMatch>,
 }
 
 /// 日志正文滚动条方向。
@@ -313,6 +550,7 @@ impl Default for LogTabViewState {
             selection_drag: None,
             is_focused: false,
             highlight_cache: HighlightCache::default(),
+            active_search_match: None,
         }
     }
 }
@@ -419,6 +657,12 @@ pub struct ArgusApp {
     pub log_tab_view_states: HashMap<usize, LogTabViewState>,
     /// 日志正文滚动条拖拽状态。
     pub log_scrollbar_drag: Option<LogScrollbarDrag>,
+    /// 独立日志搜索窗口、搜索任务和结果面板状态。
+    pub log_search: LogSearchState,
+    /// 来源树中用于“选中文件搜索”的多选日志节点。
+    pub selected_search_source_ids: BTreeSet<SourceId>,
+    /// 来源树 Shift 范围选择锚点。
+    pub last_source_selection_anchor: Option<SourceId>,
     /// 当前打开的标签页。
     pub tabs: Vec<ArgusTab>,
     /// 当前激活的标签 ID。
@@ -527,6 +771,9 @@ impl ArgusApp {
             log_reader_generations: HashMap::new(),
             log_tab_view_states: HashMap::new(),
             log_scrollbar_drag: None,
+            log_search: LogSearchState::default(),
+            selected_search_source_ids: BTreeSet::new(),
+            last_source_selection_anchor: None,
             tabs: vec![ArgusTab {
                 id: 1,
                 title: "未选择日志".to_string(),
@@ -767,7 +1014,6 @@ impl ArgusApp {
         {
             self.active_tab_id = tab_id;
             self.ensure_log_tab_view_state(tab_id);
-            self.sync_content_state_from_active_tab();
             self.log_read_states
                 .entry(source_id)
                 .or_insert(LogOpenState::Idle);
@@ -797,7 +1043,6 @@ impl ArgusApp {
         }
         self.active_tab_id = tab_id;
         self.ensure_log_tab_view_state(tab_id);
-        self.sync_content_state_from_active_tab();
         self.log_read_states
             .entry(source_id)
             .or_insert(LogOpenState::Idle);
@@ -888,6 +1133,7 @@ impl ArgusApp {
                 self.log_read_states
                     .insert(source_id, LogOpenState::Ready(handle));
                 self.placeholder_notice = format!("已读取 {label}，共 {line_count} 行");
+                self.finish_pending_search_activation(source_id);
             }
             Err(error) => {
                 let read_mode = self
@@ -980,8 +1226,22 @@ impl ArgusApp {
     pub fn activate_tab(&mut self, tab_id: usize) {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = tab_id;
-            self.sync_content_state_from_active_tab();
+            self.sync_source_tree_selection_from_active_tab();
             self.placeholder_notice = format!("已切换到 {}", self.active_tab_title());
+        }
+    }
+
+    /// 让来源树视觉选中跟随当前日志标签，不执行展开、过滤清理或多选清理等业务动作。
+    ///
+    /// 说明：这里是 UI 视图同步，不应触发日志读取、目录懒加载或来源树结构变更。
+    fn sync_source_tree_selection_from_active_tab(&mut self) {
+        let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
+            return;
+        };
+
+        let selected = self.source_registry.select(source_id).is_some();
+        if selected {
+            self.scroll_source_into_view(source_id);
         }
     }
 
@@ -1078,6 +1338,7 @@ impl ArgusApp {
             self.ensure_log_tab_view_state(self.active_tab_id);
             self.reset_log_text_selection();
             self.log_scrollbar_drag = None;
+            self.reset_log_search_runtime_state();
             self.placeholder_notice = "已清空最后一个标签".to_string();
             return;
         }
@@ -1109,7 +1370,7 @@ impl ArgusApp {
         if self.active_tab_id == tab_id {
             let next_index = closed_index.min(self.tabs.len().saturating_sub(1));
             self.active_tab_id = self.tabs[next_index].id;
-            self.sync_content_state_from_active_tab();
+            self.sync_source_tree_selection_from_active_tab();
         }
         self.placeholder_notice = "已关闭标签页".to_string();
     }
@@ -1129,9 +1390,9 @@ impl ArgusApp {
         self.ensure_log_tab_view_state(tab_id);
         self.retain_reader_for_source(kept_source_id);
         self.active_tab_id = tab_id;
+        self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
         self.log_scrollbar_drag = None;
-        self.sync_content_state_from_active_tab();
         self.placeholder_notice = if removed_count == 0 {
             "没有其他标签可关闭".to_string()
         } else {
@@ -1156,7 +1417,8 @@ impl ArgusApp {
         self.hovered_tab_id = None;
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
-        self.sync_content_state_from_active_tab();
+        self.reset_log_search_runtime_state();
+        self.content_state = ContentState::SourceNotSelected;
         self.placeholder_notice = "已关闭全部标签".to_string();
     }
 
@@ -1271,6 +1533,7 @@ impl ArgusApp {
         self.log_tab_view_states.clear();
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
+        self.reset_log_search_runtime_state();
         self.selected_log_line = None;
         self.is_search_panel_open = false;
         self.search_query.clear();
@@ -1406,53 +1669,6 @@ impl ArgusApp {
             .unwrap_or(TabKind::Empty)
     }
 
-    /// 根据当前激活标签同步过渡期内容状态，供状态栏和旧测试继续使用。
-    fn sync_content_state_from_active_tab(&mut self) {
-        match self.active_tab_kind() {
-            TabKind::Empty => {
-                self.content_state = ContentState::SourceNotSelected;
-                self.logs.clear();
-                self.selected_log_line = None;
-                self.reset_log_text_selection_for_tab(self.active_tab_id);
-            }
-            TabKind::Settings => {
-                self.content_state = ContentState::SourceNotSelected;
-                self.logs.clear();
-                self.selected_log_line = None;
-            }
-            TabKind::LogSource { source_id, path } => {
-                self.ensure_log_tab_view_state(self.active_tab_id);
-                let label = self
-                    .source_registry
-                    .node(source_id)
-                    .map(|node| node.label.clone())
-                    .unwrap_or_else(|| self.active_tab_title().to_string());
-                self.content_state = ContentState::SourceNotRead {
-                    source_id,
-                    label,
-                    path,
-                };
-                self.logs.clear();
-                self.selected_log_line = None;
-                self.sync_source_tree_selection_from_active_log(source_id);
-            }
-        }
-    }
-
-    /// 根据当前日志标签同步左侧来源树的选中态，并尽量滚动到对应节点。
-    fn sync_source_tree_selection_from_active_log(&mut self, source_id: SourceId) {
-        if self.source_registry.select(source_id).is_none() {
-            return;
-        }
-
-        self.source_registry.expand_ancestors(source_id);
-        self.rebuild_filtered_source_ids();
-        if self.is_source_tree_filtering() && !self.filtered_source_ids.contains(&source_id) {
-            self.close_source_tree_search();
-        }
-        self.scroll_source_into_view(source_id);
-    }
-
     /// 返回内容区路径文案，优先展示真实选中来源。
     pub fn content_path_label(&self) -> String {
         match self.active_tab_kind() {
@@ -1465,11 +1681,15 @@ impl ArgusApp {
 
     /// 请求来源树滚动到指定可见节点。
     pub fn scroll_source_into_view(&mut self, source_id: SourceId) {
-        if let Some(index) = self
-            .visible_source_ids()
-            .iter()
-            .position(|visible_id| *visible_id == source_id)
-        {
+        let index = if self.is_source_tree_filtering() {
+            self.filtered_source_ids
+                .iter()
+                .position(|visible_id| *visible_id == source_id)
+        } else {
+            self.source_registry.visible_index_of(source_id)
+        };
+
+        if let Some(index) = index {
             self.source_tree_scroll
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
@@ -1854,9 +2074,27 @@ mod tests {
         assert!(app.tabs.iter().any(|tab| tab.title == "error.log"));
     }
 
-    /// 验证激活日志标签页时，左侧来源树会选中同一个日志并展开父级路径。
+    /// 验证日志搜索快捷键只在日志正文拥有业务焦点时允许触发。
     #[test]
-    fn activating_log_tab_selects_matching_source_tree_node() {
+    fn log_search_shortcut_requires_log_text_focus() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+
+        assert!(!app.is_active_log_view_focused());
+
+        app.select_source(app_log_id);
+        assert!(!app.is_active_log_view_focused());
+
+        app.focus_log_text_view(app.active_tab_id);
+        assert!(app.is_active_log_view_focused());
+
+        app.open_or_focus_settings_tab();
+        assert!(!app.is_active_log_view_focused());
+    }
+
+    /// 验证激活日志标签页只同步来源树选中态，不触发展开或多选清理。
+    #[test]
+    fn activating_log_tab_only_updates_source_tree_selection() {
         let mut app = app_with_placeholder_sources();
         let logs_id = source_id_by_label(&app, "logs");
         let app_log_id = source_id_by_label(&app, "app.log");
@@ -1865,6 +2103,9 @@ mod tests {
         app.select_source(app_log_id);
         let app_tab_id = app.active_tab_id;
         app.select_source(error_log_id);
+        app.selected_search_source_ids.insert(error_log_id);
+        app.selected_search_source_ids
+            .insert(source_id_by_label(&app, "nested.log"));
         if app
             .source_registry
             .node(logs_id)
@@ -1878,6 +2119,7 @@ mod tests {
 
         app.activate_tab(app_tab_id);
 
+        assert_eq!(app.active_tab_id, app_tab_id);
         assert!(
             app.source_registry
                 .node(app_log_id)
@@ -1888,15 +2130,20 @@ mod tests {
             !app.source_registry
                 .node(error_log_id)
                 .map(|source| source.selected)
-                .unwrap_or(true)
-        );
-        assert!(
-            app.source_registry
-                .node(logs_id)
-                .map(|source| source.expanded)
                 .unwrap_or(false)
         );
-        assert!(app.visible_source_ids().contains(&app_log_id));
+        assert!(
+            !app.source_registry
+                .node(logs_id)
+                .map(|source| source.expanded)
+                .unwrap_or(true)
+        );
+        assert!(!app.visible_source_ids().contains(&app_log_id));
+        assert!(app.selected_search_source_ids.contains(&error_log_id));
+        assert!(
+            app.selected_search_source_ids
+                .contains(&source_id_by_label(&app, "nested.log"))
+        );
     }
 
     /// 验证关闭当前标签后会激活相邻标签，关闭最后一个标签会回到空标签。
@@ -2144,9 +2391,9 @@ mod tests {
         assert_eq!(visible_labels(&app), vec!["logs", "app.log"]);
     }
 
-    /// 验证切换到被当前过滤条件隐藏的日志标签时，会退出过滤并显示对应来源节点。
+    /// 验证切换到被当前过滤条件隐藏的日志标签时，只同步选中态，不修改过滤状态。
     #[test]
-    fn activating_hidden_log_tab_clears_source_tree_filter() {
+    fn activating_hidden_log_tab_keeps_source_tree_filter_and_updates_selection() {
         let mut app = app_with_placeholder_sources();
         let app_log_id = source_id_by_label(&app, "app.log");
         let error_log_id = source_id_by_label(&app, "error.log");
@@ -2161,12 +2408,19 @@ mod tests {
 
         app.activate_tab(app_tab_id);
 
-        assert!(!app.is_source_tree_search_open);
-        assert!(app.source_tree_search_query.is_empty());
-        assert!(app.visible_source_ids().contains(&app_log_id));
+        assert_eq!(app.active_tab_id, app_tab_id);
+        assert!(app.is_source_tree_search_open);
+        assert_eq!(app.source_tree_search_query, "error");
+        assert!(!app.visible_source_ids().contains(&app_log_id));
         assert!(
             app.source_registry
                 .node(app_log_id)
+                .map(|source| source.selected)
+                .unwrap_or(false)
+        );
+        assert!(
+            !app.source_registry
+                .node(error_log_id)
                 .map(|source| source.selected)
                 .unwrap_or(false)
         );

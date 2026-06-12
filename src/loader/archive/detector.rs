@@ -21,6 +21,8 @@ pub enum ArchiveFormat {
     TarBz2,
     /// xz 压缩的 TAR 归档。
     TarXz,
+    /// 普通 gzip 单文件压缩包。
+    Gzip,
     /// 7Z 压缩包。
     SevenZ,
     /// RAR 压缩包。
@@ -80,6 +82,10 @@ mod tests {
         assert_eq!(
             detect_archive_format_by_name("logs.txz"),
             Some(ArchiveFormat::TarXz)
+        );
+        assert_eq!(
+            detect_archive_format_by_name("app.log.gz"),
+            Some(ArchiveFormat::Gzip)
         );
         assert_eq!(
             detect_archive_format_by_name("logs.7z"),

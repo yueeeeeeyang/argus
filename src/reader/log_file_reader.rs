@@ -7,13 +7,16 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
 
 use crate::loader::{SourceId, SourceLocation};
-use crate::reader::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
+use crate::reader::encoding_detector::{
+    DecodedText, decode_log_bytes, decode_log_bytes_with_known_encoding,
+};
 use crate::reader::line_index::{
     LineIndex, LineIndexEntry, build_line_index_with_encoding, checked_line_span,
 };
@@ -26,6 +29,8 @@ use crate::reader::stream_backend::ArchiveStreamBackend;
 pub const LARGE_LOG_THRESHOLD_BYTES: u64 = 30 * 1024 * 1024;
 /// 分页行缓存上限，避免大日志滚动后把已访问内容全部留在内存中。
 const PAGED_DECODE_CACHE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+/// 分页搜索批量读取字节上限；顺序扫描时按字节窗口合并行，避免逐行 seek/read。
+const PAGED_SEARCH_BATCH_BYTES: u64 = 8 * 1024 * 1024;
 /// 编码检测采样大小；大文件只读取开头样本判断编码。
 const ENCODING_SAMPLE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -192,7 +197,7 @@ impl LogDocument {
                             .into_iter()
                             .map(|line| DisplayedLogLine {
                                 line_number: line.line_number,
-                                text: line.text,
+                                text: line.text.to_string(),
                             })
                             .collect()
                     })
@@ -208,7 +213,7 @@ impl LogDocument {
                 .read_line(document.longest_line_index())
                 .ok()
                 .flatten()
-                .map(|line| line.text),
+                .map(|line| line.text.to_string()),
         }
     }
 
@@ -249,7 +254,7 @@ pub struct PagedLine {
     /// 0 基行号。
     pub line_number: usize,
     /// 已解码正文，不包含行尾换行符。
-    pub text: String,
+    pub text: Arc<str>,
     /// 原始字节偏移。
     pub byte_offset: u64,
 }
@@ -270,6 +275,8 @@ pub struct PagedLogDocument {
     path: PathBuf,
     /// 实际采用的编码标签。
     encoding: String,
+    /// 运行期逐行自修复得到的编码；用于样本误判后避免每一行重复自动检测。
+    encoding_override: Arc<Mutex<Option<String>>>,
     /// 用户配置的兜底编码，用于逐行解码。
     preferred_encoding: String,
     /// 行号到字节范围索引。
@@ -302,6 +309,7 @@ impl PagedLogDocument {
         Ok(Self {
             path,
             encoding,
+            encoding_override: Arc::new(Mutex::new(None)),
             preferred_encoding,
             line_index,
             cache: Arc::new(Mutex::new(PagedLineCache::new(
@@ -330,9 +338,8 @@ impl PagedLogDocument {
     /// 返回最长显示列数估算，不读取最长行正文。
     pub fn estimated_longest_display_columns(&self) -> usize {
         let byte_len = self.line_index.longest_line_byte_len() as usize;
-        if self.encoding.eq_ignore_ascii_case("UTF-16LE")
-            || self.encoding.eq_ignore_ascii_case("UTF-16BE")
-        {
+        let encoding = self.effective_encoding_label();
+        if encoding.eq_ignore_ascii_case("UTF-16LE") || encoding.eq_ignore_ascii_case("UTF-16BE") {
             byte_len / 2
         } else {
             byte_len
@@ -400,6 +407,92 @@ impl PagedLogDocument {
         }
 
         Ok(ordered.into_iter().flatten().collect())
+    }
+
+    /// 按行号升序遍历分页日志行，读取时按连续字节窗口合并 I/O。
+    ///
+    /// 参数说明：
+    /// - `line_range`：需要遍历的 0 基行号范围，超出文档行数会自动裁剪。
+    /// - `callback`：每解码一行调用；返回 `false` 表示调用方已找到目标，可以提前停止。
+    ///
+    /// 返回值：`true` 表示完整遍历，`false` 表示被回调提前停止。
+    pub fn for_each_line_in_range<F>(
+        &self,
+        line_range: Range<usize>,
+        mut callback: F,
+    ) -> Result<bool>
+    where
+        F: FnMut(DisplayedLogLine) -> bool,
+    {
+        let range_end = line_range.end.min(self.line_index.len());
+        let mut current_line = line_range.start.min(range_end);
+
+        while current_line < range_end {
+            let Some((batch_start, batch_end, batch_offset, batch_len)) =
+                self.next_forward_scan_batch(current_line, range_end)?
+            else {
+                return Ok(true);
+            };
+            let span = self.read_byte_span(batch_offset, batch_len)?;
+
+            for line_number in batch_start..batch_end {
+                let Some(line) =
+                    self.decode_displayed_line_from_batch(line_number, batch_offset, &span)?
+                else {
+                    continue;
+                };
+                if !callback(line) {
+                    return Ok(false);
+                }
+            }
+
+            current_line = batch_end;
+        }
+
+        Ok(true)
+    }
+
+    /// 按行号降序遍历分页日志行，服务“上一个”这类反向定位场景。
+    ///
+    /// 参数说明：
+    /// - `line_range`：需要遍历的 0 基行号范围，超出文档行数会自动裁剪。
+    /// - `callback`：每解码一行调用；返回 `false` 表示调用方已找到目标，可以提前停止。
+    ///
+    /// 返回值：`true` 表示完整遍历，`false` 表示被回调提前停止。
+    pub fn for_each_line_in_range_rev<F>(
+        &self,
+        line_range: Range<usize>,
+        mut callback: F,
+    ) -> Result<bool>
+    where
+        F: FnMut(DisplayedLogLine) -> bool,
+    {
+        let range_start = line_range.start.min(self.line_index.len());
+        let mut current_end = line_range.end.min(self.line_index.len());
+
+        while current_end > range_start {
+            let Some((batch_start, batch_end, batch_offset, batch_len)) =
+                self.next_reverse_scan_batch(range_start, current_end)?
+            else {
+                return Ok(true);
+            };
+            let span = self.read_byte_span(batch_offset, batch_len)?;
+
+            for line_number in (batch_start..batch_end).rev() {
+                let Some(line) =
+                    self.decode_displayed_line_from_batch(line_number, batch_offset, &span)?
+                else {
+                    continue;
+                };
+                if !callback(line) {
+                    return Ok(false);
+                }
+            }
+
+            current_end = batch_start;
+        }
+
+        Ok(true)
     }
 
     /// 读取未命中的连续可见范围，并逐行解码。
@@ -476,18 +569,175 @@ impl PagedLogDocument {
         let bytes = span
             .get(start..end)
             .ok_or_else(|| anyhow::anyhow!("分页日志行范围超出读取结果"))?;
-        let decoded =
-            decode_log_bytes_with_known_encoding(bytes, &self.encoding, &self.preferred_encoding);
+        let decoded = self.decode_line_bytes(bytes);
 
         Ok(PagedLine {
             line_number,
-            text: decoded.text,
+            text: Arc::from(decoded.text),
             byte_offset: entry.offset,
         })
     }
+
+    /// 计算正向搜索的下一批连续字节窗口。
+    fn next_forward_scan_batch(
+        &self,
+        current_line: usize,
+        range_end: usize,
+    ) -> Result<Option<(usize, usize, u64, u64)>> {
+        let Some(first_entry) = self.line_index.get(current_line) else {
+            return Ok(None);
+        };
+        let batch_start = current_line;
+        let mut batch_end = current_line + 1;
+        let batch_offset = first_entry.offset;
+        let mut batch_len = u64::from(first_entry.byte_len);
+
+        while batch_end < range_end {
+            let Some(next_entry) = self.line_index.get(batch_end) else {
+                break;
+            };
+            let next_end = next_entry
+                .offset
+                .checked_add(u64::from(next_entry.byte_len))
+                .ok_or_else(|| anyhow::anyhow!("分页日志搜索批次范围溢出"))?;
+            let candidate_len = next_end
+                .checked_sub(batch_offset)
+                .ok_or_else(|| anyhow::anyhow!("分页日志搜索批次范围无效"))?;
+            if candidate_len > PAGED_SEARCH_BATCH_BYTES && batch_end > batch_start + 1 {
+                break;
+            }
+            batch_len = candidate_len;
+            batch_end += 1;
+            if candidate_len >= PAGED_SEARCH_BATCH_BYTES {
+                break;
+            }
+        }
+
+        Ok(Some((batch_start, batch_end, batch_offset, batch_len)))
+    }
+
+    /// 计算反向搜索的下一批连续字节窗口。
+    fn next_reverse_scan_batch(
+        &self,
+        range_start: usize,
+        current_end: usize,
+    ) -> Result<Option<(usize, usize, u64, u64)>> {
+        if current_end <= range_start {
+            return Ok(None);
+        }
+
+        let last_line = current_end - 1;
+        let Some(last_entry) = self.line_index.get(last_line) else {
+            return Ok(None);
+        };
+        let batch_end = current_end;
+        let mut batch_start = last_line;
+        let last_byte_end = last_entry
+            .offset
+            .checked_add(u64::from(last_entry.byte_len))
+            .ok_or_else(|| anyhow::anyhow!("分页日志搜索批次范围溢出"))?;
+        let mut batch_offset = last_entry.offset;
+        let mut batch_len = u64::from(last_entry.byte_len);
+
+        while batch_start > range_start {
+            let previous_line = batch_start - 1;
+            let Some(previous_entry) = self.line_index.get(previous_line) else {
+                break;
+            };
+            let candidate_len = last_byte_end
+                .checked_sub(previous_entry.offset)
+                .ok_or_else(|| anyhow::anyhow!("分页日志搜索批次范围无效"))?;
+            if candidate_len > PAGED_SEARCH_BATCH_BYTES && batch_start + 1 < batch_end {
+                break;
+            }
+            batch_start = previous_line;
+            batch_offset = previous_entry.offset;
+            batch_len = candidate_len;
+            if candidate_len >= PAGED_SEARCH_BATCH_BYTES {
+                break;
+            }
+        }
+
+        Ok(Some((batch_start, batch_end, batch_offset, batch_len)))
+    }
+
+    /// 从搜索批次字节中切出并解码一行展示文本。
+    fn decode_displayed_line_from_batch(
+        &self,
+        line_number: usize,
+        batch_offset: u64,
+        span: &[u8],
+    ) -> Result<Option<DisplayedLogLine>> {
+        let Some(entry) = self.line_index.get(line_number) else {
+            return Ok(None);
+        };
+        let relative_offset = entry
+            .offset
+            .checked_sub(batch_offset)
+            .ok_or_else(|| anyhow::anyhow!("分页日志搜索行偏移无效"))?;
+        let start = usize::try_from(relative_offset)
+            .map_err(|_| anyhow::anyhow!("分页日志搜索行偏移过大"))?;
+        let end = start
+            .checked_add(entry.byte_len as usize)
+            .ok_or_else(|| anyhow::anyhow!("分页日志搜索行长度溢出"))?;
+        let bytes = span
+            .get(start..end)
+            .ok_or_else(|| anyhow::anyhow!("分页日志搜索行范围超出读取结果"))?;
+        let decoded = self.decode_line_bytes(bytes);
+
+        Ok(Some(DisplayedLogLine {
+            line_number,
+            text: decoded.text,
+        }))
+    }
+
+    /// 返回当前分页文档应使用的编码标签；运行期修复优先于初始样本结果。
+    fn effective_encoding_label(&self) -> String {
+        self.encoding_override
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_else(|| self.encoding.clone())
+    }
+
+    /// 解码单行字节，并在发现更可靠编码时更新分页文档运行期编码缓存。
+    fn decode_line_bytes(&self, bytes: &[u8]) -> DecodedText {
+        let previous_encoding = self.effective_encoding_label();
+        let decoded = decode_log_bytes_with_known_encoding(
+            bytes,
+            &previous_encoding,
+            &self.preferred_encoding,
+        );
+        if !decoded
+            .encoding_label
+            .eq_ignore_ascii_case(previous_encoding.as_str())
+        {
+            self.promote_runtime_encoding(decoded.encoding_label.as_str());
+        }
+        decoded
+    }
+
+    /// 记录逐行解码自修复出的编码，并清空旧编码下的缓存行。
+    fn promote_runtime_encoding(&self, encoding_label: &str) {
+        let mut changed = false;
+        if let Ok(mut guard) = self.encoding_override.lock() {
+            let current = guard.as_deref().unwrap_or(self.encoding.as_str());
+            if !encoding_label.eq_ignore_ascii_case(current) {
+                *guard = Some(encoding_label.to_string());
+                changed = true;
+            }
+        }
+
+        if changed {
+            // 旧缓存可能包含误判编码下的乱码行；切换运行期编码后必须丢弃。
+            if let Ok(mut cache) = self.cache.lock() {
+                cache.clear();
+            }
+        }
+    }
 }
 
-/// 简单行缓存；按访问顺序淘汰，避免为本轮改造新增外部依赖。
+/// 简单行缓存；按插入顺序淘汰，避免在 UI 渲染热路径中为每次命中重排缓存。
 #[derive(Debug)]
 struct PagedLineCache {
     /// 最大缓存字节数。
@@ -496,7 +746,7 @@ struct PagedLineCache {
     used_bytes: usize,
     /// 行号到已解码行。
     lines: HashMap<usize, PagedLine>,
-    /// 访问顺序，队尾为最新访问。
+    /// 插入顺序，队首为最早进入缓存的行。
     order: VecDeque<usize>,
 }
 
@@ -511,10 +761,10 @@ impl PagedLineCache {
         }
     }
 
-    /// 读取缓存行并刷新访问顺序。
+    /// 读取缓存行，并刷新最近使用顺序。
     fn get(&mut self, line_number: usize) -> Option<PagedLine> {
         let line = self.lines.get(&line_number).cloned()?;
-        self.order.retain(|existing| *existing != line_number);
+        self.order.retain(|stored| *stored != line_number);
         self.order.push_back(line_number);
         Some(line)
     }
@@ -522,14 +772,27 @@ impl PagedLineCache {
     /// 插入缓存行，并按总字节数淘汰旧行。
     fn insert(&mut self, line: PagedLine) {
         let line_number = line.line_number;
-        if let Some(old) = self.lines.remove(&line_number) {
+        if let Some(old) = self.lines.insert(line_number, line) {
             self.used_bytes = self.used_bytes.saturating_sub(old.text.len());
+            if let Some(current) = self.lines.get(&line_number) {
+                self.used_bytes = self.used_bytes.saturating_add(current.text.len());
+            }
+            self.evict_if_needed();
+            return;
         }
-        self.order.retain(|existing| *existing != line_number);
-        self.used_bytes = self.used_bytes.saturating_add(line.text.len());
-        self.lines.insert(line_number, line);
+
+        if let Some(current) = self.lines.get(&line_number) {
+            self.used_bytes = self.used_bytes.saturating_add(current.text.len());
+        }
         self.order.push_back(line_number);
         self.evict_if_needed();
+    }
+
+    /// 清空所有缓存行；用于分页文档运行期编码被修复后丢弃旧解码结果。
+    fn clear(&mut self) {
+        self.used_bytes = 0;
+        self.lines.clear();
+        self.order.clear();
     }
 
     /// 淘汰最久未使用的行；重复 order 项会自然跳过。
@@ -847,9 +1110,48 @@ mod tests {
             .read_visible_lines(0, 3)
             .expect("应能读取 UTF-16LE 分页行");
 
-        assert_eq!(lines[0].text, "first");
-        assert_eq!(lines[1].text, "第二");
-        assert_eq!(lines[2].text, "last");
+        assert_eq!(lines[0].text.as_ref(), "first");
+        assert_eq!(lines[1].text.as_ref(), "第二");
+        assert_eq!(lines[2].text.as_ref(), "last");
+
+        let _ = fs::remove_file(path);
+    }
+
+    /// 验证分页搜索遍历能按行号正反向读取，并支持调用方提前停止。
+    #[test]
+    fn paged_document_iterates_search_ranges_with_early_stop() {
+        let path = temp_log_path("paged-search-range.log");
+        fs::write(&path, "alpha\nbeta\nerror\nomega\n").expect("应能写入分页遍历测试日志");
+        let document = PagedLogDocument::open(path.clone(), "UTF-8".to_string(), None)
+            .expect("应能打开分页遍历测试日志");
+        let mut forward = Vec::new();
+
+        let completed = document
+            .for_each_line_in_range(1..4, |line| {
+                forward.push((line.line_number, line.text));
+                forward.len() < 2
+            })
+            .expect("正向分页遍历应能读取");
+
+        assert!(!completed);
+        assert_eq!(
+            forward,
+            vec![(1, "beta".to_string()), (2, "error".to_string())]
+        );
+
+        let mut backward = Vec::new();
+        let completed = document
+            .for_each_line_in_range_rev(0..3, |line| {
+                backward.push((line.line_number, line.text));
+                backward.len() < 2
+            })
+            .expect("反向分页遍历应能读取");
+
+        assert!(!completed);
+        assert_eq!(
+            backward,
+            vec![(2, "error".to_string()), (1, "beta".to_string())]
+        );
 
         let _ = fs::remove_file(path);
     }

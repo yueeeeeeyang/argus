@@ -10,8 +10,9 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Render, SharedString, Window, canvas, div, point, prelude::*, px, rgb, uniform_list,
+    AnyElement, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Render, SharedString, Window, canvas, div, point, prelude::*, px, rgb,
+    uniform_list,
 };
 use std::ops::Range;
 
@@ -132,6 +133,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
                                         row_meta.child_count,
                                         &row_meta.ancestor_continuation_levels,
                                         row_meta.has_next_sibling,
+                                        app.is_source_selected_for_search(source_id),
                                         &theme,
                                         cx,
                                     )
@@ -156,6 +158,7 @@ fn render_node(
     child_count: usize,
     ancestor_continuation_levels: &[usize],
     has_next_sibling: bool,
+    is_search_selected: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -190,7 +193,9 @@ fn render_node(
                 .pl(px(10.0 + source.depth as f32 * 16.0))
                 .pr_2()
                 .rounded_sm()
-                .when(source.selected, |this| this.bg(rgb(theme.selection)))
+                .when(source.selected || is_search_selected, |this| {
+                    this.bg(rgb(theme.selection))
+                })
                 .hover(|this| this.bg(rgb(theme.current_line)))
                 .text_size(px(SOURCE_TREE_FONT_SIZE))
                 .font_weight(FontWeight::MEDIUM)
@@ -265,16 +270,18 @@ fn render_node(
                             .child(message),
                     )
                 })
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    if can_expand {
-                        app.toggle_source_expanded(source_id, cx);
-                    } else {
-                        app.select_source(source_id);
-                        app.request_open_log_content(source_id, cx);
-                        app.scroll_source_into_view(source_id);
-                    }
-                    cx.notify();
-                })),
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if can_expand {
+                            app.toggle_source_expanded(source_id, cx);
+                        } else {
+                            app.handle_source_tree_click(source_id, event.modifiers, cx);
+                        }
+                        cx.notify();
+                    }),
+                ),
         )
 }
 

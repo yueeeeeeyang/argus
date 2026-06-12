@@ -7,6 +7,7 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
@@ -43,9 +44,14 @@ impl SpoolCleanup {
 }
 
 impl Drop for SpoolCleanup {
-    /// 删除临时分页文件；清理失败不应影响应用退出或 tab 关闭。
+    /// 后台删除临时分页文件；清理失败不应影响应用退出或 tab 关闭。
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let path = self.path.clone();
+        let _ = thread::Builder::new()
+            .name("argus-spool-cleanup".to_string())
+            .spawn(move || {
+                let _ = fs::remove_file(path);
+            });
     }
 }
 

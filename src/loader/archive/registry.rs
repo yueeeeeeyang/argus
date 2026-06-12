@@ -16,6 +16,7 @@ use crate::loader::archive::adapter::{
 };
 use crate::loader::archive::compressed_tar::CompressedTarArchiveAdapter;
 use crate::loader::archive::detector::ArchiveFormat;
+use crate::loader::archive::gzip_adapter::GzipArchiveAdapter;
 use crate::loader::archive::rar_adapter::RarArchiveAdapter;
 use crate::loader::archive::sevenz_adapter::SevenzArchiveAdapter;
 use crate::loader::archive::tar_adapter::TarArchiveAdapter;
@@ -37,6 +38,8 @@ static TAR_BZ2_ADAPTER: CompressedTarArchiveAdapter = CompressedTarArchiveAdapte
 static TAR_XZ_ADAPTER: CompressedTarArchiveAdapter = CompressedTarArchiveAdapter {
     format: ArchiveFormat::TarXz,
 };
+/// 普通 gzip 内置适配器实例。
+static GZIP_ADAPTER: GzipArchiveAdapter = GzipArchiveAdapter;
 /// 7Z 内置适配器实例。
 static SEVENZ_ADAPTER: SevenzArchiveAdapter = SevenzArchiveAdapter;
 /// RAR 内置适配器实例。
@@ -67,6 +70,7 @@ impl ArchiveAdapterRegistry {
                 &TAR_BZ2_ADAPTER,
                 &TAR_XZ_ADAPTER,
                 &TAR_ADAPTER,
+                &GZIP_ADAPTER,
                 &SEVENZ_ADAPTER,
                 &RAR_ADAPTER,
             ],
@@ -108,7 +112,7 @@ impl ArchiveAdapterRegistry {
             Some(format) if requires_name_confirmation(format) && name_format == Some(format) => {
                 Some(format)
             }
-            Some(format) if requires_name_confirmation(format) => None,
+            Some(format) if requires_name_confirmation(format) => name_format,
             Some(format) => Some(format),
             None => name_format,
         }
@@ -275,6 +279,10 @@ mod tests {
             Some(ArchiveFormat::TarBz2)
         );
         assert_eq!(registry.detect_name("logs.txz"), Some(ArchiveFormat::TarXz));
+        assert_eq!(
+            registry.detect_name("app.log.gz"),
+            Some(ArchiveFormat::Gzip)
+        );
         assert_eq!(registry.detect_name("logs.7z"), Some(ArchiveFormat::SevenZ));
         assert_eq!(registry.detect_name("logs.rar"), Some(ArchiveFormat::Rar));
         assert_eq!(registry.detect_name("app.log"), None);
@@ -300,6 +308,18 @@ mod tests {
     fn gzip_header_without_tar_extension_is_not_detected_as_tar_gz() {
         let registry = ArchiveAdapterRegistry::with_builtin_adapters();
         let path = test_archive_path("app.log.gz");
+        fs::write(&path, [0x1F, 0x8B, 0x08, 0x00]).expect("应能写入 gzip 头测试文件");
+
+        assert_eq!(registry.detect_path(&path), Some(ArchiveFormat::Gzip));
+
+        let _ = fs::remove_file(path);
+    }
+
+    /// 验证只有 gzip 文件头但没有 gzip 扩展名时不会误判为 tar.gz。
+    #[test]
+    fn gzip_header_without_gzip_name_is_not_detected_as_tar_gz() {
+        let registry = ArchiveAdapterRegistry::with_builtin_adapters();
+        let path = test_archive_path("app.log");
         fs::write(&path, [0x1F, 0x8B, 0x08, 0x00]).expect("应能写入 gzip 头测试文件");
 
         assert_eq!(registry.detect_path(&path), None);
