@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义跨平台日志来源选择器独立窗口。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-12
 //! 作者：Argus 开发团队
 //! 主要功能：提供独立窗口中的目录浏览、目录/文件/压缩包多选和确认加载入口。
 
@@ -17,6 +17,7 @@ use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::loader::{BrowseEntry, BrowseEntryKind};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
@@ -26,15 +27,25 @@ use crate::utils::size_format::format_bytes;
 use crate::utils::time_format::format_modified_time;
 
 /// 左侧快捷入口宽度。
-const SOURCE_PICKER_LOCATION_WIDTH: f32 = 164.0;
+const SOURCE_PICKER_LOCATION_WIDTH: f32 = 188.0;
+/// 选择器窗口固定头部高度，和设置窗口保持一致。
+const SOURCE_PICKER_HEADER_HEIGHT: f32 = 56.0;
+/// 选择器窗口标题图标尺寸，和 14px 标题文字保持协调比例。
+const SOURCE_PICKER_TITLE_ICON_SIZE: f32 = 16.0;
+/// 选择器内容区统一内边距。
+const SOURCE_PICKER_CONTENT_PADDING: f32 = 16.0;
 /// 文件列表固定行高。
 const SOURCE_PICKER_ROW_HEIGHT: f32 = 32.0;
-/// 无标题栏窗口顶部留白，给右上角关闭按钮和路径栏保留清晰层次。
-const SOURCE_PICKER_TOP_PADDING: f32 = 34.0;
 /// 修改日期列宽度。
 const SOURCE_PICKER_MODIFIED_WIDTH: f32 = 128.0;
 /// 大小列宽度。
 const SOURCE_PICKER_SIZE_WIDTH: f32 = 76.0;
+/// 选择器按钮内容视觉下移量，用于抵消字体和 SVG 几何居中后的视觉偏上。
+const SOURCE_PICKER_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
+/// 选择器表头内容视觉下移量，表头字号更小，使用更轻的修正避免显得下坠。
+const SOURCE_PICKER_HEADER_CONTENT_Y_OFFSET: f32 = 0.5;
+/// 选择器表头图标尺寸。
+const SOURCE_PICKER_HEADER_ICON_SIZE: f32 = 13.0;
 
 /// 来源选择器独立窗口根视图；通过观察主应用实体获得最新选择器状态。
 pub struct SourcePickerWindow {
@@ -119,34 +130,61 @@ fn render_window_content(
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .occlude()
+        .child(render_title_bar(&theme, &close_app))
         .child(
             div()
                 .flex_1()
                 .min_h(px(0.0))
                 .flex()
+                .bg(rgb(theme.content))
                 .child(render_locations(snapshot, &theme, app_handle))
                 .child(render_browser(snapshot, &theme, app_handle, cx)),
         )
+}
+
+/// 渲染来源选择器固定头部。
+///
+/// 说明：头部只承载窗口标题和关闭按钮，不参与目录浏览业务，保持和设置窗口一致的
+/// 无标题栏窗口结构。
+fn render_title_bar(theme: &AppTheme, close_app: &Entity<ArgusApp>) -> impl IntoElement + use<> {
+    let close_app = close_app.clone();
+
+    div()
+        .h(px(SOURCE_PICKER_HEADER_HEIGHT))
+        .flex_none()
+        .px_5()
+        .flex()
+        .items_center()
+        .justify_between()
+        .bg(rgb(theme.content))
         .child(
             div()
-                .id("source-picker-window-close")
-                .absolute()
-                .top(px(14.0))
-                .right(px(14.0))
-                .w(px(28.0))
-                .h(px(28.0))
                 .flex()
                 .items_center()
-                .justify_center()
-                .rounded_sm()
-                .cursor_pointer()
-                .hover(|this| this.bg(rgb(theme.current_line)))
-                .child(render_icon(ArgusIcon::Close, theme.foreground_muted, 16.0))
-                .on_click(move |_, window, cx| {
-                    update_picker_app(&close_app, cx, |app, _| app.close_source_picker());
-                    window.remove_window();
-                }),
+                .gap_2()
+                .text_size(px(14.0))
+                .line_height(px(18.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.foreground))
+                .child(render_icon(
+                    ArgusIcon::FolderPlus,
+                    theme.foreground_muted,
+                    SOURCE_PICKER_TITLE_ICON_SIZE,
+                ))
+                .child("加载日志来源"),
         )
+        .child(render_icon_button(
+            "source-picker-window-close",
+            ArgusIcon::Close,
+            "关闭加载日志来源",
+            false,
+            IconButtonSize::Small,
+            theme,
+            move |_, window, cx| {
+                update_picker_app(&close_app, cx, |app, _| app.close_source_picker());
+                window.remove_window();
+            },
+        ))
 }
 
 /// 渲染左侧常用位置列表。
@@ -164,11 +202,16 @@ fn render_locations(
         .flex()
         .flex_col()
         .gap_1()
-        .p_3()
-        .pt(px(SOURCE_PICKER_TOP_PADDING + 12.0))
-        .bg(rgb(theme.side_bar))
+        .px_4()
+        .py(px(SOURCE_PICKER_CONTENT_PADDING))
+        .border_r_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.content))
         .child(
             div()
+                .h(px(28.0))
+                .flex()
+                .items_center()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(theme.foreground_muted))
@@ -224,7 +267,7 @@ fn render_browser(
         .flex()
         .flex_col()
         .bg(rgb(theme.content))
-        .pt(px(SOURCE_PICKER_TOP_PADDING))
+        .pt(px(SOURCE_PICKER_CONTENT_PADDING))
         .child(render_header(snapshot, theme, app_handle))
         .child(render_entry_area(snapshot, theme, app_handle, cx))
         .child(render_footer(snapshot, theme, app_handle))
@@ -246,12 +289,11 @@ fn render_header(
     let refresh_dir = snapshot.source_picker.current_dir.clone();
 
     div()
-        .h(px(64.0))
+        .h(px(48.0))
         .flex()
         .items_center()
         .gap_2()
-        .pl_4()
-        .pr_4()
+        .px_4()
         .bg(rgb(theme.content))
         .child(picker_icon_button(
             "source-picker-up",
@@ -405,51 +447,67 @@ fn render_entry_header(
     app_handle: &Entity<ArgusApp>,
 ) -> impl IntoElement + use<> {
     div()
-        .h(px(30.0))
+        .h(px(28.0))
         .flex_none()
-        .flex()
-        .items_center()
-        .px_4()
+        .px_2()
         .border_b_1()
         .border_color(rgb(theme.border))
-        .text_size(px(11.0))
+        .text_size(px(12.0))
         .text_color(rgb(theme.foreground_muted))
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.0))
-                .pl(px(23.0))
-                .child(render_sort_header_cell(
-                    "名称",
-                    SourcePickerSortKey::Name,
-                    snapshot.source_picker.sort_key,
-                    snapshot.source_picker.sort_direction,
-                    theme,
-                    app_handle,
-                )),
-        )
-        .child(div().w(px(SOURCE_PICKER_MODIFIED_WIDTH)).flex_none().child(
-            render_sort_header_cell(
-                "修改日期",
-                SourcePickerSortKey::Modified,
-                snapshot.source_picker.sort_key,
-                snapshot.source_picker.sort_direction,
-                theme,
-                app_handle,
-            ),
-        ))
-        .child(
-            div()
-                .w(px(SOURCE_PICKER_SIZE_WIDTH))
-                .flex_none()
-                .text_right()
-                .child("大小"),
+                .h_full()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .child(div().flex_1().min_w(px(0.0)).flex().items_center().child(
+                    render_sort_header_cell(
+                        "名称",
+                        ArgusIcon::File,
+                        SourcePickerSortKey::Name,
+                        snapshot.source_picker.sort_key,
+                        snapshot.source_picker.sort_direction,
+                        theme,
+                        app_handle,
+                    ),
+                ))
+                .child(
+                    div()
+                        .w(px(SOURCE_PICKER_MODIFIED_WIDTH))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .child(render_sort_header_cell(
+                            "修改日期",
+                            ArgusIcon::Refresh,
+                            SourcePickerSortKey::Modified,
+                            snapshot.source_picker.sort_key,
+                            snapshot.source_picker.sort_direction,
+                            theme,
+                            app_handle,
+                        )),
+                )
+                .child(
+                    div()
+                        .w(px(SOURCE_PICKER_SIZE_WIDTH))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .child(render_static_header_cell(
+                            "大小",
+                            ArgusIcon::Database,
+                            theme,
+                        )),
+                ),
         )
 }
 
 /// 渲染可点击排序表头单元格。
 fn render_sort_header_cell(
     label: &'static str,
+    icon: ArgusIcon,
     sort_key: SourcePickerSortKey,
     active_key: SourcePickerSortKey,
     direction: SourcePickerSortDirection,
@@ -469,21 +527,17 @@ fn render_sort_header_cell(
         SourcePickerSortKey::Name => "source-picker-sort-name",
         SourcePickerSortKey::Modified => "source-picker-sort-modified",
     };
-    let icon = match sort_key {
-        SourcePickerSortKey::Name => ArgusIcon::File,
-        SourcePickerSortKey::Modified => ArgusIcon::Refresh,
-    };
     let app_handle = app_handle.clone();
 
     div()
         .id(id)
+        .h(px(22.0))
         .flex()
         .items_center()
         .gap_1()
         .rounded_sm()
-        .px_1()
-        .py(px(2.0))
-        .line_height(px(20.0))
+        .px_2()
+        .line_height(px(18.0))
         .text_color(rgb(if is_active {
             theme.foreground
         } else {
@@ -496,16 +550,34 @@ fn render_sort_header_cell(
                 app.set_source_picker_sort(sort_key);
             });
         })
-        .child(render_icon(
+        // 表头图标和文字从列起始处左对齐，避免名称列前出现额外空白。
+        .child(header_icon(
             icon,
             if is_active {
                 theme.foreground
             } else {
                 theme.foreground_muted
             },
-            12.0,
         ))
-        .child(format!("{label}{indicator}"))
+        .child(header_label_text(format!("{label}{indicator}")))
+}
+
+/// 渲染不可排序的静态表头单元格。
+fn render_static_header_cell(
+    label: &'static str,
+    icon: ArgusIcon,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    div()
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .line_height(px(18.0))
+        .text_color(rgb(theme.foreground_muted))
+        .child(header_icon(icon, theme.foreground_muted))
+        .child(header_label_text(label.to_string()))
 }
 
 /// 渲染加载状态。
@@ -873,7 +945,12 @@ where
                 .on_click(on_click)
         })
         .when(!is_enabled, |this| this.opacity(0.45))
-        .child(render_icon(icon, theme.foreground_muted, 16.0))
+        .child(
+            div()
+                .relative()
+                .top(px(SOURCE_PICKER_BUTTON_CONTENT_Y_OFFSET))
+                .child(render_icon(icon, theme.foreground_muted, 16.0)),
+        )
 }
 
 /// 渲染普通文本按钮。
@@ -903,8 +980,8 @@ where
         .hover(|this| this.bg(rgb(theme.selection)))
         .cursor_pointer()
         .on_click(on_click)
-        .child(render_icon(icon, theme.foreground_muted, 13.0))
-        .child(label)
+        .child(button_icon(icon, theme.foreground_muted, 13.0))
+        .child(button_label(label))
 }
 
 /// 渲染主操作按钮。
@@ -943,7 +1020,7 @@ where
                 .on_click(on_click)
         })
         .when(!is_enabled, |this| this.opacity(0.55))
-        .child(render_icon(
+        .child(button_icon(
             icon,
             if is_enabled {
                 theme.foreground
@@ -952,7 +1029,39 @@ where
             },
             13.0,
         ))
+        .child(button_label(label))
+}
+
+/// 渲染选择器按钮中的图标内容，统一修正视觉垂直居中。
+fn button_icon(icon: ArgusIcon, color: u32, size: f32) -> impl IntoElement {
+    div()
+        .relative()
+        .top(px(SOURCE_PICKER_BUTTON_CONTENT_Y_OFFSET))
+        .child(render_icon(icon, color, size))
+}
+
+/// 渲染选择器按钮中的文字内容，统一修正视觉垂直居中。
+fn button_label(label: &'static str) -> impl IntoElement {
+    div()
+        .relative()
+        .top(px(SOURCE_PICKER_BUTTON_CONTENT_Y_OFFSET))
         .child(label)
+}
+
+/// 渲染表头文字内容，和按钮文字使用同一套视觉垂直居中修正。
+fn header_label_text(label: String) -> impl IntoElement {
+    div()
+        .relative()
+        .top(px(SOURCE_PICKER_HEADER_CONTENT_Y_OFFSET))
+        .child(label)
+}
+
+/// 渲染表头图标内容，和表头文字使用同一套视觉垂直居中修正。
+fn header_icon(icon: ArgusIcon, color: u32) -> impl IntoElement {
+    div()
+        .relative()
+        .top(px(SOURCE_PICKER_HEADER_CONTENT_Y_OFFSET))
+        .child(render_icon(icon, color, SOURCE_PICKER_HEADER_ICON_SIZE))
 }
 
 /// 统一更新主应用状态；选择器窗口只负责表现，不直接保存业务状态。

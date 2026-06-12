@@ -13,12 +13,17 @@ use crate::app::{ArgusApp, LogSearchInputKind, LogSearchState};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::search::search_engine::SearchScope;
 use crate::theme::AppTheme;
-use crate::ui::components::icon::ArgusIcon;
+use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
 use crate::ui::components::loading_spinner::render_loading_spinner;
+
+/// 搜索窗口按钮内容视觉下移量，用于修正文字和图标在按钮内略靠上的观感。
+const LOG_SEARCH_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
+/// 搜索窗口标题图标尺寸，和 14px 标题文字保持协调比例。
+const LOG_SEARCH_TITLE_ICON_SIZE: f32 = 16.0;
 
 /// 搜索窗口根视图；业务状态仍保存在主应用实体中。
 pub struct LogSearchWindow {
@@ -136,8 +141,18 @@ fn render_window_content(
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(13.0))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(14.0))
+                        .line_height(px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.foreground))
+                        .child(render_icon(
+                            ArgusIcon::Search,
+                            theme.foreground_muted,
+                            LOG_SEARCH_TITLE_ICON_SIZE,
+                        ))
                         .child("日志搜索"),
                 )
                 .child(render_icon_button(
@@ -274,7 +289,7 @@ fn render_scope_segment(
                     });
                 })
                 .child(render_button_icon(icon, is_active, &theme))
-                .child(scope.label())
+                .child(button_label(scope.label()))
         }),
     )
 }
@@ -295,7 +310,7 @@ fn render_button_icon(icon: ArgusIcon, is_active: bool, theme: &AppTheme) -> imp
     } else {
         theme.foreground_muted
     };
-    crate::ui::components::icon::render_icon(icon, color, 13.0)
+    button_icon(icon, color, 13.0)
 }
 
 /// 渲染搜索选项切换按钮。
@@ -340,7 +355,7 @@ fn render_search_option_toggle(
             })
             .into()
         })
-        .child(label)
+        .child(button_label(label))
         .on_click(on_click)
 }
 
@@ -583,13 +598,25 @@ fn action_button(
         .line_height(px(28.0))
         .text_color(rgb(theme.foreground))
         .cursor_pointer()
-        .child(crate::ui::components::icon::render_icon(
-            icon,
-            theme.foreground_muted,
-            13.0,
-        ))
-        .when(!label.is_empty(), |this| this.child(label))
+        .child(button_icon(icon, theme.foreground_muted, 13.0))
+        .when(!label.is_empty(), |this| this.child(button_label(label)))
         .on_click(on_click)
+}
+
+/// 渲染搜索窗口按钮中的图标，统一修正视觉垂直居中。
+fn button_icon(icon: ArgusIcon, color: u32, size: f32) -> impl IntoElement {
+    div()
+        .relative()
+        .top(px(LOG_SEARCH_BUTTON_CONTENT_Y_OFFSET))
+        .child(crate::ui::components::icon::render_icon(icon, color, size))
+}
+
+/// 渲染搜索窗口按钮中的文字，统一修正视觉垂直居中。
+fn button_label(label: &'static str) -> impl IntoElement {
+    div()
+        .relative()
+        .top(px(LOG_SEARCH_BUTTON_CONTENT_Y_OFFSET))
+        .child(label)
 }
 
 /// 计算输入框选区范围。

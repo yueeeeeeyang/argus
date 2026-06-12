@@ -124,8 +124,8 @@ impl Default for SourcePickerState {
             path_input_selection_anchor: None,
             path_input_selection_drag: None,
             is_path_input_focused: false,
-            sort_key: SourcePickerSortKey::Name,
-            sort_direction: SourcePickerSortDirection::Ascending,
+            sort_key: SourcePickerSortKey::Modified,
+            sort_direction: SourcePickerSortDirection::Descending,
         }
     }
 }
@@ -162,6 +162,25 @@ impl SourcePickerState {
         self.path_input_selection_anchor = None;
         self.path_input_selection_drag = None;
     }
+
+    /// 将选择器恢复到每次新打开窗口时的默认浏览状态。
+    ///
+    /// 说明：默认定位下载目录并按修改日期倒序排列，符合日志包通常来自下载目录、
+    /// 新文件更常被选择的使用路径。
+    fn reset_for_open(&mut self) {
+        let current_dir = PathBrowser::default_start_directory();
+        self.current_dir = current_dir.clone();
+        self.parent_dir = None;
+        self.entries.clear();
+        self.is_loading = false;
+        self.error_message = None;
+        self.selected_paths.clear();
+        self.entry_scroll = UniformListScrollHandle::new();
+        self.sort_key = SourcePickerSortKey::Modified;
+        self.sort_direction = SourcePickerSortDirection::Descending;
+        self.is_path_input_focused = false;
+        self.set_path_input_from_path(&current_dir);
+    }
 }
 
 impl ArgusApp {
@@ -187,8 +206,7 @@ impl ArgusApp {
 
         let app_entity = cx.entity();
         self.source_picker.is_open = true;
-        self.source_picker.is_path_input_focused = false;
-        self.source_picker.error_message = None;
+        self.source_picker.reset_for_open();
         self.source_picker.locations = PathBrowser::default_locations();
         self.placeholder_notice = "请选择日志文件、目录或压缩包".to_string();
 
@@ -779,15 +797,6 @@ mod tests {
         ];
 
         app.set_source_picker_sort(SourcePickerSortKey::Name);
-        let descending_names = app
-            .source_picker
-            .entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(descending_names, vec!["beta", "alpha", "z.log", "a.log"]);
-
-        app.set_source_picker_sort(SourcePickerSortKey::Name);
         let ascending_names = app
             .source_picker
             .entries
@@ -795,6 +804,15 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ascending_names, vec!["alpha", "beta", "a.log", "z.log"]);
+
+        app.set_source_picker_sort(SourcePickerSortKey::Name);
+        let descending_names = app
+            .source_picker
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(descending_names, vec!["beta", "alpha", "z.log", "a.log"]);
     }
 
     /// 验证修改日期排序默认按新到旧排列，缺失日期的条目始终靠后。
@@ -811,6 +829,8 @@ mod tests {
             test_entry("missing.log", crate::loader::BrowseEntryKind::LogFile, None),
             test_entry("new.log", crate::loader::BrowseEntryKind::LogFile, Some(30)),
         ];
+        app.source_picker.sort_key = SourcePickerSortKey::Name;
+        app.source_picker.sort_direction = SourcePickerSortDirection::Ascending;
 
         app.set_source_picker_sort(SourcePickerSortKey::Modified);
 

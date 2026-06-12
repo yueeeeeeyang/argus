@@ -1928,8 +1928,13 @@ fn action_text_button(
         .bg(rgb(theme.current_line))
         .hover(|this| this.bg(rgb(theme.selection)))
         .cursor_pointer()
-        .child(render_icon(icon, theme.foreground_muted, 12.0))
-        .child(label)
+        .child(
+            div()
+                .relative()
+                .top(px(1.0))
+                .child(render_icon(icon, theme.foreground_muted, 12.0)),
+        )
+        .child(div().relative().top(px(1.0)).child(label))
         .on_click(on_click)
 }
 

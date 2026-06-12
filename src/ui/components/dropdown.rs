@@ -42,6 +42,9 @@ pub struct Dropdown {
 /// 下拉框选项点击回调类型。
 pub type DropdownSelectCallback = Arc<dyn Fn(String, &mut Window, &mut App) + 'static>;
 
+/// 下拉触发按钮内容视觉下移量，用于和其它文字按钮保持垂直居中观感。
+const DROPDOWN_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
+
 /// 渲染通用下拉框。
 ///
 /// 参数说明：
@@ -92,16 +95,28 @@ pub fn render_dropdown(
                 .bg(rgb(theme.content))
                 .cursor_pointer()
                 .hover(|this| this.bg(rgb(theme.current_line)))
-                .child(div().flex_1().truncate().child(selected_text))
-                .child(render_icon(
-                    if dropdown.is_open {
-                        ArgusIcon::Collapse
-                    } else {
-                        ArgusIcon::Expand
-                    },
-                    theme.foreground_muted,
-                    14.0,
-                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .truncate()
+                        .relative()
+                        .top(px(DROPDOWN_BUTTON_CONTENT_Y_OFFSET))
+                        .child(selected_text),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .top(px(DROPDOWN_BUTTON_CONTENT_Y_OFFSET))
+                        .child(render_icon(
+                            if dropdown.is_open {
+                                ArgusIcon::Collapse
+                            } else {
+                                ArgusIcon::Expand
+                            },
+                            theme.foreground_muted,
+                            14.0,
+                        )),
+                )
                 .on_click(on_toggle),
         )
         .when(dropdown.is_open && dropdown.show_inline_menu, |this| {

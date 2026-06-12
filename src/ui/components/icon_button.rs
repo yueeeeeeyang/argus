@@ -22,6 +22,12 @@ pub enum IconButtonSize {
     Medium,
 }
 
+/// 图标按钮内容的视觉下移量。
+///
+/// 说明：当前 UI 字体和 Lucide SVG 在 GPUI 中按几何中心对齐时会显得略靠上，
+/// 这里仅移动内容层，不改变按钮尺寸和命中区域。
+const ICON_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
+
 /// tooltip 视图状态，仅保存需要展示的说明文案。
 struct TooltipView {
     /// tooltip 展示文本。
@@ -112,6 +118,11 @@ pub fn render_icon_button(
             })
             .into()
         })
-        .child(render_icon(icon, foreground, icon_size))
+        .child(
+            div()
+                .relative()
+                .top(px(ICON_BUTTON_CONTENT_Y_OFFSET))
+                .child(render_icon(icon, foreground, icon_size)),
+        )
         .on_click(on_click)
 }

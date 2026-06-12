@@ -141,9 +141,17 @@ impl PathBrowser {
 
     /// 返回选择器首次打开时应定位的目录。
     pub fn default_start_directory() -> PathBuf {
-        user_home_dir()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."))
+        if let Some(home) = user_home_dir() {
+            // 选择器主要用于加载用户下载的日志包，优先打开下载目录；目录不存在时回退主目录。
+            let downloads = home.join("Downloads");
+            if downloads.is_dir() {
+                return downloads;
+            }
+
+            return home;
+        }
+
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
     /// 返回跨平台常用位置入口；不存在的位置会被过滤。

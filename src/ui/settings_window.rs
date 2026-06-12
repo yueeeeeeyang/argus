@@ -20,6 +20,8 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 
 /// 设置行右侧内边距，用于让浮层菜单和选择框左边缘对齐。
 const SETTINGS_ROW_HORIZONTAL_PADDING: f32 = 12.0;
+/// 设置窗口标题图标尺寸，和 14px 标题文字保持协调比例。
+const SETTINGS_WINDOW_TITLE_ICON_SIZE: f32 = 16.0;
 /// 主题下拉框固定宽度，需和通用下拉框按钮宽度保持一致。
 const SETTINGS_THEME_DROPDOWN_WIDTH: f32 = 260.0;
 /// 主题下拉菜单单行高度。
@@ -162,12 +164,13 @@ fn render_settings_window(
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_size(px(16.0))
+                        .text_size(px(14.0))
+                        .line_height(px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(render_icon(
                             ArgusIcon::Settings,
                             theme.foreground_muted,
-                            16.0,
+                            SETTINGS_WINDOW_TITLE_ICON_SIZE,
                         ))
                         .child("设置"),
                 )
