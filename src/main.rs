@@ -1,47 +1,86 @@
 //! 文件职责：Argus 桌面客户端启动入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-15
 //! 作者：Argus 开发团队
-//! 主要功能：初始化 GPUI 应用、打开主窗口并处理应用重新打开事件。
+//! 主要功能：初始化 GPUI 应用、打开主窗口并处理应用重新打开和系统外部打开事件。
 
 use argus::app::ArgusApp;
+use argus::app::ExternalSourceTrigger;
 use argus::assets::ArgusAssetSource;
 use argus::fonts::register_argus_fonts;
+use argus::platform::external_sources::{paths_from_open_urls, paths_from_startup_args};
 use gpui::{
-    App, AppContext, Application, Bounds, Keystroke, TitlebarOptions, WindowBounds, WindowOptions,
-    point, px, size,
+    App, AppContext, Application, Bounds, Keystroke, TitlebarOptions, WindowBounds, WindowHandle,
+    WindowOptions, point, px, size,
 };
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
+
+/// 主窗口句柄共享引用；系统 open-url 监听和 reopen 逻辑共同维护最新可用窗口。
+type MainWindowSlot = Rc<RefCell<Option<WindowHandle<ArgusApp>>>>;
 
 /// 启动 Argus GPUI 应用并创建透明原生标题栏的主窗口。
 fn main() {
     let application = Application::new().with_assets(ArgusAssetSource::new());
+    let startup_paths = paths_from_startup_args(std::env::args_os().skip(1));
+    let (external_open_sender, external_open_receiver) = async_channel::unbounded::<Vec<PathBuf>>();
+    let main_window_slot: MainWindowSlot = Rc::new(RefCell::new(None));
 
-    application.on_reopen(|cx| {
-        if activate_last_available_window(cx) {
-            return;
+    application.on_open_urls(move |urls| {
+        let paths = paths_from_open_urls(urls);
+        if !paths.is_empty() {
+            let _ = external_open_sender.try_send(paths);
         }
-
-        if let Err(error) = open_argus_main_window(cx) {
-            eprintln!("重新打开 Argus 主窗口失败：{error}");
-            return;
-        }
-
-        cx.activate(true);
     });
 
-    application.run(|cx: &mut App| {
+    application.on_reopen({
+        let main_window_slot = main_window_slot.clone();
+        move |cx| {
+            if let Some(window_handle) = activate_last_argus_main_window(cx) {
+                *main_window_slot.borrow_mut() = Some(window_handle);
+                return;
+            }
+
+            match open_argus_main_window(cx) {
+                Ok(window_handle) => {
+                    *main_window_slot.borrow_mut() = Some(window_handle);
+                }
+                Err(error) => {
+                    eprintln!("重新打开 Argus 主窗口失败：{error}");
+                    return;
+                }
+            }
+
+            cx.activate(true);
+        }
+    });
+
+    application.run(move |cx: &mut App| {
         if let Err(error) = register_argus_fonts(cx) {
             eprintln!("Argus 内置字体注册失败：{error}");
         }
 
-        open_argus_main_window(cx).expect("打开 Argus 主窗口失败");
+        let window_handle = open_argus_main_window(cx).expect("打开 Argus 主窗口失败");
+        *main_window_slot.borrow_mut() = Some(window_handle);
+        observe_external_open_requests(
+            main_window_slot.clone(),
+            external_open_receiver.clone(),
+            cx,
+        );
+        if !startup_paths.is_empty() {
+            load_external_paths_in_main_window(
+                window_handle,
+                startup_paths.clone(),
+                ExternalSourceTrigger::StartupArgs,
+                cx,
+            );
+        }
 
         cx.activate(true);
     });
 }
 
 /// 创建 Argus 主窗口；启动和 reopen 都复用同一套窗口选项，避免配置分叉。
-fn open_argus_main_window(cx: &mut App) -> anyhow::Result<()> {
+fn open_argus_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<ArgusApp>> {
     let bounds = Bounds::centered(None, size(px(1330.0), px(820.0)), cx);
 
     let window_handle = cx.open_window(
@@ -58,7 +97,76 @@ fn open_argus_main_window(cx: &mut App) -> anyhow::Result<()> {
     )?;
     observe_log_view_shortcuts(cx, window_handle);
 
-    Ok(())
+    Ok(window_handle)
+}
+
+/// 监听系统 Open With / open-url 事件，并转入主应用统一来源加载流程。
+fn observe_external_open_requests(
+    main_window_slot: MainWindowSlot,
+    receiver: async_channel::Receiver<Vec<PathBuf>>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        while let Ok(paths) = receiver.recv().await {
+            let mut pending_paths = Some(paths);
+
+            if let Some(window_handle) = *main_window_slot.borrow() {
+                let update_result = window_handle.update(cx, |app, window, cx| {
+                    window.activate_window();
+                    if let Some(paths) = pending_paths.take() {
+                        app.load_sources_from_paths(paths, ExternalSourceTrigger::OpenWith, cx);
+                    }
+                    cx.notify();
+                });
+                if update_result.is_ok() {
+                    continue;
+                }
+
+                // 已缓存的主窗口句柄可能来自已经关闭的窗口；清空后用同一批路径重建主窗口加载。
+                *main_window_slot.borrow_mut() = None;
+            }
+
+            let Some(paths) = pending_paths.take() else {
+                continue;
+            };
+            let recreated_window = cx.update(open_argus_main_window);
+            match recreated_window {
+                Ok(Ok(window_handle)) => {
+                    *main_window_slot.borrow_mut() = Some(window_handle);
+                    let load_result = window_handle.update(cx, |app, window, cx| {
+                        window.activate_window();
+                        app.load_sources_from_paths(paths, ExternalSourceTrigger::OpenWith, cx);
+                        cx.notify();
+                    });
+                    if let Err(error) = load_result {
+                        *main_window_slot.borrow_mut() = None;
+                        eprintln!("外部打开路径加载失败：新建 Argus 主窗口不可用：{error}");
+                    }
+                }
+                Ok(Err(error)) => {
+                    eprintln!("外部打开路径加载失败：重新创建 Argus 主窗口失败：{error}");
+                }
+                Err(error) => {
+                    eprintln!("外部打开路径加载失败：无法回到 UI 线程创建主窗口：{error}");
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// 把启动参数或系统右键传入的路径加载到主窗口。
+fn load_external_paths_in_main_window(
+    window_handle: WindowHandle<ArgusApp>,
+    paths: Vec<PathBuf>,
+    trigger: ExternalSourceTrigger,
+    cx: &mut App,
+) {
+    let _ = window_handle.update(cx, |app, window, cx| {
+        window.activate_window();
+        app.load_sources_from_paths(paths, trigger, cx);
+        cx.notify();
+    });
 }
 
 /// 前置观察主窗口日志阅读快捷键。
@@ -166,21 +274,24 @@ fn log_key_probe_if_enabled(
     );
 }
 
-/// 激活平台记录的最后可用窗口；全部失效时返回 false，让调用方重新创建主窗口。
-fn activate_last_available_window(cx: &mut App) -> bool {
+/// 激活最后一个 Argus 主窗口；全部失效时返回 `None`，让调用方重新创建主窗口。
+fn activate_last_argus_main_window(cx: &mut App) -> Option<WindowHandle<ArgusApp>> {
     let Some(window_stack) = cx.window_stack() else {
-        return false;
+        return None;
     };
 
     for window_handle in window_stack.into_iter().rev() {
+        let Some(window_handle) = window_handle.downcast::<ArgusApp>() else {
+            continue;
+        };
         if window_handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
         {
             cx.activate(true);
-            return true;
+            return Some(window_handle);
         }
     }
 
-    false
+    None
 }

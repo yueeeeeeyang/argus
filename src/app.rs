@@ -26,6 +26,7 @@ use crate::loader::{
     LoadReport, LogSourceLoader, SourceArchiveProbeRequest, SourceArchiveProbeResult, SourceId,
     SourceKind, SourceLocation, SourceRegistry, SourceTreeNode,
 };
+use crate::platform::open_with_registration::RegistrationStatus;
 use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
@@ -46,7 +47,9 @@ use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 #[cfg(test)]
 use placeholder_data::{placeholder_logs, placeholder_source_registry};
-pub use source_picker::{SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState};
+pub use source_picker::{
+    ExternalSourceTrigger, SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState,
+};
 
 /// 来源侧栏默认宽度；主窗口默认宽度同步增加，避免挤占右侧日志阅读区。
 pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 350.0;
@@ -702,6 +705,12 @@ pub struct ArgusApp {
     pub is_settings_window_open: bool,
     /// 设置窗口句柄，用于重复点击设置按钮时置前已有窗口。
     pub settings_window_handle: Option<WindowHandle<SettingsWindow>>,
+    /// 系统“用 Argus 打开”右键菜单注册状态。
+    pub open_with_registration_status: RegistrationStatus,
+    /// 是否正在执行系统右键菜单注册或卸载任务。
+    pub is_open_with_registration_busy: bool,
+    /// 系统右键菜单注册最近一次操作提示。
+    pub open_with_registration_message: Option<String>,
     /// 日志内容区字号，仅影响主阅读区域。
     pub log_content_font_size: f32,
     /// 设置页编码选项。
@@ -803,6 +812,9 @@ impl ArgusApp {
             is_theme_dropdown_open: false,
             is_settings_window_open: false,
             settings_window_handle: None,
+            open_with_registration_status: RegistrationStatus::Unknown("尚未检查".to_string()),
+            is_open_with_registration_busy: false,
+            open_with_registration_message: None,
             log_content_font_size,
             selected_encoding,
             is_cache_enabled,

@@ -118,6 +118,7 @@ name = "argus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel 2.5.0",
  "bzip2",
  "chardetng",
  "chrono",
@@ -133,7 +134,9 @@ dependencies = [
  "tar",
  "thiserror 2.0.18",
  "toml 0.8.23",
+ "url",
  "walkdir",
+ "windows-sys 0.60.2",
  "xz2",
  "zip",
 ]

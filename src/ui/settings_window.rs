@@ -13,6 +13,7 @@ use gpui::{
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
+use crate::platform::open_with_registration::RegistrationStatus;
 use crate::theme::{AppTheme, ThemeOption};
 use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -95,6 +96,9 @@ impl SettingsWindow {
             max_archive_depth: app.config.loader.max_archive_depth,
             archive_probe_concurrency: app.config.loader.archive_probe_concurrency,
             follow_symlinks: app.config.loader.follow_symlinks,
+            open_with_registration_status: app.open_with_registration_status.clone(),
+            is_open_with_registration_busy: app.is_open_with_registration_busy,
+            open_with_registration_message: app.open_with_registration_message.clone(),
         }
     }
 }
@@ -127,6 +131,12 @@ pub struct SettingsWindowSnapshot {
     pub archive_probe_concurrency: usize,
     /// 是否跟随符号链接。
     pub follow_symlinks: bool,
+    /// 系统右键菜单注册状态。
+    pub open_with_registration_status: RegistrationStatus,
+    /// 系统右键菜单是否正在注册或卸载。
+    pub is_open_with_registration_busy: bool,
+    /// 系统右键菜单最近一次操作提示。
+    pub open_with_registration_message: Option<String>,
 }
 
 /// 渲染设置窗口主体布局。
@@ -414,6 +424,11 @@ fn render_log_loading_section(
             follow_symlink_control(snapshot.follow_symlinks, app_handle, theme),
             theme,
         ))
+        .child(setting_row(
+            "系统右键菜单",
+            open_with_registration_control(snapshot, app_handle, theme),
+            theme,
+        ))
 }
 
 /// 渲染设置组背景容器。
@@ -614,6 +629,146 @@ fn follow_symlink_control(
                 update_settings_app(&toggle_app, cx, |app, _| app.toggle_follow_symlinks());
             },
         ))
+}
+
+/// 渲染系统右键菜单注册状态与操作按钮。
+fn open_with_registration_control(
+    snapshot: &SettingsWindowSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    let register_app = app_handle.clone();
+    let unregister_app = app_handle.clone();
+    let status = snapshot.open_with_registration_status.clone();
+    let status_label = status.label();
+    let message = snapshot.open_with_registration_message.clone();
+    let is_busy = snapshot.is_open_with_registration_busy;
+    let can_register = !is_busy && status.can_register();
+    let can_unregister = !is_busy && status.can_unregister();
+
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .max_w(px(220.0))
+                .h(px(28.0))
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .bg(rgb(match status {
+                    RegistrationStatus::Registered => theme.selection,
+                    RegistrationStatus::Unsupported(_) => theme.content,
+                    RegistrationStatus::NotRegistered | RegistrationStatus::Unknown(_) => {
+                        theme.current_line
+                    }
+                }))
+                .text_size(px(12.0))
+                .line_height(px(28.0))
+                .text_color(rgb(
+                    if matches!(
+                        snapshot.open_with_registration_status,
+                        RegistrationStatus::Registered
+                    ) {
+                        theme.foreground
+                    } else {
+                        theme.foreground_muted
+                    },
+                ))
+                .child(div().truncate().child(if is_busy {
+                    "执行中...".to_string()
+                } else {
+                    status_label
+                })),
+        )
+        .when_some(message, |this, message| {
+            this.child(
+                div()
+                    .max_w(px(180.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.foreground_muted))
+                    .truncate()
+                    .child(message),
+            )
+        })
+        .child(registration_action_button(
+            "settings-open-with-register",
+            "注册",
+            ArgusIcon::FolderPlus,
+            !can_register,
+            theme,
+            move |cx| {
+                update_settings_app(&register_app, cx, |app, cx| app.register_open_with_menu(cx));
+            },
+        ))
+        .child(registration_action_button(
+            "settings-open-with-unregister",
+            "卸载",
+            ArgusIcon::Close,
+            !can_unregister,
+            theme,
+            move |cx| {
+                update_settings_app(&unregister_app, cx, |app, cx| {
+                    app.unregister_open_with_menu(cx)
+                });
+            },
+        ))
+}
+
+/// 渲染设置窗口里带图标的紧凑文字按钮。
+fn registration_action_button(
+    id: &'static str,
+    label: &'static str,
+    icon: ArgusIcon,
+    is_disabled: bool,
+    theme: &AppTheme,
+    action: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let button_theme = theme.clone();
+
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px_3()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .rounded_sm()
+        .bg(rgb(if is_disabled {
+            button_theme.content
+        } else {
+            button_theme.current_line
+        }))
+        .text_size(px(12.0))
+        .line_height(px(28.0))
+        .text_color(rgb(if is_disabled {
+            button_theme.foreground_muted
+        } else {
+            button_theme.foreground
+        }))
+        .when(!is_disabled, |this| {
+            this.cursor_pointer()
+                .hover(move |this| this.bg(rgb(button_theme.selection)))
+        })
+        .child(render_icon(
+            icon,
+            if is_disabled {
+                theme.foreground_muted
+            } else {
+                theme.foreground
+            },
+            13.0,
+        ))
+        .child(label)
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            if !is_disabled {
+                action(cx);
+            }
+        })
 }
 
 /// 渲染紧凑数值徽标。

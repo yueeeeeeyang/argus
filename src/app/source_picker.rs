@@ -59,6 +59,28 @@ impl SourcePickerSortDirection {
     }
 }
 
+/// 日志来源加载触发入口，用于让选择器、启动参数和系统右键复用同一条后台流程。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalSourceTrigger {
+    /// 用户在 Argus 自定义来源选择器中点击“加载”。
+    SourcePicker,
+    /// 操作系统通过“用 Argus 打开”或 Open With 传入路径。
+    OpenWith,
+    /// 应用启动参数中携带了待打开路径。
+    StartupArgs,
+}
+
+impl ExternalSourceTrigger {
+    /// 返回加载中提示使用的来源描述。
+    fn loading_label(self) -> &'static str {
+        match self {
+            Self::SourcePicker => "日志来源",
+            Self::OpenWith => "系统右键来源",
+            Self::StartupArgs => "启动参数来源",
+        }
+    }
+}
+
 /// 自定义来源选择器状态；所有字段只描述 UI 和待加载路径，不持有文件句柄。
 #[derive(Clone, Debug)]
 pub struct SourcePickerState {
@@ -369,22 +391,48 @@ impl ArgusApp {
 
     /// 确认选择器路径并复用现有来源加载流程，返回是否成功进入加载状态。
     pub fn confirm_source_picker_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.is_source_loading {
-            self.source_picker.error_message = Some("日志来源正在加载中，请稍候".to_string());
-            return false;
-        }
-
         let paths = self.source_picker.selected_paths.clone();
         if paths.is_empty() {
             self.source_picker.error_message = Some("请至少选择一个文件、压缩包或目录".to_string());
             return false;
         }
 
+        let started = self.load_sources_from_paths(paths, ExternalSourceTrigger::SourcePicker, cx);
+        if !started && self.source_picker.error_message.is_none() {
+            self.source_picker.error_message = Some("日志来源正在加载中，请稍候".to_string());
+        }
+        started
+    }
+
+    /// 统一加载外部传入的日志来源路径。
+    ///
+    /// 参数说明：
+    /// - `paths`：待加载的本地文件、目录或压缩包路径。
+    /// - `trigger`：触发来源，用于生成用户可读提示。
+    /// - `cx`：应用上下文，用于派发后台加载任务。
+    ///
+    /// 返回值：成功启动后台任务返回 `true`；已有加载任务或路径为空返回 `false`。
+    pub fn load_sources_from_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        trigger: ExternalSourceTrigger,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.is_source_loading {
+            self.placeholder_notice = "日志来源正在加载中，请稍候".to_string();
+            return false;
+        }
+        if paths.is_empty() {
+            self.placeholder_notice = "未收到可加载的日志来源路径".to_string();
+            return false;
+        }
+
         self.source_picker.is_open = false;
         self.source_picker.window_handle = None;
         self.source_picker.error_message = None;
+        self.source_picker.selected_paths.clear();
         self.is_source_loading = true;
-        self.placeholder_notice = format!("正在加载 {} 个日志来源", paths.len());
+        self.placeholder_notice = format!("正在加载 {} 个{}", paths.len(), trigger.loading_label());
         let loader_config = self.config.loader.clone();
 
         cx.spawn(async move |view, cx| {

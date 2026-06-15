@@ -10,6 +10,7 @@ pub mod config;
 pub mod fonts;
 pub mod highlight;
 pub mod loader;
+pub mod platform;
 pub mod reader;
 pub mod search;
 pub mod text_selection;

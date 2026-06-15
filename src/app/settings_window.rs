@@ -7,6 +7,9 @@
 use gpui::{AppContext, Bounds, Context, WindowBounds, WindowOptions, px, size};
 
 use crate::app::ArgusApp;
+use crate::platform::open_with_registration::{
+    register_open_with, registration_status, unregister_open_with,
+};
 use crate::ui::settings_window::SettingsWindow;
 
 /// 设置窗口默认宽度，保证单页设置内容不过度拉伸。
@@ -24,6 +27,8 @@ impl ArgusApp {
     /// 参数说明：
     /// - `cx`：主应用上下文，用于创建或激活独立窗口。
     pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
+        self.refresh_open_with_registration_status(cx);
+
         if self.is_settings_window_open {
             if let Some(window_handle) = self.settings_window_handle.clone()
                 && window_handle
@@ -80,5 +85,93 @@ impl ArgusApp {
         self.settings_window_handle = None;
         self.is_theme_dropdown_open = false;
         self.placeholder_notice = "已关闭设置窗口".to_string();
+    }
+
+    /// 刷新系统“用 Argus 打开”右键菜单注册状态。
+    ///
+    /// 说明：状态查询应保持轻量，打开设置窗口和注册/卸载完成后都会调用；忙碌时跳过，
+    /// 避免执行中状态被同步查询覆盖。
+    pub fn refresh_open_with_registration_status(&mut self, _cx: &mut Context<Self>) {
+        if self.is_open_with_registration_busy {
+            return;
+        }
+
+        self.open_with_registration_status = registration_status();
+    }
+
+    /// 注册系统右键菜单；执行期间禁用注册/卸载按钮，避免重复写入系统状态。
+    pub fn register_open_with_menu(&mut self, cx: &mut Context<Self>) {
+        if self.is_open_with_registration_busy {
+            self.open_with_registration_message = Some("系统右键菜单操作正在执行".to_string());
+            return;
+        }
+
+        self.is_open_with_registration_busy = true;
+        self.open_with_registration_message = Some("正在注册系统右键菜单...".to_string());
+        self.placeholder_notice = "正在注册系统右键菜单".to_string();
+
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { register_open_with() })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.is_open_with_registration_busy = false;
+                match result {
+                    Ok(()) => {
+                        app.open_with_registration_status = registration_status();
+                        app.open_with_registration_message = Some("系统右键菜单已注册".to_string());
+                        app.placeholder_notice = "系统右键菜单已注册".to_string();
+                    }
+                    Err(error) => {
+                        app.open_with_registration_status = registration_status();
+                        app.open_with_registration_message = Some(error.to_string());
+                        app.placeholder_notice = format!("系统右键菜单注册失败：{error}");
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 卸载系统右键菜单；完成后重新查询系统状态并更新设置窗口提示。
+    pub fn unregister_open_with_menu(&mut self, cx: &mut Context<Self>) {
+        if self.is_open_with_registration_busy {
+            self.open_with_registration_message = Some("系统右键菜单操作正在执行".to_string());
+            return;
+        }
+
+        self.is_open_with_registration_busy = true;
+        self.open_with_registration_message = Some("正在卸载系统右键菜单...".to_string());
+        self.placeholder_notice = "正在卸载系统右键菜单".to_string();
+
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { unregister_open_with() })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.is_open_with_registration_busy = false;
+                match result {
+                    Ok(()) => {
+                        app.open_with_registration_status = registration_status();
+                        app.open_with_registration_message = Some("系统右键菜单已卸载".to_string());
+                        app.placeholder_notice = "系统右键菜单已卸载".to_string();
+                    }
+                    Err(error) => {
+                        app.open_with_registration_status = registration_status();
+                        app.open_with_registration_message = Some(error.to_string());
+                        app.placeholder_notice = format!("系统右键菜单卸载失败：{error}");
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }

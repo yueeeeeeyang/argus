@@ -12,6 +12,7 @@ description = "Argus 高性能日志查看平台的界面占位框架"
 
 [dependencies]
 anyhow = "1.0.102"
+async-channel = "2.5.0"
 bzip2 = "0.6.1"
 chardetng = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
@@ -29,6 +30,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 tar = "0.4.46"
 thiserror = "2.0.18"
 toml = "0.8.23"
+url = "2.5.8"
 walkdir = "2.5.0"
 xz2 = "0.1.7"
 zip = "8.6.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry"] }
