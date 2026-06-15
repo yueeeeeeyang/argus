@@ -856,11 +856,10 @@ fn next_line_marker_after_avoiding_repeat(
 
 /// 判断当前按键是否表示 F2。
 ///
-/// 说明：macOS/部分键盘布局下，物理 F2 会报告为 `f2`，而 `Fn+2` 可能报告为带 function
-/// 修饰的 `2`；两者都按文档中的 F2 打点跳转处理。
+/// 说明：打点跳转只接受纯 F2，带 Cmd/Ctrl/Alt/Shift/Fn 等任意修饰键时都不触发。
 fn is_log_line_marker_jump_key(keystroke: &Keystroke) -> bool {
     let key = keystroke.key.to_lowercase();
-    key == "f2" || (keystroke.modifiers.function && key == "2")
+    key == "f2" && !keystroke.modifiers.modified()
 }
 
 /// 输出 F2 打点跳转内部状态，帮助区分没有打点、日志未读取和滚动未生效等情况。
@@ -953,9 +952,62 @@ pub(crate) fn merge_log_text_ranges(
 mod tests {
     use super::*;
 
+    /// 构造测试用按键，避免每个用例重复填写无关字段。
+    fn test_keystroke(key: &str, modifiers: gpui::Modifiers) -> Keystroke {
+        Keystroke {
+            key: key.to_string(),
+            modifiers,
+            key_char: None,
+        }
+    }
+
     /// 构造有序打点集合，便于验证 F2 循环查找规则。
     fn marker_set(lines: &[usize]) -> BTreeSet<usize> {
         lines.iter().copied().collect()
+    }
+
+    /// 验证打点跳转只监听纯 F2，不接受任何修饰键组合或 Fn+2 兼容路径。
+    #[test]
+    fn line_marker_jump_key_only_accepts_plain_f2() {
+        assert!(is_log_line_marker_jump_key(&test_keystroke(
+            "f2",
+            gpui::Modifiers::default()
+        )));
+
+        for modifiers in [
+            gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            gpui::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+            gpui::Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            gpui::Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            gpui::Modifiers {
+                function: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(!is_log_line_marker_jump_key(&test_keystroke(
+                "f2", modifiers
+            )));
+        }
+
+        assert!(!is_log_line_marker_jump_key(&test_keystroke(
+            "2",
+            gpui::Modifiers {
+                function: true,
+                ..Default::default()
+            },
+        )));
     }
 
     /// 验证 F2 查找会优先选择当前可见首行之后的打点。

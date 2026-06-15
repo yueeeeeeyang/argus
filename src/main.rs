@@ -136,7 +136,7 @@ fn is_log_copy_shortcut(keystroke: &Keystroke) -> bool {
 /// 判断是否为日志行号打点跳转快捷键；F2 不要求日志正文元素拥有 GPUI 焦点。
 fn is_log_line_marker_jump_shortcut(keystroke: &Keystroke) -> bool {
     let key = keystroke.key.to_lowercase();
-    key == "f2" || (keystroke.modifiers.function && key == "2")
+    key == "f2" && !keystroke.modifiers.modified()
 }
 
 /// 输出主窗口按键探针日志，帮助确认 macOS 是否真的把 F2 传给 GPUI。
