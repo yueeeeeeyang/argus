@@ -29,6 +29,8 @@ pub enum SourceKind {
     LogFile,
     /// 可展开或受限的压缩包文件。
     Archive(ArchiveFormat),
+    /// 根层仅包含一个普通文件的压缩包；界面显示压缩包名，但点击直接打开内部文件。
+    SingleFileArchive(ArchiveFormat),
     /// 压缩包内目录。
     ArchiveDirectory,
     /// 压缩包内文件条目。
@@ -46,6 +48,7 @@ impl SourceKind {
             Self::Directory => "目录".to_string(),
             Self::LogFile => "日志".to_string(),
             Self::Archive(format) => format.label().to_string(),
+            Self::SingleFileArchive(format) => format.label().to_string(),
             Self::ArchiveDirectory => "目录".to_string(),
             Self::ArchiveFile => "条目".to_string(),
             Self::Unsupported(reason) => reason.clone(),
@@ -63,7 +66,10 @@ impl SourceKind {
 
     /// 返回节点是否表示用户可选择的日志候选。
     pub fn is_log_candidate(&self) -> bool {
-        matches!(self, Self::LogFile | Self::ArchiveFile)
+        matches!(
+            self,
+            Self::LogFile | Self::ArchiveFile | Self::SingleFileArchive(_)
+        )
     }
 }
 

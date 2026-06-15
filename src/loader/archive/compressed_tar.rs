@@ -15,10 +15,11 @@ use xz2::read::XzDecoder;
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveRootProbe,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::tar_adapter::{
-    list_tar_entries, read_tar_entry_bytes, stream_tar_entry,
+    list_tar_entries, probe_tar_single_file_root, read_tar_entry_bytes, stream_tar_entry,
 };
 
 /// tar.gz 可识别扩展名。
@@ -98,6 +99,23 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         list_compressed_tar_entries(reader, self.format, source_label)
     }
 
+    /// 轻量探测压缩 TAR 根层单文件，外层解压后复用 TAR 短路探测。
+    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+        let file = File::open(path)
+            .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
+        probe_compressed_tar_single_file_root(file, self.format, &path.display().to_string())
+    }
+
+    /// 从内存压缩 TAR 数据源轻量探测根层单文件。
+    fn probe_single_file_root_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        source_label: &str,
+    ) -> Result<ArchiveRootProbe> {
+        probe_compressed_tar_single_file_root(reader, self.format, source_label)
+    }
+
     /// 从本地压缩 TAR 读取指定条目字节。
     fn read_entry_bytes(&self, path: &Path, entry_path: &str) -> Result<Vec<u8>> {
         let file = File::open(path)
@@ -144,6 +162,23 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         stream_compressed_tar_entry(reader, self.format, entry_path, source_label, consumer)
+    }
+}
+
+/// 从任意读取器中短路探测压缩 TAR 根层单文件。
+pub fn probe_compressed_tar_single_file_root<R>(
+    reader: R,
+    format: ArchiveFormat,
+    source_label: &str,
+) -> Result<ArchiveRootProbe>
+where
+    R: Read,
+{
+    match format {
+        ArchiveFormat::TarGz => probe_tar_single_file_root(GzDecoder::new(reader), source_label),
+        ArchiveFormat::TarBz2 => probe_tar_single_file_root(BzDecoder::new(reader), source_label),
+        ArchiveFormat::TarXz => probe_tar_single_file_root(XzDecoder::new(reader), source_label),
+        _ => bail!("{} 不是压缩 TAR 格式", format.label()),
     }
 }
 

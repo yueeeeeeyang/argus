@@ -158,6 +158,7 @@ mod tests {
             },
             loader: LoaderConfig {
                 max_archive_depth: 4,
+                archive_probe_concurrency: 6,
                 follow_symlinks: true,
             },
             encoding: EncodingConfig {
@@ -175,6 +176,7 @@ mod tests {
         assert_eq!(loaded.appearance.theme_mode, "custom_dark.toml");
         assert_eq!(loaded.appearance.log_content_font_size, 16.0);
         assert_eq!(loaded.loader.max_archive_depth, 4);
+        assert_eq!(loaded.loader.archive_probe_concurrency, 6);
         assert!(loaded.loader.follow_symlinks);
         assert_eq!(loaded.encoding.selected, "GBK");
         assert!(!loaded.cache.enabled);

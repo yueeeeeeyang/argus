@@ -13,6 +13,7 @@ use flate2::read::GzDecoder;
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveRootProbe,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -58,6 +59,29 @@ impl ArchiveAdapter for GzipArchiveAdapter {
         source_label: &str,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         Ok(single_gzip_entry(source_label))
+    }
+
+    /// GZIP 天然只有一个虚拟文件条目，可直接返回单文件探测结果。
+    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+        let file_name = path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or("content.gz");
+        Ok(ArchiveRootProbe::SingleFile(
+            single_gzip_entry(file_name).remove(0),
+        ))
+    }
+
+    /// 从内存 GZIP 数据源探测唯一虚拟文件条目。
+    fn probe_single_file_root_from_reader(
+        &self,
+        _reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        source_label: &str,
+    ) -> Result<ArchiveRootProbe> {
+        Ok(ArchiveRootProbe::SingleFile(
+            single_gzip_entry(source_label).remove(0),
+        ))
     }
 
     /// 从本地 GZIP 读取虚拟文件完整字节。

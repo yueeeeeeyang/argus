@@ -12,7 +12,7 @@ mod source_picker;
 mod source_search;
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -20,9 +20,12 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::config::{AppConfig, ConfigManager};
 use crate::highlight::HighlightCache;
-use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceLocation, SourceRegistry};
 #[cfg(test)]
-use crate::loader::{SourceKind, SourceMetadata, SourceTreeNode};
+use crate::loader::SourceMetadata;
+use crate::loader::{
+    LoadReport, LogSourceLoader, SourceArchiveProbeRequest, SourceArchiveProbeResult, SourceId,
+    SourceKind, SourceLocation, SourceRegistry, SourceTreeNode,
+};
 use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
@@ -79,6 +82,8 @@ pub const LOG_VIEWER_LINE_NUMBER_DIGIT_WIDTH: f32 = 7.0;
 pub const LOG_VIEWER_LINE_NUMBER_PADDING: f32 = 18.0;
 /// 日志正文中的制表符展示为空格时的固定宽度。
 pub const LOG_VIEWER_TAB_DISPLAY_SPACES: &str = "    ";
+/// 后台压缩包探测每批最多处理 `并发数 * 该系数` 个节点，避免频繁重绘。
+const SOURCE_ARCHIVE_PROBE_BATCH_FACTOR: usize = 16;
 
 /// 根据日志总行数计算行号栏宽度。
 ///
@@ -609,6 +614,20 @@ pub struct ArgusApp {
     pub filtered_source_ids: Vec<SourceId>,
     /// 来源树子级懒加载 generation，用于丢弃过期后台结果。
     pub source_child_load_generations: HashMap<SourceId, usize>,
+    /// 等待后台探测的压缩包节点队列。
+    pub source_archive_probe_queue: VecDeque<SourceId>,
+    /// 已在探测队列中的压缩包节点，避免重复入队。
+    pub source_archive_probe_queued_ids: BTreeSet<SourceId>,
+    /// 正在后台探测的压缩包节点，避免重复调度。
+    pub source_archive_probe_inflight_ids: BTreeSet<SourceId>,
+    /// 用户点击后独立触发的压缩包探测节点；不受批量队列阻塞。
+    pub source_archive_probe_direct_inflight_ids: BTreeSet<SourceId>,
+    /// 已经完成探测的压缩包节点，避免滚动时反复提交。
+    pub source_archive_probe_completed_ids: BTreeSet<SourceId>,
+    /// 用户点击后等待探测结果自动继续打开或展开的压缩包节点。
+    pub source_archive_probe_click_intents: BTreeSet<SourceId>,
+    /// 压缩包探测批次 generation，用于丢弃旧来源树返回的过期结果。
+    pub source_archive_probe_generation: usize,
     /// 自定义日志来源选择器状态，用于替代系统路径选择器。
     pub source_picker: SourcePickerState,
     /// 当前内容区状态。
@@ -736,6 +755,13 @@ impl ArgusApp {
             source_tree_search_animation_generation: 0,
             filtered_source_ids: Vec::new(),
             source_child_load_generations: HashMap::new(),
+            source_archive_probe_queue: VecDeque::new(),
+            source_archive_probe_queued_ids: BTreeSet::new(),
+            source_archive_probe_inflight_ids: BTreeSet::new(),
+            source_archive_probe_direct_inflight_ids: BTreeSet::new(),
+            source_archive_probe_completed_ids: BTreeSet::new(),
+            source_archive_probe_click_intents: BTreeSet::new(),
+            source_archive_probe_generation: 0,
             source_picker: SourcePickerState::default(),
             content_state: ContentState::SourceNotSelected,
             logs: Vec::new(),
@@ -1432,6 +1458,29 @@ impl ArgusApp {
             return;
         }
 
+        if matches!(node.kind, SourceKind::Archive(_))
+            && !self.source_archive_probe_completed_ids.contains(&source_id)
+        {
+            let label = node.label.clone();
+            self.start_direct_source_archive_probe(source_id, node, cx);
+            self.placeholder_notice = format!("正在识别 {label}，完成后继续打开或展开");
+            return;
+        }
+
+        self.start_source_child_load(source_id, node, cx);
+    }
+
+    /// 启动指定可展开节点的子级后台加载。
+    fn start_source_child_load(
+        &mut self,
+        source_id: SourceId,
+        node: SourceTreeNode,
+        cx: &mut Context<Self>,
+    ) {
+        if !node.kind.can_expand() || node.metadata.children_loaded || node.metadata.is_loading {
+            return;
+        }
+
         if let Some(node) = self.source_registry.node_mut(source_id) {
             node.expanded = true;
             node.metadata.is_loading = true;
@@ -1445,7 +1494,11 @@ impl ArgusApp {
         cx.spawn(async move |view, cx| {
             let report = cx
                 .background_executor()
-                .spawn(async move { LogSourceLoader::new(loader_config).load_children(&node) })
+                .spawn(async move {
+                    LogSourceLoader::new(loader_config)
+                        .with_deferred_archive_probe()
+                        .load_children(&node)
+                })
                 .await;
 
             view.update(cx, |app, cx| {
@@ -1535,8 +1588,11 @@ impl ArgusApp {
         self.source_registry = report.registry;
         self.has_loaded_real_sources = true;
         self.source_child_load_generations.clear();
+        self.clear_source_archive_probe_state();
         self.source_picker.selected_paths.clear();
         self.reset_log_workspace_after_source_replace();
+        let probe_ids = self.source_registry.tree_order_source_ids().to_vec();
+        self.enqueue_source_archive_probe_ids(&probe_ids, false);
 
         self.placeholder_notice = if report.errors.is_empty() {
             format!("已加载 {added_count} 个来源节点，请选择日志")
@@ -1587,6 +1643,8 @@ impl ArgusApp {
             parent.metadata.message = Some(report.errors.join("；"));
         }
         self.rebuild_filtered_source_ids();
+        let child_ids = self.source_registry.child_ids(parent_id).to_vec();
+        self.enqueue_source_archive_probe_ids(&child_ids, false);
 
         self.placeholder_notice = if report.errors.is_empty() {
             format!("已加载 {added_count} 个子节点")
@@ -1599,6 +1657,276 @@ impl ArgusApp {
                 report.errors.join("；")
             )
         };
+    }
+
+    /// 清理来源树压缩包探测队列；来源树整体替换时调用。
+    fn clear_source_archive_probe_state(&mut self) {
+        self.source_archive_probe_queue.clear();
+        self.source_archive_probe_queued_ids.clear();
+        self.source_archive_probe_inflight_ids.clear();
+        self.source_archive_probe_direct_inflight_ids.clear();
+        self.source_archive_probe_completed_ids.clear();
+        self.source_archive_probe_click_intents.clear();
+        self.source_archive_probe_generation = self.source_archive_probe_generation.wrapping_add(1);
+    }
+
+    /// 将可见来源节点提升到压缩包探测队列前端。
+    pub fn prioritize_visible_source_archive_probes(
+        &mut self,
+        source_ids: &[SourceId],
+        cx: &mut Context<Self>,
+    ) {
+        self.enqueue_source_archive_probes(source_ids, true, cx);
+    }
+
+    /// 入队来源树压缩包探测任务，支持普通追加和高优先级前插。
+    fn enqueue_source_archive_probes(
+        &mut self,
+        source_ids: &[SourceId],
+        priority: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.enqueue_source_archive_probe_ids(source_ids, priority) {
+            return;
+        }
+
+        self.pump_source_archive_probe_queue(cx);
+    }
+
+    /// 只把来源压缩包节点放入后台探测队列，不立即启动后台任务。
+    fn enqueue_source_archive_probe_ids(
+        &mut self,
+        source_ids: &[SourceId],
+        priority: bool,
+    ) -> bool {
+        let mut accepted_ids = Vec::new();
+        for source_id in source_ids.iter().copied() {
+            if !self.should_probe_source_archive(source_id) {
+                continue;
+            }
+            accepted_ids.push(source_id);
+        }
+
+        if accepted_ids.is_empty() {
+            return false;
+        }
+
+        if priority {
+            for source_id in accepted_ids.into_iter().rev() {
+                if self.source_archive_probe_queued_ids.contains(&source_id) {
+                    self.source_archive_probe_queue
+                        .retain(|queued_id| *queued_id != source_id);
+                } else {
+                    self.source_archive_probe_queued_ids.insert(source_id);
+                }
+                self.source_archive_probe_queue.push_front(source_id);
+            }
+        } else {
+            for source_id in accepted_ids {
+                if self.source_archive_probe_queued_ids.insert(source_id) {
+                    self.source_archive_probe_queue.push_back(source_id);
+                }
+            }
+        }
+        true
+    }
+
+    /// 判断来源节点是否需要后台单文件压缩包探测。
+    fn should_probe_source_archive(&self, source_id: SourceId) -> bool {
+        if self.source_archive_probe_completed_ids.contains(&source_id)
+            || self.source_archive_probe_inflight_ids.contains(&source_id)
+            || self
+                .source_archive_probe_direct_inflight_ids
+                .contains(&source_id)
+        {
+            return false;
+        }
+
+        self.source_registry.node(source_id).is_some_and(|node| {
+            matches!(node.kind, SourceKind::Archive(_)) && !node.metadata.children_loaded
+        })
+    }
+
+    /// 用户直接点击未探测压缩包时，绕过批量队列立即启动单节点探测。
+    fn start_direct_source_archive_probe(
+        &mut self,
+        source_id: SourceId,
+        node: SourceTreeNode,
+        cx: &mut Context<Self>,
+    ) {
+        self.source_archive_probe_click_intents.insert(source_id);
+        if self.source_archive_probe_queued_ids.remove(&source_id) {
+            self.source_archive_probe_queue
+                .retain(|queued_id| *queued_id != source_id);
+        }
+
+        if self
+            .source_archive_probe_direct_inflight_ids
+            .contains(&source_id)
+        {
+            return;
+        }
+
+        self.source_archive_probe_direct_inflight_ids
+            .insert(source_id);
+        let loader_config = self.config.loader.clone();
+        let generation = self.source_archive_probe_generation;
+        let request = SourceArchiveProbeRequest { source_id, node };
+
+        cx.spawn(async move |view, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    LogSourceLoader::new(loader_config).probe_archive_nodes(vec![request])
+                })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_source_archive_probe_results(generation, results, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 按批次启动后台压缩包探测；每批完成后会再次调用自身处理后续队列。
+    fn pump_source_archive_probe_queue(&mut self, cx: &mut Context<Self>) {
+        if !self.source_archive_probe_inflight_ids.is_empty() {
+            return;
+        }
+
+        let batch_size = self
+            .config
+            .loader
+            .archive_probe_concurrency
+            .clamp(1, 16)
+            .saturating_mul(SOURCE_ARCHIVE_PROBE_BATCH_FACTOR)
+            .max(1);
+        let mut batch_ids = Vec::new();
+        while batch_ids.len() < batch_size {
+            let Some(source_id) = self.source_archive_probe_queue.pop_front() else {
+                break;
+            };
+            self.source_archive_probe_queued_ids.remove(&source_id);
+            if !self.should_probe_source_archive(source_id) {
+                continue;
+            }
+            self.source_archive_probe_inflight_ids.insert(source_id);
+            batch_ids.push(source_id);
+        }
+
+        if batch_ids.is_empty() {
+            return;
+        }
+
+        let requests = batch_ids
+            .iter()
+            .filter_map(|source_id| {
+                self.source_registry.node(*source_id).cloned().map(|node| {
+                    SourceArchiveProbeRequest {
+                        source_id: *source_id,
+                        node,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if requests.is_empty() {
+            for source_id in batch_ids {
+                self.source_archive_probe_inflight_ids.remove(&source_id);
+            }
+            return;
+        }
+
+        let loader_config = self.config.loader.clone();
+        let generation = self.source_archive_probe_generation;
+        cx.spawn(async move |view, cx| {
+            let results =
+                cx.background_executor()
+                    .spawn(async move {
+                        LogSourceLoader::new(loader_config).probe_archive_nodes(requests)
+                    })
+                    .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_source_archive_probe_results(generation, results, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 批量应用后台单文件压缩包探测结果。
+    fn apply_source_archive_probe_results(
+        &mut self,
+        generation: usize,
+        results: Vec<SourceArchiveProbeResult>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.source_archive_probe_generation {
+            return;
+        }
+
+        let mut changed_count = 0;
+        let mut fallback_expand_ids = Vec::new();
+        let mut open_log_ids = Vec::new();
+
+        for result in results {
+            let was_completed = self
+                .source_archive_probe_completed_ids
+                .contains(&result.source_id);
+            self.source_archive_probe_inflight_ids
+                .remove(&result.source_id);
+            self.source_archive_probe_direct_inflight_ids
+                .remove(&result.source_id);
+            self.source_archive_probe_completed_ids
+                .insert(result.source_id);
+            let had_click_intent = self
+                .source_archive_probe_click_intents
+                .remove(&result.source_id);
+
+            if was_completed && !had_click_intent {
+                continue;
+            }
+
+            if let Some(patch) = result.patch {
+                let replaced = self.source_registry.replace_node_payload(
+                    result.source_id,
+                    patch.kind,
+                    patch.location,
+                    patch.metadata,
+                );
+                if replaced {
+                    changed_count += 1;
+                    if had_click_intent {
+                        open_log_ids.push(result.source_id);
+                    }
+                }
+            } else if had_click_intent {
+                fallback_expand_ids.push(result.source_id);
+            }
+        }
+
+        if changed_count > 0 {
+            self.source_registry.rebuild_all_indices();
+            self.rebuild_filtered_source_ids();
+        }
+
+        for source_id in open_log_ids {
+            self.select_source(source_id);
+            self.request_open_log_content(source_id, cx);
+            self.scroll_source_into_view(source_id);
+        }
+
+        for source_id in fallback_expand_ids {
+            if let Some(node) = self.source_registry.node(source_id).cloned() {
+                self.start_source_child_load(source_id, node, cx);
+            }
+        }
+
+        self.pump_source_archive_probe_queue(cx);
     }
 
     /// 为指定来源节点生成下一次子级懒加载 generation。
@@ -1809,6 +2137,21 @@ impl ArgusApp {
         self.placeholder_notice = format!(
             "嵌套压缩包深度已调整为 {} 层",
             self.config.loader.max_archive_depth
+        );
+        self.persist_config_or_report();
+    }
+
+    /// 调整当前目录层单文件压缩包探测并发数，设置会影响后续来源加载任务。
+    pub fn adjust_archive_probe_concurrency(&mut self, delta: isize) {
+        self.config.loader.archive_probe_concurrency = self
+            .config
+            .loader
+            .archive_probe_concurrency
+            .saturating_add_signed(delta)
+            .clamp(1, 16);
+        self.placeholder_notice = format!(
+            "单文件压缩包探测并发已调整为 {}",
+            self.config.loader.archive_probe_concurrency
         );
         self.persist_config_or_report();
     }
@@ -2278,6 +2621,7 @@ mod tests {
         app.select_theme("dark.toml".to_string());
         app.adjust_log_content_font_size(2.0);
         app.adjust_max_archive_depth(1);
+        app.adjust_archive_probe_concurrency(2);
         app.toggle_follow_symlinks();
 
         let saved =
@@ -2286,6 +2630,7 @@ mod tests {
         assert_eq!(saved.appearance.theme_mode, "dark.toml");
         assert_eq!(saved.appearance.log_content_font_size, 14.0);
         assert_eq!(saved.loader.max_archive_depth, 3);
+        assert_eq!(saved.loader.archive_probe_concurrency, 6);
         assert!(saved.loader.follow_symlinks);
     }
 

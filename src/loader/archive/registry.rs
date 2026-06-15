@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result};
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveRootProbe,
 };
 use crate::loader::archive::compressed_tar::CompressedTarArchiveAdapter;
 use crate::loader::archive::detector::ArchiveFormat;
@@ -154,6 +155,34 @@ impl ArchiveAdapterRegistry {
         adapter
             .list_entries_from_reader(reader, reader_len, source_label)
             .with_context(|| format!("{label} 内存条目枚举失败：{source_label}"))
+    }
+
+    /// 轻量探测本地压缩包根层是否恰好只有一个普通文件。
+    pub fn probe_single_file_root(
+        &self,
+        format: ArchiveFormat,
+        path: &Path,
+    ) -> Result<ArchiveRootProbe> {
+        let adapter = self.require_adapter(format)?;
+        let label = adapter.capabilities().label;
+        adapter
+            .probe_single_file_root(path)
+            .with_context(|| format!("{label} 根层单文件探测失败：{}", path.display()))
+    }
+
+    /// 轻量探测内存压缩包根层是否恰好只有一个普通文件。
+    pub fn probe_single_file_root_from_reader(
+        &self,
+        format: ArchiveFormat,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        source_label: &str,
+    ) -> Result<ArchiveRootProbe> {
+        let adapter = self.require_adapter(format)?;
+        let label = adapter.capabilities().label;
+        adapter
+            .probe_single_file_root_from_reader(reader, reader_len, source_label)
+            .with_context(|| format!("{label} 内存根层单文件探测失败：{source_label}"))
     }
 
     /// 从本地压缩包读取指定条目并统一补充错误上下文。

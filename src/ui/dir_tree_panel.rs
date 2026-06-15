@@ -121,6 +121,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
                     visible_count,
                     cx.processor(|app, range: Range<usize>, _window, cx| {
                         let visible_ids = app.visible_source_ids()[range].to_vec();
+                        app.prioritize_visible_source_archive_probes(&visible_ids, cx);
                         let theme = app.theme.clone();
                         let mut rows = Vec::with_capacity(visible_ids.len());
 
@@ -312,6 +313,7 @@ fn source_meta_text(source: &SourceTreeNode, child_count: usize) -> String {
         }
         SourceKind::LogFile
         | SourceKind::Archive(_)
+        | SourceKind::SingleFileArchive(_)
         | SourceKind::ArchiveFile
         | SourceKind::Unsupported(_)
         | SourceKind::Error => source.metadata.size.map(format_bytes).unwrap_or_default(),
@@ -466,7 +468,7 @@ fn icon_for_source(source: &SourceTreeNode) -> ArgusIcon {
     match &source.kind {
         SourceKind::Directory if source.expanded => ArgusIcon::FolderOpen,
         SourceKind::Directory => ArgusIcon::Folder,
-        SourceKind::Archive(_) => ArgusIcon::Archive,
+        SourceKind::Archive(_) | SourceKind::SingleFileArchive(_) => ArgusIcon::Archive,
         SourceKind::ArchiveDirectory if source.expanded => ArgusIcon::FolderOpen,
         SourceKind::ArchiveDirectory => ArgusIcon::Folder,
         SourceKind::ArchiveFile | SourceKind::LogFile => ArgusIcon::FileText,

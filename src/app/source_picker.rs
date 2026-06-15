@@ -390,7 +390,11 @@ impl ArgusApp {
         cx.spawn(async move |view, cx| {
             let report = cx
                 .background_executor()
-                .spawn(async move { LogSourceLoader::new(loader_config).load_paths(paths) })
+                .spawn(async move {
+                    LogSourceLoader::new(loader_config)
+                        .with_deferred_archive_probe()
+                        .load_paths(paths)
+                })
                 .await;
 
             view.update(cx, |app, cx| {

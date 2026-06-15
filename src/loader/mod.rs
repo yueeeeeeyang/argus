@@ -13,7 +13,10 @@ pub mod path_browser;
 pub mod source_registry;
 pub mod spool_manager;
 
-pub use dir_tree::{LoadReport, LogSourceLoader};
+pub use dir_tree::{
+    LoadReport, LogSourceLoader, SourceArchiveProbePatch, SourceArchiveProbeRequest,
+    SourceArchiveProbeResult,
+};
 pub use log_source::{SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
 pub use path_browser::{BrowseEntry, BrowseEntryKind, BrowseLocation, BrowseResult, PathBrowser};
 pub use source_registry::SourceRegistry;

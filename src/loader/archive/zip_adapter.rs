@@ -13,6 +13,7 @@ use zip::ZipArchive;
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveRootProbe, ArchiveRootProbeState,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -60,6 +61,23 @@ impl ArchiveAdapter for ZipArchiveAdapter {
         list_zip_entries_from_reader(reader, source_label)
     }
 
+    /// 轻量探测 ZIP 根层单文件，发现第二个根层项或目录后立即停止。
+    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开 ZIP 压缩包：{}", path.display()))?;
+        probe_zip_single_file_root_from_reader(file, &path.display().to_string())
+    }
+
+    /// 从内存 ZIP 数据源轻量探测根层单文件。
+    fn probe_single_file_root_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        source_label: &str,
+    ) -> Result<ArchiveRootProbe> {
+        probe_zip_single_file_root_from_reader(reader, source_label)
+    }
+
     /// 从本地 ZIP 读取指定条目字节。
     fn read_entry_bytes(&self, path: &Path, entry_path: &str) -> Result<Vec<u8>> {
         read_zip_entry_bytes(path, entry_path)
@@ -99,6 +117,46 @@ impl ArchiveAdapter for ZipArchiveAdapter {
     ) -> Result<()> {
         stream_zip_entry_from_reader(reader, entry_path, source_label, consumer)
     }
+}
+
+/// 从任意可读可 seek 的 ZIP 输入中短路探测根层单文件。
+pub fn probe_zip_single_file_root_from_reader<R>(
+    reader: R,
+    source_label: &str,
+) -> Result<ArchiveRootProbe>
+where
+    R: Read + Seek,
+{
+    let mut archive =
+        ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
+    let mut state = ArchiveRootProbeState::default();
+
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .with_context(|| format!("无法读取 ZIP 第 {index} 个条目：{source_label}"))?;
+        let entry_path = normalize_archive_entry_path(file.name());
+        if entry_path.is_empty() {
+            continue;
+        }
+
+        let label = entry_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(entry_path.as_str())
+            .to_string();
+        let entry = ArchiveEntryInfo {
+            path: entry_path,
+            label,
+            is_dir: file.is_dir(),
+            size: Some(file.size()),
+        };
+        if !state.observe(entry) {
+            break;
+        }
+    }
+
+    Ok(state.finish())
 }
 
 /// 从任意可读可 seek 的输入枚举 ZIP 条目。

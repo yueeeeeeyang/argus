@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result};
 
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::registry::archive_registry;
+use crate::utils::path::normalize_archive_entry_path;
 
 /// 压缩包条目枚举结果；只保存结构信息，不读取日志正文内容。
 #[derive(Clone, Debug)]
@@ -23,6 +24,74 @@ pub struct ArchiveEntryInfo {
     pub is_dir: bool,
     /// 条目未压缩大小；部分格式可能无法提供。
     pub size: Option<u64>,
+}
+
+/// 压缩包根层单文件探测结果。
+#[derive(Clone, Debug)]
+pub enum ArchiveRootProbe {
+    /// 根层恰好只有一个普通文件，可被折叠为可直接打开的来源树叶子。
+    SingleFile(ArchiveEntryInfo),
+    /// 根层恰好只有一个文件，但该文件本身仍是压缩包；当前容器保持可展开。
+    SingleNestedArchive {
+        /// 唯一根层文件条目。
+        entry: ArchiveEntryInfo,
+        /// 唯一根层文件的压缩格式。
+        format: ArchiveFormat,
+    },
+    /// 根层为空、包含目录、包含多个文件，或唯一文件位于子目录中。
+    NotSingle,
+}
+
+/// 根层单文件短路探测状态机，供各格式适配器复用。
+#[derive(Debug, Default)]
+pub struct ArchiveRootProbeState {
+    /// 当前唯一候选文件；一旦发现第二个候选或目录即判定不是单文件压缩包。
+    candidate: Option<ArchiveEntryInfo>,
+    /// 是否已经判定不是根层单文件。
+    is_not_single: bool,
+}
+
+impl ArchiveRootProbeState {
+    /// 记录一个条目；返回 `false` 表示已经可以短路停止枚举。
+    pub fn observe(&mut self, mut entry: ArchiveEntryInfo) -> bool {
+        if self.is_not_single {
+            return false;
+        }
+
+        entry.path = normalize_archive_entry_path(&entry.path);
+        if entry.path.is_empty() {
+            return true;
+        }
+
+        let mut parts = entry.path.split('/').filter(|part| !part.is_empty());
+        let Some(_) = parts.next() else {
+            return true;
+        };
+        if entry.is_dir || parts.next().is_some() || self.candidate.is_some() {
+            self.is_not_single = true;
+            self.candidate = None;
+            return false;
+        }
+
+        self.candidate = Some(entry);
+        true
+    }
+
+    /// 根据已观察条目生成最终探测结果。
+    pub fn finish(self) -> ArchiveRootProbe {
+        if self.is_not_single {
+            return ArchiveRootProbe::NotSingle;
+        }
+
+        let Some(entry) = self.candidate else {
+            return ArchiveRootProbe::NotSingle;
+        };
+
+        match archive_registry().detect_name(&entry.path) {
+            Some(format) => ArchiveRootProbe::SingleNestedArchive { entry, format },
+            None => ArchiveRootProbe::SingleFile(entry),
+        }
+    }
 }
 
 /// 压缩格式能力声明，供 UI、加载器和后续格式扩展判断可用能力。
@@ -93,6 +162,28 @@ pub trait ArchiveAdapter: Sync {
         source_label: &str,
     ) -> Result<Vec<ArchiveEntryInfo>>;
 
+    /// 轻量探测根层是否恰好只有一个普通文件。
+    ///
+    /// 默认实现复用完整枚举，保证新增格式无需立即实现短路探测也能保持正确性；
+    /// 核心内置格式会覆盖该方法，只枚举到足以判定的条目后立即返回。
+    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+        Ok(probe_single_file_root_from_entries(
+            self.list_entries(path)?,
+        ))
+    }
+
+    /// 对内存或其他可 seek 数据源做根层单文件轻量探测。
+    fn probe_single_file_root_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        source_label: &str,
+    ) -> Result<ArchiveRootProbe> {
+        Ok(probe_single_file_root_from_entries(
+            self.list_entries_from_reader(reader, reader_len, source_label)?,
+        ))
+    }
+
     /// 从本地压缩包读取指定条目的完整字节。
     ///
     /// 返回值：目标条目原始字节；用于嵌套压缩包继续解析。
@@ -134,6 +225,17 @@ pub trait ArchiveAdapter: Sync {
             self.read_entry_bytes_from_reader(reader, reader_len, entry_path, source_label)?;
         consumer(&bytes)
     }
+}
+
+/// 使用完整条目列表兜底推导根层单文件探测结果。
+pub fn probe_single_file_root_from_entries(entries: Vec<ArchiveEntryInfo>) -> ArchiveRootProbe {
+    let mut state = ArchiveRootProbeState::default();
+    for entry in entries {
+        if !state.observe(entry) {
+            break;
+        }
+    }
+    state.finish()
 }
 
 /// 根据注册表中的压缩适配器枚举压缩包条目。

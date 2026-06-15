@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::loader::log_source::{SourceId, SourceTreeNode};
+use crate::loader::log_source::{
+    SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode,
+};
 
 /// 来源树单行渲染元数据，随树结构变化统一重建，避免滚动时重复计算。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -246,6 +248,36 @@ impl SourceRegistry {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.metadata.is_loading = is_loading;
         }
+    }
+
+    /// 替换节点的类型、位置和元信息。
+    ///
+    /// 说明：后台单文件压缩包探测完成后会把可展开压缩包修正为可直接打开的叶子节点。
+    /// 调用方应在批量替换后统一调用 `rebuild_all_indices`，避免大量节点逐个重建。
+    pub fn replace_node_payload(
+        &mut self,
+        id: SourceId,
+        kind: SourceKind,
+        location: SourceLocation,
+        metadata: SourceMetadata,
+    ) -> bool {
+        if !self.nodes.contains_key(&id) {
+            return false;
+        }
+
+        if !kind.can_expand() {
+            self.remove_existing_children(id);
+        }
+
+        let Some(node) = self.nodes.get_mut(&id) else {
+            return false;
+        };
+        node.kind = kind;
+        node.location = location;
+        node.metadata = metadata;
+        node.expanded = node.kind.can_expand() && node.expanded;
+        self.search_keys.insert(id, search_key_for_node(node));
+        true
     }
 
     /// 将子级注册表追加到指定父节点下，并重映射子节点 ID。

@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::loader::archive::registry::archive_registry;
 
 /// Argus MVP 支持识别的压缩格式。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ArchiveFormat {
     /// ZIP 压缩包。
     Zip,
