@@ -477,6 +477,10 @@ pub struct LogTabViewState {
     pub highlight_cache: HighlightCache,
     /// 当前搜索结果激活后需要在正文中强调的命中行和片段。
     pub active_search_match: Option<ActiveSearchMatch>,
+    /// 当前日志页签的行号打点集合，使用 0 基行号并按行号有序保存，便于 F2 循环跳转。
+    pub line_markers: BTreeSet<usize>,
+    /// 上一次 F2 跳转到的打点行，避免系统按键重复在同一渲染帧内反复命中同一打点。
+    pub last_line_marker_jump: Option<usize>,
 }
 
 /// 日志正文滚动条方向。
@@ -511,6 +515,8 @@ impl Default for LogTabViewState {
             is_focused: false,
             highlight_cache: HighlightCache::default(),
             active_search_match: None,
+            line_markers: BTreeSet::new(),
+            last_line_marker_jump: None,
         }
     }
 }
@@ -2024,6 +2030,63 @@ mod tests {
 
         app.close_tab(app.active_tab_id);
         assert!(!app.is_active_log_view_focused());
+    }
+
+    /// 验证日志行号打点在同一行重复点击时会添加再移除。
+    #[test]
+    fn toggling_log_line_marker_adds_and_removes_line() {
+        let mut app = test_app();
+        let tab_id = app.active_tab_id;
+
+        app.toggle_log_line_marker(tab_id, 9);
+        assert!(
+            app.log_tab_view_state(tab_id)
+                .is_some_and(|state| state.line_markers.contains(&9))
+        );
+        assert!(app.placeholder_notice.contains("已添加第 10 行"));
+
+        app.toggle_log_line_marker(tab_id, 9);
+        assert!(
+            app.log_tab_view_state(tab_id)
+                .is_some_and(|state| state.line_markers.is_empty())
+        );
+        assert!(app.placeholder_notice.contains("已移除第 10 行"));
+    }
+
+    /// 验证手动切换打点会清除上一轮 F2 跳转缓存，下一次跳转应从当前视口重新计算。
+    #[test]
+    fn toggling_log_line_marker_clears_last_jump_cache() {
+        let mut app = test_app();
+        let tab_id = app.active_tab_id;
+        app.toggle_log_line_marker(tab_id, 9);
+        app.log_tab_view_state_mut(tab_id)
+            .expect("测试应用应存在默认日志视图状态")
+            .last_line_marker_jump = Some(9);
+
+        app.toggle_log_line_marker(tab_id, 12);
+
+        assert!(
+            app.log_tab_view_state(tab_id)
+                .is_some_and(|state| state.last_line_marker_jump.is_none())
+        );
+    }
+
+    /// 验证关闭日志标签页时会释放该标签的打点状态。
+    #[test]
+    fn closing_tab_clears_line_markers_for_that_tab() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+
+        app.select_source(app_log_id);
+        let tab_id = app.active_tab_id;
+        app.toggle_log_line_marker(tab_id, 2);
+        app.close_tab(tab_id);
+
+        assert!(
+            app.log_tab_view_state(tab_id)
+                .is_some_and(|state| state.line_markers.is_empty())
+        );
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     }
 
     /// 验证激活日志标签页只同步来源树选中态，不触发展开或多选清理。

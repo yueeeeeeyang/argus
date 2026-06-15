@@ -63,8 +63,9 @@ fn open_argus_main_window(cx: &mut App) -> anyhow::Result<()> {
 
 /// 前置观察主窗口日志阅读快捷键。
 ///
-/// 说明：搜索窗口属于全局日志操作，只要已有日志标签即可触发；复制仍限制在日志正文焦点内，
-/// 避免抢走输入框、下拉框等普通控件的复制快捷键。
+/// 说明：搜索窗口属于全局日志操作，只要已有日志标签即可触发；F2 打点跳转只要求当前为已读取
+/// 日志标签，避免日志正文子元素焦点丢失时快捷键失效；复制仍限制在日志正文焦点内，避免抢走输入框、
+/// 下拉框等普通控件的复制快捷键。
 fn observe_log_view_shortcuts(cx: &mut App, window_handle: gpui::WindowHandle<ArgusApp>) {
     let main_window_id = window_handle.window_id();
     cx.intercept_keystrokes(move |event, window, cx| {
@@ -73,7 +74,14 @@ fn observe_log_view_shortcuts(cx: &mut App, window_handle: gpui::WindowHandle<Ar
         }
         let is_search_shortcut = is_log_search_shortcut(&event.keystroke);
         let is_copy_shortcut = is_log_copy_shortcut(&event.keystroke);
-        if !is_search_shortcut && !is_copy_shortcut {
+        let is_marker_jump_shortcut = is_log_line_marker_jump_shortcut(&event.keystroke);
+        log_key_probe_if_enabled(
+            &event.keystroke,
+            is_search_shortcut,
+            is_copy_shortcut,
+            is_marker_jump_shortcut,
+        );
+        if !is_search_shortcut && !is_copy_shortcut && !is_marker_jump_shortcut {
             return;
         }
 
@@ -86,6 +94,12 @@ fn observe_log_view_shortcuts(cx: &mut App, window_handle: gpui::WindowHandle<Ar
                     return false;
                 }
                 app.open_log_search_window(cx);
+                cx.notify();
+                return true;
+            }
+
+            if is_marker_jump_shortcut {
+                app.jump_to_next_line_marker_from_viewport();
                 cx.notify();
                 return true;
             }
@@ -117,6 +131,39 @@ fn is_log_search_shortcut(keystroke: &Keystroke) -> bool {
 /// 判断是否为日志复制快捷键；这里补足日志阅读区子元素未获得键盘焦点时的复制路径。
 fn is_log_copy_shortcut(keystroke: &Keystroke) -> bool {
     keystroke.modifiers.secondary() && keystroke.key.eq_ignore_ascii_case("c")
+}
+
+/// 判断是否为日志行号打点跳转快捷键；F2 不要求日志正文元素拥有 GPUI 焦点。
+fn is_log_line_marker_jump_shortcut(keystroke: &Keystroke) -> bool {
+    let key = keystroke.key.to_lowercase();
+    key == "f2" || (keystroke.modifiers.function && key == "2")
+}
+
+/// 输出主窗口按键探针日志，帮助确认 macOS 是否真的把 F2 传给 GPUI。
+///
+/// 说明：该探针默认关闭，仅在设置 `ARGUS_KEY_DEBUG=1` 时输出，避免影响正常运行和终端日志。
+fn log_key_probe_if_enabled(
+    keystroke: &Keystroke,
+    is_search_shortcut: bool,
+    is_copy_shortcut: bool,
+    is_marker_jump_shortcut: bool,
+) {
+    if std::env::var_os("ARGUS_KEY_DEBUG").is_none() {
+        return;
+    }
+
+    eprintln!(
+        "[argus-key] key={:?} modifiers={{cmd:{}, ctrl:{}, alt:{}, shift:{}, function:{}}} search={} copy={} marker_jump={}",
+        keystroke.key,
+        keystroke.modifiers.platform,
+        keystroke.modifiers.control,
+        keystroke.modifiers.alt,
+        keystroke.modifiers.shift,
+        keystroke.modifiers.function,
+        is_search_shortcut,
+        is_copy_shortcut,
+        is_marker_jump_shortcut
+    );
 }
 
 /// 激活平台记录的最后可用窗口；全部失效时返回 false，让调用方重新创建主窗口。

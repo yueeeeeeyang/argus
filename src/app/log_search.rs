@@ -1620,6 +1620,7 @@ impl ArgusApp {
             crate::reader::log_file_reader::LogDocument::Paged(_)
         );
         let line_count = handle.line_count();
+        self.clear_line_marker_jump_cache(tab_id);
         let Some(state) = self.log_tab_view_states.get_mut(&tab_id) else {
             return false;
         };

@@ -34,6 +34,10 @@ use gpui::{
 
 /// 日志正文固定行高；虚拟列表和分页窗口都依赖该值稳定换算。
 const LOG_VIEWER_ROW_HEIGHT: f32 = 20.0;
+/// 行号右侧打点标记尺寸；保持较小尺寸避免干扰行号读取。
+const LOG_LINE_MARKER_SIZE: f32 = 5.0;
+/// 行号打点距离行号列右侧的间距。
+const LOG_LINE_MARKER_RIGHT: f32 = 5.0;
 /// 首帧视口未测量时的默认渲染行数。
 const DEFAULT_VISIBLE_ROWS: usize = 80;
 /// 自绘滚动条宽度。
@@ -220,6 +224,11 @@ fn render_in_memory_log(
         .on_click(cx.listener(move |app, _, _, cx| {
             app.focus_log_text_view(tab_id);
             cx.notify();
+        }))
+        .on_scroll_wheel(cx.listener(move |app, _: &ScrollWheelEvent, _, cx| {
+            if app.clear_line_marker_jump_cache(tab_id) {
+                cx.notify();
+            }
         }))
         .on_key_down(cx.listener(|app, event: &KeyDownEvent, _, cx| {
             cx.stop_propagation();
@@ -518,6 +527,21 @@ fn render_log_line(
             .with_highlights(highlights)
             .into_any_element()
     };
+    let has_line_marker = app
+        .log_tab_view_state(tab_id)
+        .is_some_and(|state| state.line_markers.contains(&line_number));
+    let is_active_line_marker_jump = app
+        .log_tab_view_state(tab_id)
+        .is_some_and(|state| state.last_line_marker_jump == Some(line_number));
+    let is_active_search_line = app
+        .log_tab_view_state(tab_id)
+        .and_then(|state| state.active_search_match.as_ref())
+        .is_some_and(|active_match| active_match.line_number == line_number);
+    let row_background = if is_active_line_marker_jump || is_active_search_line {
+        Some(theme.current_line)
+    } else {
+        None
+    };
 
     div()
         .id(SharedString::from(format!(
@@ -530,12 +554,7 @@ fn render_log_line(
         .line_height(px(LOG_VIEWER_ROW_HEIGHT))
         .font_family(ARGUS_LOG_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
-        .when(
-            app.log_tab_view_state(tab_id)
-                .and_then(|state| state.active_search_match.as_ref())
-                .is_some_and(|active_match| active_match.line_number == line_number),
-            |row| row.bg(rgb(theme.current_line)),
-        )
+        .when_some(row_background, |row, color| row.bg(rgb(color)))
         .hover(|row| row.bg(rgb(theme.current_line)))
         .child(
             div()
@@ -556,13 +575,39 @@ fn render_log_line(
                 .top(px(0.0))
                 .h_full()
                 .w(px(line_number_width + LOG_VIEWER_TEXT_LEFT_PADDING))
-                .bg(rgb(theme.content))
-                .pr(px(LOG_VIEWER_TEXT_LEFT_PADDING))
-                .flex()
-                .items_center()
-                .justify_end()
-                .text_color(rgb(theme.foreground_muted))
-                .child((line_number + 1).to_string()),
+                .bg(rgb(row_background.unwrap_or(theme.content)))
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |app, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        app.toggle_log_line_marker(tab_id, line_number);
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .size_full()
+                        .pr(px(LOG_VIEWER_TEXT_LEFT_PADDING))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .text_color(rgb(theme.foreground_muted))
+                        .child((line_number + 1).to_string())
+                        .when(has_line_marker, |cell| {
+                            cell.child(
+                                div()
+                                    .absolute()
+                                    .right(px(LOG_LINE_MARKER_RIGHT))
+                                    .top(px((LOG_VIEWER_ROW_HEIGHT - LOG_LINE_MARKER_SIZE) / 2.0))
+                                    .w(px(LOG_LINE_MARKER_SIZE))
+                                    .h(px(LOG_LINE_MARKER_SIZE))
+                                    .rounded(px(LOG_LINE_MARKER_SIZE / 2.0))
+                                    .bg(rgb(theme.warning)),
+                            )
+                        }),
+                ),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -1272,8 +1317,10 @@ fn render_scrollbar_thumb(
                                         }
                                     }
                                 }
+                                app.clear_line_marker_jump_cache(tab_id);
                                 let _ = source_id;
                             } else {
+                                app.clear_line_marker_jump_cache(tab_id);
                                 let current = scroll_handle.offset();
                                 match axis {
                                     LogScrollbarAxis::Vertical => {
