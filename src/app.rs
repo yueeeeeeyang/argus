@@ -1248,6 +1248,20 @@ impl ArgusApp {
         });
     }
 
+    /// 在搜索结果面板指定窗口坐标打开批量操作右键菜单。
+    pub fn open_search_results_context_menu(&mut self, anchor: Point<Pixels>) {
+        if self.log_search.result_groups.is_empty() {
+            self.placeholder_notice = "暂无可操作的搜索结果分组".to_string();
+            return;
+        }
+
+        self.tab_menu_scroll = UniformListScrollHandle::new();
+        self.active_menu = Some(ActiveMenu {
+            kind: ActiveMenuKind::SearchResultsPanel,
+            anchor,
+        });
+    }
+
     /// 关闭当前活动菜单。
     pub fn close_active_menu(&mut self) {
         self.active_menu = None;
@@ -1276,6 +1290,10 @@ impl ArgusApp {
                     .selected(tab.id == self.active_tab_id)
                 })
                 .collect(),
+            ActiveMenuKind::SearchResultsPanel => vec![
+                MenuEntry::new("全部展开", MenuAction::ExpandAllSearchResults),
+                MenuEntry::new("全部收起", MenuAction::CollapseAllSearchResults),
+            ],
         }
     }
 
@@ -1286,6 +1304,8 @@ impl ArgusApp {
             MenuAction::CloseTab { tab_id } => self.close_tab(tab_id),
             MenuAction::CloseOtherTabs { tab_id } => self.close_other_tabs(tab_id),
             MenuAction::CloseAllTabs => self.close_all_tabs(),
+            MenuAction::ExpandAllSearchResults => self.expand_all_search_result_groups(),
+            MenuAction::CollapseAllSearchResults => self.collapse_all_search_result_groups(),
         }
 
         self.close_active_menu();

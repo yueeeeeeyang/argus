@@ -47,7 +47,7 @@ const LOG_SCROLLBAR_PADDING: f32 = 4.0;
 /// 自绘滚动条最小滑块长度。
 const LOG_SCROLLBAR_MIN_THUMB: f32 = 32.0;
 /// 搜索结果面板固定行高。
-const SEARCH_RESULT_ROW_HEIGHT: f32 = 34.0;
+const SEARCH_RESULT_ROW_HEIGHT: f32 = 28.0;
 /// 搜索结果列表最小内容宽度，超出面板宽度时启用横向滚动条。
 const SEARCH_RESULT_ROW_MIN_WIDTH: f32 = 760.0;
 /// 搜索结果行左侧行号列宽度。
@@ -538,7 +538,7 @@ fn render_log_line(
         .and_then(|state| state.active_search_match.as_ref())
         .is_some_and(|active_match| active_match.line_number == line_number);
     let row_background = if is_active_line_marker_jump || is_active_search_line {
-        Some(theme.current_line)
+        Some(theme.selection)
     } else {
         None
     };
@@ -555,7 +555,7 @@ fn render_log_line(
         .font_family(ARGUS_LOG_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .when_some(row_background, |row, color| row.bg(rgb(color)))
-        .hover(|row| row.bg(rgb(theme.current_line)))
+        .hover(move |row| row.bg(rgb(row_background.unwrap_or(theme.current_line))))
         .child(
             div()
                 .relative()
@@ -1378,6 +1378,14 @@ fn render_search_results_panel(
         .border_color(rgb(theme.border))
         .bg(rgb(theme.status_bar))
         .occlude()
+        .on_mouse_up(
+            MouseButton::Right,
+            cx.listener(|app, event: &MouseUpEvent, _, cx| {
+                app.open_search_results_context_menu(event.position);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
         .child(render_search_results_resize_handle(theme, cx))
         .child(
             div()
@@ -1413,18 +1421,6 @@ fn render_search_results_panel(
                         .text_color(rgb(theme.foreground_muted))
                         .child(status_text),
                 )
-                .when(is_running, |this| {
-                    this.child(action_text_button(
-                        "log-search-results-cancel",
-                        ArgusIcon::Close,
-                        "取消",
-                        theme,
-                        cx.listener(|app, _, _, cx| {
-                            app.cancel_log_search();
-                            cx.notify();
-                        }),
-                    ))
-                })
                 .child(render_icon_button(
                     "log-search-results-close",
                     ArgusIcon::Close,
@@ -1594,12 +1590,12 @@ fn render_search_result_group_row(
         .collapsed_result_groups
         .contains(&group.source_id);
     let result_count = group.end_index.saturating_sub(group.start_index);
+    let group_label = format!("{} ({result_count})", group.label);
     let group_intrinsic_width = SEARCH_RESULT_ROW_HORIZONTAL_PADDING
         + 14.0
         + 14.0
-        + 76.0
-        + SEARCH_RESULT_ROW_GAP_WIDTH * 3.0
-        + estimated_search_result_text_width(&group.label)
+        + SEARCH_RESULT_ROW_GAP_WIDTH * 2.0
+        + estimated_search_result_text_width(&group_label)
         + estimated_search_result_text_width(&group.path);
     let row_width = search_result_row_width(app, group_intrinsic_width);
 
@@ -1639,7 +1635,7 @@ fn render_search_result_group_row(
                 .flex_none()
                 .max_w(px(220.0))
                 .truncate()
-                .child(group.label.clone()),
+                .child(group_label),
         )
         .child(
             div()
@@ -1649,17 +1645,18 @@ fn render_search_result_group_row(
                 .text_color(rgb(theme.foreground_muted))
                 .child(group.path.clone()),
         )
-        .child(
-            div()
-                .w(px(76.0))
-                .text_right()
-                .text_color(rgb(theme.foreground_muted))
-                .child(format!("{result_count} 条")),
-        )
         .on_click(cx.listener(move |app, _, _, cx| {
             app.toggle_search_result_group(group_index);
             cx.notify();
         }))
+        .on_mouse_up(
+            MouseButton::Right,
+            cx.listener(|app, event: &MouseUpEvent, _, cx| {
+                app.open_search_results_context_menu(event.position);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
         .into_any_element()
 }
 
@@ -1672,6 +1669,11 @@ fn render_search_result_row(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let is_active = app.log_search.active_result_index == Some(index);
+    let hover_background = if is_active {
+        theme.selection
+    } else {
+        theme.content
+    };
     let (preview_text, preview_match_ranges) = search_result_preview_text(result);
     let display_text = log_viewer_display_text(&preview_text).into_owned();
     let match_ranges =
@@ -1704,7 +1706,7 @@ fn render_search_result_row(
 
     div()
         .id(SharedString::from(format!("log-search-result-{index}")))
-        .h(px(34.0))
+        .h(px(SEARCH_RESULT_ROW_HEIGHT))
         .w(px(row_width))
         .px_3()
         .flex()
@@ -1714,7 +1716,7 @@ fn render_search_result_row(
         .text_size(px(12.0))
         .cursor_pointer()
         .when(is_active, |this| this.bg(rgb(theme.selection)))
-        .hover(|this| this.bg(rgb(theme.current_line)))
+        .hover(move |this| this.bg(rgb(hover_background)))
         .child(
             div()
                 .w(px(78.0))
@@ -1735,6 +1737,14 @@ fn render_search_result_row(
             app.activate_search_result(index, cx);
             cx.notify();
         }))
+        .on_mouse_up(
+            MouseButton::Right,
+            cx.listener(|app, event: &MouseUpEvent, _, cx| {
+                app.open_search_results_context_menu(event.position);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
 }
 
 /// 返回搜索结果行实际渲染宽度：至少撑满当前视口，内容更宽时交给横向滚动条。
@@ -1951,38 +1961,6 @@ fn render_search_result_scrollbar_thumb(
             .size_full(),
         )
         .into_any_element()
-}
-
-/// 渲染结果面板文本按钮。
-fn action_text_button(
-    id: &'static str,
-    icon: ArgusIcon,
-    label: &'static str,
-    theme: &AppTheme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .h(px(24.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .gap_1()
-        .rounded_sm()
-        .text_size(px(12.0))
-        .line_height(px(24.0))
-        .text_color(rgb(theme.foreground))
-        .bg(rgb(theme.current_line))
-        .hover(|this| this.bg(rgb(theme.selection)))
-        .cursor_pointer()
-        .child(
-            div()
-                .relative()
-                .top(px(1.0))
-                .child(render_icon(icon, theme.foreground_muted, 12.0)),
-        )
-        .child(div().relative().top(px(1.0)).child(label))
-        .on_click(on_click)
 }
 
 /// 返回搜索结果面板进度文案。

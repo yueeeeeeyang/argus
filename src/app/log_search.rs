@@ -58,6 +58,8 @@ const SEARCH_RESULT_LIST_MIN_WIDTH: f32 = 760.0;
 const SEARCH_RESULT_ASCII_CHAR_WIDTH_ESTIMATE: f32 = 7.4;
 /// 搜索结果中文等非 ASCII 字符宽度估算；避免混排结果低估宽度导致横向滚动条缺失。
 const SEARCH_RESULT_WIDE_CHAR_WIDTH_ESTIMATE: f32 = 13.0;
+/// 目录搜索每发现一批目标就立即搜索，避免长时间停留在“准备目录搜索目标”阶段。
+const DIRECTORY_SEARCH_TARGET_BATCH_SIZE: usize = 32;
 
 /// 计算分页日志跳转命中行时的垂直滚动偏移。
 ///
@@ -78,7 +80,7 @@ fn centered_paged_scroll_top(line_number: usize, line_count: usize, viewport_hei
 
 /// 后台搜索线程向 UI 线程回传的事件。
 enum SearchWorkerEvent {
-    /// 目录搜索目标已在后台补齐并准备完成。
+    /// 目录搜索目标发现进度；可能携带补齐后的来源树快照。
     Prepared(SearchPreparedEvent),
     /// 搜索进度更新。
     Progress(SearchProgress),
@@ -92,13 +94,14 @@ enum SearchWorkerEvent {
 
 /// 搜索准备阶段回传给 UI 的状态；目录搜索会携带补齐后的来源树。
 struct SearchPreparedEvent {
-    /// 补齐懒加载节点后的来源树；非目录搜索无需更新。
+    /// 补齐懒加载节点后的来源树；只在目录搜索发现新节点时更新。
     registry: Option<SourceRegistry>,
-    /// 本次搜索最终目标文件数量。
+    /// 当前已经发现的搜索目标文件数量。
     total_files: usize,
 }
 
-/// 后台目录搜索准备结果。
+/// 后台目录搜索准备结果；仅用于回归测试旧的完整补齐逻辑。
+#[cfg(test)]
 struct DirectorySearchPreparation {
     /// 补齐懒加载节点后的来源树快照。
     registry: SourceRegistry,
@@ -306,7 +309,7 @@ impl ArgusApp {
         let (sender, receiver) = mpsc::channel::<SearchWorkerEvent>();
 
         if let Some((directory_id, registry, loader_config)) = directory_prepare {
-            self.log_search.progress.current_path = Some("正在准备目录搜索目标".to_string());
+            self.log_search.progress.current_path = Some("正在发现目录搜索目标".to_string());
             spawn_directory_search_worker(
                 directory_id,
                 registry,
@@ -340,7 +343,7 @@ impl ArgusApp {
         self.placeholder_notice = format!(
             "{}",
             if scope == SearchScope::Directory {
-                "正在准备目录搜索目标".to_string()
+                "正在发现目录搜索目标".to_string()
             } else {
                 format!(
                     "正在搜索 {} 个日志文件",
@@ -363,7 +366,7 @@ impl ArgusApp {
     ) {
         cx.spawn(async move |view, cx| {
             loop {
-                let mut prepared_event = None;
+                let mut prepared_event: Option<SearchPreparedEvent> = None;
                 let mut latest_progress = None;
                 let mut pending_results = Vec::new();
                 let mut failed_message = None;
@@ -372,8 +375,15 @@ impl ArgusApp {
 
                 for _ in 0..LOG_SEARCH_MAX_EVENTS_PER_TICK {
                     match receiver.try_recv() {
-                        Ok(SearchWorkerEvent::Prepared(event)) => {
-                            prepared_event = Some(event);
+                        Ok(SearchWorkerEvent::Prepared(mut event)) => {
+                            if let Some(existing) = &mut prepared_event {
+                                if event.registry.is_some() {
+                                    existing.registry = event.registry.take();
+                                }
+                                existing.total_files = event.total_files;
+                            } else {
+                                prepared_event = Some(event);
+                            }
                         }
                         Ok(SearchWorkerEvent::Progress(progress)) => {
                             latest_progress = Some(progress);
@@ -1141,12 +1151,12 @@ impl ArgusApp {
                 }
                 self.log_search.progress.total_files = event.total_files;
                 self.log_search.message =
-                    Some(format!("已准备 {} 个搜索目标，开始搜索", event.total_files));
+                    Some(format!("已发现 {} 个搜索目标，正在搜索", event.total_files));
                 self.placeholder_notice = self
                     .log_search
                     .message
                     .clone()
-                    .unwrap_or_else(|| "已准备搜索目标".to_string());
+                    .unwrap_or_else(|| "正在搜索已发现目标".to_string());
             }
             SearchWorkerEvent::Progress(progress) => {
                 self.apply_search_progress(generation, progress)
@@ -1222,6 +1232,35 @@ impl ArgusApp {
         }
         self.rebuild_visible_search_result_items();
         self.placeholder_notice = format!("已切换 {label} 的搜索结果展开状态");
+    }
+
+    /// 展开全部搜索结果文件分组。
+    pub fn expand_all_search_result_groups(&mut self) {
+        if self.log_search.result_groups.is_empty() {
+            self.placeholder_notice = "暂无可展开的搜索结果".to_string();
+            return;
+        }
+
+        self.log_search.collapsed_result_groups.clear();
+        self.rebuild_visible_search_result_items();
+        self.placeholder_notice = "已展开全部搜索结果".to_string();
+    }
+
+    /// 收起全部搜索结果文件分组。
+    pub fn collapse_all_search_result_groups(&mut self) {
+        if self.log_search.result_groups.is_empty() {
+            self.placeholder_notice = "暂无可收起的搜索结果".to_string();
+            return;
+        }
+
+        self.log_search.collapsed_result_groups = self
+            .log_search
+            .result_groups
+            .iter()
+            .map(|group| group.source_id)
+            .collect();
+        self.rebuild_visible_search_result_items();
+        self.placeholder_notice = "已收起全部搜索结果".to_string();
     }
 
     /// 开始拖拽搜索结果面板高度。
@@ -1563,7 +1602,9 @@ impl ArgusApp {
                 source_id: result.source_id,
                 line_number: result.line_number,
                 match_ranges: result.match_ranges.clone(),
-                active_range: None,
+                // 搜索结果点击定位时需要同时激活一个具体命中片段，否则正文中只有行背景，
+                // 关键字仍使用普通命中样式，在选中行背景上对比度不足。
+                active_range: result.match_ranges.first().cloned(),
             });
         }
     }
@@ -1899,66 +1940,202 @@ fn spawn_search_worker(
 /// 启动目录搜索后台线程；目录补齐、目标收集和正文扫描全部离开 UI 线程。
 fn spawn_directory_search_worker(
     directory_id: SourceId,
-    registry: SourceRegistry,
+    mut registry: SourceRegistry,
     loader_config: crate::config::LoaderConfig,
-    mut request: SearchRequest,
+    request: SearchRequest,
     cancel_token: Arc<AtomicBool>,
     sender: mpsc::Sender<SearchWorkerEvent>,
 ) {
     std::thread::spawn(move || {
-        let preparation = prepare_directory_search_targets(registry, directory_id, loader_config);
-        let preparation = match preparation {
-            Ok(preparation) => preparation,
-            Err(message) => {
-                let _ = sender.send(SearchWorkerEvent::Failed(message));
-                return;
-            }
-        };
-
-        if cancel_token.load(Ordering::Relaxed) {
-            let _ = sender.send(SearchWorkerEvent::Finished(SearchTaskSummary {
-                was_cancelled: true,
-                ..SearchTaskSummary::default()
-            }));
+        if registry.node(directory_id).is_none() {
+            let _ = sender.send(SearchWorkerEvent::Failed(
+                "未在来源树中找到该目录".to_string(),
+            ));
             return;
         }
 
-        if preparation.targets.is_empty() {
-            let message = if preparation.errors.is_empty() {
+        let loader = LogSourceLoader::new(loader_config).with_deferred_archive_probe();
+        let mut pending_ids = vec![directory_id];
+        let mut visited_ids = BTreeSet::new();
+        let mut target_batch = Vec::with_capacity(DIRECTORY_SEARCH_TARGET_BATCH_SIZE);
+        let mut summary = SearchTaskSummary::default();
+        let mut errors = Vec::new();
+        let mut discovered_total = 0usize;
+        let mut last_prepared_total = 0usize;
+        let mut registry_dirty = false;
+
+        while let Some(source_id) = pending_ids.pop() {
+            if cancel_token.load(Ordering::Relaxed) {
+                summary.was_cancelled = true;
+                break;
+            }
+            if !visited_ids.insert(source_id) {
+                continue;
+            }
+
+            let Some(node) = registry.node(source_id).cloned() else {
+                continue;
+            };
+
+            if node.kind.can_expand() && !node.metadata.children_loaded && !node.metadata.is_loading
+            {
+                registry.set_loading(source_id, true);
+                let report = loader.load_children(&node);
+                errors.extend(report.errors.iter().cloned());
+                apply_search_directory_child_report_to_registry(&mut registry, source_id, report);
+                registry_dirty = true;
+            }
+
+            let child_ids = registry.child_ids(source_id).to_vec();
+            for child_id in child_ids.into_iter().rev() {
+                if cancel_token.load(Ordering::Relaxed) {
+                    summary.was_cancelled = true;
+                    break;
+                }
+
+                if let Some(target) = search_target_from_registry(&registry, child_id) {
+                    target_batch.push(target);
+                    discovered_total += 1;
+
+                    if target_batch.len() >= DIRECTORY_SEARCH_TARGET_BATCH_SIZE {
+                        send_directory_search_prepared(
+                            &sender,
+                            registry_dirty.then(|| registry.clone()),
+                            discovered_total,
+                        );
+                        registry_dirty = false;
+                        last_prepared_total = discovered_total;
+
+                        let batch_summary = search_discovered_target_batch(
+                            &request,
+                            &mut target_batch,
+                            discovered_total,
+                            summary.scanned_files,
+                            Arc::clone(&cancel_token),
+                            &sender,
+                        );
+                        let was_cancelled = batch_summary.was_cancelled;
+                        merge_search_summary(&mut summary, batch_summary);
+                        if was_cancelled {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                if registry
+                    .node(child_id)
+                    .is_some_and(|node| node.kind.can_expand())
+                {
+                    pending_ids.push(child_id);
+                }
+            }
+
+            if summary.was_cancelled {
+                break;
+            }
+        }
+
+        if !summary.was_cancelled && !target_batch.is_empty() {
+            send_directory_search_prepared(
+                &sender,
+                registry_dirty.then(|| registry.clone()),
+                discovered_total,
+            );
+            registry_dirty = false;
+            last_prepared_total = discovered_total;
+
+            let batch_summary = search_discovered_target_batch(
+                &request,
+                &mut target_batch,
+                discovered_total,
+                summary.scanned_files,
+                Arc::clone(&cancel_token),
+                &sender,
+            );
+            merge_search_summary(&mut summary, batch_summary);
+        }
+
+        summary.errors.extend(errors);
+
+        if summary.was_cancelled {
+            let _ = sender.send(SearchWorkerEvent::Finished(summary));
+            return;
+        }
+
+        if discovered_total == 0 {
+            let message = if summary.errors.is_empty() {
                 "目录下没有日志文件".to_string()
             } else {
-                format!("目录搜索目标加载失败：{}", preparation.errors.join("；"))
+                format!("目录搜索目标加载失败：{}", summary.errors.join("；"))
             };
             let _ = sender.send(SearchWorkerEvent::Failed(message));
             return;
         }
 
-        request.targets = preparation.targets;
-        let target_count = request.targets.len();
-        let prepare_errors = preparation.errors;
-        let _ = sender.send(SearchWorkerEvent::Prepared(SearchPreparedEvent {
-            registry: Some(preparation.registry),
-            total_files: target_count,
-        }));
+        if registry_dirty || last_prepared_total != discovered_total {
+            send_directory_search_prepared(
+                &sender,
+                registry_dirty.then_some(registry),
+                discovered_total,
+            );
+        }
 
-        let progress_sender = sender.clone();
-        let result_sender = sender.clone();
-        let mut summary = SearchEngine::search(
-            request,
-            move |progress| {
-                let _ = progress_sender.send(SearchWorkerEvent::Progress(progress));
-            },
-            move |results| {
-                let _ = result_sender.send(SearchWorkerEvent::Results(results));
-            },
-            cancel_token,
-        );
-        summary.errors.extend(prepare_errors);
         let _ = sender.send(SearchWorkerEvent::Finished(summary));
     });
 }
 
+/// 向 UI 线程报告目录搜索已经发现的目标数量和可选来源树快照。
+fn send_directory_search_prepared(
+    sender: &mpsc::Sender<SearchWorkerEvent>,
+    registry: Option<SourceRegistry>,
+    total_files: usize,
+) {
+    let _ = sender.send(SearchWorkerEvent::Prepared(SearchPreparedEvent {
+        registry,
+        total_files,
+    }));
+}
+
+/// 搜索当前已经发现的一批目录目标，并把批内进度映射成目录总进度。
+fn search_discovered_target_batch(
+    request_template: &SearchRequest,
+    target_batch: &mut Vec<SearchTarget>,
+    discovered_total: usize,
+    scanned_files_base: usize,
+    cancel_token: Arc<AtomicBool>,
+    sender: &mpsc::Sender<SearchWorkerEvent>,
+) -> SearchTaskSummary {
+    let mut request = request_template.clone();
+    request.targets = std::mem::take(target_batch);
+
+    let progress_sender = sender.clone();
+    let result_sender = sender.clone();
+    SearchEngine::search(
+        request,
+        move |mut progress| {
+            progress.scanned_files += scanned_files_base;
+            progress.total_files = discovered_total;
+            let _ = progress_sender.send(SearchWorkerEvent::Progress(progress));
+        },
+        move |results| {
+            let _ = result_sender.send(SearchWorkerEvent::Results(results));
+        },
+        cancel_token,
+    )
+}
+
+/// 合并分批目录搜索的摘要数据。
+fn merge_search_summary(total: &mut SearchTaskSummary, batch: SearchTaskSummary) {
+    total.was_cancelled |= batch.was_cancelled;
+    total.scanned_files += batch.scanned_files;
+    total.scanned_lines += batch.scanned_lines;
+    total.matched_results += batch.matched_results;
+    total.errors.extend(batch.errors);
+}
+
 /// 在后台补齐目录搜索所需的来源树，并收集可搜索日志目标。
+#[cfg(test)]
 fn prepare_directory_search_targets(
     mut registry: SourceRegistry,
     directory_id: SourceId,
@@ -2037,6 +2214,7 @@ fn apply_search_directory_child_report_to_registry(
 }
 
 /// 从指定来源树快照目录下递归收集日志候选。
+#[cfg(test)]
 fn collect_loaded_log_targets_under_registry(
     registry: &SourceRegistry,
     directory_id: SourceId,
@@ -2047,6 +2225,7 @@ fn collect_loaded_log_targets_under_registry(
 }
 
 /// 递归收集来源树快照中的日志候选。
+#[cfg(test)]
 fn collect_loaded_log_targets_recursive(
     registry: &SourceRegistry,
     parent_id: SourceId,
@@ -2284,6 +2463,7 @@ mod tests {
         )
         .unwrap();
 
+        assert!(preparation.errors.is_empty());
         assert!(
             preparation
                 .targets
@@ -2535,6 +2715,18 @@ mod tests {
                 SearchResultListItem::Result(2),
             ]
         );
+
+        app.collapse_all_search_result_groups();
+        assert_eq!(
+            app.log_search.visible_result_items,
+            vec![
+                SearchResultListItem::Group(0),
+                SearchResultListItem::Group(1),
+            ]
+        );
+
+        app.expand_all_search_result_groups();
+        assert_eq!(app.log_search.visible_result_items.len(), 5);
     }
 
     /// 验证搜索结果面板拖拽高度会被限制在合理范围内。

@@ -17,6 +17,8 @@ use gpui::{
 const TAB_CONTEXT_MENU_WIDTH: f32 = 132.0;
 /// 标签页溢出菜单宽度，保留长日志文件名的展示空间。
 const TAB_OVERFLOW_MENU_WIDTH: f32 = 220.0;
+/// 搜索结果面板菜单宽度，仅包含展开/收起两项批量动作。
+const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
 /// 菜单项固定行高，供 `uniform_list` 稳定计算滚动范围。
 const MENU_ROW_HEIGHT: f32 = 30.0;
 /// 菜单最大高度，超出后只在菜单内部滚动。
@@ -34,6 +36,8 @@ pub enum ActiveMenuKind {
     },
     /// 标签溢出下拉菜单，展示全部标签并支持切换。
     TabOverflow,
+    /// 搜索结果面板右键菜单，动作作用于全部结果分组。
+    SearchResultsPanel,
 }
 
 /// 当前打开的菜单状态。
@@ -65,6 +69,10 @@ pub enum MenuAction {
     },
     /// 关闭全部标签，并保留一个空标签。
     CloseAllTabs,
+    /// 展开全部搜索结果文件分组。
+    ExpandAllSearchResults,
+    /// 收起全部搜索结果文件分组。
+    CollapseAllSearchResults,
 }
 
 impl MenuAction {
@@ -75,6 +83,8 @@ impl MenuAction {
             Self::CloseTab { tab_id } => format!("close-tab-{tab_id}"),
             Self::CloseOtherTabs { tab_id } => format!("close-other-tabs-{tab_id}"),
             Self::CloseAllTabs => "close-all-tabs".to_string(),
+            Self::ExpandAllSearchResults => "expand-all-search-results".to_string(),
+            Self::CollapseAllSearchResults => "collapse-all-search-results".to_string(),
         }
     }
 }
@@ -132,6 +142,7 @@ pub fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl In
     let menu_width = match active_menu.kind {
         ActiveMenuKind::TabContext { .. } => TAB_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::TabOverflow => TAB_OVERFLOW_MENU_WIDTH,
+        ActiveMenuKind::SearchResultsPanel => SEARCH_RESULTS_MENU_WIDTH,
     };
     let menu_height = (entry_count as f32 * MENU_ROW_HEIGHT)
         .min(MENU_MAX_HEIGHT)
