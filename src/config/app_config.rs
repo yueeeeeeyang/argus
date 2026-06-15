@@ -1,8 +1,8 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-12
+//! 修改日期：2026-06-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供外观、日志加载、编码和缓存设置的默认值、校验和 TOML 序列化结构。
+//! 主要功能：提供外观、日志加载、日志搜索、编码和缓存设置的默认值、校验和 TOML 序列化结构。
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,9 @@ pub struct AppConfig {
     /// 日志来源加载配置，控制目录和压缩包的展开策略。
     #[serde(default)]
     pub loader: LoaderConfig,
+    /// 日志搜索配置，保存快搜关键字等跨会话搜索偏好。
+    #[serde(default)]
+    pub log_search: LogSearchConfig,
     /// 编码配置，后续日志读取模块会据此选择默认解码策略。
     #[serde(default)]
     pub encoding: EncodingConfig,
@@ -44,6 +47,7 @@ impl AppConfig {
             self.appearance.log_content_font_size.clamp(12.0, 20.0);
         self.loader.max_archive_depth = self.loader.max_archive_depth.min(8);
         self.loader.archive_probe_concurrency = self.loader.archive_probe_concurrency.clamp(1, 16);
+        self.log_search.quick_keywords = self.log_search.quick_keywords.trim().to_string();
         self.cache.limit_mb = self.cache.limit_mb.clamp(128, 2048);
         if self.encoding.selected.trim().is_empty() {
             self.encoding.selected = EncodingConfig::default().selected;
@@ -58,6 +62,7 @@ impl Default for AppConfig {
         Self {
             appearance: AppearanceConfig::default(),
             loader: LoaderConfig::default(),
+            log_search: LogSearchConfig::default(),
             encoding: EncodingConfig::default(),
             cache: CacheConfig::default(),
         }
@@ -109,6 +114,13 @@ impl Default for LoaderConfig {
 /// 返回默认单文件压缩包探测并发数。
 fn default_archive_probe_concurrency() -> usize {
     4
+}
+
+/// 日志搜索配置，当前用于保存快搜关键字。
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LogSearchConfig {
+    /// 快搜关键字原始输入，使用英文逗号分隔；解析和去重在搜索启动时执行。
+    pub quick_keywords: String,
 }
 
 /// 编码配置，当前先持久化用户选择，日志正文读取接入后再参与解码。
@@ -163,6 +175,9 @@ mod tests {
                 archive_probe_concurrency: 99,
                 follow_symlinks: true,
             },
+            log_search: LogSearchConfig {
+                quick_keywords: " ERROR, WARN ".to_string(),
+            },
             encoding: EncodingConfig {
                 selected: String::new(),
             },
@@ -177,6 +192,7 @@ mod tests {
         assert_eq!(config.appearance.theme_mode, "dark.toml");
         assert_eq!(config.loader.max_archive_depth, 8);
         assert_eq!(config.loader.archive_probe_concurrency, 16);
+        assert_eq!(config.log_search.quick_keywords, "ERROR, WARN");
         assert_eq!(config.encoding.selected, "UTF-8");
         assert_eq!(config.cache.limit_mb, 128);
     }
@@ -191,5 +207,11 @@ mod tests {
     #[test]
     fn default_log_content_font_size_is_twelve() {
         assert_eq!(AppearanceConfig::default().log_content_font_size, 12.0);
+    }
+
+    /// 验证日志搜索配置默认没有快搜关键字，避免新用户误触发搜索。
+    #[test]
+    fn default_quick_search_keywords_is_empty() {
+        assert!(LogSearchConfig::default().quick_keywords.is_empty());
     }
 }

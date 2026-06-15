@@ -1,14 +1,23 @@
 //! 文件职责：维护独立设置窗口的打开、置前和关闭状态。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-12
+//! 修改日期：2026-06-15
 //! 作者：Argus 开发团队
-//! 主要功能：将设置页从标签页迁移到无标题栏独立窗口，同时复用主应用配置持久化逻辑。
+//! 主要功能：将设置页从标签页迁移到无标题栏独立窗口，同时复用主应用配置和日志搜索偏好持久化逻辑。
 
-use gpui::{AppContext, Bounds, Context, WindowBounds, WindowOptions, px, size};
+use std::borrow::Borrow;
+use std::ops::Range;
 
-use crate::app::ArgusApp;
+use gpui::{
+    AppContext, Bounds, ClipboardItem, Context, Keystroke, WindowBounds, WindowOptions, px, size,
+};
+
+use crate::app::{ArgusApp, InputTextSelectionDrag, SettingsTextInputState};
 use crate::platform::open_with_registration::{
     register_open_with, registration_status, unregister_open_with,
+};
+use crate::text_selection::{
+    TextSelectionGranularity, character_count, insert_text_at_character_index,
+    remove_character_range, slice_character_range, word_range_at,
 };
 use crate::ui::settings_window::SettingsWindow;
 
@@ -173,5 +182,281 @@ impl ArgusApp {
             .ok();
         })
         .detach();
+    }
+
+    /// 聚焦设置窗口快搜关键字输入框，并关闭设置页的其它浮层。
+    pub fn focus_settings_quick_keywords_input(&mut self) {
+        self.is_theme_dropdown_open = false;
+        self.settings_quick_keywords_input.is_focused = true;
+    }
+
+    /// 返回设置窗口快搜关键字输入框当前选区范围。
+    ///
+    /// 返回值：存在非空选区时返回字符范围；无选区或空选区返回 `None`。
+    pub fn settings_quick_keywords_selection_range(&self) -> Option<Range<usize>> {
+        normalized_input_selection_range(&self.settings_quick_keywords_input)
+    }
+
+    /// 清空设置窗口快搜关键字输入框，并立即持久化配置。
+    pub fn clear_settings_quick_keywords_input(&mut self) {
+        self.settings_quick_keywords_input.value.clear();
+        self.settings_quick_keywords_input.cursor = 0;
+        self.settings_quick_keywords_input.selection_anchor = None;
+        self.settings_quick_keywords_input.selection_drag = None;
+        self.commit_settings_quick_keywords_input();
+    }
+
+    /// 直接更新快搜关键字配置；测试和未来批量设置入口可复用。
+    pub fn update_settings_quick_keywords(&mut self, value: String) {
+        self.settings_quick_keywords_input = SettingsTextInputState::from_value(value);
+        self.commit_settings_quick_keywords_input();
+    }
+
+    /// 处理设置窗口快搜关键字输入框键盘事件。
+    ///
+    /// 参数说明：
+    /// - `keystroke`：GPUI 归一化按键事件。
+    /// - `cx`：主应用上下文，用于访问系统剪贴板。
+    pub fn handle_settings_quick_keywords_key(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
+        let key = keystroke.key.as_str();
+        let modifiers = keystroke.modifiers;
+
+        if modifiers.platform && key.eq_ignore_ascii_case("a") {
+            self.select_all_settings_quick_keywords_input();
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("c") {
+            self.copy_settings_quick_keywords_selection(cx);
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("x") {
+            self.cut_settings_quick_keywords_selection(cx);
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("v") {
+            self.paste_settings_quick_keywords_clipboard(cx);
+            return;
+        }
+
+        match key {
+            "backspace" => self.delete_settings_quick_keywords_backward(),
+            "delete" => self.delete_settings_quick_keywords_forward(),
+            "left" => self.move_settings_quick_keywords_cursor_left(modifiers.shift),
+            "right" => self.move_settings_quick_keywords_cursor_right(modifiers.shift),
+            "home" => self.move_settings_quick_keywords_cursor_to(0, modifiers.shift),
+            "end" => {
+                let text_length = character_count(&self.settings_quick_keywords_input.value);
+                self.move_settings_quick_keywords_cursor_to(text_length, modifiers.shift);
+            }
+            "escape" => self.settings_quick_keywords_input.is_focused = false,
+            _ if key.chars().count() == 1 && !modifiers.control && !modifiers.platform => {
+                self.insert_settings_quick_keywords_text(key);
+            }
+            _ => {}
+        }
+    }
+
+    /// 开始设置窗口快搜关键字输入框鼠标选择。
+    pub fn begin_settings_quick_keywords_pointer_selection(
+        &mut self,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        self.focus_settings_quick_keywords_input();
+        let range = settings_input_range_for_granularity(
+            &self.settings_quick_keywords_input,
+            character_index,
+            granularity,
+        );
+        self.settings_quick_keywords_input.cursor = range.end;
+        self.settings_quick_keywords_input.selection_anchor = Some(range.start);
+        self.settings_quick_keywords_input.selection_drag = Some(InputTextSelectionDrag {
+            anchor_range: range,
+            granularity,
+        });
+    }
+
+    /// 更新设置窗口快搜关键字输入框鼠标拖拽选择。
+    pub fn update_settings_quick_keywords_pointer_selection(&mut self, character_index: usize) {
+        let Some(drag) = self.settings_quick_keywords_input.selection_drag.clone() else {
+            return;
+        };
+        let focus_range = settings_input_range_for_granularity(
+            &self.settings_quick_keywords_input,
+            character_index,
+            drag.granularity,
+        );
+        let start = drag.anchor_range.start.min(focus_range.start);
+        let end = drag.anchor_range.end.max(focus_range.end);
+        self.settings_quick_keywords_input.selection_anchor = Some(start);
+        self.settings_quick_keywords_input.cursor = end;
+    }
+
+    /// 结束设置窗口快搜关键字输入框鼠标选择。
+    pub fn finish_settings_quick_keywords_pointer_selection(&mut self) {
+        self.settings_quick_keywords_input.selection_drag = None;
+    }
+
+    /// 将设置输入框内容写回配置并保存。
+    fn commit_settings_quick_keywords_input(&mut self) {
+        self.config.log_search.quick_keywords = self.settings_quick_keywords_input.value.clone();
+        self.placeholder_notice = "快搜关键字已保存".to_string();
+        self.persist_config_or_report();
+    }
+
+    /// 向设置快搜输入框插入文本。
+    fn insert_settings_quick_keywords_text(&mut self, text: &str) {
+        self.delete_settings_quick_keywords_selection();
+        let input = &mut self.settings_quick_keywords_input;
+        input.value = insert_text_at_character_index(&input.value, input.cursor, text);
+        input.cursor += character_count(text);
+        input.selection_anchor = None;
+        input.selection_drag = None;
+        self.commit_settings_quick_keywords_input();
+    }
+
+    /// 删除设置快搜输入框当前选区。
+    fn delete_settings_quick_keywords_selection(&mut self) -> bool {
+        let Some(range) = self.settings_quick_keywords_selection_range() else {
+            return false;
+        };
+        let input = &mut self.settings_quick_keywords_input;
+        input.value = remove_character_range(&input.value, range.clone());
+        input.cursor = range.start;
+        input.selection_anchor = None;
+        input.selection_drag = None;
+        self.commit_settings_quick_keywords_input();
+        true
+    }
+
+    /// 从光标前删除一个字符。
+    fn delete_settings_quick_keywords_backward(&mut self) {
+        if self.delete_settings_quick_keywords_selection()
+            || self.settings_quick_keywords_input.cursor == 0
+        {
+            return;
+        }
+        let cursor = self.settings_quick_keywords_input.cursor;
+        let input = &mut self.settings_quick_keywords_input;
+        input.value = remove_character_range(&input.value, cursor - 1..cursor);
+        input.cursor -= 1;
+        input.selection_drag = None;
+        self.commit_settings_quick_keywords_input();
+    }
+
+    /// 从光标后删除一个字符。
+    fn delete_settings_quick_keywords_forward(&mut self) {
+        if self.delete_settings_quick_keywords_selection() {
+            return;
+        }
+        let cursor = self.settings_quick_keywords_input.cursor;
+        let text_length = character_count(&self.settings_quick_keywords_input.value);
+        if cursor >= text_length {
+            return;
+        }
+        let input = &mut self.settings_quick_keywords_input;
+        input.value = remove_character_range(&input.value, cursor..cursor + 1);
+        input.selection_drag = None;
+        self.commit_settings_quick_keywords_input();
+    }
+
+    /// 左移设置快搜输入框光标。
+    fn move_settings_quick_keywords_cursor_left(&mut self, extend_selection: bool) {
+        let cursor = self.settings_quick_keywords_input.cursor.saturating_sub(1);
+        self.move_settings_quick_keywords_cursor_to(cursor, extend_selection);
+    }
+
+    /// 右移设置快搜输入框光标。
+    fn move_settings_quick_keywords_cursor_right(&mut self, extend_selection: bool) {
+        let text_length = character_count(&self.settings_quick_keywords_input.value);
+        let cursor = (self.settings_quick_keywords_input.cursor + 1).min(text_length);
+        self.move_settings_quick_keywords_cursor_to(cursor, extend_selection);
+    }
+
+    /// 移动设置快搜输入框光标，并按需扩展选区。
+    fn move_settings_quick_keywords_cursor_to(&mut self, cursor: usize, extend_selection: bool) {
+        let text_length = character_count(&self.settings_quick_keywords_input.value);
+        let cursor = cursor.min(text_length);
+        let input = &mut self.settings_quick_keywords_input;
+        if extend_selection {
+            input.selection_anchor.get_or_insert(input.cursor);
+        } else {
+            input.selection_anchor = None;
+        }
+        input.cursor = cursor;
+        input.selection_drag = None;
+    }
+
+    /// 全选设置快搜输入框文本。
+    fn select_all_settings_quick_keywords_input(&mut self) {
+        self.settings_quick_keywords_input.selection_anchor = Some(0);
+        self.settings_quick_keywords_input.cursor =
+            character_count(&self.settings_quick_keywords_input.value);
+        self.settings_quick_keywords_input.selection_drag = None;
+    }
+
+    /// 复制设置快搜输入框选中文本。
+    fn copy_settings_quick_keywords_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self.selected_settings_quick_keywords_text() else {
+            return;
+        };
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    /// 剪切设置快搜输入框选中文本。
+    fn cut_settings_quick_keywords_selection(&mut self, cx: &mut Context<Self>) {
+        self.copy_settings_quick_keywords_selection(cx);
+        self.delete_settings_quick_keywords_selection();
+    }
+
+    /// 粘贴剪贴板文本到设置快搜输入框。
+    fn paste_settings_quick_keywords_clipboard(&mut self, cx: &mut Context<Self>) {
+        let app_context: &gpui::App = (&*cx).borrow();
+        let Some(item) = app_context.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text() {
+            self.insert_settings_quick_keywords_text(&text.replace(['\n', '\r'], " "));
+        }
+    }
+
+    /// 返回设置快搜输入框选中文本。
+    fn selected_settings_quick_keywords_text(&self) -> Option<String> {
+        let range = self.settings_quick_keywords_selection_range()?;
+        Some(slice_character_range(
+            &self.settings_quick_keywords_input.value,
+            range,
+        ))
+    }
+}
+
+/// 返回输入状态中的规范化非空选区。
+fn normalized_input_selection_range(input: &SettingsTextInputState) -> Option<Range<usize>> {
+    let anchor = input.selection_anchor?;
+    if anchor == input.cursor {
+        return None;
+    }
+    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+}
+
+/// 根据鼠标选择粒度返回设置输入框目标字符范围。
+fn settings_input_range_for_granularity(
+    input: &SettingsTextInputState,
+    character_index: usize,
+    granularity: TextSelectionGranularity,
+) -> Range<usize> {
+    let text_length = character_count(&input.value);
+    let cursor = character_index.min(text_length);
+    match granularity {
+        TextSelectionGranularity::Character => cursor..cursor,
+        TextSelectionGranularity::Word => {
+            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
+        }
+        TextSelectionGranularity::Line => 0..text_length,
     }
 }

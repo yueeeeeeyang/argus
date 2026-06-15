@@ -1,0 +1,7 @@
+// 文件职责：Windows 可执行文件资源声明。
+// 创建日期：2026-06-15
+// 修改日期：2026-06-15
+// 作者：Argus 开发团队
+// 主要功能：把应用图标作为资源 ID 1 嵌入 exe，匹配 GPUI Windows 平台的图标读取逻辑。
+
+1 ICON "resources/windows/app.ico"

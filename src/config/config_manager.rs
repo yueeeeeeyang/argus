@@ -125,7 +125,9 @@ impl Default for ConfigManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig};
+    use crate::config::{
+        AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogSearchConfig,
+    };
 
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
     fn test_settings_path(name: &str) -> PathBuf {
@@ -161,6 +163,9 @@ mod tests {
                 archive_probe_concurrency: 6,
                 follow_symlinks: true,
             },
+            log_search: LogSearchConfig {
+                quick_keywords: "ERROR,WARN".to_string(),
+            },
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
             },
@@ -178,6 +183,7 @@ mod tests {
         assert_eq!(loaded.loader.max_archive_depth, 4);
         assert_eq!(loaded.loader.archive_probe_concurrency, 6);
         assert!(loaded.loader.follow_symlinks);
+        assert_eq!(loaded.log_search.quick_keywords, "ERROR,WARN");
         assert_eq!(loaded.encoding.selected, "GBK");
         assert!(!loaded.cache.enabled);
         assert_eq!(loaded.cache.limit_mb, 1024);

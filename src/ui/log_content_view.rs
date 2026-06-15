@@ -9,7 +9,7 @@ use std::ops::Range;
 use crate::app::{
     ArgusApp, LOG_VIEWER_TEXT_LEFT_PADDING, LOG_VIEWER_TEXT_RIGHT_PADDING, LogScrollbarAxis,
     LogScrollbarDrag, SearchResultListItem, SearchResultScrollbarAxis, SearchResultScrollbarDrag,
-    TabKind, log_viewer_display_text, log_viewer_line_number_width,
+    SearchRunKind, TabKind, log_viewer_display_text, log_viewer_line_number_width,
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
@@ -815,8 +815,8 @@ fn merge_log_line_highlights(
             range,
             selection_range.as_ref(),
             HighlightStyle {
-                background_color: Some(rgb(theme.current_line).into()),
-                color: Some(rgb(theme.foreground).into()),
+                background_color: Some(rgb(theme.warning).into()),
+                color: Some(rgb(theme.background).into()),
                 ..Default::default()
             },
         );
@@ -1356,8 +1356,20 @@ fn render_search_results_panel(
     let is_running = app.log_search.task_state.is_running();
     let panel_title = match app.log_search.task_state {
         SearchTaskState::Idle => "搜索结果".to_string(),
-        SearchTaskState::Running => "正在搜索".to_string(),
-        SearchTaskState::Finished => "搜索完成".to_string(),
+        SearchTaskState::Running => {
+            if app.log_search.run_kind == SearchRunKind::QuickKeywords {
+                "正在快搜".to_string()
+            } else {
+                "正在搜索".to_string()
+            }
+        }
+        SearchTaskState::Finished => {
+            if app.log_search.run_kind == SearchRunKind::QuickKeywords {
+                "快搜完成".to_string()
+            } else {
+                "搜索完成".to_string()
+            }
+        }
         SearchTaskState::Cancelled => "搜索已取消".to_string(),
         SearchTaskState::Failed(ref message) => format!("搜索失败：{message}"),
     };
@@ -1679,10 +1691,13 @@ fn render_search_result_row(
     let match_ranges =
         search_ranges_for_display(&preview_text, &display_text, &preview_match_ranges);
     let text_width = estimated_search_result_text_width(&display_text);
+    let keyword_badges_width = search_result_keyword_badges_width(result);
     let row_width = search_result_row_width(
         app,
         SEARCH_RESULT_ROW_HORIZONTAL_PADDING
             + SEARCH_RESULT_LINE_LABEL_WIDTH
+            + SEARCH_RESULT_ROW_GAP_WIDTH
+            + keyword_badges_width
             + SEARCH_RESULT_ROW_GAP_WIDTH
             + text_width,
     );
@@ -1724,6 +1739,7 @@ fn render_search_result_row(
                 .text_color(rgb(theme.foreground_muted))
                 .child(format!("第 {} 行", result.line_number + 1)),
         )
+        .child(render_search_result_keyword_badges(result, theme))
         .child(
             div()
                 .flex_none()
@@ -1745,6 +1761,62 @@ fn render_search_result_row(
                 cx.notify();
             }),
         )
+}
+
+/// 渲染搜索结果行前的命中关键字徽标。
+fn render_search_result_keyword_badges(
+    result: &crate::search::search_engine::SearchResult,
+    theme: &AppTheme,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .children(result.matched_keywords.iter().take(4).map(|keyword| {
+            div()
+                .h(px(18.0))
+                .px_1()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .bg(rgb(theme.selection))
+                .text_size(px(11.0))
+                .line_height(px(18.0))
+                .text_color(rgb(theme.foreground))
+                .child(keyword.clone())
+        }))
+        .when(result.matched_keywords.len() > 4, |this| {
+            this.child(
+                div()
+                    .h(px(18.0))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .bg(rgb(theme.current_line))
+                    .text_size(px(11.0))
+                    .line_height(px(18.0))
+                    .text_color(rgb(theme.foreground_muted))
+                    .child(format!("+{}", result.matched_keywords.len() - 4)),
+            )
+        })
+}
+
+/// 估算搜索结果关键字徽标宽度，用于横向滚动范围。
+fn search_result_keyword_badges_width(result: &crate::search::search_engine::SearchResult) -> f32 {
+    let visible_keywords_width = result
+        .matched_keywords
+        .iter()
+        .take(4)
+        .map(|keyword| estimated_search_result_text_width(keyword) + 14.0)
+        .sum::<f32>();
+    let overflow_width = if result.matched_keywords.len() > 4 {
+        28.0
+    } else {
+        0.0
+    };
+    visible_keywords_width + overflow_width
 }
 
 /// 返回搜索结果行实际渲染宽度：至少撑满当前视口，内容更宽时交给横向滚动条。

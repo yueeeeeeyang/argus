@@ -4,4 +4,5 @@
 # 主要功能：避免 Cargo 构建目录和本机系统文件进入版本管理。
 
 /target/
+/dist/
 .DS_Store

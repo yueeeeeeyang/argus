@@ -1,23 +1,26 @@
 //! 文件职责：渲染 Argus 独立设置窗口。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-12
+//! 修改日期：2026-06-15
 //! 作者：Argus 开发团队
-//! 主要功能：以无系统标题栏窗口展示关于、外观和日志加载设置，并通过主应用状态持久化配置。
+//! 主要功能：以无系统标题栏窗口展示关于、外观、日志搜索和日志加载设置，并通过主应用状态持久化配置。
 
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FontWeight, IntoElement, Render, SharedString, Subscription, Window, div,
-    prelude::*, px, rgb,
+    App, Context, Entity, FontWeight, IntoElement, KeyDownEvent, Render, SharedString,
+    Subscription, Window, div, prelude::*, px, rgb,
 };
 
-use crate::app::ArgusApp;
+use crate::app::{ArgusApp, SettingsTextInputState};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::theme::{AppTheme, ThemeOption};
 use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
+use crate::ui::components::input::{
+    Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
+};
 
 /// 设置行右侧内边距，用于让浮层菜单和选择框左边缘对齐。
 const SETTINGS_ROW_HORIZONTAL_PADDING: f32 = 12.0;
@@ -96,6 +99,7 @@ impl SettingsWindow {
             max_archive_depth: app.config.loader.max_archive_depth,
             archive_probe_concurrency: app.config.loader.archive_probe_concurrency,
             follow_symlinks: app.config.loader.follow_symlinks,
+            quick_keywords_input: app.settings_quick_keywords_input.clone(),
             open_with_registration_status: app.open_with_registration_status.clone(),
             is_open_with_registration_busy: app.is_open_with_registration_busy,
             open_with_registration_message: app.open_with_registration_message.clone(),
@@ -131,6 +135,8 @@ pub struct SettingsWindowSnapshot {
     pub archive_probe_concurrency: usize,
     /// 是否跟随符号链接。
     pub follow_symlinks: bool,
+    /// 快搜关键字输入框状态。
+    pub quick_keywords_input: SettingsTextInputState,
     /// 系统右键菜单注册状态。
     pub open_with_registration_status: RegistrationStatus,
     /// 系统右键菜单是否正在注册或卸载。
@@ -223,6 +229,12 @@ fn render_settings_window(
                             "外观",
                             ArgusIcon::Palette,
                             render_appearance_section(snapshot, app_handle, &theme),
+                            &theme,
+                        ))
+                        .child(settings_section(
+                            "日志搜索",
+                            ArgusIcon::Search,
+                            render_log_search_section(snapshot, app_handle, &theme),
                             &theme,
                         ))
                         .child(settings_section(
@@ -398,6 +410,19 @@ fn render_appearance_section(
     })
 }
 
+/// 渲染日志搜索设置区。
+fn render_log_search_section(
+    snapshot: &SettingsWindowSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    setting_group(theme).child(setting_row(
+        "快搜关键字",
+        quick_keywords_input_control(snapshot, app_handle, theme),
+        theme,
+    ))
+}
+
 /// 渲染日志加载设置区。
 fn render_log_loading_section(
     snapshot: &SettingsWindowSnapshot,
@@ -429,6 +454,87 @@ fn render_log_loading_section(
             open_with_registration_control(snapshot, app_handle, theme),
             theme,
         ))
+}
+
+/// 渲染快搜关键字配置输入框。
+fn quick_keywords_input_control(
+    snapshot: &SettingsWindowSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    let input_state = snapshot.quick_keywords_input.clone();
+    let key_app = app_handle.clone();
+    let click_app = app_handle.clone();
+    let pointer_app = app_handle.clone();
+    let clear_app = app_handle.clone();
+
+    div().w(px(360.0)).child(render_input(
+        Input {
+            id: "settings-quick-keywords-input",
+            placeholder: "ERROR,WARN,timeout",
+            value: input_state.value.clone(),
+            is_disabled: false,
+            is_focused: input_state.is_focused,
+            cursor_index: input_state.cursor,
+            selection_range: settings_input_selection_range(&input_state),
+            is_pointer_selecting: input_state.selection_drag.is_some(),
+            size: InputSize::Regular,
+            leading_accessory: Some(InputAccessory {
+                id: "settings-quick-keywords-leading",
+                icon: ArgusIcon::Search,
+                tooltip: "英文逗号分隔快搜关键字",
+            }),
+            trailing_accessory: Some(InputAccessory {
+                id: "settings-quick-keywords-clear",
+                icon: ArgusIcon::Close,
+                tooltip: "清空快搜关键字",
+            }),
+        },
+        theme,
+        move |event: &KeyDownEvent, _, cx| {
+            update_settings_app(&key_app, cx, |app, app_cx| {
+                app.handle_settings_quick_keywords_key(&event.keystroke, app_cx);
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&click_app, cx, |app, _| {
+                app.focus_settings_quick_keywords_input();
+            });
+        },
+        move |event: &InputPointerEvent, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&pointer_app, cx, |app, _| match event.action {
+                InputPointerAction::Begin => app.begin_settings_quick_keywords_pointer_selection(
+                    event.character_index,
+                    event.granularity,
+                ),
+                InputPointerAction::Extend => {
+                    app.update_settings_quick_keywords_pointer_selection(event.character_index)
+                }
+                InputPointerAction::Finish => {
+                    app.finish_settings_quick_keywords_pointer_selection()
+                }
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&clear_app, cx, |app, _| {
+                app.clear_settings_quick_keywords_input();
+            });
+        },
+    ))
+}
+
+/// 返回设置输入框的规范化非空选区。
+fn settings_input_selection_range(
+    input: &SettingsTextInputState,
+) -> Option<std::ops::Range<usize>> {
+    let anchor = input.selection_anchor?;
+    if anchor == input.cursor {
+        return None;
+    }
+    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
 }
 
 /// 渲染设置组背景容器。

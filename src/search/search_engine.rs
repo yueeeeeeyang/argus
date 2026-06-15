@@ -1,8 +1,8 @@
 //! 文件职责：执行真实日志关键字搜索。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-15
 //! 作者：Argus 开发团队
-//! 主要功能：按日志来源逐文件读取、逐行匹配关键字，并以批次形式回报全部搜索结果。
+//! 主要功能：按日志来源逐文件读取、逐行匹配单个或多个关键字，并以批次形式回报全部搜索结果。
 
 use std::ops::Range;
 use std::sync::{
@@ -86,12 +86,42 @@ pub struct SearchRequest {
     pub generation: usize,
     /// 搜索范围。
     pub scope: SearchScope,
-    /// 搜索关键字。
-    pub query: SearchQuery,
+    /// 搜索关键字集合；普通搜索只有一个查询，快搜会包含多个查询。
+    pub queries: Vec<SearchQuery>,
     /// 本次搜索目标。
     pub targets: Vec<SearchTarget>,
     /// 用户设置的默认编码名称。
     pub default_encoding: String,
+}
+
+impl SearchRequest {
+    /// 构造普通单关键字搜索请求。
+    pub fn new(
+        generation: usize,
+        scope: SearchScope,
+        query: SearchQuery,
+        targets: Vec<SearchTarget>,
+        default_encoding: String,
+    ) -> Self {
+        Self::with_queries(generation, scope, vec![query], targets, default_encoding)
+    }
+
+    /// 构造多关键字搜索请求，调用方需保证查询集合非空。
+    pub fn with_queries(
+        generation: usize,
+        scope: SearchScope,
+        queries: Vec<SearchQuery>,
+        targets: Vec<SearchTarget>,
+        default_encoding: String,
+    ) -> Self {
+        Self {
+            generation,
+            scope,
+            queries,
+            targets,
+            default_encoding,
+        }
+    }
 }
 
 /// 搜索进度；当前文件搜索看行进度，目录和选中文件搜索看文件进度。
@@ -124,6 +154,8 @@ pub struct SearchResult {
     pub line_text: String,
     /// 关键字在行文本中的字节范围；范围基于 UTF-8 边界。
     pub match_ranges: Vec<Range<usize>>,
+    /// 本行命中的关键字列表；普通搜索为单个关键字，快搜可能包含多个关键字。
+    pub matched_keywords: Vec<String>,
 }
 
 /// 搜索结束摘要。
@@ -218,6 +250,7 @@ impl SearchEngine {
         cancel_token: Arc<AtomicBool>,
     ) -> Result<CurrentLogMatchScan, String> {
         let matcher = SearchMatcher::new(&query)?;
+        let matched_keyword = matcher.keyword_label();
         let mut scan = CurrentLogMatchScan::default();
         let line_count = handle.line_count();
         let mut start_line = 0;
@@ -246,6 +279,7 @@ impl SearchEngine {
                         line_number: line.line_number,
                         line_text: line.text,
                         match_ranges,
+                        matched_keywords: vec![matched_keyword.clone()],
                     });
                 }
             }
@@ -388,8 +422,8 @@ impl SearchEngine {
         cancel_token: Arc<AtomicBool>,
     ) -> SearchTaskSummary {
         let mut summary = SearchTaskSummary::default();
-        let matcher = match SearchMatcher::new(&request.query) {
-            Ok(matcher) => matcher,
+        let matcher_set = match SearchMatcherSet::new(&request.queries) {
+            Ok(matcher_set) => matcher_set,
             Err(message) => {
                 summary.errors.push(message);
                 return summary;
@@ -446,14 +480,15 @@ impl SearchEngine {
                 match handle.lines(start_line, max_lines) {
                     Ok(lines) => {
                         for line in lines {
-                            if let Some(match_ranges) = matcher.find_match_ranges(&line.text) {
+                            if let Some(matches) = matcher_set.find_line_matches(&line.text) {
                                 result_batch.push(SearchResult {
                                     source_id: target.source_id,
                                     label: target.label.clone(),
                                     path: target.path.clone(),
                                     line_number: line.line_number,
                                     line_text: line.text,
-                                    match_ranges,
+                                    match_ranges: matches.match_ranges,
+                                    matched_keywords: matches.matched_keywords,
                                 });
                                 summary.matched_results += 1;
 
@@ -836,6 +871,7 @@ fn find_forward_paged_segment(
             write_navigation_result(
                 target,
                 navigation,
+                matcher,
                 line,
                 match_ranges,
                 match_index,
@@ -889,6 +925,7 @@ fn find_backward_paged_segment(
             write_navigation_result(
                 target,
                 navigation,
+                matcher,
                 line,
                 match_ranges,
                 match_index,
@@ -935,6 +972,7 @@ fn find_paged_single_line_from_index(
     write_navigation_result(
         target,
         navigation,
+        matcher,
         line,
         match_ranges,
         match_index,
@@ -970,6 +1008,7 @@ fn find_paged_single_line_before_index(
     write_navigation_result(
         target,
         navigation,
+        matcher,
         line,
         match_ranges,
         match_index,
@@ -1041,6 +1080,7 @@ fn find_forward_inclusive_segment(
                     write_navigation_result(
                         target,
                         navigation,
+                        matcher,
                         line,
                         match_ranges,
                         match_index,
@@ -1101,6 +1141,7 @@ fn find_backward_inclusive_segment(
                     write_navigation_result(
                         target,
                         navigation,
+                        matcher,
                         line,
                         match_ranges,
                         match_index,
@@ -1149,7 +1190,15 @@ fn find_forward_single_line_prefix(
         return Ok(false);
     }
     let active_range = match_ranges[0].clone();
-    write_navigation_result(target, navigation, line, match_ranges, 0, active_range);
+    write_navigation_result(
+        target,
+        navigation,
+        matcher,
+        line,
+        match_ranges,
+        0,
+        active_range,
+    );
     Ok(true)
 }
 
@@ -1188,6 +1237,7 @@ fn find_backward_single_line_suffix(
     write_navigation_result(
         target,
         navigation,
+        matcher,
         line,
         match_ranges,
         match_index,
@@ -1227,6 +1277,7 @@ fn last_match_before_index(
 fn write_navigation_result(
     target: &SearchTarget,
     navigation: &mut CurrentLogMatchNavigation,
+    matcher: &SearchMatcher,
     line: DisplayedLogLine,
     match_ranges: Vec<Range<usize>>,
     match_index: usize,
@@ -1239,12 +1290,74 @@ fn write_navigation_result(
         line_number: line.line_number,
         line_text: line.text,
         match_ranges,
+        matched_keywords: vec![matcher.keyword_label()],
     });
     navigation.active_range = Some(active_range);
     navigation.position = Some(CurrentLogMatchPosition {
         line_number: line.line_number,
         match_index: Some(match_index),
     });
+}
+
+/// 单行多关键字匹配结果；同一行只生成一条搜索结果。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchLineMatches {
+    /// 合并后的命中范围，范围基于原始行文本的 UTF-8 byte range。
+    pub match_ranges: Vec<Range<usize>>,
+    /// 本行命中的关键字，按配置顺序去重保留。
+    pub matched_keywords: Vec<String>,
+}
+
+/// 多关键字搜索匹配器集合，保证每个关键字只在任务启动时编译一次。
+pub struct SearchMatcherSet {
+    /// 已编译匹配器及其展示关键字。
+    matchers: Vec<(String, SearchMatcher)>,
+}
+
+impl SearchMatcherSet {
+    /// 构造匹配器集合，并在快搜模式下指出具体失败关键字。
+    pub fn new(queries: &[SearchQuery]) -> Result<Self, String> {
+        if queries.is_empty() {
+            return Err("请输入搜索关键字".to_string());
+        }
+
+        let mut matchers = Vec::with_capacity(queries.len());
+        for query in queries {
+            let matcher = SearchMatcher::new(query).map_err(|message| {
+                if queries.len() > 1 {
+                    format!("快搜关键字 `{}` {message}", query.keyword)
+                } else {
+                    message
+                }
+            })?;
+            matchers.push((query.keyword.clone(), matcher));
+        }
+
+        Ok(Self { matchers })
+    }
+
+    /// 查找单行内所有关键字命中；多个关键字命中同一行时合并为一条结果。
+    pub fn find_line_matches(&self, line: &str) -> Option<SearchLineMatches> {
+        let mut all_ranges = Vec::new();
+        let mut matched_keywords = Vec::new();
+
+        for (keyword, matcher) in &self.matchers {
+            let Some(mut ranges) = matcher.find_match_ranges(line) else {
+                continue;
+            };
+            all_ranges.append(&mut ranges);
+            matched_keywords.push(keyword.clone());
+        }
+
+        if all_ranges.is_empty() {
+            return None;
+        }
+
+        Some(SearchLineMatches {
+            match_ranges: merge_match_ranges(all_ranges),
+            matched_keywords,
+        })
+    }
 }
 
 /// 编译后的搜索匹配器，保证正则表达式只在任务启动时构造一次。
@@ -1288,6 +1401,37 @@ impl SearchMatcher {
                 .count(),
         }
     }
+
+    /// 返回匹配器对应的展示关键字。
+    pub fn keyword_label(&self) -> String {
+        match self {
+            Self::Literal(query) => query.keyword.clone(),
+            Self::Regex(regex) => regex.as_str().to_string(),
+        }
+    }
+}
+
+/// 合并重叠或相邻的命中范围，避免多关键字高亮产生交叠片段。
+fn merge_match_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<Range<usize>> = Vec::new();
+
+    for range in ranges {
+        if range.start == range.end {
+            continue;
+        }
+
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+            continue;
+        }
+
+        merged.push(range);
+    }
+
+    merged
 }
 
 /// 在单行文本中查找所有关键字命中范围。
@@ -1551,22 +1695,22 @@ mod tests {
     /// 验证非法正则会被提前转换为用户可读错误。
     #[test]
     fn invalid_regex_query_is_reported_without_scanning_files() {
-        let request = SearchRequest {
-            generation: 1,
-            scope: SearchScope::CurrentFile,
-            query: SearchQuery {
+        let request = SearchRequest::new(
+            1,
+            SearchScope::CurrentFile,
+            SearchQuery {
                 keyword: "(".to_string(),
                 case_sensitive: false,
                 regex_enabled: true,
             },
-            targets: vec![SearchTarget {
+            vec![SearchTarget {
                 source_id: SourceId(1),
                 label: "test.log".to_string(),
                 path: "test.log".to_string(),
                 location: SourceLocation::LocalPath(std::env::temp_dir().join("missing.log")),
             }],
-            default_encoding: "UTF-8".to_string(),
-        };
+            "UTF-8".to_string(),
+        );
 
         let summary =
             SearchEngine::search(request, |_| {}, |_| {}, Arc::new(AtomicBool::new(false)));
@@ -1796,18 +1940,18 @@ mod tests {
             1
         ));
         fs::write(&path, "INFO start\nERROR failed\nwarn\nerror again\n").unwrap();
-        let request = SearchRequest {
-            generation: 1,
-            scope: SearchScope::CurrentFile,
-            query: SearchQuery::new("error".to_string()),
-            targets: vec![SearchTarget {
+        let request = SearchRequest::new(
+            1,
+            SearchScope::CurrentFile,
+            SearchQuery::new("error".to_string()),
+            vec![SearchTarget {
                 source_id: SourceId(1),
                 label: "test.log".to_string(),
                 path: path.display().to_string(),
                 location: SourceLocation::LocalPath(path.clone()),
             }],
-            default_encoding: "UTF-8".to_string(),
-        };
+            "UTF-8".to_string(),
+        );
         let mut batches = Vec::new();
 
         let summary = SearchEngine::search(
@@ -1827,5 +1971,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 3]
         );
+    }
+
+    /// 验证快搜多关键字会一次扫描文件，并把同一行多个命中合并为一条结果。
+    #[test]
+    fn multi_query_search_merges_matches_on_same_line() {
+        let path = std::env::temp_dir().join(format!(
+            "argus-search-multi-test-{}-{}.log",
+            std::process::id(),
+            7
+        ));
+        fs::write(&path, "ERROR timeout\nWARN only\nINFO ok\n").unwrap();
+        let request = SearchRequest::with_queries(
+            1,
+            SearchScope::CurrentFile,
+            vec![
+                SearchQuery::new("ERROR".to_string()),
+                SearchQuery::new("timeout".to_string()),
+                SearchQuery::new("WARN".to_string()),
+            ],
+            vec![SearchTarget {
+                source_id: SourceId(3),
+                label: "multi.log".to_string(),
+                path: path.display().to_string(),
+                location: SourceLocation::LocalPath(path.clone()),
+            }],
+            "UTF-8".to_string(),
+        );
+        let mut results = Vec::new();
+
+        let summary = SearchEngine::search(
+            request,
+            |_| {},
+            |batch| results.extend(batch),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let _ = fs::remove_file(path);
+
+        assert_eq!(summary.matched_results, 2);
+        assert_eq!(results[0].line_number, 0);
+        assert_eq!(results[0].match_ranges, vec![0..5, 6..13]);
+        assert_eq!(
+            results[0].matched_keywords,
+            vec!["ERROR".to_string(), "timeout".to_string()]
+        );
+        assert_eq!(results[1].matched_keywords, vec!["WARN".to_string()]);
     }
 }

@@ -464,6 +464,7 @@ fn render_progress_and_actions(
     let theme = snapshot.theme.clone();
     let search = snapshot.log_search.clone();
     let start_app = app_handle.clone();
+    let quick_app = app_handle.clone();
     let cancel_app = app_handle.clone();
     let count_app = app_handle.clone();
     let previous_app = app_handle.clone();
@@ -474,6 +475,19 @@ fn render_progress_and_actions(
         .flex()
         .items_center()
         .gap_3()
+        .when(!search.task_state.is_running(), |this| {
+            this.child(action_button(
+                "log-search-quick-keywords",
+                ArgusIcon::QuickSearch,
+                "快搜",
+                &theme,
+                move |_, _, cx| {
+                    update_search_app(&quick_app, cx, |app, app_cx| {
+                        app.start_quick_keyword_search(app_cx);
+                    });
+                },
+            ))
+        })
         .child(
             div()
                 .flex_1()

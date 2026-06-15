@@ -1,6 +1,6 @@
 # 文件职责：定义 Argus 桌面客户端的 Cargo 包信息与依赖版本。
 # 创建日期：2026-06-09
-# 修改日期：2026-06-10
+# 修改日期：2026-06-15
 # 作者：Argus 开发团队
 # 主要功能：配置 Rust 版本、包元信息以及 GPUI 界面依赖。
 
@@ -37,3 +37,6 @@ zip = "8.6.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry"] }
+
+[build-dependencies]
+embed-resource = "3.0.9"

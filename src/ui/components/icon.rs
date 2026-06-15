@@ -1,8 +1,8 @@
 //! 文件职责：定义 Argus 界面使用的 Lucide 图标清单与 SVG 渲染入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-15
 //! 作者：Argus 开发团队
-//! 主要功能：将稳定的业务语义图标映射到 icondata Lucide 图标常量。
+//! 主要功能：将稳定的业务语义图标和快搜等操作图标映射到 icondata Lucide 图标常量。
 
 use gpui::{IntoElement, prelude::*, px, rgb, svg};
 use icondata::Icon;
@@ -22,6 +22,8 @@ pub enum ArgusIcon {
     FolderPlus,
     /// 全局搜索或搜索框。
     Search,
+    /// 一键快搜。
+    QuickSearch,
     /// 来源树过滤。
     Filter,
     /// 连接入口。
@@ -94,6 +96,7 @@ impl ArgusIcon {
             Self::Open,
             Self::FolderPlus,
             Self::Search,
+            Self::QuickSearch,
             Self::Filter,
             Self::Connection,
             Self::Plus,
@@ -141,6 +144,7 @@ impl ArgusIcon {
             Self::Open => "icons/open.svg",
             Self::FolderPlus => "icons/folder-plus.svg",
             Self::Search => "icons/search.svg",
+            Self::QuickSearch => "icons/quick-search.svg",
             Self::Filter => "icons/filter.svg",
             Self::Connection => "icons/connection.svg",
             Self::Plus => "icons/plus.svg",
@@ -205,6 +209,7 @@ impl ArgusIcon {
             Self::Open => icondata::LuFolderOpen,
             Self::FolderPlus => icondata::LuFolderPlus,
             Self::Search => icondata::LuSearch,
+            Self::QuickSearch => icondata::LuZap,
             Self::Filter => icondata::LuListFilter,
             Self::Connection => icondata::LuPlug,
             Self::Plus => icondata::LuPlus,

@@ -122,6 +122,7 @@ dependencies = [
  "bzip2",
  "chardetng",
  "chrono",
+ "embed-resource",
  "encoding_rs",
  "flate2",
  "gpui",

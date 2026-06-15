@@ -33,9 +33,7 @@ use crate::reader::log_file_reader::{
 use crate::reader::read_mode::ReadMode;
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
-use crate::text_selection::TextSelectionGranularity;
-#[cfg(test)]
-use crate::text_selection::character_count;
+use crate::text_selection::{TextSelectionGranularity, character_count};
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::log_search_window::LogSearchWindow;
@@ -271,6 +269,42 @@ impl Default for LogSearchInputState {
     }
 }
 
+/// 设置窗口中的单行输入框状态；用于保存持久化设置项的编辑光标和选区。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsTextInputState {
+    /// 输入框当前文本。
+    pub value: String,
+    /// 光标字符位置。
+    pub cursor: usize,
+    /// 选区锚点；与光标不一致时表示存在选区。
+    pub selection_anchor: Option<usize>,
+    /// 鼠标拖拽选区状态。
+    pub selection_drag: Option<InputTextSelectionDrag>,
+    /// 是否处于焦点状态。
+    pub is_focused: bool,
+}
+
+impl SettingsTextInputState {
+    /// 根据已有配置值构造设置输入框状态，光标默认位于文本末尾。
+    pub fn from_value(value: String) -> Self {
+        let cursor = character_count(&value);
+        Self {
+            value,
+            cursor,
+            selection_anchor: None,
+            selection_drag: None,
+            is_focused: false,
+        }
+    }
+}
+
+impl Default for SettingsTextInputState {
+    /// 创建空设置输入框状态。
+    fn default() -> Self {
+        Self::from_value(String::new())
+    }
+}
+
 /// 日志正文中当前被搜索结果激活的命中位置。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveSearchMatch {
@@ -319,6 +353,15 @@ pub enum SearchResultListItem {
     Group(usize),
     /// 单条命中结果行。
     Result(usize),
+}
+
+/// 日志搜索任务来源，用于结果面板区分普通搜索和快搜。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchRunKind {
+    /// 搜索窗口关键字输入框发起的普通搜索。
+    Normal,
+    /// 设置中的快搜关键字集合发起的一键搜索。
+    QuickKeywords,
 }
 
 /// 搜索结果面板自绘滚动条方向。
@@ -371,6 +414,8 @@ pub struct LogSearchState {
     pub progress: SearchProgress,
     /// 当前任务状态。
     pub task_state: SearchTaskState,
+    /// 当前搜索任务类型，用于结果面板文案和提示。
+    pub run_kind: SearchRunKind,
     /// 搜索 generation，用于丢弃过期后台事件。
     pub generation: usize,
     /// 当前搜索取消令牌。
@@ -431,6 +476,7 @@ impl Default for LogSearchState {
             regex_enabled: false,
             progress: SearchProgress::default(),
             task_state: SearchTaskState::Idle,
+            run_kind: SearchRunKind::Normal,
             generation: 0,
             cancel_token: None,
             quick_match_generation: 0,
@@ -701,6 +747,8 @@ pub struct ArgusApp {
     pub selected_theme_id: String,
     /// 设置窗口主题下拉框是否展开。
     pub is_theme_dropdown_open: bool,
+    /// 设置窗口“快搜关键字”输入框状态。
+    pub settings_quick_keywords_input: SettingsTextInputState,
     /// 设置窗口是否处于打开状态。
     pub is_settings_window_open: bool,
     /// 设置窗口句柄，用于重复点击设置按钮时置前已有窗口。
@@ -740,6 +788,7 @@ impl ArgusApp {
         let selected_encoding = config.encoding.selected.clone();
         let is_cache_enabled = config.cache.enabled;
         let cache_limit_mb = config.cache.limit_mb.clamp(128, 2048);
+        let quick_keywords_input_value = config.log_search.quick_keywords.clone();
         config.appearance.theme_mode = selected_theme_id.clone();
         config.appearance.log_content_font_size = log_content_font_size;
         config.cache.limit_mb = cache_limit_mb;
@@ -810,6 +859,9 @@ impl ArgusApp {
             selected_placeholder_source: PlaceholderSourceKind::File,
             selected_theme_id,
             is_theme_dropdown_open: false,
+            settings_quick_keywords_input: SettingsTextInputState::from_value(
+                quick_keywords_input_value,
+            ),
             is_settings_window_open: false,
             settings_window_handle: None,
             open_with_registration_status: RegistrationStatus::Unknown("尚未检查".to_string()),
@@ -2655,6 +2707,7 @@ mod tests {
         app.adjust_max_archive_depth(1);
         app.adjust_archive_probe_concurrency(2);
         app.toggle_follow_symlinks();
+        app.update_settings_quick_keywords("ERROR,WARN,timeout".to_string());
 
         let saved =
             ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
@@ -2664,6 +2717,7 @@ mod tests {
         assert_eq!(saved.loader.max_archive_depth, 3);
         assert_eq!(saved.loader.archive_probe_concurrency, 6);
         assert!(saved.loader.follow_symlinks);
+        assert_eq!(saved.log_search.quick_keywords, "ERROR,WARN,timeout");
     }
 
     /// 验证新日志来源加载成功后会替换旧来源，并清理旧日志相关界面状态。

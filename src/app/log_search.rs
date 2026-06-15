@@ -22,7 +22,7 @@ use gpui::{
 use super::{
     ArgusApp, InputTextSelectionDrag, LogSearchInputKind, LogSearchInputState, QuickMatchKey,
     SEARCH_RESULT_PANEL_HEIGHT_MAX, SEARCH_RESULT_PANEL_HEIGHT_MIN, SearchResultGroup,
-    SearchResultListItem, SearchResultPanelResizeDrag, TabKind,
+    SearchResultListItem, SearchResultPanelResizeDrag, SearchRunKind, TabKind,
 };
 use crate::app::LOG_VIEWER_ROW_HEIGHT;
 use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceKind, SourceRegistry};
@@ -60,6 +60,27 @@ const SEARCH_RESULT_ASCII_CHAR_WIDTH_ESTIMATE: f32 = 7.4;
 const SEARCH_RESULT_WIDE_CHAR_WIDTH_ESTIMATE: f32 = 13.0;
 /// 目录搜索每发现一批目标就立即搜索，避免长时间停留在“准备目录搜索目标”阶段。
 const DIRECTORY_SEARCH_TARGET_BATCH_SIZE: usize = 32;
+
+/// 解析设置中的快搜关键字。
+///
+/// 参数说明：
+/// - `raw_keywords`：用户在设置页输入的英文逗号分隔文本。
+///
+/// 返回值：去除空项和重复项后的关键字列表，保持首次出现顺序。
+pub(crate) fn parse_quick_search_keywords(raw_keywords: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    raw_keywords
+        .split(',')
+        .filter_map(|keyword| {
+            let keyword = keyword.trim();
+            if keyword.is_empty() || !seen.insert(keyword.to_string()) {
+                None
+            } else {
+                Some(keyword.to_string())
+            }
+        })
+        .collect()
+}
 
 /// 计算分页日志跳转命中行时的垂直滚动偏移。
 ///
@@ -246,6 +267,60 @@ impl ArgusApp {
             return;
         }
 
+        self.start_log_search_with_queries(scope, vec![query], SearchRunKind::Normal, cx);
+    }
+
+    /// 按当前搜索窗口范围启动一键快搜。
+    ///
+    /// 参数说明：
+    /// - `cx`：GPUI 上下文，用于安排后台线程事件轮询。
+    pub fn start_quick_keyword_search(&mut self, cx: &mut Context<Self>) {
+        let keywords = parse_quick_search_keywords(&self.config.log_search.quick_keywords);
+        if keywords.is_empty() {
+            let message = "请先在设置中配置快搜关键字".to_string();
+            self.log_search.message = Some(message.clone());
+            self.placeholder_notice = message;
+            return;
+        }
+
+        let queries = keywords
+            .into_iter()
+            .map(|keyword| SearchQuery {
+                keyword,
+                case_sensitive: self.log_search.case_sensitive,
+                regex_enabled: self.log_search.regex_enabled,
+            })
+            .collect::<Vec<_>>();
+
+        for query in &queries {
+            if let Err(message) = SearchEngine::validate_query(query) {
+                let message = if queries.len() > 1 {
+                    format!("快搜关键字 `{}` {message}", query.keyword)
+                } else {
+                    message
+                };
+                self.log_search.message = Some(message.clone());
+                self.placeholder_notice = message;
+                return;
+            }
+        }
+
+        self.start_log_search_with_queries(
+            self.log_search.scope,
+            queries,
+            SearchRunKind::QuickKeywords,
+            cx,
+        );
+    }
+
+    /// 使用指定查询集合启动搜索任务；普通搜索和快搜共享此流程。
+    fn start_log_search_with_queries(
+        &mut self,
+        scope: SearchScope,
+        queries: Vec<SearchQuery>,
+        run_kind: SearchRunKind,
+        cx: &mut Context<Self>,
+    ) {
         let directory_prepare = if scope == SearchScope::Directory {
             let directory_id = match self.resolve_search_directory_source_id() {
                 Ok(directory_id) => directory_id,
@@ -284,6 +359,7 @@ impl ArgusApp {
 
         self.cancel_log_search();
         self.log_search.scope = scope;
+        self.log_search.run_kind = run_kind;
         self.log_search.generation = self.log_search.generation.wrapping_add(1);
         self.log_search.progress = SearchProgress {
             total_files: targets.len(),
@@ -314,25 +390,19 @@ impl ArgusApp {
                 directory_id,
                 registry,
                 loader_config,
-                SearchRequest {
+                SearchRequest::with_queries(
                     generation,
                     scope,
-                    query,
-                    targets: Vec::new(),
+                    queries,
+                    Vec::new(),
                     default_encoding,
-                },
+                ),
                 cancel_token,
                 sender,
             );
         } else {
             spawn_search_worker(
-                SearchRequest {
-                    generation,
-                    scope,
-                    query,
-                    targets,
-                    default_encoding,
-                },
+                SearchRequest::with_queries(generation, scope, queries, targets, default_encoding),
                 cancel_token,
                 sender,
             );
@@ -345,8 +415,13 @@ impl ArgusApp {
             if scope == SearchScope::Directory {
                 "正在发现目录搜索目标".to_string()
             } else {
+                let action = if run_kind == SearchRunKind::QuickKeywords {
+                    "正在快搜"
+                } else {
+                    "正在搜索"
+                };
                 format!(
-                    "正在搜索 {} 个日志文件",
+                    "{action} {} 个日志文件",
                     self.log_search.progress.total_files
                 )
             }
@@ -893,6 +968,7 @@ impl ArgusApp {
         self.log_search.collapsed_result_groups.clear();
         self.log_search.result_list_content_width = 0.0;
         self.log_search.progress = SearchProgress::default();
+        self.log_search.run_kind = SearchRunKind::Normal;
         self.log_search.active_result_index = None;
         self.log_search.pending_activation = None;
         self.log_search.result_scrollbar_drag = None;
@@ -909,6 +985,7 @@ impl ArgusApp {
         }
         self.log_search.progress = SearchProgress::default();
         self.log_search.task_state = SearchTaskState::Idle;
+        self.log_search.run_kind = SearchRunKind::Normal;
         self.log_search.results.clear();
         self.log_search.result_groups.clear();
         self.log_search.visible_result_items.clear();
@@ -2266,6 +2343,23 @@ fn search_target_from_registry(
 
 /// 估算搜索结果行宽度；只影响横向滚动范围，不影响真实结果内容和定位。
 fn estimated_search_result_row_width(result: &SearchResult) -> f32 {
+    let keyword_badges_width = result
+        .matched_keywords
+        .iter()
+        .map(|keyword| {
+            keyword
+                .chars()
+                .map(|character| {
+                    if character.is_ascii() {
+                        SEARCH_RESULT_ASCII_CHAR_WIDTH_ESTIMATE
+                    } else {
+                        SEARCH_RESULT_WIDE_CHAR_WIDTH_ESTIMATE
+                    }
+                })
+                .sum::<f32>()
+                + 18.0
+        })
+        .sum::<f32>();
     let preview_width = result
         .line_text
         .chars()
@@ -2279,7 +2373,7 @@ fn estimated_search_result_row_width(result: &SearchResult) -> f32 {
         })
         .sum::<f32>();
     let metadata_width = 112.0;
-    (metadata_width + preview_width + 64.0).max(SEARCH_RESULT_LIST_MIN_WIDTH)
+    (metadata_width + keyword_badges_width + preview_width + 64.0).max(SEARCH_RESULT_LIST_MIN_WIDTH)
 }
 
 /// 将“第 N 次出现”映射为对应结果行和单个命中范围。
@@ -2343,6 +2437,19 @@ mod tests {
         assert_eq!(
             centered_paged_scroll_top(199, 200, row_height * 20.0),
             row_height * 180.0
+        );
+    }
+
+    /// 验证快搜关键字解析会 trim、过滤空项并按首次出现去重。
+    #[test]
+    fn quick_search_keywords_are_trimmed_and_deduplicated() {
+        assert_eq!(
+            parse_quick_search_keywords(" ERROR, WARN,,ERROR, timeout ,WARN "),
+            vec![
+                "ERROR".to_string(),
+                "WARN".to_string(),
+                "timeout".to_string()
+            ]
         );
     }
 
@@ -2506,6 +2613,7 @@ mod tests {
             line_number: 1,
             line_text: "ERROR".to_string(),
             match_ranges: vec![0..5],
+            matched_keywords: vec!["ERROR".to_string()],
         });
 
         app.reset_log_search_runtime_state();
@@ -2619,6 +2727,7 @@ mod tests {
                 line_number: 0,
                 line_text: "ERROR ERROR".to_string(),
                 match_ranges: vec![0..5, 6..11],
+                matched_keywords: vec!["ERROR".to_string()],
             },
             SearchResult {
                 source_id: first_id,
@@ -2627,6 +2736,7 @@ mod tests {
                 line_number: 2,
                 line_text: "ERROR".to_string(),
                 match_ranges: vec![0..5],
+                matched_keywords: vec!["ERROR".to_string()],
             },
         ];
 
@@ -2656,6 +2766,7 @@ mod tests {
             line_number: 0,
             line_text: "ERROR".to_string(),
             match_ranges: vec![0..5],
+            matched_keywords: vec!["ERROR".to_string()],
         });
 
         app.insert_log_search_input_text(LogSearchInputKind::Keyword, "!");
@@ -2682,6 +2793,7 @@ mod tests {
                     line_number: 1,
                     line_text: "ERROR one".to_string(),
                     match_ranges: vec![0..5],
+                    matched_keywords: vec!["ERROR".to_string()],
                 },
                 SearchResult {
                     source_id: first_id,
@@ -2690,6 +2802,7 @@ mod tests {
                     line_number: 2,
                     line_text: "ERROR two".to_string(),
                     match_ranges: vec![0..5],
+                    matched_keywords: vec!["ERROR".to_string()],
                 },
                 SearchResult {
                     source_id: second_id,
@@ -2698,6 +2811,7 @@ mod tests {
                     line_number: 3,
                     line_text: "ERROR three".to_string(),
                     match_ranges: vec![0..5],
+                    matched_keywords: vec!["ERROR".to_string()],
                 },
             ],
         );
