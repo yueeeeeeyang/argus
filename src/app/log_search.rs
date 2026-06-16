@@ -1016,11 +1016,11 @@ impl ArgusApp {
             return;
         };
 
-        if !source.kind.is_log_candidate() {
-            return;
-        }
-
         if modifiers.shift {
+            if !self.is_source_selectable_for_search_selection(source_id) {
+                self.placeholder_notice = format!("{} 不是可选择的日志候选", source.label);
+                return;
+            }
             self.select_source_tree_range_for_search(source_id);
             self.placeholder_notice = format!(
                 "已选择 {} 个搜索文件",
@@ -1030,6 +1030,10 @@ impl ArgusApp {
         }
 
         if modifiers.secondary() {
+            if !self.is_source_selectable_for_search_selection(source_id) {
+                self.placeholder_notice = format!("{} 不是可选择的日志候选", source.label);
+                return;
+            }
             if !self.selected_search_source_ids.insert(source_id) {
                 self.selected_search_source_ids.remove(&source_id);
             }
@@ -1038,6 +1042,10 @@ impl ArgusApp {
                 "已选择 {} 个搜索文件",
                 self.selected_search_source_ids.len()
             );
+            return;
+        }
+
+        if !source.kind.is_log_candidate() {
             return;
         }
 
@@ -1620,7 +1628,7 @@ impl ArgusApp {
     }
 
     /// 按可见来源树顺序执行 Shift 范围多选。
-    fn select_source_tree_range_for_search(&mut self, target_id: SourceId) {
+    pub(crate) fn select_source_tree_range_for_search(&mut self, target_id: SourceId) {
         let Some(anchor_id) = self.last_source_selection_anchor else {
             self.selected_search_source_ids.clear();
             self.selected_search_source_ids.insert(target_id);
@@ -1646,16 +1654,25 @@ impl ArgusApp {
         };
         let selected = visible_ids[start..=end]
             .iter()
-            .filter(|source_id| {
-                self.source_registry
-                    .node(**source_id)
-                    .is_some_and(|node| node.kind.is_log_candidate())
-            })
+            .filter(|source_id| self.is_source_selectable_for_search_selection(**source_id))
             .copied()
             .collect::<BTreeSet<_>>();
         if !selected.is_empty() {
             self.selected_search_source_ids = selected;
         }
+    }
+
+    /// 判断来源节点是否可参与来源树多选。
+    ///
+    /// 说明：单文件压缩包探测未完成前仍是 `Archive`，但用户已经能在树中看到它；
+    /// 允许其临时进入多选集合，探测完成后如果变成 `SingleFileArchive` 会自然成为日志候选。
+    fn is_source_selectable_for_search_selection(&self, source_id: SourceId) -> bool {
+        self.source_registry.node(source_id).is_some_and(|node| {
+            node.kind.is_log_candidate()
+                || (matches!(node.kind, SourceKind::Archive(_))
+                    && !node.metadata.children_loaded
+                    && !self.source_archive_probe_completed_ids.contains(&source_id))
+        })
     }
 
     /// 写入搜索结果高亮状态。

@@ -1,12 +1,13 @@
 //! 文件职责：提供通用上下文菜单与下拉菜单组件。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：按窗口坐标渲染可滚动菜单，并将菜单项动作分发给应用状态。
 
 use std::ops::Range;
 
 use crate::app::ArgusApp;
+use crate::loader::SourceId;
 use crate::theme::AppTheme;
 use gpui::{
     Context, Corner, IntoElement, Pixels, Point, SharedString, UniformListScrollHandle, anchored,
@@ -19,6 +20,8 @@ const TAB_CONTEXT_MENU_WIDTH: f32 = 132.0;
 const TAB_OVERFLOW_MENU_WIDTH: f32 = 220.0;
 /// 搜索结果面板菜单宽度，仅包含展开/收起两项批量动作。
 const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
+/// 来源树右键菜单宽度，容纳 Jstack 分析中文动作。
+const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 178.0;
 /// 菜单项固定行高，供 `uniform_list` 稳定计算滚动范围。
 const MENU_ROW_HEIGHT: f32 = 30.0;
 /// 菜单最大高度，超出后只在菜单内部滚动。
@@ -38,6 +41,11 @@ pub enum ActiveMenuKind {
     TabOverflow,
     /// 搜索结果面板右键菜单，动作作用于全部结果分组。
     SearchResultsPanel,
+    /// 来源树右键菜单，动作作用于被点击的日志候选节点或当前多选集合。
+    SourceTree {
+        /// 被右键点击的来源节点 ID。
+        source_id: SourceId,
+    },
 }
 
 /// 当前打开的菜单状态。
@@ -73,6 +81,11 @@ pub enum MenuAction {
     ExpandAllSearchResults,
     /// 收起全部搜索结果文件分组。
     CollapseAllSearchResults,
+    /// 打开 Jstack 线程日志分析页签。
+    OpenJstackAnalysis {
+        /// 右键触发分析的来源节点 ID。
+        source_id: SourceId,
+    },
 }
 
 impl MenuAction {
@@ -85,6 +98,9 @@ impl MenuAction {
             Self::CloseAllTabs => "close-all-tabs".to_string(),
             Self::ExpandAllSearchResults => "expand-all-search-results".to_string(),
             Self::CollapseAllSearchResults => "collapse-all-search-results".to_string(),
+            Self::OpenJstackAnalysis { source_id } => {
+                format!("open-jstack-analysis-{source_id}")
+            }
         }
     }
 }
@@ -143,6 +159,7 @@ pub fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl In
         ActiveMenuKind::TabContext { .. } => TAB_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::TabOverflow => TAB_OVERFLOW_MENU_WIDTH,
         ActiveMenuKind::SearchResultsPanel => SEARCH_RESULTS_MENU_WIDTH,
+        ActiveMenuKind::SourceTree { .. } => SOURCE_TREE_CONTEXT_MENU_WIDTH,
     };
     let menu_height = (entry_count as f32 * MENU_ROW_HEIGHT)
         .min(MENU_MAX_HEIGHT)
@@ -270,7 +287,7 @@ fn render_menu_entry(
         .child(div().flex_1().truncate().child(entry.label))
         .on_click(cx.listener(move |app, _, _, cx| {
             cx.stop_propagation();
-            app.handle_menu_action(action.clone());
+            app.handle_menu_action_with_context(action.clone(), cx);
             cx.notify();
         }))
 }

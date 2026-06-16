@@ -101,7 +101,7 @@ impl ArgusApp {
             }
             match tab.kind {
                 TabKind::LogSource { source_id, .. } => Some(source_id),
-                TabKind::Empty | TabKind::Settings => None,
+                TabKind::Empty | TabKind::JstackAnalysis { .. } | TabKind::Settings => None,
             }
         })?;
         let LogOpenState::Ready(handle) = self.log_read_state(source_id)? else {

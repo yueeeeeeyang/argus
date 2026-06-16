@@ -9,6 +9,7 @@ pub mod assets;
 pub mod config;
 pub mod fonts;
 pub mod highlight;
+pub mod jstack_analysis;
 pub mod loader;
 pub mod platform;
 pub mod reader;

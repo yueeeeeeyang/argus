@@ -1,8 +1,8 @@
 //! 文件职责：渲染主内容区底部状态栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：显示编码、来源树统计、内容读取状态和用户操作提示，且只属于内容区宽度。
+//! 主要功能：显示编码、来源树统计、日志或 Jstack 内容状态和用户操作提示，且只属于内容区宽度。
 
 use crate::app::{ArgusApp, TabKind};
 use crate::reader::log_file_reader::LogOpenState;
@@ -23,6 +23,10 @@ pub fn render(app: &ArgusApp) -> impl IntoElement {
             .log_read_state(source_id)
             .map(LogOpenState::status_label)
             .unwrap_or_else(|| "未读取".to_string()),
+        TabKind::JstackAnalysis { analysis_id } => app
+            .jstack_analysis_state(analysis_id)
+            .map(|state| state.title.clone())
+            .unwrap_or_else(|| "Jstack分析".to_string()),
         TabKind::Settings => "设置".to_string(),
     };
 

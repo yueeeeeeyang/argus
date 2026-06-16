@@ -2,12 +2,14 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：组织主窗口、自定义标题栏、活动栏、来源侧栏、内容区、升级弹窗和可复用组件。
+//! 主要功能：组织主窗口、自定义标题栏、活动栏、来源侧栏、内容区、Jstack 分析页、升级弹窗和可复用组件。
 
 pub mod activity_bar;
 pub mod components;
 pub mod custom_title_bar;
 pub mod dir_tree_panel;
+pub mod jstack_analysis_view;
+pub mod jstack_thread_detail_window;
 pub mod log_content_view;
 pub mod log_search_window;
 pub mod main_window;

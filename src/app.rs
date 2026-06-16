@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：提供工作区切换、真实来源树、升级状态、未读取内容提示和保留的日志样例数据。
+//! 主要功能：提供工作区切换、真实来源树、Jstack 分析、升级状态、未读取内容提示和保留的日志样例数据。
 
 mod log_search;
 mod log_text;
@@ -20,6 +20,10 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::config::{AppConfig, ConfigManager};
 use crate::highlight::HighlightCache;
+use crate::jstack_analysis::{
+    JstackAnalysisResult, JstackAnalysisTarget, JstackThreadDetail, JstackThreadState,
+    analyze_jstack_targets,
+};
 #[cfg(test)]
 use crate::loader::SourceMetadata;
 use crate::loader::{
@@ -36,6 +40,7 @@ use crate::search::search_task::SearchTaskState;
 use crate::text_selection::{TextSelectionGranularity, character_count};
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
+use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
 use crate::ui::log_search_window::LogSearchWindow;
 use crate::ui::main_window;
 use crate::ui::settings_window::SettingsWindow;
@@ -43,7 +48,10 @@ use crate::updater::{
     AvailableUpgrade, UpgradeCheckOutcome, UpgradeService, current_platform_arch,
     current_platform_os,
 };
-use gpui::{Context, IntoElement, Keystroke, Pixels, Point, Render, Window, WindowHandle};
+use gpui::{
+    AppContext, Bounds, Context, IntoElement, Keystroke, Pixels, Point, Render, Window,
+    WindowBounds, WindowHandle, WindowOptions, px, size,
+};
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
@@ -75,6 +83,14 @@ pub const SEARCH_RESULT_PANEL_HEIGHT_MAX: f32 = 520.0;
 pub const LOG_VIEWER_TEXT_LEFT_PADDING: f32 = 16.0;
 /// 日志正文右侧内边距；横向滚动范围和渲染必须保持一致。
 pub const LOG_VIEWER_TEXT_RIGHT_PADDING: f32 = 16.0;
+/// Jstack 线程详情窗口默认宽度。
+const JSTACK_THREAD_DETAIL_WINDOW_WIDTH: f32 = 900.0;
+/// Jstack 线程详情窗口默认高度。
+const JSTACK_THREAD_DETAIL_WINDOW_HEIGHT: f32 = 640.0;
+/// Jstack 线程详情窗口最小宽度。
+const JSTACK_THREAD_DETAIL_WINDOW_MIN_WIDTH: f32 = 600.0;
+/// Jstack 线程详情窗口最小高度。
+const JSTACK_THREAD_DETAIL_WINDOW_MIN_HEIGHT: f32 = 420.0;
 /// 日志正文固定行高；分页滚动和 UI 渲染必须保持一致。
 pub const LOG_VIEWER_ROW_HEIGHT: f32 = 20.0;
 /// 行号栏最小宽度，保证小文件也有稳定的视觉留白。
@@ -168,6 +184,11 @@ pub enum TabKind {
         source_id: SourceId,
         /// 来源展示路径，可能是本地路径或压缩包内虚拟路径。
         path: String,
+    },
+    /// Jstack 线程日志分析标签页。
+    JstackAnalysis {
+        /// 分析状态 ID，用于从应用状态表中读取结果。
+        analysis_id: usize,
     },
     /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
     Settings,
@@ -585,6 +606,42 @@ pub struct LogScrollbarDrag {
     pub cursor_offset: Pixels,
 }
 
+/// Jstack 分析任务状态，供内容区页签展示加载、结果或失败。
+#[derive(Clone, Debug)]
+pub enum JstackAnalysisTaskState {
+    /// 后台任务正在读取和聚合线程栈。
+    Loading {
+        /// 当前加载提示。
+        message: String,
+    },
+    /// 分析完成，可渲染频率矩阵。
+    Ready(JstackAnalysisResult),
+    /// 分析任务启动或后台执行失败。
+    Failed {
+        /// 用户可读失败原因。
+        message: String,
+    },
+}
+
+/// 单个 Jstack 分析页签的持久状态。
+#[derive(Clone, Debug)]
+pub struct JstackAnalysisState {
+    /// 分析 ID，与 `TabKind::JstackAnalysis` 对应。
+    pub id: usize,
+    /// 页签标题。
+    pub title: String,
+    /// 本次分析的来源目标快照，保持创建页签时的来源树顺序。
+    pub targets: Vec<JstackAnalysisTarget>,
+    /// 后台任务 generation，避免旧任务覆盖新结果。
+    pub generation: usize,
+    /// 当前启用的线程状态筛选项；默认仅展示 RUNNABLE。
+    pub active_states: BTreeSet<JstackThreadState>,
+    /// 线程频率矩阵行虚拟列表滚动句柄。
+    pub row_scroll: UniformListScrollHandle,
+    /// 当前任务状态。
+    pub task_state: JstackAnalysisTaskState,
+}
+
 impl Default for LogTabViewState {
     /// 创建默认阅读区状态。
     fn default() -> Self {
@@ -721,6 +778,10 @@ pub struct ArgusApp {
     pub log_scrollbar_drag: Option<LogScrollbarDrag>,
     /// 独立日志搜索窗口、搜索任务和结果面板状态。
     pub log_search: LogSearchState,
+    /// Jstack 线程日志分析页签状态表。
+    pub jstack_analyses: HashMap<usize, JstackAnalysisState>,
+    /// 下一个 Jstack 分析 ID。
+    pub next_jstack_analysis_id: usize,
     /// 来源树中用于“选中文件搜索”的多选日志节点。
     pub selected_search_source_ids: BTreeSet<SourceId>,
     /// 来源树 Shift 范围选择锚点。
@@ -870,6 +931,8 @@ impl ArgusApp {
             log_tab_view_states: HashMap::new(),
             log_scrollbar_drag: None,
             log_search: LogSearchState::default(),
+            jstack_analyses: HashMap::new(),
+            next_jstack_analysis_id: 1,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,
             tabs: vec![ArgusTab {
@@ -1446,15 +1509,21 @@ impl ArgusApp {
         *generation
     }
 
-    /// 释放某个标签页对应的日志读取状态，避免关闭 tab 后继续占用内存。
-    fn release_reader_for_tab_kind(&mut self, kind: &TabKind) {
-        if let Some(source_id) = source_id_for_tab_kind(kind) {
-            self.log_read_states.remove(&source_id);
-            self.log_reader_generations.remove(&source_id);
+    /// 释放某个标签页对应的运行期资源，避免关闭 tab 后继续占用内存。
+    fn release_resources_for_tab_kind(&mut self, kind: &TabKind) {
+        match kind {
+            TabKind::LogSource { source_id, .. } => {
+                self.log_read_states.remove(source_id);
+                self.log_reader_generations.remove(source_id);
+            }
+            TabKind::JstackAnalysis { analysis_id } => {
+                self.jstack_analyses.remove(analysis_id);
+            }
+            TabKind::Empty | TabKind::Settings => {}
         }
     }
 
-    /// 只保留指定来源的日志读取状态；设置或空 tab 会清空全部读取结果。
+    /// 只保留指定来源的日志读取状态；非日志 tab 会清空全部读取结果。
     fn retain_reader_for_source(&mut self, kept_source_id: Option<SourceId>) {
         match kept_source_id {
             Some(source_id) => {
@@ -1464,6 +1533,19 @@ impl ArgusApp {
             None => {
                 self.log_read_states.clear();
                 self.log_reader_generations.clear();
+            }
+        }
+    }
+
+    /// 只保留指定 Jstack 分析 tab 的结果；非分析 tab 会清空全部分析状态。
+    fn retain_jstack_analysis_for_tab_kind(&mut self, kept_kind: &TabKind) {
+        match kept_kind {
+            TabKind::JstackAnalysis { analysis_id } => {
+                self.jstack_analyses
+                    .retain(|existing_id, _| *existing_id == *analysis_id);
+            }
+            TabKind::Empty | TabKind::LogSource { .. } | TabKind::Settings => {
+                self.jstack_analyses.clear();
             }
         }
     }
@@ -1569,6 +1651,24 @@ impl ArgusApp {
         });
     }
 
+    /// 在来源树指定窗口坐标打开日志候选节点右键菜单。
+    pub fn open_source_tree_context_menu(&mut self, source_id: SourceId, anchor: Point<Pixels>) {
+        let Some(source) = self.source_registry.node(source_id) else {
+            self.placeholder_notice = "未找到可操作的来源节点".to_string();
+            return;
+        };
+        if !source.kind.is_log_candidate() {
+            self.placeholder_notice = format!("{} 不是可分析的日志候选", source.label);
+            return;
+        }
+
+        self.tab_menu_scroll = UniformListScrollHandle::new();
+        self.active_menu = Some(ActiveMenu {
+            kind: ActiveMenuKind::SourceTree { source_id },
+            anchor,
+        });
+    }
+
     /// 关闭当前活动菜单。
     pub fn close_active_menu(&mut self) {
         self.active_menu = None;
@@ -1601,6 +1701,10 @@ impl ArgusApp {
                 MenuEntry::new("全部展开", MenuAction::ExpandAllSearchResults),
                 MenuEntry::new("全部收起", MenuAction::CollapseAllSearchResults),
             ],
+            ActiveMenuKind::SourceTree { source_id } => vec![MenuEntry::new(
+                "Jstack线程日志分析",
+                MenuAction::OpenJstackAnalysis { source_id },
+            )],
         }
     }
 
@@ -1613,9 +1717,346 @@ impl ArgusApp {
             MenuAction::CloseAllTabs => self.close_all_tabs(),
             MenuAction::ExpandAllSearchResults => self.expand_all_search_result_groups(),
             MenuAction::CollapseAllSearchResults => self.collapse_all_search_result_groups(),
+            MenuAction::OpenJstackAnalysis { .. } => {
+                self.placeholder_notice = "Jstack 分析需要从界面菜单触发".to_string();
+            }
         }
 
         self.close_active_menu();
+    }
+
+    /// 执行需要 GPUI 上下文的菜单动作；普通动作复用无上下文分发。
+    pub fn handle_menu_action_with_context(&mut self, action: MenuAction, cx: &mut Context<Self>) {
+        match action {
+            MenuAction::OpenJstackAnalysis { source_id } => {
+                self.open_jstack_analysis_tab(source_id, cx);
+                self.close_active_menu();
+            }
+            other => self.handle_menu_action(other),
+        }
+    }
+
+    /// 创建 Jstack 分析标签页，并启动后台读取与聚合任务。
+    pub fn open_jstack_analysis_tab(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+        let target_ids = self.jstack_source_ids_for_context(source_id);
+        if target_ids.is_empty() {
+            self.placeholder_notice = "请选择至少一个可分析的 Jstack 日志文件".to_string();
+            return;
+        }
+
+        let targets = self.jstack_targets_from_source_ids(&target_ids);
+        if targets.is_empty() {
+            self.placeholder_notice = "未找到可读取的 Jstack 日志来源".to_string();
+            return;
+        }
+
+        let background_targets = targets.clone();
+        let Some((analysis_id, generation)) = self.create_jstack_analysis_tab_state(targets) else {
+            self.placeholder_notice = "未找到可读取的 Jstack 日志来源".to_string();
+            return;
+        };
+
+        let default_encoding = self.selected_encoding.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { analyze_jstack_targets(background_targets, default_encoding) })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_jstack_analysis_result(analysis_id, generation, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 返回指定 Jstack 分析状态。
+    pub fn jstack_analysis_state(&self, analysis_id: usize) -> Option<&JstackAnalysisState> {
+        self.jstack_analyses.get(&analysis_id)
+    }
+
+    /// 根据频率矩阵格子定位线程详情，并延迟组装完整堆栈记录。
+    ///
+    /// 参数说明：
+    /// - `analysis_id`：Jstack 分析页签 ID。
+    /// - `row_index`：频率矩阵中的线程行索引。
+    /// - `active_snapshot_index`：用户点击的快照列索引。
+    /// - `active_occurrence_index`：同快照内重复线程名的出现序号。
+    /// - `cx`：主应用上下文，用于继续打开详情窗口。
+    pub fn open_jstack_thread_detail_for_cell(
+        &mut self,
+        analysis_id: usize,
+        row_index: usize,
+        active_snapshot_index: usize,
+        active_occurrence_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let detail_result: std::result::Result<JstackThreadDetail, String> = (|| {
+            let Some(state) = self.jstack_analyses.get(&analysis_id) else {
+                return Err("未找到 Jstack 分析结果".to_string());
+            };
+            let JstackAnalysisTaskState::Ready(result) = &state.task_state else {
+                return Err("Jstack 分析尚未完成".to_string());
+            };
+            let Some(row) = result.rows.get(row_index) else {
+                return Err("未找到当前线程行".to_string());
+            };
+
+            // 详情窗口需要当前线程跨快照的完整堆栈；该数据只在点击时收集，避免滚动渲染时反复克隆。
+            let occurrences = row
+                .cells
+                .iter()
+                .flat_map(|cell| cell.stack_occurrences.iter().cloned())
+                .collect::<Vec<_>>();
+            if occurrences.is_empty() {
+                return Err("当前线程没有可展示的堆栈详情".to_string());
+            }
+
+            Ok(JstackThreadDetail {
+                thread_name: row.thread_name.clone(),
+                occurrences,
+            })
+        })();
+
+        match detail_result {
+            Ok(detail) => self.open_jstack_thread_detail_window(
+                detail,
+                active_snapshot_index,
+                active_occurrence_index,
+                cx,
+            ),
+            Err(message) => {
+                self.placeholder_notice = message;
+            }
+        }
+    }
+
+    /// 打开 Jstack 线程详情独立窗口。
+    ///
+    /// 参数说明：
+    /// - `detail`：当前线程跨快照的完整堆栈记录。
+    /// - `active_snapshot_index`：用户点击的快照序号，用于定位详情初始页。
+    /// - `active_occurrence_index`：同快照内线程出现序号，用于重复线程名时定位具体堆栈。
+    /// - `cx`：主应用上下文，用于创建无系统标题栏窗口。
+    pub fn open_jstack_thread_detail_window(
+        &mut self,
+        detail: JstackThreadDetail,
+        active_snapshot_index: usize,
+        active_occurrence_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if detail.occurrences.is_empty() {
+            self.placeholder_notice = "当前线程没有可展示的堆栈详情".to_string();
+            return;
+        }
+
+        let initial_theme = self.theme.clone();
+        let bounds = Bounds::centered(
+            None,
+            size(
+                px(JSTACK_THREAD_DETAIL_WINDOW_WIDTH),
+                px(JSTACK_THREAD_DETAIL_WINDOW_HEIGHT),
+            ),
+            cx,
+        );
+        let window_options = WindowOptions {
+            titlebar: None,
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(JSTACK_THREAD_DETAIL_WINDOW_MIN_WIDTH),
+                px(JSTACK_THREAD_DETAIL_WINDOW_MIN_HEIGHT),
+            )),
+            ..Default::default()
+        };
+
+        let thread_name = detail.thread_name.clone();
+        match cx.open_window(window_options, move |_, cx| {
+            cx.new(|_| {
+                JstackThreadDetailWindow::new(
+                    initial_theme,
+                    detail,
+                    active_snapshot_index,
+                    active_occurrence_index,
+                )
+            })
+        }) {
+            Ok(_) => {
+                self.placeholder_notice = format!("已打开线程详情：{thread_name}");
+            }
+            Err(error) => {
+                self.placeholder_notice = format!("打开线程详情失败：{error}");
+            }
+        }
+    }
+
+    /// 创建 Jstack 分析 tab 和加载状态；后台任务由调用方负责启动。
+    fn create_jstack_analysis_tab_state(
+        &mut self,
+        targets: Vec<JstackAnalysisTarget>,
+    ) -> Option<(usize, usize)> {
+        if targets.is_empty() {
+            return None;
+        }
+
+        let analysis_id = self.next_jstack_analysis_id;
+        self.next_jstack_analysis_id = self.next_jstack_analysis_id.saturating_add(1);
+        let title = if targets.len() > 1 {
+            format!("Jstack分析({})", targets.len())
+        } else {
+            "Jstack分析".to_string()
+        };
+        let tab_id = if self.tabs.len() == 1 && matches!(self.tabs[0].kind, TabKind::Empty) {
+            self.tabs[0].id
+        } else {
+            let next_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(ArgusTab {
+                id: next_id,
+                title: String::new(),
+                kind: TabKind::Empty,
+            });
+            next_id
+        };
+
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.title = title.clone();
+            tab.kind = TabKind::JstackAnalysis { analysis_id };
+        }
+        self.active_tab_id = tab_id;
+        self.log_tab_view_states.remove(&tab_id);
+
+        let generation = 1;
+        self.jstack_analyses.insert(
+            analysis_id,
+            JstackAnalysisState {
+                id: analysis_id,
+                title: title.clone(),
+                targets,
+                generation,
+                active_states: BTreeSet::from([JstackThreadState::Runnable]),
+                row_scroll: UniformListScrollHandle::new(),
+                task_state: JstackAnalysisTaskState::Loading {
+                    message: "正在分析 Jstack 日志文件".to_string(),
+                },
+            },
+        );
+        self.placeholder_notice = format!("已创建 {title} 页签");
+
+        Some((analysis_id, generation))
+    }
+
+    /// 切换 Jstack 分析结果中的线程状态筛选项。
+    pub fn toggle_jstack_state_filter(
+        &mut self,
+        analysis_id: usize,
+        thread_state: JstackThreadState,
+    ) {
+        let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Jstack 分析结果".to_string();
+            return;
+        };
+
+        if !state.active_states.insert(thread_state) {
+            state.active_states.remove(&thread_state);
+        }
+        state.row_scroll = UniformListScrollHandle::new();
+        self.placeholder_notice = if state.active_states.is_empty() {
+            "已隐藏全部 Jstack 线程状态".to_string()
+        } else {
+            let labels = state
+                .active_states
+                .iter()
+                .map(|state| state.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Jstack 状态筛选：{labels}")
+        };
+    }
+
+    /// 根据右键来源节点生成分析输入；多选命中时沿用多选，否则切换到单文件。
+    fn jstack_source_ids_for_context(&mut self, source_id: SourceId) -> Vec<SourceId> {
+        let Some(source) = self.source_registry.node(source_id) else {
+            return Vec::new();
+        };
+        if !source.kind.is_log_candidate() {
+            return Vec::new();
+        }
+
+        if !self.selected_search_source_ids.contains(&source_id) {
+            self.selected_search_source_ids.clear();
+            self.selected_search_source_ids.insert(source_id);
+            self.last_source_selection_anchor = Some(source_id);
+            return vec![source_id];
+        }
+
+        let selected_ids = self.selected_search_source_ids.clone();
+        let mut ordered_ids = self
+            .visible_source_ids()
+            .iter()
+            .filter(|visible_id| selected_ids.contains(visible_id))
+            .filter(|visible_id| {
+                self.source_registry
+                    .node(**visible_id)
+                    .is_some_and(|node| node.kind.is_log_candidate())
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for selected_id in selected_ids {
+            if !ordered_ids.contains(&selected_id)
+                && self
+                    .source_registry
+                    .node(selected_id)
+                    .is_some_and(|node| node.kind.is_log_candidate())
+            {
+                ordered_ids.push(selected_id);
+            }
+        }
+
+        ordered_ids
+    }
+
+    /// 将来源树节点转换为 Jstack 分析目标。
+    fn jstack_targets_from_source_ids(&self, source_ids: &[SourceId]) -> Vec<JstackAnalysisTarget> {
+        source_ids
+            .iter()
+            .filter_map(|source_id| {
+                let node = self.source_registry.node(*source_id)?;
+                if !node.kind.is_log_candidate() {
+                    return None;
+                }
+                Some(JstackAnalysisTarget {
+                    source_id: *source_id,
+                    location: node.location.clone(),
+                    label: node.label.clone(),
+                    path: node.location.display_path(),
+                })
+            })
+            .collect()
+    }
+
+    /// 应用后台 Jstack 分析结果，过期 generation 会被忽略。
+    fn apply_jstack_analysis_result(
+        &mut self,
+        analysis_id: usize,
+        generation: usize,
+        result: JstackAnalysisResult,
+    ) {
+        let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        if state.generation != generation {
+            return;
+        }
+
+        let thread_count = result.thread_count();
+        let snapshot_count = result.snapshot_count();
+        let skipped_count = result.skipped_count();
+        state.task_state = JstackAnalysisTaskState::Ready(result);
+        self.placeholder_notice = format!(
+            "Jstack 分析完成：{snapshot_count} 个快照，{thread_count} 个线程，跳过 {skipped_count} 个文件"
+        );
     }
 
     /// 更新鼠标悬停标签，仅影响标题栏标签视觉状态。
@@ -1642,6 +2083,8 @@ impl ArgusApp {
             self.log_read_states.clear();
             self.log_reader_generations.clear();
             self.log_tab_view_states.clear();
+            self.jstack_analyses.clear();
+            self.next_jstack_analysis_id = 1;
             self.ensure_log_tab_view_state(self.active_tab_id);
             self.reset_log_text_selection();
             self.log_scrollbar_drag = None;
@@ -1663,7 +2106,7 @@ impl ArgusApp {
         self.tabs.retain(|tab| tab.id != tab_id);
         self.log_tab_view_states.remove(&tab_id);
         if let Some(kind) = closed_tab_kind {
-            self.release_reader_for_tab_kind(&kind);
+            self.release_resources_for_tab_kind(&kind);
         }
         if self.hovered_tab_id == Some(tab_id) {
             self.hovered_tab_id = None;
@@ -1691,11 +2134,13 @@ impl ArgusApp {
 
         let removed_count = self.tabs.len().saturating_sub(1);
         let kept_source_id = source_id_for_tab_kind(&kept_tab.kind);
+        let kept_kind = kept_tab.kind.clone();
         self.tabs = vec![kept_tab];
         self.log_tab_view_states
             .retain(|existing_tab_id, _| *existing_tab_id == tab_id);
         self.ensure_log_tab_view_state(tab_id);
         self.retain_reader_for_source(kept_source_id);
+        self.retain_jstack_analysis_for_tab_kind(&kept_kind);
         self.active_tab_id = tab_id;
         self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
@@ -1719,6 +2164,8 @@ impl ArgusApp {
         self.log_read_states.clear();
         self.log_reader_generations.clear();
         self.log_tab_view_states.clear();
+        self.jstack_analyses.clear();
+        self.next_jstack_analysis_id = 1;
         self.ensure_log_tab_view_state(empty_tab_id);
         self.active_tab_id = empty_tab_id;
         self.hovered_tab_id = None;
@@ -1865,6 +2312,8 @@ impl ArgusApp {
         self.log_read_states.clear();
         self.log_reader_generations.clear();
         self.log_tab_view_states.clear();
+        self.jstack_analyses.clear();
+        self.next_jstack_analysis_id = 1;
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
         self.reset_log_search_runtime_state();
@@ -2282,6 +2731,11 @@ impl ArgusApp {
     pub fn content_path_label(&self) -> String {
         match self.active_tab_kind() {
             TabKind::LogSource { path, .. } => path,
+            TabKind::JstackAnalysis { analysis_id } => self
+                .jstack_analyses
+                .get(&analysis_id)
+                .map(|state| format!("Argus / {}", state.title))
+                .unwrap_or_else(|| "Argus / Jstack分析".to_string()),
             TabKind::Settings => "Argus / 设置".to_string(),
             TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
             TabKind::Empty => "未选择来源".to_string(),
@@ -2515,7 +2969,7 @@ impl ArgusApp {
 fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
     match kind {
         TabKind::LogSource { source_id, .. } => Some(*source_id),
-        TabKind::Empty | TabKind::Settings => None,
+        TabKind::Empty | TabKind::JstackAnalysis { .. } | TabKind::Settings => None,
     }
 }
 
@@ -2608,6 +3062,227 @@ mod tests {
                     .unwrap_or(false)
             })
             .expect("测试样例来源应存在")
+    }
+
+    /// 验证来源树右键菜单只对日志候选节点展示 Jstack 分析入口。
+    #[test]
+    fn source_tree_context_menu_shows_jstack_action_for_log_candidates() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let logs_dir_id = source_id_by_label(&app, "logs");
+
+        app.open_source_tree_context_menu(app_log_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+
+        assert!(matches!(
+            app.active_menu.as_ref().map(|menu| &menu.kind),
+            Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == app_log_id
+        ));
+        assert_eq!(app.active_menu_entries().len(), 1);
+        assert!(matches!(
+            app.active_menu_entries()[0].action,
+            MenuAction::OpenJstackAnalysis { source_id } if source_id == app_log_id
+        ));
+
+        app.close_active_menu();
+        app.open_source_tree_context_menu(logs_dir_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+
+        assert!(app.active_menu.is_none());
+        assert!(app.placeholder_notice.contains("不是可分析"));
+    }
+
+    /// 验证右键未选中文件时会把分析输入切换为该文件。
+    #[test]
+    fn jstack_context_selection_switches_to_right_clicked_file() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+        app.selected_search_source_ids.insert(app_log_id);
+
+        let source_ids = app.jstack_source_ids_for_context(error_log_id);
+
+        assert_eq!(source_ids, vec![error_log_id]);
+        assert_eq!(
+            app.selected_search_source_ids,
+            BTreeSet::from([error_log_id])
+        );
+        assert_eq!(app.last_source_selection_anchor, Some(error_log_id));
+    }
+
+    /// 验证右键已在多选集合中时，会按来源树可见顺序保留多选输入。
+    #[test]
+    fn jstack_context_selection_keeps_multi_selection_in_tree_order() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+        let nested_log_id = source_id_by_label(&app, "nested.log");
+        app.selected_search_source_ids = BTreeSet::from([nested_log_id, error_log_id, app_log_id]);
+
+        let source_ids = app.jstack_source_ids_for_context(error_log_id);
+
+        assert_eq!(source_ids, vec![app_log_id, error_log_id, nested_log_id]);
+    }
+
+    /// 验证创建 Jstack 分析 tab 会复用空 tab 并写入加载状态。
+    #[test]
+    fn creating_jstack_analysis_tab_reuses_empty_tab() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+        let targets = app.jstack_targets_from_source_ids(&[app_log_id, error_log_id]);
+
+        let (analysis_id, generation) = app
+            .create_jstack_analysis_tab_state(targets)
+            .expect("应能创建 Jstack 分析 tab");
+
+        assert_eq!(generation, 1);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(matches!(
+            app.active_tab_kind(),
+            TabKind::JstackAnalysis { analysis_id: active_id } if active_id == analysis_id
+        ));
+        let state = app
+            .jstack_analysis_state(analysis_id)
+            .expect("应保存分析状态");
+        assert_eq!(state.targets.len(), 2);
+        assert_eq!(
+            state.active_states,
+            BTreeSet::from([JstackThreadState::Runnable])
+        );
+        assert!(matches!(
+            state.task_state,
+            JstackAnalysisTaskState::Loading { .. }
+        ));
+        assert_eq!(app.active_tab_title(), "Jstack分析(2)");
+    }
+
+    /// 验证 Jstack 状态筛选开关可以增删状态并重置滚动句柄。
+    #[test]
+    fn toggling_jstack_state_filter_updates_active_states() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_jstack_analysis_tab_state(targets)
+            .expect("应能创建 Jstack 分析 tab");
+
+        app.toggle_jstack_state_filter(analysis_id, JstackThreadState::Blocked);
+
+        let state = app
+            .jstack_analysis_state(analysis_id)
+            .expect("应保存分析状态");
+        assert!(state.active_states.contains(&JstackThreadState::Runnable));
+        assert!(state.active_states.contains(&JstackThreadState::Blocked));
+
+        app.toggle_jstack_state_filter(analysis_id, JstackThreadState::Runnable);
+
+        let state = app
+            .jstack_analysis_state(analysis_id)
+            .expect("应保存分析状态");
+        assert!(!state.active_states.contains(&JstackThreadState::Runnable));
+        assert!(state.active_states.contains(&JstackThreadState::Blocked));
+    }
+
+    /// 验证单文件探测未完成的压缩包不会打断来源树 Shift 范围多选。
+    #[test]
+    fn shift_range_selection_includes_pending_single_file_archive_probe() {
+        let mut app = test_app();
+        let mut registry = SourceRegistry::new();
+        let root_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: root_id,
+            parent_id: None,
+            depth: 0,
+            label: "logs".to_string(),
+            kind: SourceKind::Directory,
+            location: SourceLocation::LocalPath(PathBuf::from("logs")),
+            metadata: SourceMetadata {
+                size: None,
+                children_loaded: true,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: true,
+        });
+        let first_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: first_id,
+            parent_id: Some(root_id),
+            depth: 1,
+            label: "001.log".to_string(),
+            kind: SourceKind::LogFile,
+            location: SourceLocation::LocalPath(PathBuf::from("logs/001.log")),
+            metadata: SourceMetadata {
+                size: Some(10),
+                children_loaded: true,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: false,
+        });
+        let pending_archive_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: pending_archive_id,
+            parent_id: Some(root_id),
+            depth: 1,
+            label: "002.zip".to_string(),
+            kind: SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
+            location: SourceLocation::LocalPath(PathBuf::from("logs/002.zip")),
+            metadata: SourceMetadata {
+                size: Some(20),
+                children_loaded: false,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: false,
+        });
+        let last_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: last_id,
+            parent_id: Some(root_id),
+            depth: 1,
+            label: "003.log".to_string(),
+            kind: SourceKind::LogFile,
+            location: SourceLocation::LocalPath(PathBuf::from("logs/003.log")),
+            metadata: SourceMetadata {
+                size: Some(30),
+                children_loaded: true,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: false,
+        });
+        registry.rebuild_all_indices();
+        app.source_registry = registry;
+        app.selected_search_source_ids.insert(first_id);
+        app.last_source_selection_anchor = Some(first_id);
+
+        app.select_source_tree_range_for_search(last_id);
+
+        assert_eq!(
+            app.selected_search_source_ids,
+            BTreeSet::from([first_id, pending_archive_id, last_id])
+        );
+    }
+
+    /// 验证关闭 Jstack 分析 tab 会清理对应分析状态。
+    #[test]
+    fn closing_jstack_analysis_tab_clears_analysis_state() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_jstack_analysis_tab_state(targets)
+            .expect("应能创建 Jstack 分析 tab");
+        let tab_id = app.active_tab_id;
+
+        app.close_tab(tab_id);
+
+        assert!(app.jstack_analysis_state(analysis_id).is_none());
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     }
 
     /// 验证正式启动时来源树为空，左侧由空态图标承接而非展示样例数据。

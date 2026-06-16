@@ -1,8 +1,8 @@
 //! 文件职责：渲染来源侧栏中的真实来源目录树。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：使用 GPUI uniform_list 虚拟渲染大目录树，并提供纵向滚动条。
+//! 主要功能：使用 GPUI uniform_list 虚拟渲染大目录树，提供纵向滚动条和日志节点右键菜单入口。
 
 use crate::app::ArgusApp;
 use crate::loader::log_source::{SourceId, SourceKind, SourceTreeNode};
@@ -275,11 +275,21 @@ fn render_node(
                     MouseButton::Left,
                     cx.listener(move |app, event: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        if can_expand {
+                        if event.modifiers.shift || event.modifiers.secondary() {
+                            app.handle_source_tree_click(source_id, event.modifiers, cx);
+                        } else if can_expand {
                             app.toggle_source_expanded(source_id, cx);
                         } else {
                             app.handle_source_tree_click(source_id, event.modifiers, cx);
                         }
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        app.open_source_tree_context_menu(source_id, event.position);
                         cx.notify();
                     }),
                 ),

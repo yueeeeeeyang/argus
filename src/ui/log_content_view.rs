@@ -1,8 +1,8 @@
 //! 文件职责：渲染日志分析工作区的主内容区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：按行虚拟渲染日志正文，大日志只读取当前可见页，避免整份日志进入 UI 文本节点。
+//! 主要功能：按行虚拟渲染日志正文和 Jstack 分析页，大日志只读取当前可见页，避免整份日志进入 UI 文本节点。
 
 use std::ops::Range;
 
@@ -25,6 +25,7 @@ use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon::render_icon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
+use crate::ui::jstack_analysis_view;
 use crate::ui::settings_page;
 use gpui::{
     AnyElement, Context, HighlightStyle, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior,
@@ -126,6 +127,9 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
 fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusApp>) -> AnyElement {
     match app.active_tab_kind() {
         TabKind::Settings => settings_page::render(app, cx).into_any_element(),
+        TabKind::JstackAnalysis { analysis_id } => {
+            jstack_analysis_view::render(app, analysis_id, cx).into_any_element()
+        }
         TabKind::LogSource { source_id, path } => {
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();
             render_log_source_content(app, theme, tab_id, source_id, &path, cx)
