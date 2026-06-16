@@ -11,8 +11,8 @@ use crate::ui::{
     source_resizer, upgrade_dialog,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, IntoElement, MouseButton, MouseMoveEvent,
-    MouseUpEvent, Window, div, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, ClickEvent, Context, IntoElement, MouseButton,
+    MouseMoveEvent, MouseUpEvent, Window, div, prelude::*, px, rgb,
 };
 use std::time::Duration;
 
@@ -30,6 +30,9 @@ pub fn render(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     app.sync_window_appearance_theme(window);
+    let input_focus_handles = app.ensure_input_focus_handles(cx);
+    let root_focus_for_track = input_focus_handles.root.clone();
+    let root_focus_for_click = input_focus_handles.root.clone();
     let theme = app.theme.clone();
 
     div()
@@ -41,6 +44,13 @@ pub fn render(
         .bg(rgb(theme.background))
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
+        .focusable()
+        .track_focus(&root_focus_for_track)
+        .on_click(cx.listener(move |app, _event: &ClickEvent, window, cx| {
+            root_focus_for_click.focus(window);
+            app.clear_all_text_input_focus();
+            cx.notify();
+        }))
         .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _window, cx| {
             let pointer_x = event.position.x / px(1.0);
             if app.is_source_panel_resizing && app.resize_source_panel(pointer_x) {

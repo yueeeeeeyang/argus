@@ -8,6 +8,7 @@ pub mod activity_bar;
 pub mod components;
 pub mod custom_title_bar;
 pub mod dir_tree_panel;
+pub mod input_native;
 pub mod jstack_analysis_view;
 pub mod jstack_thread_detail_window;
 pub mod log_content_view;

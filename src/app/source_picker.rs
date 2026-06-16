@@ -1,6 +1,6 @@
 //! 文件职责：维护自定义日志来源选择器的应用状态与业务动作。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：替代系统文件选择器，提供跨平台目录浏览、多选和确认加载流程。
 
@@ -112,6 +112,8 @@ pub struct SourcePickerState {
     pub path_input_cursor: usize,
     /// 手动路径输入框选区锚点。
     pub path_input_selection_anchor: Option<usize>,
+    /// 手动路径输入框输入法 marked text 字符范围。
+    pub path_input_marked_range: Option<Range<usize>>,
     /// 手动路径输入框鼠标拖拽选择状态。
     pub path_input_selection_drag: Option<InputTextSelectionDrag>,
     /// 手动路径输入框是否聚焦。
@@ -144,6 +146,7 @@ impl Default for SourcePickerState {
             path_input,
             path_input_cursor,
             path_input_selection_anchor: None,
+            path_input_marked_range: None,
             path_input_selection_drag: None,
             is_path_input_focused: false,
             sort_key: SourcePickerSortKey::Modified,
@@ -174,6 +177,7 @@ impl SourcePickerState {
         self.path_input = display_path(&self.current_dir);
         self.path_input_cursor = character_count(&self.path_input);
         self.path_input_selection_anchor = None;
+        self.path_input_marked_range = None;
         self.path_input_selection_drag = None;
     }
 
@@ -182,6 +186,7 @@ impl SourcePickerState {
         self.path_input = display_path(path);
         self.path_input_cursor = character_count(&self.path_input);
         self.path_input_selection_anchor = None;
+        self.path_input_marked_range = None;
         self.path_input_selection_drag = None;
     }
 
@@ -484,6 +489,7 @@ impl ArgusApp {
     pub fn set_source_picker_path_input_focused(&mut self, is_focused: bool) {
         self.source_picker.is_path_input_focused = is_focused;
         if !is_focused {
+            self.source_picker.path_input_marked_range = None;
             self.source_picker.path_input_selection_drag = None;
         }
     }
@@ -532,6 +538,7 @@ impl ArgusApp {
 
         self.source_picker.path_input_cursor = range.end;
         self.source_picker.path_input_selection_anchor = Some(range.start);
+        self.source_picker.path_input_marked_range = None;
         self.source_picker.path_input_selection_drag = Some(InputTextSelectionDrag {
             anchor_range: range,
             granularity,
@@ -559,6 +566,7 @@ impl ArgusApp {
         let end = selection_drag.anchor_range.end.max(next_range.end);
 
         self.source_picker.path_input_selection_anchor = Some(start);
+        self.source_picker.path_input_marked_range = None;
         self.source_picker.path_input_cursor = end;
     }
 
@@ -613,6 +621,7 @@ impl ArgusApp {
         self.source_picker.path_input =
             remove_character_range(&self.source_picker.path_input, cursor - 1..cursor);
         self.source_picker.path_input_cursor -= 1;
+        self.source_picker.path_input_marked_range = None;
     }
 
     /// 向前删除一个字符或当前选区。
@@ -629,6 +638,7 @@ impl ArgusApp {
         }
         self.source_picker.path_input =
             remove_character_range(&self.source_picker.path_input, cursor..cursor + 1);
+        self.source_picker.path_input_marked_range = None;
     }
 
     /// 将路径输入框光标左移一位，并清除选区。
@@ -636,6 +646,7 @@ impl ArgusApp {
         self.source_picker.path_input_cursor =
             self.source_picker.path_input_cursor.saturating_sub(1);
         self.source_picker.path_input_selection_anchor = None;
+        self.source_picker.path_input_marked_range = None;
     }
 
     /// 将路径输入框光标右移一位，并清除选区。
@@ -644,18 +655,21 @@ impl ArgusApp {
         self.source_picker.path_input_cursor =
             (self.source_picker.path_input_cursor + 1).min(text_len);
         self.source_picker.path_input_selection_anchor = None;
+        self.source_picker.path_input_marked_range = None;
     }
 
     /// 将路径输入框光标移动到开头。
     fn move_source_picker_path_cursor_to_start(&mut self) {
         self.source_picker.path_input_cursor = 0;
         self.source_picker.path_input_selection_anchor = None;
+        self.source_picker.path_input_marked_range = None;
     }
 
     /// 将路径输入框光标移动到末尾。
     fn move_source_picker_path_cursor_to_end(&mut self) {
         self.source_picker.path_input_cursor = character_count(&self.source_picker.path_input);
         self.source_picker.path_input_selection_anchor = None;
+        self.source_picker.path_input_marked_range = None;
     }
 
     /// 替换路径输入框选区或在光标处插入文本。
@@ -671,6 +685,7 @@ impl ArgusApp {
         self.source_picker.path_input = next_text;
         self.source_picker.path_input_cursor = selection_range.start + character_count(replacement);
         self.source_picker.path_input_selection_anchor = None;
+        self.source_picker.path_input_marked_range = None;
     }
 }
 

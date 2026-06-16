@@ -1,16 +1,17 @@
 //! 文件职责：渲染侧栏和内容区的紧凑上下文工具栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：提供加载日志、过滤、目录树折叠、导航和更多操作的占位按钮。
 
-use crate::app::ArgusApp;
+use crate::app::{AppTextInputTarget, ArgusApp};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
+use crate::ui::input_native::app_native_input;
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, IntoElement, KeyDownEvent, div,
     prelude::*, px, rgb,
@@ -128,6 +129,8 @@ fn source_icon_button(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
+    let app_entity = cx.entity();
+
     render_icon_button(
         id,
         icon,
@@ -140,7 +143,19 @@ fn source_icon_button(
                 "加载日志" => app.request_load_sources(cx),
                 "过滤" => {
                     app.open_source_tree_search();
-                    window.on_next_frame(|window, _| window.focus_next());
+                    let search_focus_handle = app
+                        .ensure_input_focus_handles(cx)
+                        .source_tree_search
+                        .clone();
+                    let app_entity = app_entity.clone();
+                    window.on_next_frame(move |window, cx| {
+                        search_focus_handle.focus(window);
+                        // 根节点点击会在同一轮事件里清理输入焦点，这里下一帧恢复刚打开的过滤框。
+                        let _ = app_entity.update(cx, |app, cx| {
+                            app.set_source_tree_search_focused(true);
+                            cx.notify();
+                        });
+                    });
                 }
                 "全部收起" => app.collapse_all_sources(),
                 _ => app.mark_placeholder_action(action_name),
@@ -156,6 +171,14 @@ fn render_source_search_toolbar(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
+    let native_input = app.input_focus_handles.as_ref().map(|handles| {
+        app_native_input(
+            cx.entity(),
+            AppTextInputTarget::SourceTreeSearch,
+            handles.source_tree_search.clone(),
+        )
+    });
+
     div()
         .w_full()
         .overflow_hidden()
@@ -168,6 +191,7 @@ fn render_source_search_toolbar(
                 is_focused: app.is_source_tree_search_focused,
                 cursor_index: app.source_tree_search_cursor,
                 selection_range: app.source_tree_search_selection_range(),
+                marked_range: app.source_tree_search_marked_range.clone(),
                 is_pointer_selecting: app.source_tree_search_selection_drag.is_some(),
                 size: InputSize::Compact,
                 leading_accessory: Some(InputAccessory {
@@ -180,6 +204,7 @@ fn render_source_search_toolbar(
                     icon: ArgusIcon::Close,
                     tooltip: "关闭搜索",
                 }),
+                native_input,
             },
             theme,
             cx.listener(|app, event: &KeyDownEvent, _, cx| {
@@ -188,6 +213,7 @@ fn render_source_search_toolbar(
                 cx.notify();
             }),
             cx.listener(|app, _event: &ClickEvent, _, cx| {
+                cx.stop_propagation();
                 app.set_source_tree_search_focused(true);
                 cx.notify();
             }),

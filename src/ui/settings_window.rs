@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FontWeight, IntoElement, KeyDownEvent, Render, SharedString,
+    App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render, SharedString,
     Subscription, Window, div, prelude::*, px, rgb,
 };
 
-use crate::app::{ArgusApp, SettingsTextInputState};
+use crate::app::{AppTextInputTarget, ArgusApp, SettingsTextInputState};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::theme::{AppTheme, ThemeOption};
@@ -21,6 +21,7 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
+use crate::ui::input_native::app_native_input;
 
 /// 设置行右侧内边距，用于让浮层菜单和选择框左边缘对齐。
 const SETTINGS_ROW_HORIZONTAL_PADDING: f32 = 12.0;
@@ -55,8 +56,23 @@ pub struct SettingsWindow {
     app: Entity<ArgusApp>,
     /// 当前窗口渲染快照。
     snapshot: SettingsWindowSnapshot,
+    /// 设置窗口内输入框真实焦点句柄。
+    input_focus_handles: SettingsInputFocusHandles,
     /// 主应用状态订阅，确保主题切换和设置变更后窗口刷新。
     _app_observer: Subscription,
+}
+
+/// 设置窗口输入框焦点句柄集合。
+#[derive(Clone)]
+struct SettingsInputFocusHandles {
+    /// 设置窗口根区域焦点，用于点击非输入区域时承接键盘焦点。
+    root: FocusHandle,
+    /// 快搜关键字输入框焦点。
+    quick_keywords: FocusHandle,
+    /// 升级服务器输入框焦点。
+    upgrade_server: FocusHandle,
+    /// 升级验签公钥输入框焦点。
+    upgrade_public_key: FocusHandle,
 }
 
 impl SettingsWindow {
@@ -85,6 +101,12 @@ impl SettingsWindow {
         Self {
             app,
             snapshot,
+            input_focus_handles: SettingsInputFocusHandles {
+                root: cx.focus_handle(),
+                quick_keywords: cx.focus_handle(),
+                upgrade_server: cx.focus_handle(),
+                upgrade_public_key: cx.focus_handle(),
+            },
             _app_observer,
         }
     }
@@ -120,7 +142,13 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     /// 渲染设置窗口主体。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        render_settings_window(&self.snapshot, &self.app, window, cx)
+        render_settings_window(
+            &self.snapshot,
+            &self.app,
+            &self.input_focus_handles,
+            window,
+            cx,
+        )
     }
 }
 
@@ -175,11 +203,14 @@ pub struct SettingsWindowSnapshot {
 fn render_settings_window(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
     _window: &mut Window,
     _cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement + use<> {
     let theme = snapshot.theme.clone();
     let close_app = app_handle.clone();
+    let root_focus_for_track = input_focus_handles.root.clone();
+    let root_focus_for_click = input_focus_handles.root.clone();
 
     div()
         .id("settings-window-root")
@@ -191,10 +222,16 @@ fn render_settings_window(
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .occlude()
+        .focusable()
+        .track_focus(&root_focus_for_track)
         .on_click({
             let app_handle = app_handle.clone();
-            move |_, _, cx| {
-                update_settings_app(&app_handle, cx, |app, _| app.close_theme_dropdown());
+            move |_, window, cx| {
+                root_focus_for_click.focus(window);
+                update_settings_app(&app_handle, cx, |app, _| {
+                    app.close_theme_dropdown();
+                    app.clear_all_text_input_focus();
+                });
             }
         })
         .child(
@@ -261,13 +298,23 @@ fn render_settings_window(
                         .child(settings_section(
                             "日志搜索",
                             ArgusIcon::Search,
-                            render_log_search_section(snapshot, app_handle, &theme),
+                            render_log_search_section(
+                                snapshot,
+                                app_handle,
+                                input_focus_handles,
+                                &theme,
+                            ),
                             &theme,
                         ))
                         .child(settings_section(
                             "升级",
                             ArgusIcon::Refresh,
-                            render_upgrade_section(snapshot, app_handle, &theme),
+                            render_upgrade_section(
+                                snapshot,
+                                app_handle,
+                                input_focus_handles,
+                                &theme,
+                            ),
                             &theme,
                         ))
                         .child(settings_section(
@@ -467,11 +514,12 @@ fn render_appearance_section(
 fn render_log_search_section(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
     setting_group(theme).child(setting_row(
         "快搜关键字",
-        quick_keywords_input_control(snapshot, app_handle, theme),
+        quick_keywords_input_control(snapshot, app_handle, input_focus_handles, theme),
         theme,
     ))
 }
@@ -480,6 +528,7 @@ fn render_log_search_section(
 fn render_upgrade_section(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
     let last_check = snapshot
@@ -498,12 +547,12 @@ fn render_upgrade_section(
         ))
         .child(setting_row(
             "升级服务器",
-            upgrade_server_input_control(snapshot, app_handle, theme),
+            upgrade_server_input_control(snapshot, app_handle, input_focus_handles, theme),
             theme,
         ))
         .child(setting_row(
             "验签公钥",
-            upgrade_public_key_input_control(snapshot, app_handle, theme),
+            upgrade_public_key_input_control(snapshot, app_handle, input_focus_handles, theme),
             theme,
         ))
         .child(setting_row(
@@ -555,6 +604,7 @@ fn render_log_loading_section(
 fn quick_keywords_input_control(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
     let input_state = snapshot.quick_keywords_input.clone();
@@ -562,6 +612,11 @@ fn quick_keywords_input_control(
     let click_app = app_handle.clone();
     let pointer_app = app_handle.clone();
     let clear_app = app_handle.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::SettingsQuickKeywords,
+        input_focus_handles.quick_keywords.clone(),
+    );
 
     div().w(px(360.0)).child(render_input(
         Input {
@@ -572,6 +627,7 @@ fn quick_keywords_input_control(
             is_focused: input_state.is_focused,
             cursor_index: input_state.cursor,
             selection_range: settings_input_selection_range(&input_state),
+            marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
             size: InputSize::Regular,
             leading_accessory: Some(InputAccessory {
@@ -584,6 +640,7 @@ fn quick_keywords_input_control(
                 icon: ArgusIcon::Close,
                 tooltip: "清空快搜关键字",
             }),
+            native_input: Some(native_input),
         },
         theme,
         move |event: &KeyDownEvent, _, cx| {
@@ -625,6 +682,7 @@ fn quick_keywords_input_control(
 fn upgrade_server_input_control(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
     let input_state = snapshot.upgrade_server_input.clone();
@@ -632,6 +690,11 @@ fn upgrade_server_input_control(
     let click_app = app_handle.clone();
     let pointer_app = app_handle.clone();
     let clear_app = app_handle.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::SettingsUpgradeServer,
+        input_focus_handles.upgrade_server.clone(),
+    );
 
     div().w(px(360.0)).child(render_input(
         Input {
@@ -642,6 +705,7 @@ fn upgrade_server_input_control(
             is_focused: input_state.is_focused,
             cursor_index: input_state.cursor,
             selection_range: settings_input_selection_range(&input_state),
+            marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
             size: InputSize::Regular,
             leading_accessory: Some(InputAccessory {
@@ -654,6 +718,7 @@ fn upgrade_server_input_control(
                 icon: ArgusIcon::Close,
                 tooltip: "清空升级服务器",
             }),
+            native_input: Some(native_input),
         },
         theme,
         move |event: &KeyDownEvent, _, cx| {
@@ -695,6 +760,7 @@ fn upgrade_server_input_control(
 fn upgrade_public_key_input_control(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
     let input_state = snapshot.upgrade_public_key_input.clone();
@@ -702,6 +768,11 @@ fn upgrade_public_key_input_control(
     let click_app = app_handle.clone();
     let pointer_app = app_handle.clone();
     let clear_app = app_handle.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::SettingsUpgradePublicKey,
+        input_focus_handles.upgrade_public_key.clone(),
+    );
 
     div().w(px(360.0)).child(render_input(
         Input {
@@ -712,6 +783,7 @@ fn upgrade_public_key_input_control(
             is_focused: input_state.is_focused,
             cursor_index: input_state.cursor,
             selection_range: settings_input_selection_range(&input_state),
+            marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
             size: InputSize::Regular,
             leading_accessory: Some(InputAccessory {
@@ -724,6 +796,7 @@ fn upgrade_public_key_input_control(
                 icon: ArgusIcon::Close,
                 tooltip: "清空升级验签公钥",
             }),
+            native_input: Some(native_input),
         },
         theme,
         move |event: &KeyDownEvent, _, cx| {

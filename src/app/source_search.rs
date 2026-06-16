@@ -1,6 +1,6 @@
 //! 文件职责：维护来源树过滤输入框的本地状态和过滤索引。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：处理来源树过滤输入、鼠标选区、剪贴板操作和可见节点重建。
 
@@ -22,6 +22,7 @@ impl ArgusApp {
         self.source_tree_search_query.clear();
         self.source_tree_search_cursor = 0;
         self.source_tree_search_selection_anchor = None;
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
         self.is_source_tree_search_focused = true;
         self.source_tree_search_animation_generation =
@@ -36,6 +37,7 @@ impl ArgusApp {
         self.source_tree_search_query.clear();
         self.source_tree_search_cursor = 0;
         self.source_tree_search_selection_anchor = None;
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
         self.is_source_tree_search_focused = false;
         self.source_tree_search_animation_generation =
@@ -49,6 +51,7 @@ impl ArgusApp {
         self.source_tree_search_query = query;
         self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
         self.source_tree_search_selection_anchor = None;
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
         self.rebuild_filtered_source_ids();
 
@@ -69,8 +72,10 @@ impl ArgusApp {
         if is_focused {
             self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
             self.source_tree_search_selection_anchor = None;
+            self.source_tree_search_marked_range = None;
             self.source_tree_search_selection_drag = None;
         } else {
+            self.source_tree_search_marked_range = None;
             self.source_tree_search_selection_drag = None;
         }
     }
@@ -178,6 +183,7 @@ impl ArgusApp {
         let previous_cursor = self.source_tree_search_cursor;
         let text_length = character_count(&self.source_tree_search_query);
         self.source_tree_search_cursor = next_cursor.min(text_length);
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
 
         if should_select {
@@ -222,6 +228,7 @@ impl ArgusApp {
             remove_character_range(&self.source_tree_search_query, selection_range.clone());
         self.source_tree_search_cursor = selection_range.start;
         self.source_tree_search_selection_anchor = None;
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
         true
     }
@@ -236,6 +243,7 @@ impl ArgusApp {
         );
         self.source_tree_search_cursor += character_count(text);
         self.source_tree_search_selection_anchor = None;
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
     }
 
@@ -249,6 +257,7 @@ impl ArgusApp {
         self.source_tree_search_query =
             remove_character_range(&self.source_tree_search_query, delete_range);
         self.source_tree_search_cursor -= 1;
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
     }
 
@@ -266,6 +275,7 @@ impl ArgusApp {
         let delete_range = self.source_tree_search_cursor..self.source_tree_search_cursor + 1;
         self.source_tree_search_query =
             remove_character_range(&self.source_tree_search_query, delete_range);
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
     }
 
@@ -273,6 +283,7 @@ impl ArgusApp {
     pub fn select_all_source_tree_search(&mut self) {
         self.source_tree_search_selection_anchor = Some(0);
         self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
+        self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
     }
 
@@ -289,6 +300,7 @@ impl ArgusApp {
             anchor_range,
             granularity,
         });
+        self.source_tree_search_marked_range = None;
         self.is_source_tree_search_focused = true;
     }
 
@@ -300,6 +312,7 @@ impl ArgusApp {
         let focus_range =
             self.source_tree_search_range_for_granularity(character_index, drag.granularity);
         self.apply_source_tree_search_pointer_range(drag.anchor_range, focus_range);
+        self.source_tree_search_marked_range = None;
         self.is_source_tree_search_focused = true;
     }
 
@@ -341,6 +354,7 @@ impl ArgusApp {
             self.source_tree_search_selection_anchor = Some(anchor_range.start);
             self.source_tree_search_cursor = anchor_range.end.max(focus_range.end);
         }
+        self.source_tree_search_marked_range = None;
     }
 
     /// 返回来源树搜索框当前选中的文本。

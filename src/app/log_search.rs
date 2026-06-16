@@ -1083,6 +1083,7 @@ impl ArgusApp {
         input.is_focused = true;
         input.cursor = character_count(&input.value);
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
     }
 
@@ -1092,6 +1093,7 @@ impl ArgusApp {
         input.value.clear();
         input.cursor = 0;
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         input.is_focused = true;
         if input_kind == LogSearchInputKind::Keyword {
@@ -1197,6 +1199,7 @@ impl ArgusApp {
     pub fn finish_log_search_input_pointer_selection(&mut self, input_kind: LogSearchInputKind) {
         let input = self.log_search_input_mut(input_kind);
         input.selection_drag = None;
+        input.marked_range = None;
         if input.selection_anchor == Some(input.cursor) {
             input.selection_anchor = None;
         }
@@ -1402,6 +1405,7 @@ impl ArgusApp {
         keyword.value = selected_text;
         keyword.cursor = character_count(&keyword.value);
         keyword.selection_anchor = None;
+        keyword.marked_range = None;
         keyword.selection_drag = None;
         if should_clear_quick {
             self.clear_quick_log_search_state();
@@ -1415,6 +1419,7 @@ impl ArgusApp {
         keyword.is_focused = true;
         keyword.cursor = character_count(&keyword.value);
         keyword.selection_anchor = (keyword.cursor > 0).then_some(0);
+        keyword.marked_range = None;
         keyword.selection_drag = None;
     }
 
@@ -1488,6 +1493,7 @@ impl ArgusApp {
         self.log_search.directory_input.cursor =
             character_count(&self.log_search.directory_input.value);
         self.log_search.directory_input.selection_anchor = None;
+        self.log_search.directory_input.marked_range = None;
         self.log_search.directory_input.selection_drag = None;
     }
 
@@ -1777,8 +1783,10 @@ impl ArgusApp {
     /// 清理所有搜索输入框焦点。
     fn clear_log_search_input_focus(&mut self) {
         self.log_search.keyword_input.is_focused = false;
+        self.log_search.keyword_input.marked_range = None;
         self.log_search.keyword_input.selection_drag = None;
         self.log_search.directory_input.is_focused = false;
+        self.log_search.directory_input.marked_range = None;
         self.log_search.directory_input.selection_drag = None;
     }
 
@@ -1817,6 +1825,7 @@ impl ArgusApp {
         let previous_cursor = input.cursor;
         let text_length = character_count(&input.value);
         input.cursor = next_cursor.min(text_length);
+        input.marked_range = None;
         input.selection_drag = None;
 
         if should_select {
@@ -1861,6 +1870,7 @@ impl ArgusApp {
         input.value = remove_character_range(&input.value, selection_range.clone());
         input.cursor = selection_range.start;
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         if input_kind == LogSearchInputKind::Keyword {
             self.clear_quick_log_search_state();
@@ -1875,6 +1885,7 @@ impl ArgusApp {
         input.value = insert_text_at_character_index(&input.value, input.cursor, text);
         input.cursor += character_count(text);
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         if input_kind == LogSearchInputKind::Keyword {
             self.clear_quick_log_search_state();
@@ -1892,6 +1903,7 @@ impl ArgusApp {
         let input = self.log_search_input_mut(input_kind);
         input.value = remove_character_range(&input.value, cursor - 1..cursor);
         input.cursor -= 1;
+        input.marked_range = None;
         input.selection_drag = None;
         if input_kind == LogSearchInputKind::Keyword {
             self.clear_quick_log_search_state();
@@ -1910,6 +1922,7 @@ impl ArgusApp {
         }
         let input = self.log_search_input_mut(input_kind);
         input.value = remove_character_range(&input.value, cursor..cursor + 1);
+        input.marked_range = None;
         input.selection_drag = None;
         if input_kind == LogSearchInputKind::Keyword {
             self.clear_quick_log_search_state();
@@ -1921,6 +1934,7 @@ impl ArgusApp {
         let input = self.log_search_input_mut(input_kind);
         input.selection_anchor = Some(0);
         input.cursor = character_count(&input.value);
+        input.marked_range = None;
         input.selection_drag = None;
     }
 
@@ -2005,6 +2019,7 @@ impl ArgusApp {
             input.selection_anchor = Some(anchor_range.start);
             input.cursor = anchor_range.end.max(focus_range.end);
         }
+        input.marked_range = None;
     }
 }
 
@@ -2413,6 +2428,7 @@ fn reset_log_search_input_state(input: &mut LogSearchInputState) {
     input.value.clear();
     input.cursor = 0;
     input.selection_anchor = None;
+    input.marked_range = None;
     input.selection_drag = None;
     input.is_focused = false;
 }

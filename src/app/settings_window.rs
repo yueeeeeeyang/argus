@@ -188,8 +188,11 @@ impl ArgusApp {
     pub fn focus_settings_quick_keywords_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_upgrade_server_input.is_focused = false;
+        self.settings_upgrade_server_input.marked_range = None;
         self.settings_upgrade_public_key_input.is_focused = false;
+        self.settings_upgrade_public_key_input.marked_range = None;
         self.settings_quick_keywords_input.is_focused = true;
+        self.settings_quick_keywords_input.marked_range = None;
     }
 
     /// 返回设置窗口快搜关键字输入框当前选区范围。
@@ -204,6 +207,7 @@ impl ArgusApp {
         self.settings_quick_keywords_input.value.clear();
         self.settings_quick_keywords_input.cursor = 0;
         self.settings_quick_keywords_input.selection_anchor = None;
+        self.settings_quick_keywords_input.marked_range = None;
         self.settings_quick_keywords_input.selection_drag = None;
         self.commit_settings_quick_keywords_input();
     }
@@ -276,6 +280,7 @@ impl ArgusApp {
         );
         self.settings_quick_keywords_input.cursor = range.end;
         self.settings_quick_keywords_input.selection_anchor = Some(range.start);
+        self.settings_quick_keywords_input.marked_range = None;
         self.settings_quick_keywords_input.selection_drag = Some(InputTextSelectionDrag {
             anchor_range: range,
             granularity,
@@ -295,6 +300,7 @@ impl ArgusApp {
         let start = drag.anchor_range.start.min(focus_range.start);
         let end = drag.anchor_range.end.max(focus_range.end);
         self.settings_quick_keywords_input.selection_anchor = Some(start);
+        self.settings_quick_keywords_input.marked_range = None;
         self.settings_quick_keywords_input.cursor = end;
     }
 
@@ -317,6 +323,7 @@ impl ArgusApp {
         input.value = insert_text_at_character_index(&input.value, input.cursor, text);
         input.cursor += character_count(text);
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_quick_keywords_input();
     }
@@ -330,6 +337,7 @@ impl ArgusApp {
         input.value = remove_character_range(&input.value, range.clone());
         input.cursor = range.start;
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_quick_keywords_input();
         true
@@ -346,6 +354,7 @@ impl ArgusApp {
         let input = &mut self.settings_quick_keywords_input;
         input.value = remove_character_range(&input.value, cursor - 1..cursor);
         input.cursor -= 1;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_quick_keywords_input();
     }
@@ -362,6 +371,7 @@ impl ArgusApp {
         }
         let input = &mut self.settings_quick_keywords_input;
         input.value = remove_character_range(&input.value, cursor..cursor + 1);
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_quick_keywords_input();
     }
@@ -390,6 +400,7 @@ impl ArgusApp {
             input.selection_anchor = None;
         }
         input.cursor = cursor;
+        input.marked_range = None;
         input.selection_drag = None;
     }
 
@@ -398,6 +409,7 @@ impl ArgusApp {
         self.settings_quick_keywords_input.selection_anchor = Some(0);
         self.settings_quick_keywords_input.cursor =
             character_count(&self.settings_quick_keywords_input.value);
+        self.settings_quick_keywords_input.marked_range = None;
         self.settings_quick_keywords_input.selection_drag = None;
     }
 
@@ -440,8 +452,11 @@ impl ArgusApp {
     pub fn focus_settings_upgrade_server_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
+        self.settings_quick_keywords_input.marked_range = None;
         self.settings_upgrade_public_key_input.is_focused = false;
+        self.settings_upgrade_public_key_input.marked_range = None;
         self.settings_upgrade_server_input.is_focused = true;
+        self.settings_upgrade_server_input.marked_range = None;
     }
 
     /// 返回设置窗口升级服务器输入框当前选区范围。
@@ -454,6 +469,7 @@ impl ArgusApp {
         self.settings_upgrade_server_input.value.clear();
         self.settings_upgrade_server_input.cursor = 0;
         self.settings_upgrade_server_input.selection_anchor = None;
+        self.settings_upgrade_server_input.marked_range = None;
         self.settings_upgrade_server_input.selection_drag = None;
         self.commit_settings_upgrade_server_input();
     }
@@ -522,6 +538,7 @@ impl ArgusApp {
         );
         self.settings_upgrade_server_input.cursor = range.end;
         self.settings_upgrade_server_input.selection_anchor = Some(range.start);
+        self.settings_upgrade_server_input.marked_range = None;
         self.settings_upgrade_server_input.selection_drag = Some(InputTextSelectionDrag {
             anchor_range: range,
             granularity,
@@ -541,6 +558,7 @@ impl ArgusApp {
         let start = drag.anchor_range.start.min(focus_range.start);
         let end = drag.anchor_range.end.max(focus_range.end);
         self.settings_upgrade_server_input.selection_anchor = Some(start);
+        self.settings_upgrade_server_input.marked_range = None;
         self.settings_upgrade_server_input.cursor = end;
     }
 
@@ -564,6 +582,7 @@ impl ArgusApp {
         input.value = insert_text_at_character_index(&input.value, input.cursor, text);
         input.cursor += character_count(text);
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_server_input();
     }
@@ -577,6 +596,7 @@ impl ArgusApp {
         input.value = remove_character_range(&input.value, range.clone());
         input.cursor = range.start;
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_server_input();
         true
@@ -593,6 +613,7 @@ impl ArgusApp {
         let input = &mut self.settings_upgrade_server_input;
         input.value = remove_character_range(&input.value, cursor - 1..cursor);
         input.cursor -= 1;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_server_input();
     }
@@ -609,6 +630,7 @@ impl ArgusApp {
         }
         let input = &mut self.settings_upgrade_server_input;
         input.value = remove_character_range(&input.value, cursor..cursor + 1);
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_server_input();
     }
@@ -637,6 +659,7 @@ impl ArgusApp {
             input.selection_anchor = None;
         }
         input.cursor = cursor;
+        input.marked_range = None;
         input.selection_drag = None;
     }
 
@@ -645,6 +668,7 @@ impl ArgusApp {
         self.settings_upgrade_server_input.selection_anchor = Some(0);
         self.settings_upgrade_server_input.cursor =
             character_count(&self.settings_upgrade_server_input.value);
+        self.settings_upgrade_server_input.marked_range = None;
         self.settings_upgrade_server_input.selection_drag = None;
     }
 
@@ -687,8 +711,11 @@ impl ArgusApp {
     pub fn focus_settings_upgrade_public_key_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
+        self.settings_quick_keywords_input.marked_range = None;
         self.settings_upgrade_server_input.is_focused = false;
+        self.settings_upgrade_server_input.marked_range = None;
         self.settings_upgrade_public_key_input.is_focused = true;
+        self.settings_upgrade_public_key_input.marked_range = None;
     }
 
     /// 返回设置窗口升级验签公钥输入框当前选区范围。
@@ -701,6 +728,7 @@ impl ArgusApp {
         self.settings_upgrade_public_key_input.value.clear();
         self.settings_upgrade_public_key_input.cursor = 0;
         self.settings_upgrade_public_key_input.selection_anchor = None;
+        self.settings_upgrade_public_key_input.marked_range = None;
         self.settings_upgrade_public_key_input.selection_drag = None;
         self.commit_settings_upgrade_public_key_input();
     }
@@ -773,6 +801,7 @@ impl ArgusApp {
         );
         self.settings_upgrade_public_key_input.cursor = range.end;
         self.settings_upgrade_public_key_input.selection_anchor = Some(range.start);
+        self.settings_upgrade_public_key_input.marked_range = None;
         self.settings_upgrade_public_key_input.selection_drag = Some(InputTextSelectionDrag {
             anchor_range: range,
             granularity,
@@ -796,6 +825,7 @@ impl ArgusApp {
         let start = drag.anchor_range.start.min(focus_range.start);
         let end = drag.anchor_range.end.max(focus_range.end);
         self.settings_upgrade_public_key_input.selection_anchor = Some(start);
+        self.settings_upgrade_public_key_input.marked_range = None;
         self.settings_upgrade_public_key_input.cursor = end;
     }
 
@@ -822,6 +852,7 @@ impl ArgusApp {
         input.value = insert_text_at_character_index(&input.value, input.cursor, text);
         input.cursor += character_count(text);
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_public_key_input();
     }
@@ -835,6 +866,7 @@ impl ArgusApp {
         input.value = remove_character_range(&input.value, range.clone());
         input.cursor = range.start;
         input.selection_anchor = None;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_public_key_input();
         true
@@ -851,6 +883,7 @@ impl ArgusApp {
         let input = &mut self.settings_upgrade_public_key_input;
         input.value = remove_character_range(&input.value, cursor - 1..cursor);
         input.cursor -= 1;
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_public_key_input();
     }
@@ -867,6 +900,7 @@ impl ArgusApp {
         }
         let input = &mut self.settings_upgrade_public_key_input;
         input.value = remove_character_range(&input.value, cursor..cursor + 1);
+        input.marked_range = None;
         input.selection_drag = None;
         self.commit_settings_upgrade_public_key_input();
     }
@@ -902,6 +936,7 @@ impl ArgusApp {
             input.selection_anchor = None;
         }
         input.cursor = cursor;
+        input.marked_range = None;
         input.selection_drag = None;
     }
 
@@ -910,6 +945,7 @@ impl ArgusApp {
         self.settings_upgrade_public_key_input.selection_anchor = Some(0);
         self.settings_upgrade_public_key_input.cursor =
             character_count(&self.settings_upgrade_public_key_input.value);
+        self.settings_upgrade_public_key_input.marked_range = None;
         self.settings_upgrade_public_key_input.selection_drag = None;
     }
 

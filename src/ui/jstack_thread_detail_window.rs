@@ -13,8 +13,9 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use gpui::{
-    AnyElement, Context, FontWeight, HighlightStyle, IntoElement, Render, SharedString, StyledText,
-    Window, div, prelude::*, px, rgb,
+    AnyElement, Bounds, Context, FontWeight, HighlightStyle, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString,
+    StyledText, Window, canvas, div, point, prelude::*, px, rgb,
 };
 
 /// 详情窗口顶部标题栏高度。
@@ -23,6 +24,12 @@ const DETAIL_TITLE_BAR_HEIGHT: f32 = 56.0;
 const DETAIL_SUMMARY_HEIGHT: f32 = 92.0;
 /// 详情窗口内容滚动条宽度。
 const DETAIL_SCROLLBAR_WIDTH: f32 = 8.0;
+/// 详情窗口滚动条轨道内边距。
+const DETAIL_SCROLLBAR_PADDING: f32 = 4.0;
+/// 详情窗口滚动条最小滑块长度。
+const DETAIL_SCROLLBAR_MIN_THUMB: f32 = 32.0;
+/// 详情窗口滚动条滑块厚度。
+const DETAIL_SCROLLBAR_THUMB_SIZE: f32 = 5.0;
 /// 箭头切换按钮尺寸。
 const DETAIL_NAV_BUTTON_SIZE: f32 = 28.0;
 /// 行号栏宽度。
@@ -34,6 +41,39 @@ const DETAIL_STACK_FONT_SIZE: f32 = 12.0;
 /// 堆栈行高，保持与日志阅读区类似的高密度展示。
 const DETAIL_STACK_LINE_HEIGHT: f32 = 20.0;
 
+/// 详情窗口滚动条方向。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetailScrollbarAxis {
+    /// 横向滚动条。
+    Horizontal,
+    /// 纵向滚动条。
+    Vertical,
+}
+
+/// 详情窗口滚动条拖拽态，记录点击点在滑块内的相对偏移。
+#[derive(Clone, Copy, Debug)]
+struct DetailScrollbarDrag {
+    /// 当前拖拽的滚动条方向。
+    axis: DetailScrollbarAxis,
+    /// 鼠标按下位置到滑块起点的距离。
+    cursor_offset: Pixels,
+}
+
+/// 详情窗口滚动条布局度量。
+#[derive(Clone, Copy, Debug)]
+struct DetailScrollbarMetrics {
+    /// 滑块起点。
+    thumb_start: Pixels,
+    /// 滑块长度。
+    thumb_length: Pixels,
+    /// 轨道起点。
+    track_start: Pixels,
+    /// 轨道长度。
+    track_length: Pixels,
+    /// 最大滚动距离。
+    max_scroll: Pixels,
+}
+
 /// Jstack 线程详情窗口根视图。
 pub struct JstackThreadDetailWindow {
     /// 打开窗口时的主题快照。
@@ -44,6 +84,10 @@ pub struct JstackThreadDetailWindow {
     active_index: usize,
     /// 用户点击高亮的堆栈行；切换堆栈时会自动定位到第一条栈帧。
     highlighted_line: Option<usize>,
+    /// 堆栈内容滚动句柄，用于显示横纵滚动条并在切换快照时复位。
+    stack_scroll: ScrollHandle,
+    /// 当前正在拖拽的滚动条；为空表示没有拖拽。
+    scrollbar_drag: Option<DetailScrollbarDrag>,
 }
 
 impl JstackThreadDetailWindow {
@@ -86,6 +130,8 @@ impl JstackThreadDetailWindow {
             detail,
             active_index,
             highlighted_line,
+            stack_scroll: ScrollHandle::new(),
+            scrollbar_drag: None,
         }
     }
 
@@ -111,6 +157,8 @@ impl JstackThreadDetailWindow {
             .occurrences
             .get(self.active_index)
             .and_then(default_highlighted_line);
+        self.stack_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.scrollbar_drag = None;
     }
 }
 
@@ -136,6 +184,7 @@ impl Render for JstackThreadDetailWindow {
                 active_occurrence,
                 self.active_index,
                 self.highlighted_line,
+                &self.stack_scroll,
                 window,
                 cx,
             ))
@@ -184,6 +233,7 @@ fn render_detail_body(
     active_occurrence: Option<JstackThreadStackOccurrence>,
     active_index: usize,
     highlighted_line: Option<usize>,
+    stack_scroll: &ScrollHandle,
     _window: &mut Window,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
@@ -215,6 +265,7 @@ fn render_detail_body(
             theme,
             &active_occurrence,
             highlighted_line,
+            stack_scroll,
             cx,
         ))
         .into_any_element()
@@ -362,30 +413,255 @@ fn render_stack_content(
     theme: &AppTheme,
     occurrence: &JstackThreadStackOccurrence,
     highlighted_line: Option<usize>,
+    stack_scroll: &ScrollHandle,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let lines = occurrence.stack_lines.iter().cloned().collect::<Vec<_>>();
+    let scroll_handle = stack_scroll.clone();
 
     div()
         .id("jstack-thread-detail-stack")
+        .relative()
         .flex_1()
         .min_h(px(0.0))
-        .overflow_scroll()
-        .scrollbar_width(px(DETAIL_SCROLLBAR_WIDTH))
+        .overflow_hidden()
         .bg(rgb(theme.background))
-        .font_family(ARGUS_LOG_FONT_FAMILY)
-        .text_size(px(DETAIL_STACK_FONT_SIZE))
-        .text_color(rgb(theme.foreground))
         .child(
             div()
-                .min_w(px(DETAIL_STACK_MIN_WIDTH))
-                .flex()
-                .flex_col()
-                .children(lines.into_iter().enumerate().map(|(index, line)| {
-                    render_stack_line(theme, index, line, highlighted_line == Some(index), cx)
-                        .into_any_element()
-                })),
+                .id("jstack-thread-detail-stack-scroll")
+                .w_full()
+                .h_full()
+                .overflow_scroll()
+                .scrollbar_width(px(DETAIL_SCROLLBAR_WIDTH))
+                .track_scroll(&scroll_handle)
+                .font_family(ARGUS_LOG_FONT_FAMILY)
+                .text_size(px(DETAIL_STACK_FONT_SIZE))
+                .text_color(rgb(theme.foreground))
+                .child(
+                    div()
+                        .min_w(px(DETAIL_STACK_MIN_WIDTH))
+                        .flex()
+                        .flex_col()
+                        .children(lines.into_iter().enumerate().map(|(index, line)| {
+                            render_stack_line(
+                                theme,
+                                index,
+                                line,
+                                highlighted_line == Some(index),
+                                cx,
+                            )
+                            .into_any_element()
+                        })),
+                ),
         )
+        .children(render_detail_scrollbars(&scroll_handle, theme, cx))
+}
+
+/// 根据堆栈滚动状态绘制横向和纵向滚动条。
+fn render_detail_scrollbars(
+    scroll_handle: &ScrollHandle,
+    theme: &AppTheme,
+    cx: &mut Context<JstackThreadDetailWindow>,
+) -> Vec<AnyElement> {
+    let bounds = scroll_handle.bounds();
+    let max_offset = scroll_handle.max_offset();
+    let offset = scroll_handle.offset();
+    let mut scrollbars = Vec::new();
+
+    if let Some(metrics) = detail_scrollbar_metrics(
+        bounds.size.height,
+        bounds.size.height + max_offset.height,
+        -offset.y,
+    ) {
+        scrollbars.push(render_detail_scrollbar_thumb(
+            DetailScrollbarAxis::Vertical,
+            metrics,
+            bounds,
+            scroll_handle.clone(),
+            theme,
+            cx,
+        ));
+    }
+    if let Some(metrics) = detail_scrollbar_metrics(
+        bounds.size.width,
+        bounds.size.width + max_offset.width,
+        -offset.x,
+    ) {
+        scrollbars.push(render_detail_scrollbar_thumb(
+            DetailScrollbarAxis::Horizontal,
+            metrics,
+            bounds,
+            scroll_handle.clone(),
+            theme,
+            cx,
+        ));
+    }
+
+    scrollbars
+}
+
+/// 计算滚动条滑块位置和拖拽换算所需的度量。
+fn detail_scrollbar_metrics(
+    viewport_length: gpui::Pixels,
+    content_length: gpui::Pixels,
+    scroll_offset: gpui::Pixels,
+) -> Option<DetailScrollbarMetrics> {
+    if viewport_length == px(0.0) || content_length <= viewport_length {
+        return None;
+    }
+
+    let track_padding = px(DETAIL_SCROLLBAR_PADDING);
+    let track_length = (viewport_length - track_padding * 2.0).max(px(1.0));
+    let thumb_length = ((viewport_length / content_length) * track_length)
+        .clamp(px(DETAIL_SCROLLBAR_MIN_THUMB), track_length);
+    let max_scroll = (content_length - viewport_length).max(px(1.0));
+    let scroll_ratio = (scroll_offset / max_scroll).clamp(0.0, 1.0);
+    let thumb_start = track_padding + (track_length - thumb_length) * scroll_ratio;
+
+    Some(DetailScrollbarMetrics {
+        thumb_start,
+        thumb_length,
+        track_start: track_padding,
+        track_length,
+        max_scroll,
+    })
+}
+
+/// 渲染可拖拽的详情窗口滚动条滑块。
+fn render_detail_scrollbar_thumb(
+    axis: DetailScrollbarAxis,
+    metrics: DetailScrollbarMetrics,
+    viewport_bounds: Bounds<Pixels>,
+    scroll_handle: ScrollHandle,
+    theme: &AppTheme,
+    cx: &mut Context<JstackThreadDetailWindow>,
+) -> AnyElement {
+    let entity = cx.entity();
+    let is_horizontal = axis == DetailScrollbarAxis::Horizontal;
+    let mut thumb = div()
+        .id(SharedString::from(format!(
+            "jstack-thread-detail-scrollbar-{axis:?}"
+        )))
+        .absolute()
+        .rounded_lg()
+        .bg(rgb(theme.foreground_muted))
+        .opacity(0.5)
+        .hover(|this| this.opacity(0.8))
+        .cursor_pointer()
+        .occlude();
+
+    thumb = if is_horizontal {
+        thumb
+            .left(metrics.thumb_start)
+            .bottom(px(DETAIL_SCROLLBAR_PADDING))
+            .w(metrics.thumb_length)
+            .h(px(DETAIL_SCROLLBAR_THUMB_SIZE))
+    } else {
+        thumb
+            .top(metrics.thumb_start)
+            .right(px(DETAIL_SCROLLBAR_PADDING))
+            .w(px(DETAIL_SCROLLBAR_THUMB_SIZE))
+            .h(metrics.thumb_length)
+    };
+
+    thumb
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |thumb_bounds, _, window: &mut Window, _| {
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseDownEvent, phase, _, cx| {
+                            if !phase.bubble()
+                                || event.button != MouseButton::Left
+                                || !thumb_bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+
+                            cx.stop_propagation();
+                            entity.update(cx, |view, _| {
+                                let pointer = if is_horizontal {
+                                    event.position.x
+                                } else {
+                                    event.position.y
+                                };
+                                let thumb_start = if is_horizontal {
+                                    thumb_bounds.origin.x
+                                } else {
+                                    thumb_bounds.origin.y
+                                };
+                                view.scrollbar_drag = Some(DetailScrollbarDrag {
+                                    axis,
+                                    cursor_offset: pointer - thumb_start,
+                                });
+                            });
+                            cx.notify(entity.entity_id());
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseUpEvent, phase, _, cx| {
+                            if !phase.bubble() || event.button != MouseButton::Left {
+                                return;
+                            }
+
+                            let handled = entity.update(cx, |view, _| {
+                                let handled = view.scrollbar_drag.is_some();
+                                view.scrollbar_drag = None;
+                                handled
+                            });
+                            if handled {
+                                cx.stop_propagation();
+                                cx.notify(entity.entity_id());
+                            }
+                        }
+                    });
+
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if !phase.bubble() || !event.dragging() {
+                            return;
+                        }
+
+                        let handled = entity.update(cx, |view, _| {
+                            let Some(drag) = view.scrollbar_drag else {
+                                return false;
+                            };
+                            if drag.axis != axis {
+                                return false;
+                            }
+
+                            let pointer = if is_horizontal {
+                                event.position.x - viewport_bounds.left()
+                            } else {
+                                event.position.y - viewport_bounds.top()
+                            };
+                            let movable =
+                                (metrics.track_length - metrics.thumb_length).max(px(1.0));
+                            let thumb_start = (pointer - drag.cursor_offset)
+                                .clamp(metrics.track_start, metrics.track_start + movable);
+                            let ratio = (thumb_start - metrics.track_start) / movable;
+                            let scroll = metrics.max_scroll * ratio;
+                            let current = scroll_handle.offset();
+                            if is_horizontal {
+                                scroll_handle.set_offset(point(-scroll, current.y));
+                            } else {
+                                scroll_handle.set_offset(point(current.x, -scroll));
+                            }
+                            true
+                        });
+
+                        if handled {
+                            cx.stop_propagation();
+                            cx.notify(entity.entity_id());
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 /// 渲染单行堆栈，包含行号、点击高亮和语法高亮文本。

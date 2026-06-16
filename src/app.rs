@@ -10,6 +10,7 @@ mod placeholder_data;
 mod settings_window;
 mod source_picker;
 mod source_search;
+mod text_input;
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -49,8 +50,8 @@ use crate::updater::{
     current_platform_os,
 };
 use gpui::{
-    AppContext, Bounds, Context, IntoElement, Keystroke, Pixels, Point, Render, Window,
-    WindowBounds, WindowHandle, WindowOptions, px, size,
+    AppContext, Bounds, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point, Render,
+    Window, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -266,6 +267,23 @@ pub enum LogSearchInputKind {
     Directory,
 }
 
+/// 应用内所有自绘单行输入框的原生文本输入目标。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppTextInputTarget {
+    /// 来源树过滤输入框。
+    SourceTreeSearch,
+    /// 来源选择器路径输入框。
+    SourcePickerPath,
+    /// 独立日志搜索窗口输入框。
+    LogSearch(LogSearchInputKind),
+    /// 设置窗口快搜关键字输入框。
+    SettingsQuickKeywords,
+    /// 设置窗口升级服务器输入框。
+    SettingsUpgradeServer,
+    /// 设置窗口升级验签公钥输入框。
+    SettingsUpgradePublicKey,
+}
+
 /// 日志搜索窗口中的单行输入框状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogSearchInputState {
@@ -275,6 +293,8 @@ pub struct LogSearchInputState {
     pub cursor: usize,
     /// 选区锚点；与光标不一致时表示存在选区。
     pub selection_anchor: Option<usize>,
+    /// 输入法 marked text 字符范围，候选态替换时使用。
+    pub marked_range: Option<std::ops::Range<usize>>,
     /// 鼠标拖拽选区状态。
     pub selection_drag: Option<InputTextSelectionDrag>,
     /// 是否处于焦点状态。
@@ -288,6 +308,7 @@ impl Default for LogSearchInputState {
             value: String::new(),
             cursor: 0,
             selection_anchor: None,
+            marked_range: None,
             selection_drag: None,
             is_focused: false,
         }
@@ -303,6 +324,8 @@ pub struct SettingsTextInputState {
     pub cursor: usize,
     /// 选区锚点；与光标不一致时表示存在选区。
     pub selection_anchor: Option<usize>,
+    /// 输入法 marked text 字符范围，候选态替换时使用。
+    pub marked_range: Option<std::ops::Range<usize>>,
     /// 鼠标拖拽选区状态。
     pub selection_drag: Option<InputTextSelectionDrag>,
     /// 是否处于焦点状态。
@@ -317,10 +340,20 @@ impl SettingsTextInputState {
             value,
             cursor,
             selection_anchor: None,
+            marked_range: None,
             selection_drag: None,
             is_focused: false,
         }
     }
+}
+
+/// 主窗口内输入框真实焦点句柄集合。
+#[derive(Clone)]
+pub struct AppInputFocusHandles {
+    /// 主窗口根区域焦点，用于点击非输入区域时承接真实键盘焦点。
+    pub root: FocusHandle,
+    /// 来源树过滤输入框焦点。
+    pub source_tree_search: FocusHandle,
 }
 
 impl Default for SettingsTextInputState {
@@ -738,6 +771,8 @@ pub struct ArgusApp {
     pub source_tree_search_cursor: usize,
     /// 来源树搜索框选区锚点；与光标不一致时表示存在选区。
     pub source_tree_search_selection_anchor: Option<usize>,
+    /// 来源树搜索框输入法 marked text 字符范围。
+    pub source_tree_search_marked_range: Option<std::ops::Range<usize>>,
     /// 来源树搜索框鼠标拖拽选择状态；鼠标释放后清空。
     pub source_tree_search_selection_drag: Option<InputTextSelectionDrag>,
     /// 来源树搜索框是否处于聚焦状态，用于展示光标和选区。
@@ -868,6 +903,8 @@ pub struct ArgusApp {
     pub upgrade_message: Option<String>,
     /// 当前升级弹窗状态。
     pub upgrade_dialog: Option<UpgradeDialogState>,
+    /// 主窗口输入框真实焦点句柄；首次渲染时创建，测试环境可保持为空。
+    pub input_focus_handles: Option<AppInputFocusHandles>,
 }
 
 impl ArgusApp {
@@ -911,6 +948,7 @@ impl ArgusApp {
             source_tree_search_query: String::new(),
             source_tree_search_cursor: 0,
             source_tree_search_selection_anchor: None,
+            source_tree_search_marked_range: None,
             source_tree_search_selection_drag: None,
             is_source_tree_search_focused: false,
             source_tree_search_animation_generation: 0,
@@ -986,7 +1024,22 @@ impl ArgusApp {
             is_upgrade_installing: false,
             upgrade_message: None,
             upgrade_dialog: None,
+            input_focus_handles: None,
         }
+    }
+
+    /// 确保主窗口输入框焦点句柄已创建，并返回可复制的句柄集合。
+    pub fn ensure_input_focus_handles(&mut self, cx: &mut Context<Self>) -> AppInputFocusHandles {
+        if self.input_focus_handles.is_none() {
+            self.input_focus_handles = Some(AppInputFocusHandles {
+                root: cx.focus_handle(),
+                source_tree_search: cx.focus_handle(),
+            });
+        }
+        self.input_focus_handles
+            .as_ref()
+            .expect("主窗口输入框焦点句柄应已初始化")
+            .clone()
     }
 
     /// 切换标题栏工作区入口，并更新状态提示。

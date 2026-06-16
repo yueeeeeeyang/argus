@@ -1,6 +1,6 @@
 //! 文件职责：渲染独立日志搜索窗口。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：提供无标题栏搜索窗口、关键字/目录输入和搜索范围切换控件。
 
@@ -9,7 +9,7 @@ use gpui::{
     SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
 
-use crate::app::{ArgusApp, LogSearchInputKind, LogSearchState};
+use crate::app::{AppTextInputTarget, ArgusApp, LogSearchInputKind, LogSearchState};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::search::search_engine::SearchScope;
 use crate::theme::AppTheme;
@@ -19,6 +19,7 @@ use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
 use crate::ui::components::loading_spinner::render_loading_spinner;
+use crate::ui::input_native::app_native_input;
 
 /// 搜索窗口按钮内容视觉下移量，用于修正文字和图标在按钮内略靠上的观感。
 const LOG_SEARCH_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
@@ -31,6 +32,10 @@ pub struct LogSearchWindow {
     app: Entity<ArgusApp>,
     /// 搜索窗口根焦点句柄，用于窗口打开后直接接收键盘输入。
     focus_handle: FocusHandle,
+    /// 关键字输入框真实焦点句柄。
+    keyword_focus_handle: FocusHandle,
+    /// 目录输入框真实焦点句柄。
+    directory_focus_handle: FocusHandle,
     /// 是否已经执行过初始聚焦，避免每次重绘抢走输入框点击后的焦点。
     has_focused_root: bool,
     /// 当前渲染快照。
@@ -66,6 +71,8 @@ impl LogSearchWindow {
         Self {
             app,
             focus_handle: cx.focus_handle(),
+            keyword_focus_handle: cx.focus_handle(),
+            directory_focus_handle: cx.focus_handle(),
             has_focused_root: false,
             snapshot: LogSearchSnapshot { theme, log_search },
             _app_observer,
@@ -77,11 +84,18 @@ impl Render for LogSearchWindow {
     /// 渲染搜索窗口内容。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.has_focused_root {
-            self.focus_handle.focus(window);
+            self.keyword_focus_handle.focus(window);
             self.has_focused_root = true;
         }
 
-        render_window_content(&self.snapshot, &self.app, self.focus_handle.clone(), cx)
+        render_window_content(
+            &self.snapshot,
+            &self.app,
+            self.focus_handle.clone(),
+            self.keyword_focus_handle.clone(),
+            self.directory_focus_handle.clone(),
+            cx,
+        )
     }
 }
 
@@ -99,12 +113,16 @@ fn render_window_content(
     snapshot: &LogSearchSnapshot,
     app_handle: &Entity<ArgusApp>,
     focus_handle: FocusHandle,
+    keyword_focus_handle: FocusHandle,
+    directory_focus_handle: FocusHandle,
     _cx: &mut Context<LogSearchWindow>,
 ) -> impl IntoElement + use<> {
     let theme = snapshot.theme.clone();
     let close_app = app_handle.clone();
     let key_app = app_handle.clone();
     let key_focus_handle = focus_handle.clone();
+    let blur_app = app_handle.clone();
+    let blur_focus_handle = focus_handle.clone();
     let active_input_kind = active_log_search_input_kind(&snapshot.log_search);
 
     div()
@@ -120,15 +138,27 @@ fn render_window_content(
         .occlude()
         .focusable()
         .track_focus(&focus_handle)
+        .on_click(move |_, window, cx| {
+            blur_focus_handle.focus(window);
+            update_search_app(&blur_app, cx, |app, _| {
+                app.clear_all_text_input_focus();
+            });
+        })
         .on_key_down(move |event: &KeyDownEvent, window, cx| {
             if !key_focus_handle.is_focused(window) {
                 return;
             }
 
             let should_close = event.keystroke.key.eq_ignore_ascii_case("escape");
-            update_search_app(&key_app, cx, |app, app_cx| {
-                app.handle_log_search_input_key(active_input_kind, &event.keystroke, app_cx);
-            });
+            if let Some(active_input_kind) = active_input_kind {
+                update_search_app(&key_app, cx, |app, app_cx| {
+                    app.handle_log_search_input_key(active_input_kind, &event.keystroke, app_cx);
+                });
+            } else if should_close {
+                update_search_app(&key_app, cx, |app, _| {
+                    app.close_log_search_window();
+                });
+            }
             if should_close {
                 window.remove_window();
             }
@@ -174,6 +204,7 @@ fn render_window_content(
             snapshot,
             app_handle,
             LogSearchInputKind::Keyword,
+            keyword_focus_handle,
             "关键字",
             "输入关键字后按 Enter 搜索",
             ArgusIcon::Search,
@@ -182,6 +213,7 @@ fn render_window_content(
             snapshot,
             app_handle,
             LogSearchInputKind::Directory,
+            directory_focus_handle,
             "目录",
             "来源树目录路径",
             ArgusIcon::Folder,
@@ -190,12 +222,14 @@ fn render_window_content(
         .child(render_progress_and_actions(snapshot, app_handle))
 }
 
-/// 返回当前搜索窗口逻辑聚焦的输入框；没有显式焦点时默认关键字输入框。
-fn active_log_search_input_kind(search: &LogSearchState) -> LogSearchInputKind {
-    if search.directory_input.is_focused {
-        LogSearchInputKind::Directory
+/// 返回当前搜索窗口逻辑聚焦的输入框；没有显式焦点时不接收文本输入。
+fn active_log_search_input_kind(search: &LogSearchState) -> Option<LogSearchInputKind> {
+    if search.keyword_input.is_focused {
+        Some(LogSearchInputKind::Keyword)
+    } else if search.directory_input.is_focused {
+        Some(LogSearchInputKind::Directory)
     } else {
-        LogSearchInputKind::Keyword
+        None
     }
 }
 
@@ -364,6 +398,7 @@ fn render_search_input(
     snapshot: &LogSearchSnapshot,
     app_handle: &Entity<ArgusApp>,
     input_kind: LogSearchInputKind,
+    focus_handle: FocusHandle,
     label: &'static str,
     placeholder: &'static str,
     icon: ArgusIcon,
@@ -377,6 +412,11 @@ fn render_search_input(
     let click_app = app_handle.clone();
     let pointer_app = app_handle.clone();
     let clear_app = app_handle.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::LogSearch(input_kind),
+        focus_handle,
+    );
 
     div()
         .flex()
@@ -401,6 +441,7 @@ fn render_search_input(
                 is_focused: input_state.is_focused,
                 cursor_index: input_state.cursor,
                 selection_range: selection_range_for_input(&input_state),
+                marked_range: input_state.marked_range.clone(),
                 is_pointer_selecting: input_state.selection_drag.is_some(),
                 size: InputSize::Regular,
                 leading_accessory: Some(InputAccessory {
@@ -416,6 +457,7 @@ fn render_search_input(
                     icon: ArgusIcon::Close,
                     tooltip: "清空",
                 }),
+                native_input: Some(native_input),
             },
             &theme,
             move |event: &KeyDownEvent, window, cx| {
@@ -428,11 +470,13 @@ fn render_search_input(
                 }
             },
             move |_, _, cx| {
+                cx.stop_propagation();
                 update_search_app(&click_app, cx, |app, _| {
                     app.focus_log_search_input(input_kind);
                 });
             },
             move |event: &InputPointerEvent, _, cx| {
+                cx.stop_propagation();
                 update_search_app(&pointer_app, cx, |app, _| match event.action {
                     InputPointerAction::Begin => app.begin_log_search_input_pointer_selection(
                         input_kind,
@@ -449,6 +493,7 @@ fn render_search_input(
                 });
             },
             move |_, _, cx| {
+                cx.stop_propagation();
                 update_search_app(&clear_app, cx, |app, _| {
                     app.clear_log_search_input(input_kind);
                 });

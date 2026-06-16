@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义跨平台日志来源选择器独立窗口。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-12
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：提供独立窗口中的目录浏览、目录/文件/压缩包多选和确认加载入口。
 
@@ -8,11 +8,13 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, FontWeight, IntoElement, KeyDownEvent, Render, SharedString,
-    Subscription, Window, div, prelude::*, px, rgb, uniform_list,
+    App, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
-use crate::app::{ArgusApp, SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState};
+use crate::app::{
+    AppTextInputTarget, ArgusApp, SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState,
+};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::loader::{BrowseEntry, BrowseEntryKind};
 use crate::theme::AppTheme;
@@ -22,6 +24,7 @@ use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
 use crate::ui::components::loading_spinner::render_loading_spinner;
+use crate::ui::input_native::app_native_input;
 use crate::utils::path::{display_name, display_path};
 use crate::utils::size_format::format_bytes;
 use crate::utils::time_format::format_modified_time;
@@ -53,6 +56,10 @@ pub struct SourcePickerWindow {
     app: Entity<ArgusApp>,
     /// 当前窗口自己的渲染快照，避免首次打开窗口时读取正在更新的主应用实体。
     snapshot: SourcePickerSnapshot,
+    /// 来源选择器根区域焦点，用于点击非路径输入框区域时承接键盘焦点。
+    root_focus_handle: FocusHandle,
+    /// 路径输入框真实焦点句柄。
+    path_focus_handle: FocusHandle,
     /// 主应用状态订阅，保持选择器窗口随后台目录读取结果刷新。
     _app_observer: Subscription,
 }
@@ -87,6 +94,8 @@ impl SourcePickerWindow {
                 theme,
                 source_picker,
             },
+            root_focus_handle: cx.focus_handle(),
+            path_focus_handle: cx.focus_handle(),
             _app_observer,
         }
     }
@@ -98,7 +107,13 @@ impl Render for SourcePickerWindow {
         let app_handle = self.app.clone();
         let snapshot = self.snapshot.clone();
 
-        render_window_content(&snapshot, &app_handle, cx)
+        render_window_content(
+            &snapshot,
+            &app_handle,
+            self.root_focus_handle.clone(),
+            self.path_focus_handle.clone(),
+            cx,
+        )
     }
 }
 
@@ -115,10 +130,15 @@ struct SourcePickerSnapshot {
 fn render_window_content(
     snapshot: &SourcePickerSnapshot,
     app_handle: &Entity<ArgusApp>,
+    root_focus_handle: FocusHandle,
+    path_focus_handle: FocusHandle,
     cx: &mut Context<SourcePickerWindow>,
 ) -> impl IntoElement + use<> {
     let theme = snapshot.theme.clone();
     let close_app = app_handle.clone();
+    let blur_app = app_handle.clone();
+    let root_focus_for_track = root_focus_handle.clone();
+    let root_focus_for_click = root_focus_handle.clone();
 
     div()
         .id("source-picker-window-root")
@@ -130,6 +150,14 @@ fn render_window_content(
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .occlude()
+        .focusable()
+        .track_focus(&root_focus_for_track)
+        .on_click(move |_, window, cx| {
+            root_focus_for_click.focus(window);
+            update_picker_app(&blur_app, cx, |app, _| {
+                app.clear_all_text_input_focus();
+            });
+        })
         .child(render_title_bar(&theme, &close_app))
         .child(
             div()
@@ -138,7 +166,13 @@ fn render_window_content(
                 .flex()
                 .bg(rgb(theme.content))
                 .child(render_locations(snapshot, &theme, app_handle))
-                .child(render_browser(snapshot, &theme, app_handle, cx)),
+                .child(render_browser(
+                    snapshot,
+                    &theme,
+                    app_handle,
+                    path_focus_handle,
+                    cx,
+                )),
         )
 }
 
@@ -259,6 +293,7 @@ fn render_browser(
     snapshot: &SourcePickerSnapshot,
     theme: &AppTheme,
     app_handle: &Entity<ArgusApp>,
+    path_focus_handle: FocusHandle,
     cx: &mut Context<SourcePickerWindow>,
 ) -> impl IntoElement + use<> {
     div()
@@ -268,7 +303,12 @@ fn render_browser(
         .flex_col()
         .bg(rgb(theme.content))
         .pt(px(SOURCE_PICKER_CONTENT_PADDING))
-        .child(render_header(snapshot, theme, app_handle))
+        .child(render_header(
+            snapshot,
+            theme,
+            app_handle,
+            path_focus_handle,
+        ))
         .child(render_entry_area(snapshot, theme, app_handle, cx))
         .child(render_footer(snapshot, theme, app_handle))
 }
@@ -278,6 +318,7 @@ fn render_header(
     snapshot: &SourcePickerSnapshot,
     theme: &AppTheme,
     app_handle: &Entity<ArgusApp>,
+    path_focus_handle: FocusHandle,
 ) -> impl IntoElement + use<> {
     let parent_dir = snapshot.source_picker.parent_dir.clone();
     let can_go_parent = parent_dir.is_some();
@@ -287,6 +328,11 @@ fn render_header(
     let input_pointer_app = app_handle.clone();
     let refresh_app = app_handle.clone();
     let refresh_dir = snapshot.source_picker.current_dir.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::SourcePickerPath,
+        path_focus_handle,
+    );
 
     div()
         .h(px(48.0))
@@ -318,6 +364,7 @@ fn render_header(
                 is_focused: snapshot.source_picker.is_path_input_focused,
                 cursor_index: snapshot.source_picker.path_input_cursor,
                 selection_range: snapshot.source_picker.path_input_selection_range(),
+                marked_range: snapshot.source_picker.path_input_marked_range.clone(),
                 is_pointer_selecting: snapshot.source_picker.path_input_selection_drag.is_some(),
                 size: InputSize::Compact,
                 leading_accessory: Some(InputAccessory {
@@ -326,6 +373,7 @@ fn render_header(
                     tooltip: "当前目录",
                 }),
                 trailing_accessory: None,
+                native_input: Some(native_input),
             },
             theme,
             move |event: &KeyDownEvent, window, cx| {
@@ -339,11 +387,13 @@ fn render_header(
                 }
             },
             move |_, _, cx| {
+                cx.stop_propagation();
                 update_picker_app(&input_click_app, cx, |app, _| {
                     app.set_source_picker_path_input_focused(true);
                 });
             },
             move |event: &InputPointerEvent, _, cx| {
+                cx.stop_propagation();
                 update_picker_app(&input_pointer_app, cx, |app, _| match event.action {
                     InputPointerAction::Begin => app.begin_source_picker_path_pointer_selection(
                         event.character_index,

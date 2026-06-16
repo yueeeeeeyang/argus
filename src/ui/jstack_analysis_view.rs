@@ -26,7 +26,7 @@ const JSTACK_VIEW_PADDING: f32 = 14.0;
 /// 线程名列宽度，确保长线程名前半段稳定可读。
 const THREAD_NAME_COLUMN_WIDTH: f32 = 330.0;
 /// 快照方块边长。
-const SNAPSHOT_CELL_SIZE: f32 = 14.0;
+const SNAPSHOT_CELL_SIZE: f32 = 16.0;
 /// 快照方块间距。
 const SNAPSHOT_CELL_GAP: f32 = 7.0;
 /// 线程矩阵行高。

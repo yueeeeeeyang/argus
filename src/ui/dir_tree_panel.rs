@@ -28,6 +28,10 @@ const TREE_BRANCH_Y: f32 = 14.0;
 const TREE_BRANCH_LENGTH: f32 = 14.0;
 /// 来源树固定行高；uniform_list 依赖所有行保持一致高度。
 const SOURCE_ROW_HEIGHT: f32 = 28.0;
+/// 来源树选中块上下留白，避免连续多选行视觉上粘成整片。
+const SOURCE_ROW_VERTICAL_INSET: f32 = 2.0;
+/// 来源树选中块圆角半径。
+const SOURCE_ROW_RADIUS: f32 = 5.0;
 /// 来源树节点文字大小，保持高密度目录树的可扫描性。
 const SOURCE_TREE_FONT_SIZE: f32 = 12.0;
 /// 来源树节点图标大小，与 12px 文本保持紧凑比例。
@@ -174,12 +178,14 @@ fn render_node(
     let meta_text = source_meta_text(source, child_count);
     let tooltip_label = source.label.clone();
     let tooltip_theme = theme.clone();
+    let is_selected = source.selected || is_search_selected;
 
     div()
         .id(SharedString::from(format!("source-node-{source_id}")))
         .h(px(SOURCE_ROW_HEIGHT))
         .w_full()
         .px_2()
+        .py(px(SOURCE_ROW_VERTICAL_INSET))
         .child(
             div()
                 .id(SharedString::from(format!(
@@ -193,11 +199,14 @@ fn render_node(
                 .gap_2()
                 .pl(px(10.0 + source.depth as f32 * 16.0))
                 .pr_2()
-                .rounded_sm()
-                .when(source.selected || is_search_selected, |this| {
-                    this.bg(rgb(theme.selection))
+                .rounded(px(SOURCE_ROW_RADIUS))
+                .when(is_selected, |this| this.bg(rgb(theme.selection)))
+                .when(!is_selected, |this| {
+                    this.hover(|this| this.bg(rgb(theme.current_line)))
                 })
-                .hover(|this| this.bg(rgb(theme.current_line)))
+                .when(is_selected, |this| {
+                    this.hover(|this| this.bg(rgb(theme.selection)))
+                })
                 .text_size(px(SOURCE_TREE_FONT_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme.foreground))
