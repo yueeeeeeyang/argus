@@ -1,8 +1,8 @@
 //! 文件职责：维护独立设置窗口的打开、置前和关闭状态。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-15
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：将设置页从标签页迁移到无标题栏独立窗口，同时复用主应用配置和日志搜索偏好持久化逻辑。
+//! 主要功能：将设置页从标签页迁移到无标题栏独立窗口，同时复用主应用配置、日志搜索和升级偏好持久化逻辑。
 
 use std::borrow::Borrow;
 use std::ops::Range;
@@ -187,6 +187,8 @@ impl ArgusApp {
     /// 聚焦设置窗口快搜关键字输入框，并关闭设置页的其它浮层。
     pub fn focus_settings_quick_keywords_input(&mut self) {
         self.is_theme_dropdown_open = false;
+        self.settings_upgrade_server_input.is_focused = false;
+        self.settings_upgrade_public_key_input.is_focused = false;
         self.settings_quick_keywords_input.is_focused = true;
     }
 
@@ -430,6 +432,518 @@ impl ArgusApp {
         let range = self.settings_quick_keywords_selection_range()?;
         Some(slice_character_range(
             &self.settings_quick_keywords_input.value,
+            range,
+        ))
+    }
+
+    /// 聚焦设置窗口升级服务器输入框，并关闭设置页的其它浮层。
+    pub fn focus_settings_upgrade_server_input(&mut self) {
+        self.is_theme_dropdown_open = false;
+        self.settings_quick_keywords_input.is_focused = false;
+        self.settings_upgrade_public_key_input.is_focused = false;
+        self.settings_upgrade_server_input.is_focused = true;
+    }
+
+    /// 返回设置窗口升级服务器输入框当前选区范围。
+    pub fn settings_upgrade_server_selection_range(&self) -> Option<Range<usize>> {
+        normalized_input_selection_range(&self.settings_upgrade_server_input)
+    }
+
+    /// 清空升级服务器输入框，并立即持久化配置。
+    pub fn clear_settings_upgrade_server_input(&mut self) {
+        self.settings_upgrade_server_input.value.clear();
+        self.settings_upgrade_server_input.cursor = 0;
+        self.settings_upgrade_server_input.selection_anchor = None;
+        self.settings_upgrade_server_input.selection_drag = None;
+        self.commit_settings_upgrade_server_input();
+    }
+
+    /// 直接更新升级服务器地址；测试和未来导入配置入口可复用。
+    pub fn update_settings_upgrade_server_url(&mut self, value: String) {
+        self.settings_upgrade_server_input = SettingsTextInputState::from_value(value);
+        self.commit_settings_upgrade_server_input();
+    }
+
+    /// 处理设置窗口升级服务器输入框键盘事件。
+    pub fn handle_settings_upgrade_server_key(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
+        let key = keystroke.key.as_str();
+        let modifiers = keystroke.modifiers;
+
+        if modifiers.platform && key.eq_ignore_ascii_case("a") {
+            self.select_all_settings_upgrade_server_input();
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("c") {
+            self.copy_settings_upgrade_server_selection(cx);
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("x") {
+            self.cut_settings_upgrade_server_selection(cx);
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("v") {
+            self.paste_settings_upgrade_server_clipboard(cx);
+            return;
+        }
+
+        match key {
+            "backspace" => self.delete_settings_upgrade_server_backward(),
+            "delete" => self.delete_settings_upgrade_server_forward(),
+            "left" => self.move_settings_upgrade_server_cursor_left(modifiers.shift),
+            "right" => self.move_settings_upgrade_server_cursor_right(modifiers.shift),
+            "home" => self.move_settings_upgrade_server_cursor_to(0, modifiers.shift),
+            "end" => {
+                let text_length = character_count(&self.settings_upgrade_server_input.value);
+                self.move_settings_upgrade_server_cursor_to(text_length, modifiers.shift);
+            }
+            "escape" => self.settings_upgrade_server_input.is_focused = false,
+            _ if key.chars().count() == 1 && !modifiers.control && !modifiers.platform => {
+                self.insert_settings_upgrade_server_text(key);
+            }
+            _ => {}
+        }
+    }
+
+    /// 开始设置窗口升级服务器输入框鼠标选择。
+    pub fn begin_settings_upgrade_server_pointer_selection(
+        &mut self,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        self.focus_settings_upgrade_server_input();
+        let range = settings_input_range_for_granularity(
+            &self.settings_upgrade_server_input,
+            character_index,
+            granularity,
+        );
+        self.settings_upgrade_server_input.cursor = range.end;
+        self.settings_upgrade_server_input.selection_anchor = Some(range.start);
+        self.settings_upgrade_server_input.selection_drag = Some(InputTextSelectionDrag {
+            anchor_range: range,
+            granularity,
+        });
+    }
+
+    /// 更新设置窗口升级服务器输入框鼠标拖拽选择。
+    pub fn update_settings_upgrade_server_pointer_selection(&mut self, character_index: usize) {
+        let Some(drag) = self.settings_upgrade_server_input.selection_drag.clone() else {
+            return;
+        };
+        let focus_range = settings_input_range_for_granularity(
+            &self.settings_upgrade_server_input,
+            character_index,
+            drag.granularity,
+        );
+        let start = drag.anchor_range.start.min(focus_range.start);
+        let end = drag.anchor_range.end.max(focus_range.end);
+        self.settings_upgrade_server_input.selection_anchor = Some(start);
+        self.settings_upgrade_server_input.cursor = end;
+    }
+
+    /// 结束设置窗口升级服务器输入框鼠标选择。
+    pub fn finish_settings_upgrade_server_pointer_selection(&mut self) {
+        self.settings_upgrade_server_input.selection_drag = None;
+    }
+
+    /// 将升级服务器输入框内容写回配置并保存。
+    fn commit_settings_upgrade_server_input(&mut self) {
+        self.config.upgrade.server_url =
+            self.settings_upgrade_server_input.value.trim().to_string();
+        self.placeholder_notice = "升级服务器已保存".to_string();
+        self.persist_config_or_report();
+    }
+
+    /// 向升级服务器输入框插入文本。
+    fn insert_settings_upgrade_server_text(&mut self, text: &str) {
+        self.delete_settings_upgrade_server_selection();
+        let input = &mut self.settings_upgrade_server_input;
+        input.value = insert_text_at_character_index(&input.value, input.cursor, text);
+        input.cursor += character_count(text);
+        input.selection_anchor = None;
+        input.selection_drag = None;
+        self.commit_settings_upgrade_server_input();
+    }
+
+    /// 删除升级服务器输入框当前选区。
+    fn delete_settings_upgrade_server_selection(&mut self) -> bool {
+        let Some(range) = self.settings_upgrade_server_selection_range() else {
+            return false;
+        };
+        let input = &mut self.settings_upgrade_server_input;
+        input.value = remove_character_range(&input.value, range.clone());
+        input.cursor = range.start;
+        input.selection_anchor = None;
+        input.selection_drag = None;
+        self.commit_settings_upgrade_server_input();
+        true
+    }
+
+    /// 从升级服务器输入框光标前删除一个字符。
+    fn delete_settings_upgrade_server_backward(&mut self) {
+        if self.delete_settings_upgrade_server_selection()
+            || self.settings_upgrade_server_input.cursor == 0
+        {
+            return;
+        }
+        let cursor = self.settings_upgrade_server_input.cursor;
+        let input = &mut self.settings_upgrade_server_input;
+        input.value = remove_character_range(&input.value, cursor - 1..cursor);
+        input.cursor -= 1;
+        input.selection_drag = None;
+        self.commit_settings_upgrade_server_input();
+    }
+
+    /// 从升级服务器输入框光标后删除一个字符。
+    fn delete_settings_upgrade_server_forward(&mut self) {
+        if self.delete_settings_upgrade_server_selection() {
+            return;
+        }
+        let cursor = self.settings_upgrade_server_input.cursor;
+        let text_length = character_count(&self.settings_upgrade_server_input.value);
+        if cursor >= text_length {
+            return;
+        }
+        let input = &mut self.settings_upgrade_server_input;
+        input.value = remove_character_range(&input.value, cursor..cursor + 1);
+        input.selection_drag = None;
+        self.commit_settings_upgrade_server_input();
+    }
+
+    /// 左移升级服务器输入框光标。
+    fn move_settings_upgrade_server_cursor_left(&mut self, extend_selection: bool) {
+        let cursor = self.settings_upgrade_server_input.cursor.saturating_sub(1);
+        self.move_settings_upgrade_server_cursor_to(cursor, extend_selection);
+    }
+
+    /// 右移升级服务器输入框光标。
+    fn move_settings_upgrade_server_cursor_right(&mut self, extend_selection: bool) {
+        let text_length = character_count(&self.settings_upgrade_server_input.value);
+        let cursor = (self.settings_upgrade_server_input.cursor + 1).min(text_length);
+        self.move_settings_upgrade_server_cursor_to(cursor, extend_selection);
+    }
+
+    /// 移动升级服务器输入框光标，并按需扩展选区。
+    fn move_settings_upgrade_server_cursor_to(&mut self, cursor: usize, extend_selection: bool) {
+        let text_length = character_count(&self.settings_upgrade_server_input.value);
+        let cursor = cursor.min(text_length);
+        let input = &mut self.settings_upgrade_server_input;
+        if extend_selection {
+            input.selection_anchor.get_or_insert(input.cursor);
+        } else {
+            input.selection_anchor = None;
+        }
+        input.cursor = cursor;
+        input.selection_drag = None;
+    }
+
+    /// 全选升级服务器输入框文本。
+    fn select_all_settings_upgrade_server_input(&mut self) {
+        self.settings_upgrade_server_input.selection_anchor = Some(0);
+        self.settings_upgrade_server_input.cursor =
+            character_count(&self.settings_upgrade_server_input.value);
+        self.settings_upgrade_server_input.selection_drag = None;
+    }
+
+    /// 复制升级服务器输入框选中文本。
+    fn copy_settings_upgrade_server_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self.selected_settings_upgrade_server_text() else {
+            return;
+        };
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    /// 剪切升级服务器输入框选中文本。
+    fn cut_settings_upgrade_server_selection(&mut self, cx: &mut Context<Self>) {
+        self.copy_settings_upgrade_server_selection(cx);
+        self.delete_settings_upgrade_server_selection();
+    }
+
+    /// 粘贴剪贴板文本到升级服务器输入框。
+    fn paste_settings_upgrade_server_clipboard(&mut self, cx: &mut Context<Self>) {
+        let app_context: &gpui::App = (&*cx).borrow();
+        let Some(item) = app_context.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text() {
+            self.insert_settings_upgrade_server_text(&text.replace(['\n', '\r'], " "));
+        }
+    }
+
+    /// 返回升级服务器输入框选中文本。
+    fn selected_settings_upgrade_server_text(&self) -> Option<String> {
+        let range = self.settings_upgrade_server_selection_range()?;
+        Some(slice_character_range(
+            &self.settings_upgrade_server_input.value,
+            range,
+        ))
+    }
+
+    /// 聚焦设置窗口升级验签公钥输入框，并关闭设置页的其它浮层。
+    pub fn focus_settings_upgrade_public_key_input(&mut self) {
+        self.is_theme_dropdown_open = false;
+        self.settings_quick_keywords_input.is_focused = false;
+        self.settings_upgrade_server_input.is_focused = false;
+        self.settings_upgrade_public_key_input.is_focused = true;
+    }
+
+    /// 返回设置窗口升级验签公钥输入框当前选区范围。
+    pub fn settings_upgrade_public_key_selection_range(&self) -> Option<Range<usize>> {
+        normalized_input_selection_range(&self.settings_upgrade_public_key_input)
+    }
+
+    /// 清空升级验签公钥输入框，并立即持久化配置。
+    pub fn clear_settings_upgrade_public_key_input(&mut self) {
+        self.settings_upgrade_public_key_input.value.clear();
+        self.settings_upgrade_public_key_input.cursor = 0;
+        self.settings_upgrade_public_key_input.selection_anchor = None;
+        self.settings_upgrade_public_key_input.selection_drag = None;
+        self.commit_settings_upgrade_public_key_input();
+    }
+
+    /// 直接更新升级验签公钥；测试和未来导入配置入口可复用。
+    pub fn update_settings_upgrade_public_key(&mut self, value: String) {
+        self.settings_upgrade_public_key_input = SettingsTextInputState::from_value(value);
+        self.commit_settings_upgrade_public_key_input();
+    }
+
+    /// 处理设置窗口升级验签公钥输入框键盘事件。
+    ///
+    /// 参数说明：
+    /// - `keystroke`：GPUI 归一化按键事件。
+    /// - `cx`：主应用上下文，用于访问系统剪贴板。
+    pub fn handle_settings_upgrade_public_key_key(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
+        let key = keystroke.key.as_str();
+        let modifiers = keystroke.modifiers;
+
+        if modifiers.platform && key.eq_ignore_ascii_case("a") {
+            self.select_all_settings_upgrade_public_key_input();
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("c") {
+            self.copy_settings_upgrade_public_key_selection(cx);
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("x") {
+            self.cut_settings_upgrade_public_key_selection(cx);
+            return;
+        }
+        if modifiers.platform && key.eq_ignore_ascii_case("v") {
+            self.paste_settings_upgrade_public_key_clipboard(cx);
+            return;
+        }
+
+        match key {
+            "backspace" => self.delete_settings_upgrade_public_key_backward(),
+            "delete" => self.delete_settings_upgrade_public_key_forward(),
+            "left" => self.move_settings_upgrade_public_key_cursor_left(modifiers.shift),
+            "right" => self.move_settings_upgrade_public_key_cursor_right(modifiers.shift),
+            "home" => self.move_settings_upgrade_public_key_cursor_to(0, modifiers.shift),
+            "end" => {
+                let text_length = character_count(&self.settings_upgrade_public_key_input.value);
+                self.move_settings_upgrade_public_key_cursor_to(text_length, modifiers.shift);
+            }
+            "escape" => self.settings_upgrade_public_key_input.is_focused = false,
+            _ if key.chars().count() == 1 && !modifiers.control && !modifiers.platform => {
+                self.insert_settings_upgrade_public_key_text(key);
+            }
+            _ => {}
+        }
+    }
+
+    /// 开始设置窗口升级验签公钥输入框鼠标选择。
+    pub fn begin_settings_upgrade_public_key_pointer_selection(
+        &mut self,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        self.focus_settings_upgrade_public_key_input();
+        let range = settings_input_range_for_granularity(
+            &self.settings_upgrade_public_key_input,
+            character_index,
+            granularity,
+        );
+        self.settings_upgrade_public_key_input.cursor = range.end;
+        self.settings_upgrade_public_key_input.selection_anchor = Some(range.start);
+        self.settings_upgrade_public_key_input.selection_drag = Some(InputTextSelectionDrag {
+            anchor_range: range,
+            granularity,
+        });
+    }
+
+    /// 更新设置窗口升级验签公钥输入框鼠标拖拽选择。
+    pub fn update_settings_upgrade_public_key_pointer_selection(&mut self, character_index: usize) {
+        let Some(drag) = self
+            .settings_upgrade_public_key_input
+            .selection_drag
+            .clone()
+        else {
+            return;
+        };
+        let focus_range = settings_input_range_for_granularity(
+            &self.settings_upgrade_public_key_input,
+            character_index,
+            drag.granularity,
+        );
+        let start = drag.anchor_range.start.min(focus_range.start);
+        let end = drag.anchor_range.end.max(focus_range.end);
+        self.settings_upgrade_public_key_input.selection_anchor = Some(start);
+        self.settings_upgrade_public_key_input.cursor = end;
+    }
+
+    /// 结束设置窗口升级验签公钥输入框鼠标选择。
+    pub fn finish_settings_upgrade_public_key_pointer_selection(&mut self) {
+        self.settings_upgrade_public_key_input.selection_drag = None;
+    }
+
+    /// 将升级验签公钥输入框内容写回配置并保存。
+    fn commit_settings_upgrade_public_key_input(&mut self) {
+        self.config.upgrade.public_key_base64 = self
+            .settings_upgrade_public_key_input
+            .value
+            .trim()
+            .to_string();
+        self.placeholder_notice = "升级验签公钥已保存".to_string();
+        self.persist_config_or_report();
+    }
+
+    /// 向升级验签公钥输入框插入文本。
+    fn insert_settings_upgrade_public_key_text(&mut self, text: &str) {
+        self.delete_settings_upgrade_public_key_selection();
+        let input = &mut self.settings_upgrade_public_key_input;
+        input.value = insert_text_at_character_index(&input.value, input.cursor, text);
+        input.cursor += character_count(text);
+        input.selection_anchor = None;
+        input.selection_drag = None;
+        self.commit_settings_upgrade_public_key_input();
+    }
+
+    /// 删除升级验签公钥输入框当前选区。
+    fn delete_settings_upgrade_public_key_selection(&mut self) -> bool {
+        let Some(range) = self.settings_upgrade_public_key_selection_range() else {
+            return false;
+        };
+        let input = &mut self.settings_upgrade_public_key_input;
+        input.value = remove_character_range(&input.value, range.clone());
+        input.cursor = range.start;
+        input.selection_anchor = None;
+        input.selection_drag = None;
+        self.commit_settings_upgrade_public_key_input();
+        true
+    }
+
+    /// 从升级验签公钥输入框光标前删除一个字符。
+    fn delete_settings_upgrade_public_key_backward(&mut self) {
+        if self.delete_settings_upgrade_public_key_selection()
+            || self.settings_upgrade_public_key_input.cursor == 0
+        {
+            return;
+        }
+        let cursor = self.settings_upgrade_public_key_input.cursor;
+        let input = &mut self.settings_upgrade_public_key_input;
+        input.value = remove_character_range(&input.value, cursor - 1..cursor);
+        input.cursor -= 1;
+        input.selection_drag = None;
+        self.commit_settings_upgrade_public_key_input();
+    }
+
+    /// 从升级验签公钥输入框光标后删除一个字符。
+    fn delete_settings_upgrade_public_key_forward(&mut self) {
+        if self.delete_settings_upgrade_public_key_selection() {
+            return;
+        }
+        let cursor = self.settings_upgrade_public_key_input.cursor;
+        let text_length = character_count(&self.settings_upgrade_public_key_input.value);
+        if cursor >= text_length {
+            return;
+        }
+        let input = &mut self.settings_upgrade_public_key_input;
+        input.value = remove_character_range(&input.value, cursor..cursor + 1);
+        input.selection_drag = None;
+        self.commit_settings_upgrade_public_key_input();
+    }
+
+    /// 左移升级验签公钥输入框光标。
+    fn move_settings_upgrade_public_key_cursor_left(&mut self, extend_selection: bool) {
+        let cursor = self
+            .settings_upgrade_public_key_input
+            .cursor
+            .saturating_sub(1);
+        self.move_settings_upgrade_public_key_cursor_to(cursor, extend_selection);
+    }
+
+    /// 右移升级验签公钥输入框光标。
+    fn move_settings_upgrade_public_key_cursor_right(&mut self, extend_selection: bool) {
+        let text_length = character_count(&self.settings_upgrade_public_key_input.value);
+        let cursor = (self.settings_upgrade_public_key_input.cursor + 1).min(text_length);
+        self.move_settings_upgrade_public_key_cursor_to(cursor, extend_selection);
+    }
+
+    /// 移动升级验签公钥输入框光标，并按需扩展选区。
+    fn move_settings_upgrade_public_key_cursor_to(
+        &mut self,
+        cursor: usize,
+        extend_selection: bool,
+    ) {
+        let text_length = character_count(&self.settings_upgrade_public_key_input.value);
+        let cursor = cursor.min(text_length);
+        let input = &mut self.settings_upgrade_public_key_input;
+        if extend_selection {
+            input.selection_anchor.get_or_insert(input.cursor);
+        } else {
+            input.selection_anchor = None;
+        }
+        input.cursor = cursor;
+        input.selection_drag = None;
+    }
+
+    /// 全选升级验签公钥输入框文本。
+    fn select_all_settings_upgrade_public_key_input(&mut self) {
+        self.settings_upgrade_public_key_input.selection_anchor = Some(0);
+        self.settings_upgrade_public_key_input.cursor =
+            character_count(&self.settings_upgrade_public_key_input.value);
+        self.settings_upgrade_public_key_input.selection_drag = None;
+    }
+
+    /// 复制升级验签公钥输入框选中文本。
+    fn copy_settings_upgrade_public_key_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self.selected_settings_upgrade_public_key_text() else {
+            return;
+        };
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    /// 剪切升级验签公钥输入框选中文本。
+    fn cut_settings_upgrade_public_key_selection(&mut self, cx: &mut Context<Self>) {
+        self.copy_settings_upgrade_public_key_selection(cx);
+        self.delete_settings_upgrade_public_key_selection();
+    }
+
+    /// 粘贴剪贴板文本到升级验签公钥输入框；去掉换行以兼容脚本输出和折行 Base64。
+    fn paste_settings_upgrade_public_key_clipboard(&mut self, cx: &mut Context<Self>) {
+        let app_context: &gpui::App = (&*cx).borrow();
+        let Some(item) = app_context.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text() {
+            self.insert_settings_upgrade_public_key_text(&text.replace(['\n', '\r'], ""));
+        }
+    }
+
+    /// 返回升级验签公钥输入框选中文本。
+    fn selected_settings_upgrade_public_key_text(&self) -> Option<String> {
+        let range = self.settings_upgrade_public_key_selection_range()?;
+        Some(slice_character_range(
+            &self.settings_upgrade_public_key_input.value,
             range,
         ))
     }

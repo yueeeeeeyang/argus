@@ -1,14 +1,14 @@
 //! 文件职责：组合 Argus 主窗口的整体布局。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：渲染自定义标题栏、来源侧栏、日志内容区和设置页占位界面。
+//! 主要功能：渲染自定义标题栏、来源侧栏、日志内容区、升级弹窗和设置页占位界面。
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::ui::{
     components::context_menu, custom_title_bar, log_content_view, placeholder_dialog, source_panel,
-    source_resizer,
+    source_resizer, upgrade_dialog,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, IntoElement, MouseButton, MouseMoveEvent,
@@ -78,6 +78,9 @@ pub fn render(
         })
         .when(app.active_dialog.is_some(), |this| {
             this.child(placeholder_dialog::render(app, cx))
+        })
+        .when(app.upgrade_dialog.is_some(), |this| {
+            this.child(upgrade_dialog::render(app, cx))
         })
         .when(app.active_menu.is_some(), |this| {
             this.child(context_menu::render_active_menu(app, cx))

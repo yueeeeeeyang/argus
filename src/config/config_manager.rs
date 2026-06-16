@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-12
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -126,7 +126,7 @@ impl Default for ConfigManager {
 mod tests {
     use super::*;
     use crate::config::{
-        AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogSearchConfig,
+        AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogSearchConfig, UpgradeConfig,
     };
 
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
@@ -173,6 +173,13 @@ mod tests {
                 enabled: false,
                 limit_mb: 1024,
             },
+            upgrade: UpgradeConfig {
+                enabled: true,
+                server_url: "https://updates.example.com/argus".to_string(),
+                public_key_base64: "TEST_PUBLIC_KEY_BASE64".to_string(),
+                skipped_version: Some("0.2.0".to_string()),
+                last_check_at: Some("2026-06-15T12:00:00Z".to_string()),
+            },
         };
 
         ConfigManager::save_to_path(&path, &config).expect("测试配置应可写入临时目录");
@@ -187,6 +194,13 @@ mod tests {
         assert_eq!(loaded.encoding.selected, "GBK");
         assert!(!loaded.cache.enabled);
         assert_eq!(loaded.cache.limit_mb, 1024);
+        assert!(loaded.upgrade.enabled);
+        assert_eq!(
+            loaded.upgrade.server_url,
+            "https://updates.example.com/argus"
+        );
+        assert_eq!(loaded.upgrade.public_key_base64, "TEST_PUBLIC_KEY_BASE64");
+        assert_eq!(loaded.upgrade.skipped_version.as_deref(), Some("0.2.0"));
     }
 
     /// 验证坏 TOML 会暴露解析错误，让默认加载入口决定是否回退。

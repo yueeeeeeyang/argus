@@ -1,6 +1,6 @@
 //! 文件职责：定义 Argus 界面使用的 Lucide 图标清单与 SVG 渲染入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-15
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
 //! 主要功能：将稳定的业务语义图标和快搜等操作图标映射到 icondata Lucide 图标常量。
 
@@ -74,6 +74,8 @@ pub enum ArgusIcon {
     Database,
     /// 快捷键设置。
     Keyboard,
+    /// 密钥或验签公钥设置。
+    Key,
     /// 大小写匹配。
     CaseSensitive,
     /// 正则搜索。
@@ -122,6 +124,7 @@ impl ArgusIcon {
             Self::Type,
             Self::Database,
             Self::Keyboard,
+            Self::Key,
             Self::CaseSensitive,
             Self::Regex,
             Self::WholeWord,
@@ -170,6 +173,7 @@ impl ArgusIcon {
             Self::Type => "icons/type.svg",
             Self::Database => "icons/database.svg",
             Self::Keyboard => "icons/keyboard.svg",
+            Self::Key => "icons/key.svg",
             Self::CaseSensitive => "icons/case-sensitive.svg",
             Self::Regex => "icons/regex.svg",
             Self::WholeWord => "icons/whole-word.svg",
@@ -235,6 +239,7 @@ impl ArgusIcon {
             Self::Type => icondata::LuType,
             Self::Database => icondata::LuDatabase,
             Self::Keyboard => icondata::LuKeyboard,
+            Self::Key => icondata::LuKeyRound,
             Self::CaseSensitive => icondata::LuCaseSensitive,
             Self::Regex => icondata::LuRegex,
             Self::WholeWord => icondata::LuWholeWord,

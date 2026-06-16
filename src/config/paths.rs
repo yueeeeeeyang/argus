@@ -1,8 +1,8 @@
 //! 文件职责：集中管理 Argus 用户配置目录路径。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-10
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：提供 `~/.argus`、主题目录和设置文件路径，避免路径规则散落在业务模块中。
+//! 主要功能：提供 `~/.argus`、主题目录、升级缓存目录和设置文件路径，避免路径规则散落在业务模块中。
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,8 @@ const ARGUS_CONFIG_DIR_NAME: &str = ".argus";
 const ARGUS_THEME_DIR_NAME: &str = "themes";
 /// Argus 用户设置文件名称。
 const ARGUS_SETTINGS_FILE_NAME: &str = "settings.toml";
+/// Argus 升级缓存目录名称。
+const ARGUS_UPDATES_DIR_NAME: &str = "updates";
 
 /// 返回当前用户的 Argus 配置目录。
 ///
@@ -38,6 +40,13 @@ pub fn argus_settings_file() -> PathBuf {
     argus_settings_file_from_config(&argus_config_dir())
 }
 
+/// 返回当前用户的 Argus 升级缓存目录。
+///
+/// 返回值：固定为 `~/.argus/updates`，用于保存下载完成且已校验的升级二进制。
+pub fn argus_updates_dir() -> PathBuf {
+    argus_updates_dir_from_config(&argus_config_dir())
+}
+
 /// 根据指定 home 目录构造 Argus 配置目录，供单元测试避免依赖真实用户目录。
 pub fn argus_config_dir_from_home(home: &Path) -> PathBuf {
     home.join(ARGUS_CONFIG_DIR_NAME)
@@ -51,6 +60,11 @@ pub fn argus_theme_dir_from_config(config_dir: &Path) -> PathBuf {
 /// 根据指定配置目录构造设置文件路径，供配置管理器和测试复用。
 pub fn argus_settings_file_from_config(config_dir: &Path) -> PathBuf {
     config_dir.join(ARGUS_SETTINGS_FILE_NAME)
+}
+
+/// 根据指定配置目录构造升级缓存目录，供升级模块和测试复用。
+pub fn argus_updates_dir_from_config(config_dir: &Path) -> PathBuf {
+    config_dir.join(ARGUS_UPDATES_DIR_NAME)
 }
 
 /// 获取用户 home 目录；独立成函数便于说明跨平台路径回退策略。
@@ -106,6 +120,10 @@ mod tests {
         assert_eq!(
             argus_settings_file_from_config(&config_dir),
             PathBuf::from("/tmp/argus-home/.argus/settings.toml")
+        );
+        assert_eq!(
+            argus_updates_dir_from_config(&config_dir),
+            PathBuf::from("/tmp/argus-home/.argus/updates")
         );
     }
 

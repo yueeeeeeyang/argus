@@ -1,8 +1,8 @@
 //! 文件职责：Argus 桌面客户端启动入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-15
+//! 修改日期：2026-06-16
 //! 作者：Argus 开发团队
-//! 主要功能：初始化 GPUI 应用、打开主窗口并处理应用重新打开和系统外部打开事件。
+//! 主要功能：初始化 GPUI 应用、打开主窗口、启动升级检查并处理应用重新打开和系统外部打开事件。
 
 use argus::app::ArgusApp;
 use argus::app::ExternalSourceTrigger;
@@ -74,6 +74,7 @@ fn main() {
                 cx,
             );
         }
+        start_upgrade_check_in_main_window(window_handle, cx);
 
         cx.activate(true);
     });
@@ -165,6 +166,14 @@ fn load_external_paths_in_main_window(
     let _ = window_handle.update(cx, |app, window, cx| {
         window.activate_window();
         app.load_sources_from_paths(paths, trigger, cx);
+        cx.notify();
+    });
+}
+
+/// 在主窗口应用状态可用后启动自动升级检查；未启用或未配置服务器时应用层会直接跳过。
+fn start_upgrade_check_in_main_window(window_handle: WindowHandle<ArgusApp>, cx: &mut App) {
+    let _ = window_handle.update(cx, |app, _, cx| {
+        app.start_upgrade_check(false, cx);
         cx.notify();
     });
 }
