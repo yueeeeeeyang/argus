@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Jstack 线程日志分析页签内容。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：展示线程频率矩阵、状态筛选、分析统计和高性能虚拟滚动列表。
 
@@ -17,8 +17,8 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, ListHorizontalSizingBehavior, Render,
-    SharedString, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
+    AnyElement, Context, FontWeight, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior,
+    Render, SharedString, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
 /// 分析页签顶部内边距和矩阵横向留白。
@@ -52,6 +52,31 @@ struct JstackCellTooltip {
     state_label: String,
     /// 当前线程块前 20 行堆栈预览。
     preview_stack_lines: Option<Arc<[String]>>,
+}
+
+/// 线程名复制提示气泡。
+struct ThreadNameCopyTooltip {
+    /// 当前主题令牌。
+    theme: AppTheme,
+    /// 提示文本。
+    label: String,
+}
+
+impl Render for ThreadNameCopyTooltip {
+    /// 渲染单行提示。
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(self.theme.title_bar))
+            .border_1()
+            .border_color(rgb(self.theme.border))
+            .text_size(px(12.0))
+            .line_height(px(18.0))
+            .text_color(rgb(self.theme.foreground))
+            .child(self.label.clone())
+    }
 }
 
 impl Render for JstackCellTooltip {
@@ -137,6 +162,9 @@ pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) ->
     };
 
     div()
+        .id(SharedString::from(format!(
+            "jstack-analysis-view-{analysis_id}"
+        )))
         .size_full()
         .flex()
         .flex_col()
@@ -144,13 +172,22 @@ pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) ->
         .bg(rgb(theme.content))
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
-        .child(render_header(state, analysis_id, &theme, cx))
+        .focusable()
+        .on_key_down(cx.listener(move |app, event: &KeyDownEvent, _, cx| {
+            if event.keystroke.modifiers.platform && event.keystroke.key.eq_ignore_ascii_case("c") {
+                cx.stop_propagation();
+                app.copy_selected_jstack_thread_name(analysis_id, cx);
+                cx.notify();
+            }
+        }))
+        .child(render_header(app, state, analysis_id, &theme, cx))
         .child(match &state.task_state {
             JstackAnalysisTaskState::Loading { message } => {
                 render_loading_state(message, &theme).into_any_element()
             }
             JstackAnalysisTaskState::Ready(result) => {
-                render_frequency_matrix(analysis_id, state, result, &theme, cx).into_any_element()
+                render_frequency_matrix(app, analysis_id, state, result, &theme, cx)
+                    .into_any_element()
             }
             JstackAnalysisTaskState::Failed { message } => {
                 render_error_state(message, &theme).into_any_element()
@@ -178,21 +215,31 @@ fn render_missing_state(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
 
 /// 渲染标题、统计和状态图例。
 fn render_header(
+    app: &ArgusApp,
     state: &JstackAnalysisState,
     analysis_id: usize,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
-    let (file_count, snapshot_count, thread_count, skipped_count) = match &state.task_state {
-        JstackAnalysisTaskState::Ready(result) => (
-            result.total_files,
-            result.snapshot_count(),
-            result.thread_count(),
-            result.skipped_count(),
-        ),
-        JstackAnalysisTaskState::Loading { .. } | JstackAnalysisTaskState::Failed { .. } => {
-            (0, 0, 0, 0)
-        }
+    let configured_filter = app.jstack_thread_filter();
+    let has_filter_rules = !configured_filter.is_empty();
+    let (file_count, snapshot_count, thread_count, skipped_count, filtered_count) =
+        match &state.task_state {
+            JstackAnalysisTaskState::Ready(result) => (
+                result.total_files,
+                result.snapshot_count(),
+                result.thread_count(),
+                result.skipped_count(),
+                state.filtered_row_count,
+            ),
+            JstackAnalysisTaskState::Loading { .. } | JstackAnalysisTaskState::Failed { .. } => {
+                (0, 0, 0, 0, 0)
+            }
+        };
+    let filter_summary = if filtered_count > 0 {
+        format!("，过滤 {filtered_count} 个线程")
+    } else {
+        String::new()
     };
 
     div()
@@ -226,16 +273,85 @@ fn render_header(
                         .line_height(px(16.0))
                         .text_color(rgb(theme.foreground_muted))
                         .child(format!(
-                            "{file_count} 个文件，{snapshot_count} 个快照，{thread_count} 个线程，跳过 {skipped_count} 个文件"
+                            "{file_count} 个文件，{snapshot_count} 个快照，{thread_count} 个线程{filter_summary}，跳过 {skipped_count} 个文件"
                         )),
                 ),
         )
-        .child(render_state_filter(
-            analysis_id,
-            &state.active_states,
-            theme,
-            cx,
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(render_thread_filter_toggle(
+                    analysis_id,
+                    state.is_thread_filter_enabled,
+                    has_filter_rules,
+                    theme,
+                    cx,
+                ))
+                .child(render_state_filter(
+                    analysis_id,
+                    &state.active_states,
+                    theme,
+                    cx,
+                )),
+        )
+}
+
+/// 渲染设置页线程堆栈过滤开关。
+fn render_thread_filter_toggle(
+    analysis_id: usize,
+    is_enabled: bool,
+    has_filter_rules: bool,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    div()
+        .id(SharedString::from(format!(
+            "jstack-thread-filter-toggle-{analysis_id}"
+        )))
+        .h(px(24.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .bg(rgb(if is_enabled {
+            theme.selection
+        } else {
+            theme.current_line
+        }))
+        .text_size(px(12.0))
+        .line_height(px(24.0))
+        .text_color(rgb(if is_enabled {
+            theme.foreground
+        } else {
+            theme.foreground_muted
+        }))
+        .opacity(if has_filter_rules || !is_enabled {
+            1.0
+        } else {
+            0.55
+        })
+        .child(render_icon(
+            if is_enabled {
+                ArgusIcon::ToggleRight
+            } else {
+                ArgusIcon::ToggleLeft
+            },
+            if is_enabled {
+                theme.foreground
+            } else {
+                theme.foreground_muted
+            },
+            14.0,
         ))
+        .child("配置过滤")
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.toggle_jstack_thread_filter(analysis_id);
+            cx.notify();
+        }))
 }
 
 /// 渲染线程状态筛选器。
@@ -355,13 +471,14 @@ fn render_error_state(message: &str, theme: &AppTheme) -> impl IntoElement + use
 
 /// 渲染线程频率矩阵。
 fn render_frequency_matrix(
+    _app: &ArgusApp,
     analysis_id: usize,
     state: &JstackAnalysisState,
     result: &JstackAnalysisResult,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
-    let visible_indices = visible_row_indices(result, &state.active_states);
+    let visible_indices = state.visible_row_indices.clone();
     if visible_indices.is_empty() {
         return div()
             .flex_1()
@@ -402,6 +519,7 @@ fn render_frequency_matrix(
                     let JstackAnalysisTaskState::Ready(result) = &state.task_state else {
                         return Vec::new();
                     };
+                    let selected_thread_name = state.selected_thread_name.clone();
                     let Some(row_indices) = visible_indices.as_slice().get(range) else {
                         return Vec::new();
                     };
@@ -416,6 +534,7 @@ fn render_frequency_matrix(
                                     row,
                                     result,
                                     active_states.as_ref(),
+                                    selected_thread_name.as_deref(),
                                     matrix_width,
                                     &theme,
                                     row_cx,
@@ -443,11 +562,13 @@ fn render_matrix_row(
     row: &JstackFrequencyRow,
     result: &JstackAnalysisResult,
     active_states: &BTreeSet<JstackThreadState>,
+    selected_thread_name: Option<&str>,
     matrix_width: f32,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
     let thread_name = row.thread_name.clone();
+    let is_thread_name_selected = selected_thread_name == Some(thread_name.as_str());
     let cell_elements = row
         .cells
         .iter()
@@ -483,11 +604,13 @@ fn render_matrix_row(
             div()
                 .w(px(THREAD_NAME_COLUMN_WIDTH))
                 .pr_3()
-                .truncate()
-                .text_size(px(12.0))
-                .line_height(px(MATRIX_ROW_HEIGHT))
-                .text_color(rgb(theme.foreground))
-                .child(thread_name),
+                .child(render_selectable_thread_name(
+                    analysis_id,
+                    thread_name,
+                    is_thread_name_selected,
+                    theme,
+                    cx,
+                )),
         )
         .child(
             div()
@@ -496,6 +619,52 @@ fn render_matrix_row(
                 .gap(px(SNAPSHOT_CELL_GAP))
                 .children(cell_elements),
         )
+}
+
+/// 渲染可选中复制的线程名标签。
+fn render_selectable_thread_name(
+    analysis_id: usize,
+    thread_name: String,
+    is_selected: bool,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let tooltip_theme = theme.clone();
+    div()
+        .id(SharedString::from(format!(
+            "jstack-thread-name-{analysis_id}-{thread_name}"
+        )))
+        .h(px(MATRIX_ROW_HEIGHT - 6.0))
+        .w_full()
+        .px_1()
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .bg(rgb(if is_selected {
+            theme.selection
+        } else {
+            theme.content
+        }))
+        .text_size(px(12.0))
+        .line_height(px(MATRIX_ROW_HEIGHT - 6.0))
+        .text_color(rgb(theme.foreground))
+        .truncate()
+        .child(thread_name.clone())
+        .tooltip({
+            let tooltip_label = thread_name.clone();
+            move |_, cx| {
+                cx.new(|_| ThreadNameCopyTooltip {
+                    label: format!("点击复制线程名：{tooltip_label}"),
+                    theme: tooltip_theme.clone(),
+                })
+                .into()
+            }
+        })
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.select_and_copy_jstack_thread_name(analysis_id, thread_name.clone(), cx);
+            cx.notify();
+        }))
 }
 
 /// 渲染单个快照方块。
@@ -590,33 +759,6 @@ fn render_frequency_cell(
                 cx.notify();
             }))
         })
-}
-
-/// 返回当前筛选条件下需要渲染的行索引。
-fn visible_row_indices(
-    result: &JstackAnalysisResult,
-    active_states: &BTreeSet<JstackThreadState>,
-) -> Vec<usize> {
-    if active_states.is_empty() {
-        return Vec::new();
-    }
-
-    result
-        .rows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| {
-            row.cells
-                .iter()
-                .any(|cell| {
-                    cell.count > 0
-                        && cell
-                            .state
-                            .is_some_and(|state| active_states.contains(&state))
-                })
-                .then_some(index)
-        })
-        .collect()
 }
 
 /// 根据矩阵滚动状态绘制可见滚动条。

@@ -1,8 +1,8 @@
 //! 文件职责：渲染 Argus 独立设置窗口。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
-//! 主要功能：以无系统标题栏窗口展示关于、外观、日志搜索、升级和日志加载设置，并通过主应用状态持久化配置。
+//! 主要功能：以无系统标题栏窗口展示关于、外观、日志显示、日志搜索、升级和日志加载设置，并通过主应用状态持久化配置。
 
 use std::sync::Arc;
 
@@ -19,7 +19,8 @@ use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
-    Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
+    Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, Textarea,
+    render_input, render_textarea,
 };
 use crate::ui::input_native::app_native_input;
 
@@ -69,6 +70,10 @@ struct SettingsInputFocusHandles {
     root: FocusHandle,
     /// 快搜关键字输入框焦点。
     quick_keywords: FocusHandle,
+    /// Jstack 线程名过滤输入框焦点。
+    jstack_thread_names: FocusHandle,
+    /// Jstack 完整线程段过滤输入框焦点。
+    jstack_stack_segments: FocusHandle,
     /// 升级服务器输入框焦点。
     upgrade_server: FocusHandle,
     /// 升级验签公钥输入框焦点。
@@ -104,6 +109,8 @@ impl SettingsWindow {
             input_focus_handles: SettingsInputFocusHandles {
                 root: cx.focus_handle(),
                 quick_keywords: cx.focus_handle(),
+                jstack_thread_names: cx.focus_handle(),
+                jstack_stack_segments: cx.focus_handle(),
                 upgrade_server: cx.focus_handle(),
                 upgrade_public_key: cx.focus_handle(),
             },
@@ -124,11 +131,13 @@ impl SettingsWindow {
             archive_probe_concurrency: app.config.loader.archive_probe_concurrency,
             follow_symlinks: app.config.loader.follow_symlinks,
             quick_keywords_input: app.settings_quick_keywords_input.clone(),
+            jstack_thread_name_filter_input: app.settings_jstack_thread_name_filter_input.clone(),
+            jstack_stack_segment_filter_input: app
+                .settings_jstack_stack_segment_filter_input
+                .clone(),
             upgrade_enabled: app.config.upgrade.enabled,
             upgrade_server_input: app.settings_upgrade_server_input.clone(),
             upgrade_public_key_input: app.settings_upgrade_public_key_input.clone(),
-            upgrade_last_check_at: app.config.upgrade.last_check_at.clone(),
-            upgrade_skipped_version: app.config.upgrade.skipped_version.clone(),
             upgrade_platform_label: app.upgrade_platform_label(),
             is_upgrade_checking: app.is_upgrade_checking,
             upgrade_message: app.upgrade_message.clone(),
@@ -175,16 +184,16 @@ pub struct SettingsWindowSnapshot {
     pub follow_symlinks: bool,
     /// 快搜关键字输入框状态。
     pub quick_keywords_input: SettingsTextInputState,
+    /// Jstack 线程名过滤输入框状态。
+    pub jstack_thread_name_filter_input: SettingsTextInputState,
+    /// Jstack 完整线程段过滤输入框状态。
+    pub jstack_stack_segment_filter_input: SettingsTextInputState,
     /// 是否启用启动时自动检查升级。
     pub upgrade_enabled: bool,
     /// 升级服务器输入框状态。
     pub upgrade_server_input: SettingsTextInputState,
     /// 升级验签公钥输入框状态。
     pub upgrade_public_key_input: SettingsTextInputState,
-    /// 最近一次升级检查时间。
-    pub upgrade_last_check_at: Option<String>,
-    /// 用户跳过的升级版本。
-    pub upgrade_skipped_version: Option<String>,
     /// 当前平台 manifest 标识。
     pub upgrade_platform_label: String,
     /// 是否正在检查升级。
@@ -293,6 +302,17 @@ fn render_settings_window(
                             "外观",
                             ArgusIcon::Palette,
                             render_appearance_section(snapshot, app_handle, &theme),
+                            &theme,
+                        ))
+                        .child(settings_section(
+                            "日志显示",
+                            ArgusIcon::Logs,
+                            render_log_display_section(
+                                snapshot,
+                                app_handle,
+                                input_focus_handles,
+                                &theme,
+                            ),
                             &theme,
                         ))
                         .child(settings_section(
@@ -474,40 +494,68 @@ fn render_appearance_section(
     let toggle_app = app_handle.clone();
     let select_app = app_handle.clone();
 
-    let group = setting_group(theme)
-        .relative()
-        .child(setting_row(
-            "主题",
-            render_dropdown(
-                Dropdown {
-                    id: "settings-theme-dropdown",
-                    selected_id: snapshot.selected_theme_id.clone(),
-                    selected_label: snapshot.selected_theme_label.clone(),
-                    placeholder: "选择主题",
-                    is_open: snapshot.is_theme_dropdown_open,
-                    items: dropdown_items,
-                    show_inline_menu: false,
-                },
-                theme,
-                move |_, _, cx| {
-                    cx.stop_propagation();
-                    update_settings_app(&toggle_app, cx, |app, _| app.toggle_theme_dropdown());
-                },
-                Arc::new(move |theme_id, _, cx| {
-                    update_settings_app(&select_app, cx, |app, _| app.select_theme(theme_id));
-                }),
-            ),
+    let group = setting_group(theme).relative().child(setting_row(
+        "主题",
+        render_dropdown(
+            Dropdown {
+                id: "settings-theme-dropdown",
+                selected_id: snapshot.selected_theme_id.clone(),
+                selected_label: snapshot.selected_theme_label.clone(),
+                placeholder: "选择主题",
+                is_open: snapshot.is_theme_dropdown_open,
+                items: dropdown_items,
+                show_inline_menu: false,
+            },
             theme,
-        ))
-        .child(setting_row(
-            "日志内容字号",
-            font_size_control(snapshot.log_content_font_size, app_handle, theme),
-            theme,
-        ));
+            move |_, _, cx| {
+                cx.stop_propagation();
+                update_settings_app(&toggle_app, cx, |app, _| app.toggle_theme_dropdown());
+            },
+            Arc::new(move |theme_id, _, cx| {
+                update_settings_app(&select_app, cx, |app, _| app.select_theme(theme_id));
+            }),
+        ),
+        theme,
+    ));
 
     group.when(snapshot.is_theme_dropdown_open, |this| {
         this.child(render_theme_dropdown_menu(snapshot, app_handle, theme))
     })
+}
+
+/// 渲染日志显示设置区。
+fn render_log_display_section(
+    snapshot: &SettingsWindowSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    setting_group(theme)
+        .child(setting_row(
+            "日志内容字号",
+            font_size_control(snapshot.log_content_font_size, app_handle, theme),
+            theme,
+        ))
+        .child(setting_row(
+            "线程名过滤",
+            jstack_thread_name_filter_input_control(
+                snapshot,
+                app_handle,
+                input_focus_handles,
+                theme,
+            ),
+            theme,
+        ))
+        .child(setting_row(
+            "线程段过滤",
+            jstack_stack_segment_filter_input_control(
+                snapshot,
+                app_handle,
+                input_focus_handles,
+                theme,
+            ),
+            theme,
+        ))
 }
 
 /// 渲染日志搜索设置区。
@@ -531,14 +579,6 @@ fn render_upgrade_section(
     input_focus_handles: &SettingsInputFocusHandles,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
-    let last_check = snapshot
-        .upgrade_last_check_at
-        .clone()
-        .unwrap_or_else(|| "尚未检查".to_string());
-    let skipped_version = snapshot
-        .upgrade_skipped_version
-        .clone()
-        .unwrap_or_else(|| "无".to_string());
     setting_group(theme)
         .child(setting_row(
             "自动检查",
@@ -553,16 +593,6 @@ fn render_upgrade_section(
         .child(setting_row(
             "验签公钥",
             upgrade_public_key_input_control(snapshot, app_handle, input_focus_handles, theme),
-            theme,
-        ))
-        .child(setting_row(
-            "最近检查",
-            text_value(&last_check, theme),
-            theme,
-        ))
-        .child(setting_row(
-            "跳过版本",
-            text_value(&skipped_version, theme),
             theme,
         ))
 }
@@ -673,6 +703,161 @@ fn quick_keywords_input_control(
             cx.stop_propagation();
             update_settings_app(&clear_app, cx, |app, _| {
                 app.clear_settings_quick_keywords_input();
+            });
+        },
+    ))
+}
+
+/// 渲染 Jstack 线程名过滤配置输入框。
+fn jstack_thread_name_filter_input_control(
+    snapshot: &SettingsWindowSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    let input_state = snapshot.jstack_thread_name_filter_input.clone();
+    let key_app = app_handle.clone();
+    let click_app = app_handle.clone();
+    let pointer_app = app_handle.clone();
+    let clear_app = app_handle.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::SettingsJstackThreadNameFilter,
+        input_focus_handles.jstack_thread_names.clone(),
+    );
+
+    div().w(px(360.0)).child(render_input(
+        Input {
+            id: "settings-jstack-thread-name-filter-input",
+            placeholder: "Attach Listener,Signal Dispatcher",
+            value: input_state.value.clone(),
+            is_disabled: false,
+            is_focused: input_state.is_focused,
+            cursor_index: input_state.cursor,
+            selection_range: settings_input_selection_range(&input_state),
+            marked_range: input_state.marked_range.clone(),
+            is_pointer_selecting: input_state.selection_drag.is_some(),
+            size: InputSize::Regular,
+            leading_accessory: Some(InputAccessory {
+                id: "settings-jstack-thread-name-filter-leading",
+                icon: ArgusIcon::Filter,
+                tooltip: "Jstack 线程名过滤",
+            }),
+            trailing_accessory: Some(InputAccessory {
+                id: "settings-jstack-thread-name-filter-clear",
+                icon: ArgusIcon::Close,
+                tooltip: "清空线程名过滤",
+            }),
+            native_input: Some(native_input),
+        },
+        theme,
+        move |event: &KeyDownEvent, _, cx| {
+            update_settings_app(&key_app, cx, |app, app_cx| {
+                app.handle_settings_jstack_thread_name_filter_key(&event.keystroke, app_cx);
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&click_app, cx, |app, _| {
+                app.focus_settings_jstack_thread_name_filter_input();
+            });
+        },
+        move |event: &InputPointerEvent, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&pointer_app, cx, |app, _| match event.action {
+                InputPointerAction::Begin => app
+                    .begin_settings_jstack_thread_name_filter_pointer_selection(
+                        event.character_index,
+                        event.granularity,
+                    ),
+                InputPointerAction::Extend => app
+                    .update_settings_jstack_thread_name_filter_pointer_selection(
+                        event.character_index,
+                    ),
+                InputPointerAction::Finish => {
+                    app.finish_settings_jstack_thread_name_filter_pointer_selection()
+                }
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&clear_app, cx, |app, _| {
+                app.clear_settings_jstack_thread_name_filter_input();
+            });
+        },
+    ))
+}
+
+/// 渲染 Jstack 完整线程段过滤配置 textarea。
+fn jstack_stack_segment_filter_input_control(
+    snapshot: &SettingsWindowSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    input_focus_handles: &SettingsInputFocusHandles,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    let input_state = snapshot.jstack_stack_segment_filter_input.clone();
+    let key_app = app_handle.clone();
+    let click_app = app_handle.clone();
+    let pointer_app = app_handle.clone();
+    let clear_app = app_handle.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::SettingsJstackStackSegmentFilter,
+        input_focus_handles.jstack_stack_segments.clone(),
+    );
+
+    div().w(px(360.0)).child(render_textarea(
+        Textarea {
+            id: "settings-jstack-stack-segment-filter-input",
+            placeholder: "SocketInputStream.socketRead\n    at java.net.SocketInputStream.read\n||\nUnsafe.park",
+            value: input_state.value.clone(),
+            is_disabled: false,
+            is_focused: input_state.is_focused,
+            cursor_index: input_state.cursor,
+            selection_range: settings_input_selection_range(&input_state),
+            marked_range: input_state.marked_range.clone(),
+            is_pointer_selecting: input_state.selection_drag.is_some(),
+            visible_lines: 5,
+            trailing_accessory: Some(InputAccessory {
+                id: "settings-jstack-stack-segment-filter-clear",
+                icon: ArgusIcon::Close,
+                tooltip: "清空线程段过滤",
+            }),
+            native_input: Some(native_input),
+        },
+        theme,
+        move |event: &KeyDownEvent, _, cx| {
+            update_settings_app(&key_app, cx, |app, app_cx| {
+                app.handle_settings_jstack_stack_segment_filter_key(&event.keystroke, app_cx);
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&click_app, cx, |app, _| {
+                app.focus_settings_jstack_stack_segment_filter_input();
+            });
+        },
+        move |event: &InputPointerEvent, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&pointer_app, cx, |app, _| match event.action {
+                InputPointerAction::Begin => app
+                    .begin_settings_jstack_stack_segment_filter_pointer_selection(
+                        event.character_index,
+                        event.granularity,
+                    ),
+                InputPointerAction::Extend => app
+                    .update_settings_jstack_stack_segment_filter_pointer_selection(
+                        event.character_index,
+                    ),
+                InputPointerAction::Finish => {
+                    app.finish_settings_jstack_stack_segment_filter_pointer_selection()
+                }
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&clear_app, cx, |app, _| {
+                app.clear_settings_jstack_stack_segment_filter_input();
             });
         },
     ))

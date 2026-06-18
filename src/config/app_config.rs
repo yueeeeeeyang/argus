@@ -1,6 +1,6 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：提供外观、日志加载、日志搜索、编码、缓存和升级设置的默认值、校验和 TOML 序列化结构。
 
@@ -18,6 +18,9 @@ pub struct AppConfig {
     /// 日志搜索配置，保存快搜关键字等跨会话搜索偏好。
     #[serde(default)]
     pub log_search: LogSearchConfig,
+    /// 日志显示配置，保存阅读区和线程分析展示偏好。
+    #[serde(default)]
+    pub log_display: LogDisplayConfig,
     /// 编码配置，后续日志读取模块会据此选择默认解码策略。
     #[serde(default)]
     pub encoding: EncodingConfig,
@@ -51,6 +54,10 @@ impl AppConfig {
         self.loader.max_archive_depth = self.loader.max_archive_depth.min(8);
         self.loader.archive_probe_concurrency = self.loader.archive_probe_concurrency.clamp(1, 16);
         self.log_search.quick_keywords = self.log_search.quick_keywords.trim().to_string();
+        self.log_display.jstack_thread_name_filters =
+            normalized_inline_text(self.log_display.jstack_thread_name_filters);
+        self.log_display.jstack_stack_segment_filters =
+            normalized_multiline_text(self.log_display.jstack_stack_segment_filters);
         self.cache.limit_mb = self.cache.limit_mb.clamp(128, 2048);
         if self.encoding.selected.trim().is_empty() {
             self.encoding.selected = EncodingConfig::default().selected;
@@ -70,6 +77,7 @@ impl Default for AppConfig {
             appearance: AppearanceConfig::default(),
             loader: LoaderConfig::default(),
             log_search: LogSearchConfig::default(),
+            log_display: LogDisplayConfig::default(),
             encoding: EncodingConfig::default(),
             cache: CacheConfig::default(),
             upgrade: UpgradeConfig::default(),
@@ -129,6 +137,15 @@ fn default_archive_probe_concurrency() -> usize {
 pub struct LogSearchConfig {
     /// 快搜关键字原始输入，使用英文逗号分隔；解析和去重在搜索启动时执行。
     pub quick_keywords: String,
+}
+
+/// 日志显示配置，保存阅读区和线程日志分析的展示偏好。
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LogDisplayConfig {
+    /// Jstack 线程名过滤关键字，多个关键字可用逗号、分号或竖线分隔。
+    pub jstack_thread_name_filters: String,
+    /// Jstack 完整线程段过滤片段，多个片段使用 `||` 分隔，`\n` 会按换行匹配。
+    pub jstack_stack_segment_filters: String,
 }
 
 /// 编码配置，当前先持久化用户选择，日志正文读取接入后再参与解码。
@@ -204,6 +221,20 @@ fn normalized_optional_text(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// 归一化单行设置文本，清理首尾空白并把回车换行折叠为空格。
+fn normalized_inline_text(value: String) -> String {
+    value.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+/// 归一化多行设置文本，统一换行符并清理首尾空白，保留用户粘贴的堆栈结构。
+fn normalized_multiline_text(value: String) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +254,10 @@ mod tests {
             },
             log_search: LogSearchConfig {
                 quick_keywords: " ERROR, WARN ".to_string(),
+            },
+            log_display: LogDisplayConfig {
+                jstack_thread_name_filters: " main, Attach Listener ".to_string(),
+                jstack_stack_segment_filters: " java.net.SocketInputStream\nread ".to_string(),
             },
             encoding: EncodingConfig {
                 selected: String::new(),
@@ -246,6 +281,14 @@ mod tests {
         assert_eq!(config.loader.max_archive_depth, 8);
         assert_eq!(config.loader.archive_probe_concurrency, 16);
         assert_eq!(config.log_search.quick_keywords, "ERROR, WARN");
+        assert_eq!(
+            config.log_display.jstack_thread_name_filters,
+            "main, Attach Listener"
+        );
+        assert_eq!(
+            config.log_display.jstack_stack_segment_filters,
+            "java.net.SocketInputStream\nread"
+        );
         assert_eq!(config.encoding.selected, "UTF-8");
         assert_eq!(config.cache.limit_mb, 128);
         assert_eq!(
@@ -273,6 +316,15 @@ mod tests {
     #[test]
     fn default_quick_search_keywords_is_empty() {
         assert!(LogSearchConfig::default().quick_keywords.is_empty());
+    }
+
+    /// 验证日志显示配置默认不隐藏任何 Jstack 线程。
+    #[test]
+    fn default_log_display_filters_are_empty() {
+        let config = LogDisplayConfig::default();
+
+        assert!(config.jstack_thread_name_filters.is_empty());
+        assert!(config.jstack_stack_segment_filters.is_empty());
     }
 
     /// 验证默认升级配置不会在未配置服务器时发起自动检查。

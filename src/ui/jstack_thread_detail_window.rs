@@ -1,9 +1,10 @@
 //! 文件职责：渲染 Jstack 线程详情独立窗口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：在无系统标题栏窗口中展示线程完整堆栈，并支持在不同快照间切换同名线程。
 
+use std::borrow::Borrow;
 use std::ops::Range;
 
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
@@ -13,9 +14,10 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use gpui::{
-    AnyElement, Bounds, Context, FontWeight, HighlightStyle, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString,
-    StyledText, Window, canvas, div, point, prelude::*, px, rgb,
+    AnyElement, Bounds, ClipboardItem, Context, FontWeight, HighlightStyle, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
+    ScrollHandle, SharedString, StyledText, TextRun, Window, canvas, div, point, prelude::*, px,
+    rgb,
 };
 
 /// 详情窗口顶部标题栏高度。
@@ -36,6 +38,8 @@ const DETAIL_NAV_BUTTON_SIZE: f32 = 28.0;
 const DETAIL_LINE_NUMBER_WIDTH: f32 = 48.0;
 /// 堆栈正文最小宽度，保证长堆栈在横向滚动中保持阅读节奏。
 const DETAIL_STACK_MIN_WIDTH: f32 = 1080.0;
+/// 堆栈正文左右内边距总和，用于计算真实横向滚动宽度。
+const DETAIL_STACK_TEXT_HORIZONTAL_PADDING: f32 = 24.0;
 /// 堆栈正文字号。
 const DETAIL_STACK_FONT_SIZE: f32 = 12.0;
 /// 堆栈行高，保持与日志阅读区类似的高密度展示。
@@ -88,6 +92,8 @@ pub struct JstackThreadDetailWindow {
     stack_scroll: ScrollHandle,
     /// 当前正在拖拽的滚动条；为空表示没有拖拽。
     scrollbar_drag: Option<DetailScrollbarDrag>,
+    /// 是否已选中线程名，选中后支持复制快捷键并显示高亮反馈。
+    is_thread_name_selected: bool,
 }
 
 impl JstackThreadDetailWindow {
@@ -132,6 +138,7 @@ impl JstackThreadDetailWindow {
             highlighted_line,
             stack_scroll: ScrollHandle::new(),
             scrollbar_drag: None,
+            is_thread_name_selected: false,
         }
     }
 
@@ -160,6 +167,24 @@ impl JstackThreadDetailWindow {
         self.stack_scroll.set_offset(point(px(0.0), px(0.0)));
         self.scrollbar_drag = None;
     }
+
+    /// 选中并复制当前线程详情的线程名。
+    fn select_and_copy_thread_name(&mut self, cx: &mut Context<Self>) {
+        self.is_thread_name_selected = true;
+        let thread_name = self.detail.thread_name.clone();
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name));
+    }
+
+    /// 复制已选中的线程名；若尚未选中，则先选中当前线程名再复制。
+    fn copy_selected_thread_name(&mut self, cx: &mut Context<Self>) {
+        if !self.is_thread_name_selected {
+            self.is_thread_name_selected = true;
+        }
+        let thread_name = self.detail.thread_name.clone();
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name));
+    }
 }
 
 impl Render for JstackThreadDetailWindow {
@@ -177,13 +202,29 @@ impl Render for JstackThreadDetailWindow {
             .font_family(ARGUS_UI_FONT_FAMILY)
             .text_color(rgb(theme.foreground))
             .occlude()
-            .child(render_detail_title_bar(&theme, &self.detail.thread_name))
+            .focusable()
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.modifiers.platform
+                    && event.keystroke.key.eq_ignore_ascii_case("c")
+                {
+                    cx.stop_propagation();
+                    view.copy_selected_thread_name(cx);
+                    cx.notify();
+                }
+            }))
+            .child(render_detail_title_bar(
+                &theme,
+                &self.detail.thread_name,
+                self.is_thread_name_selected,
+                cx,
+            ))
             .child(render_detail_body(
                 &theme,
                 &self.detail,
                 active_occurrence,
                 self.active_index,
                 self.highlighted_line,
+                self.is_thread_name_selected,
                 &self.stack_scroll,
                 window,
                 cx,
@@ -192,8 +233,14 @@ impl Render for JstackThreadDetailWindow {
 }
 
 /// 渲染窗口顶部标题和关闭按钮。
-fn render_detail_title_bar(theme: &AppTheme, thread_name: &str) -> impl IntoElement + use<> {
+fn render_detail_title_bar(
+    theme: &AppTheme,
+    thread_name: &str,
+    is_thread_name_selected: bool,
+    cx: &mut Context<JstackThreadDetailWindow>,
+) -> impl IntoElement + use<> {
     let close_theme = theme.clone();
+    let display_title = format!("线程堆栈 - {thread_name}");
     div()
         .h(px(DETAIL_TITLE_BAR_HEIGHT))
         .px_5()
@@ -211,7 +258,15 @@ fn render_detail_title_bar(theme: &AppTheme, thread_name: &str) -> impl IntoElem
                 .text_color(rgb(theme.foreground))
                 .truncate()
                 .child(render_icon(ArgusIcon::Logs, theme.foreground_muted, 16.0))
-                .child(format!("线程堆栈 - {thread_name}")),
+                .child(render_copyable_detail_thread_name(
+                    "jstack-thread-detail-title-name",
+                    display_title,
+                    is_thread_name_selected,
+                    14.0,
+                    true,
+                    theme,
+                    cx,
+                )),
         )
         .child(render_icon_button(
             "jstack-thread-detail-close",
@@ -226,6 +281,47 @@ fn render_detail_title_bar(theme: &AppTheme, thread_name: &str) -> impl IntoElem
         ))
 }
 
+/// 渲染可选中复制的线程名文本。
+fn render_copyable_detail_thread_name(
+    id: &'static str,
+    label: String,
+    is_selected: bool,
+    font_size: f32,
+    is_bold: bool,
+    theme: &AppTheme,
+    cx: &mut Context<JstackThreadDetailWindow>,
+) -> impl IntoElement + use<> {
+    let tooltip_theme = theme.clone();
+    div()
+        .id(id)
+        .min_w(px(0.0))
+        .px_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .bg(rgb(if is_selected {
+            theme.selection
+        } else {
+            theme.content
+        }))
+        .text_size(px(font_size))
+        .line_height(px(font_size + 6.0))
+        .text_color(rgb(theme.foreground))
+        .truncate()
+        .when(is_bold, |this| this.font_weight(FontWeight::SEMIBOLD))
+        .child(label.clone())
+        .tooltip(move |_, cx| {
+            cx.new(|_| DetailTooltip {
+                label: "点击复制线程名".to_string(),
+                theme: tooltip_theme.clone(),
+            })
+            .into()
+        })
+        .on_click(cx.listener(|view, _, _, cx| {
+            view.select_and_copy_thread_name(cx);
+            cx.notify();
+        }))
+}
+
 /// 渲染详情主体区域，包括快照切换栏、元信息和完整堆栈。
 fn render_detail_body(
     theme: &AppTheme,
@@ -233,8 +329,9 @@ fn render_detail_body(
     active_occurrence: Option<JstackThreadStackOccurrence>,
     active_index: usize,
     highlighted_line: Option<usize>,
+    is_thread_name_selected: bool,
     stack_scroll: &ScrollHandle,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let Some(active_occurrence) = active_occurrence else {
@@ -259,6 +356,7 @@ fn render_detail_body(
             detail,
             &active_occurrence,
             active_index,
+            is_thread_name_selected,
             cx,
         ))
         .child(render_stack_content(
@@ -266,6 +364,7 @@ fn render_detail_body(
             &active_occurrence,
             highlighted_line,
             stack_scroll,
+            window,
             cx,
         ))
         .into_any_element()
@@ -277,6 +376,7 @@ fn render_occurrence_summary(
     detail: &JstackThreadDetail,
     occurrence: &JstackThreadStackOccurrence,
     active_index: usize,
+    is_thread_name_selected: bool,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let total_count = detail.occurrences.len().max(1);
@@ -309,15 +409,15 @@ fn render_occurrence_summary(
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.foreground))
-                        .truncate()
-                        .child(detail.thread_name.clone()),
-                )
+                .child(render_copyable_detail_thread_name(
+                    "jstack-thread-detail-summary-name",
+                    detail.thread_name.clone(),
+                    is_thread_name_selected,
+                    14.0,
+                    true,
+                    theme,
+                    cx,
+                ))
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -414,9 +514,11 @@ fn render_stack_content(
     occurrence: &JstackThreadStackOccurrence,
     highlighted_line: Option<usize>,
     stack_scroll: &ScrollHandle,
+    window: &mut Window,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let lines = occurrence.stack_lines.iter().cloned().collect::<Vec<_>>();
+    let content_width = detail_stack_content_width(&lines, window);
     let scroll_handle = stack_scroll.clone();
 
     div()
@@ -437,22 +539,19 @@ fn render_stack_content(
                 .font_family(ARGUS_LOG_FONT_FAMILY)
                 .text_size(px(DETAIL_STACK_FONT_SIZE))
                 .text_color(rgb(theme.foreground))
-                .child(
-                    div()
-                        .min_w(px(DETAIL_STACK_MIN_WIDTH))
-                        .flex()
-                        .flex_col()
-                        .children(lines.into_iter().enumerate().map(|(index, line)| {
-                            render_stack_line(
-                                theme,
-                                index,
-                                line,
-                                highlighted_line == Some(index),
-                                cx,
-                            )
-                            .into_any_element()
-                        })),
-                ),
+                .child(div().min_w(content_width).flex().flex_col().children(
+                    lines.into_iter().enumerate().map(|(index, line)| {
+                        render_stack_line(
+                            theme,
+                            index,
+                            line,
+                            highlighted_line == Some(index),
+                            content_width,
+                            cx,
+                        )
+                        .into_any_element()
+                    }),
+                )),
         )
         .children(render_detail_scrollbars(&scroll_handle, theme, cx))
 }
@@ -664,12 +763,55 @@ fn render_detail_scrollbar_thumb(
         .into_any_element()
 }
 
+/// 计算堆栈内容真实宽度，保证横向滚动条可以覆盖最长堆栈行。
+fn detail_stack_content_width(lines: &[String], window: &mut Window) -> Pixels {
+    let mut text_style = window.text_style();
+    text_style.font_family = ARGUS_LOG_FONT_FAMILY.into();
+    text_style.font_size = px(DETAIL_STACK_FONT_SIZE).into();
+    let max_text_width = lines
+        .iter()
+        .map(|line| detail_stack_line_text_width(line, &text_style, window))
+        .fold(px(0.0), |max_width, width| max_width.max(width));
+
+    (px(DETAIL_LINE_NUMBER_WIDTH + DETAIL_STACK_TEXT_HORIZONTAL_PADDING) + max_text_width)
+        .max(px(DETAIL_STACK_MIN_WIDTH))
+}
+
+/// 使用 GPUI 字形排版计算单行堆栈文本宽度。
+fn detail_stack_line_text_width(
+    line: &str,
+    text_style: &gpui::TextStyle,
+    window: &mut Window,
+) -> Pixels {
+    if line.is_empty() {
+        return px(0.0);
+    }
+
+    let run = TextRun {
+        len: line.len(),
+        font: text_style.font(),
+        color: text_style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let shaped_line = window.text_system().shape_line(
+        SharedString::from(line.to_string()),
+        text_style.font_size.to_pixels(window.rem_size()),
+        &[run],
+        None,
+    );
+
+    shaped_line.x_for_index(line.len())
+}
+
 /// 渲染单行堆栈，包含行号、点击高亮和语法高亮文本。
 fn render_stack_line(
     theme: &AppTheme,
     line_index: usize,
     line: String,
     is_highlighted: bool,
+    content_width: Pixels,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let row_background = is_highlighted.then_some(theme.current_line);
@@ -679,7 +821,7 @@ fn render_stack_line(
         .id(SharedString::from(format!(
             "jstack-thread-detail-line-{line_index}"
         )))
-        .min_w(px(DETAIL_STACK_MIN_WIDTH))
+        .min_w(content_width)
         .h(px(DETAIL_STACK_LINE_HEIGHT))
         .flex()
         .items_center()

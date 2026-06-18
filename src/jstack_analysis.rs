@@ -1,6 +1,6 @@
 //! 文件职责：实现 Jstack 线程日志解析、聚合和读取入口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：把多个线程栈日志快照聚合为线程频率矩阵，供主内容区分析页签渲染。
 
@@ -95,6 +95,8 @@ pub struct JstackThreadStackOccurrence {
     pub occurrence_index: usize,
     /// 当前线程块完整堆栈行。
     pub stack_lines: Arc<[String]>,
+    /// 当前线程块用于过滤匹配的归一化文本，避免 UI 渲染期反复拼接和小写化堆栈。
+    pub normalized_stack_text: Arc<str>,
 }
 
 /// 线程详情窗口所需的数据快照。
@@ -180,6 +182,89 @@ pub struct JstackAnalysisResult {
     pub total_files: usize,
     /// 解析到的线程样本总数。
     pub total_samples: usize,
+}
+
+/// Jstack 线程过滤器，按线程名关键字和完整线程段片段隐藏分析结果。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct JstackThreadFilter {
+    /// 线程名匹配规则，已转为小写。
+    thread_name_patterns: Vec<JstackThreadNamePattern>,
+    /// 完整线程段匹配片段，已转为小写并处理转义换行。
+    stack_segment_patterns: Vec<String>,
+}
+
+/// Jstack 线程名过滤规则，兼容旧版模糊匹配并扩展 `*` / `?` 通配符。
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum JstackThreadNamePattern {
+    /// 不含通配符的旧规则，按子串模糊匹配。
+    Contains(String),
+    /// 含 `*` 或 `?` 的规则，按完整线程名执行 glob 匹配。
+    Wildcard(String),
+}
+
+impl JstackThreadFilter {
+    /// 从设置页原始文本创建过滤器。
+    ///
+    /// 参数说明：
+    /// - `thread_name_filters`：线程名关键字，支持逗号、分号、竖线和换行分隔。
+    /// - `stack_segment_filters`：完整线程段片段，支持 `||` 分隔多个片段。
+    ///
+    /// 返回值：归一化后的过滤器；空白配置会被忽略。
+    pub fn from_raw(thread_name_filters: &str, stack_segment_filters: &str) -> Self {
+        Self {
+            thread_name_patterns: parse_thread_name_filter_patterns(thread_name_filters),
+            stack_segment_patterns: parse_stack_segment_filter_patterns(stack_segment_filters),
+        }
+    }
+
+    /// 返回过滤器是否没有任何有效规则。
+    pub fn is_empty(&self) -> bool {
+        self.thread_name_patterns.is_empty() && self.stack_segment_patterns.is_empty()
+    }
+
+    /// 判断一个频率行是否命中配置过滤规则。
+    pub fn matches_row(&self, row: &JstackFrequencyRow) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+
+        self.matches_thread_name(&row.thread_name)
+            || row.cells.iter().any(|cell| {
+                cell.stack_occurrences
+                    .iter()
+                    .any(|occurrence| self.matches_stack_text(&occurrence.normalized_stack_text))
+            })
+    }
+
+    /// 判断线程名是否命中任意模糊匹配关键字。
+    fn matches_thread_name(&self, thread_name: &str) -> bool {
+        if self.thread_name_patterns.is_empty() {
+            return false;
+        }
+
+        let normalized_thread_name = thread_name.to_lowercase();
+        self.thread_name_patterns
+            .iter()
+            .any(|pattern| match pattern {
+                JstackThreadNamePattern::Contains(pattern) => {
+                    normalized_thread_name.contains(pattern)
+                }
+                JstackThreadNamePattern::Wildcard(pattern) => {
+                    wildcard_pattern_matches(pattern, &normalized_thread_name)
+                }
+            })
+    }
+
+    /// 判断已归一化的完整线程段是否包含任意配置片段。
+    fn matches_stack_text(&self, normalized_stack_text: &str) -> bool {
+        if self.stack_segment_patterns.is_empty() {
+            return false;
+        }
+
+        self.stack_segment_patterns
+            .iter()
+            .any(|pattern| normalized_stack_text.contains(pattern))
+    }
 }
 
 /// 增量 Jstack 解析器，避免分析大文件时先拼接完整日志文本。
@@ -326,6 +411,9 @@ pub fn build_analysis_result(
                     state: sample.state,
                     occurrence_index,
                     stack_lines: sample.stack_lines.clone(),
+                    normalized_stack_text: normalized_stack_search_text(
+                        sample.stack_lines.as_ref(),
+                    ),
                 });
         }
         per_snapshot_threads.push(threads);
@@ -505,6 +593,79 @@ fn dominant_state(state_counts: &BTreeMap<JstackThreadState, usize>) -> Option<J
         .map(|(state, _)| *state)
 }
 
+/// 解析线程名过滤关键字；过滤适合短词，因此支持常见行内分隔符。
+fn parse_thread_name_filter_patterns(raw: &str) -> Vec<JstackThreadNamePattern> {
+    raw.split(|character: char| matches!(character, ',' | ';' | '|' | '\n' | '\r' | '，' | '；'))
+        .filter_map(|pattern| {
+            let pattern = normalized_filter_pattern(pattern)?;
+            if pattern.contains('*') || pattern.contains('?') {
+                Some(JstackThreadNamePattern::Wildcard(pattern))
+            } else {
+                Some(JstackThreadNamePattern::Contains(pattern))
+            }
+        })
+        .collect()
+}
+
+/// 解析完整线程段过滤片段；使用 `||` 分隔可以保留单个片段中的空格和转义换行。
+fn parse_stack_segment_filter_patterns(raw: &str) -> Vec<String> {
+    raw.split("||")
+        .filter_map(|pattern| normalized_filter_pattern(&unescape_stack_filter_pattern(pattern)))
+        .collect()
+}
+
+/// 归一化过滤片段，空片段返回 `None`。
+fn normalized_filter_pattern(pattern: &str) -> Option<String> {
+    let pattern = pattern.trim().to_lowercase();
+    (!pattern.is_empty()).then_some(pattern)
+}
+
+/// 生成线程块过滤专用文本；分析阶段预计算一次，后续矩阵渲染只做包含判断。
+fn normalized_stack_search_text(stack_lines: &[String]) -> Arc<str> {
+    Arc::<str>::from(stack_lines.join("\n").to_lowercase())
+}
+
+/// 把设置页单行输入中的转义字符还原为真实线程段字符。
+fn unescape_stack_filter_pattern(pattern: &str) -> String {
+    pattern
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+}
+
+/// 使用常见 glob 语义匹配线程名：`*` 匹配任意长度，`?` 匹配单个字符。
+fn wildcard_pattern_matches(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let text = text.chars().collect::<Vec<_>>();
+    let mut pattern_index = 0_usize;
+    let mut text_index = 0_usize;
+    let mut star_index = None;
+    let mut match_after_star = 0_usize;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == '?' || pattern[pattern_index] == text[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == '*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            match_after_star = text_index;
+        } else if let Some(star_index) = star_index {
+            pattern_index = star_index + 1;
+            match_after_star += 1;
+            text_index = match_after_star;
+        } else {
+            return false;
+        }
+    }
+
+    pattern[pattern_index..]
+        .iter()
+        .all(|character| *character == '*')
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -655,6 +816,145 @@ mod tests {
         assert_eq!(result.rows[1].cells[1].count, 0);
         assert_eq!(result.rows[1].cells[1].state, None);
         assert!(result.rows[1].cells[1].stack_occurrences.is_empty());
+    }
+
+    /// 验证线程名过滤使用大小写不敏感的模糊匹配。
+    #[test]
+    fn thread_filter_matches_thread_name_patterns() {
+        let snapshot = parse_jstack_snapshot(
+            SourceId(1),
+            "filter.log",
+            "/tmp/filter.log",
+            r#""Attach Listener" #1
+   java.lang.Thread.State: RUNNABLE
+"business-worker" #2
+   java.lang.Thread.State: RUNNABLE
+"#,
+        );
+        let result = build_analysis_result(vec![snapshot], Vec::new(), 1);
+        let filter = JstackThreadFilter::from_raw("listener", "");
+
+        assert!(
+            filter.matches_row(
+                result
+                    .rows
+                    .iter()
+                    .find(|row| row.thread_name == "Attach Listener")
+                    .expect("应存在 Attach Listener 行")
+            )
+        );
+        assert!(
+            !filter.matches_row(
+                result
+                    .rows
+                    .iter()
+                    .find(|row| row.thread_name == "business-worker")
+                    .expect("应存在业务线程行")
+            )
+        );
+    }
+
+    /// 验证线程名过滤支持 `*` 和 `?` 通配符，并按完整线程名匹配。
+    #[test]
+    fn thread_filter_matches_thread_name_wildcards() {
+        let snapshot = parse_jstack_snapshot(
+            SourceId(1),
+            "wildcard.log",
+            "/tmp/wildcard.log",
+            r#""dasc-jetty-qtp-892335322-126905" #1
+   java.lang.Thread.State: RUNNABLE
+"dasc-jetty-qtp-892335322-17" #2
+   java.lang.Thread.State: RUNNABLE
+"business-worker" #3
+   java.lang.Thread.State: RUNNABLE
+"#,
+        );
+        let result = build_analysis_result(vec![snapshot], Vec::new(), 1);
+        let filter = JstackThreadFilter::from_raw("dasc-jetty-*-??????", "");
+
+        assert!(
+            filter.matches_row(
+                result
+                    .rows
+                    .iter()
+                    .find(|row| row.thread_name == "dasc-jetty-qtp-892335322-126905")
+                    .expect("应存在匹配通配符的线程行")
+            )
+        );
+        assert!(
+            !filter.matches_row(
+                result
+                    .rows
+                    .iter()
+                    .find(|row| row.thread_name == "dasc-jetty-qtp-892335322-17")
+                    .expect("应存在位数不匹配的线程行")
+            )
+        );
+        assert!(
+            !filter.matches_row(
+                result
+                    .rows
+                    .iter()
+                    .find(|row| row.thread_name == "business-worker")
+                    .expect("应存在业务线程行")
+            )
+        );
+    }
+
+    /// 验证完整线程段过滤能匹配转义换行后的堆栈片段。
+    #[test]
+    fn thread_filter_matches_stack_segment_patterns() {
+        let snapshot = parse_jstack_snapshot(
+            SourceId(1),
+            "stack.log",
+            "/tmp/stack.log",
+            r#""socket-reader" #1
+   java.lang.Thread.State: RUNNABLE
+        at java.net.SocketInputStream.socketRead0(Native Method)
+        at java.net.SocketInputStream.socketRead(SocketInputStream.java:116)
+"business-worker" #2
+   java.lang.Thread.State: RUNNABLE
+        at app.Business.run(Business.java:10)
+"#,
+        );
+        let result = build_analysis_result(vec![snapshot], Vec::new(), 1);
+        let filter = JstackThreadFilter::from_raw(
+            "",
+            "java.net.SocketInputStream.socketRead0(Native Method)\\n        at java.net.SocketInputStream.socketRead",
+        );
+        let socket_occurrence = result
+            .rows
+            .iter()
+            .find(|row| row.thread_name == "socket-reader")
+            .expect("应存在 socket-reader 行")
+            .cells[0]
+            .stack_occurrences
+            .first()
+            .expect("应存在 socket-reader 堆栈记录");
+
+        assert!(
+            filter.matches_row(
+                result
+                    .rows
+                    .iter()
+                    .find(|row| row.thread_name == "socket-reader")
+                    .expect("应存在 socket-reader 行")
+            )
+        );
+        assert!(
+            !filter.matches_row(
+                result
+                    .rows
+                    .iter()
+                    .find(|row| row.thread_name == "business-worker")
+                    .expect("应存在业务线程行")
+            )
+        );
+        assert!(
+            socket_occurrence
+                .normalized_stack_text
+                .contains("socketinputstream.socketread0")
+        );
     }
 
     /// 验证通过 LogFileReader 的读取集成路径，并记录失败来源。

@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -126,7 +126,8 @@ impl Default for ConfigManager {
 mod tests {
     use super::*;
     use crate::config::{
-        AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogSearchConfig, UpgradeConfig,
+        AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogDisplayConfig,
+        LogSearchConfig, UpgradeConfig,
     };
 
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
@@ -166,6 +167,10 @@ mod tests {
             log_search: LogSearchConfig {
                 quick_keywords: "ERROR,WARN".to_string(),
             },
+            log_display: LogDisplayConfig {
+                jstack_thread_name_filters: "Attach Listener,Signal Dispatcher".to_string(),
+                jstack_stack_segment_filters: "Unsafe.park||SocketInputStream\\nread".to_string(),
+            },
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
             },
@@ -191,6 +196,14 @@ mod tests {
         assert_eq!(loaded.loader.archive_probe_concurrency, 6);
         assert!(loaded.loader.follow_symlinks);
         assert_eq!(loaded.log_search.quick_keywords, "ERROR,WARN");
+        assert_eq!(
+            loaded.log_display.jstack_thread_name_filters,
+            "Attach Listener,Signal Dispatcher"
+        );
+        assert_eq!(
+            loaded.log_display.jstack_stack_segment_filters,
+            "Unsafe.park||SocketInputStream\\nread"
+        );
         assert_eq!(loaded.encoding.selected, "GBK");
         assert!(!loaded.cache.enabled);
         assert_eq!(loaded.cache.limit_mb, 1024);

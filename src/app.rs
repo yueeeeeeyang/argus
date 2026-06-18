@@ -1,6 +1,6 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、Jstack 分析、升级状态、未读取内容提示和保留的日志样例数据。
 
@@ -12,7 +12,7 @@ mod source_picker;
 mod source_search;
 mod text_input;
 
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 #[cfg(test)]
@@ -22,8 +22,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 use crate::config::{AppConfig, ConfigManager};
 use crate::highlight::HighlightCache;
 use crate::jstack_analysis::{
-    JstackAnalysisResult, JstackAnalysisTarget, JstackThreadDetail, JstackThreadState,
-    analyze_jstack_targets,
+    JstackAnalysisResult, JstackAnalysisTarget, JstackThreadDetail, JstackThreadFilter,
+    JstackThreadState, analyze_jstack_targets,
 };
 #[cfg(test)]
 use crate::loader::SourceMetadata;
@@ -50,8 +50,8 @@ use crate::updater::{
     current_platform_os,
 };
 use gpui::{
-    AppContext, Bounds, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point, Render,
-    Window, WindowBounds, WindowHandle, WindowOptions, px, size,
+    AppContext, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point,
+    Render, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -278,6 +278,10 @@ pub enum AppTextInputTarget {
     LogSearch(LogSearchInputKind),
     /// 设置窗口快搜关键字输入框。
     SettingsQuickKeywords,
+    /// 设置窗口 Jstack 线程名过滤输入框。
+    SettingsJstackThreadNameFilter,
+    /// 设置窗口 Jstack 完整线程段过滤输入框。
+    SettingsJstackStackSegmentFilter,
     /// 设置窗口升级服务器输入框。
     SettingsUpgradeServer,
     /// 设置窗口升级验签公钥输入框。
@@ -669,10 +673,50 @@ pub struct JstackAnalysisState {
     pub generation: usize,
     /// 当前启用的线程状态筛选项；默认仅展示 RUNNABLE。
     pub active_states: BTreeSet<JstackThreadState>,
+    /// 是否启用设置页配置的线程堆栈过滤；新分析页默认开启。
+    pub is_thread_filter_enabled: bool,
+    /// 当前在分析矩阵中选中的线程名，用于高亮和复制。
+    pub selected_thread_name: Option<String>,
+    /// 当前筛选条件下可见的结果行索引，避免矩阵滚动渲染时重复扫描全部线程。
+    pub visible_row_indices: Vec<usize>,
+    /// 当前线程堆栈配置过滤隐藏的线程数量，用于标题统计展示。
+    pub filtered_row_count: usize,
     /// 线程频率矩阵行虚拟列表滚动句柄。
     pub row_scroll: UniformListScrollHandle,
     /// 当前任务状态。
     pub task_state: JstackAnalysisTaskState,
+}
+
+impl JstackAnalysisState {
+    /// 根据当前状态筛选和配置过滤规则重建可见行缓存。
+    ///
+    /// 参数说明：
+    /// - `thread_filter`：设置页当前配置的线程过滤器。
+    ///
+    /// 返回值：无；结果会写入 `visible_row_indices` 和 `filtered_row_count`。
+    pub fn rebuild_visible_row_cache(&mut self, thread_filter: &JstackThreadFilter) {
+        let JstackAnalysisTaskState::Ready(result) = &self.task_state else {
+            self.visible_row_indices.clear();
+            self.filtered_row_count = 0;
+            return;
+        };
+
+        let should_filter_threads = self.is_thread_filter_enabled && !thread_filter.is_empty();
+        self.filtered_row_count = if should_filter_threads {
+            result
+                .rows
+                .iter()
+                .filter(|row| thread_filter.matches_row(row))
+                .count()
+        } else {
+            0
+        };
+        self.visible_row_indices = visible_jstack_row_indices(
+            result,
+            &self.active_states,
+            should_filter_threads.then_some(thread_filter),
+        );
+    }
 }
 
 impl Default for LogTabViewState {
@@ -691,6 +735,38 @@ impl Default for LogTabViewState {
             last_line_marker_jump: None,
         }
     }
+}
+
+/// 返回当前 Jstack 筛选条件下需要渲染的结果行索引。
+fn visible_jstack_row_indices(
+    result: &JstackAnalysisResult,
+    active_states: &BTreeSet<JstackThreadState>,
+    thread_filter: Option<&JstackThreadFilter>,
+) -> Vec<usize> {
+    if active_states.is_empty() {
+        return Vec::new();
+    }
+
+    result
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            if thread_filter.is_some_and(|filter| filter.matches_row(row)) {
+                return None;
+            }
+
+            row.cells
+                .iter()
+                .any(|cell| {
+                    cell.count > 0
+                        && cell
+                            .state
+                            .is_some_and(|state| active_states.contains(&state))
+                })
+                .then_some(index)
+        })
+        .collect()
 }
 
 /// 来源树占位节点，用于模拟文件、目录和压缩包结构。
@@ -873,6 +949,10 @@ pub struct ArgusApp {
     pub is_theme_dropdown_open: bool,
     /// 设置窗口“快搜关键字”输入框状态。
     pub settings_quick_keywords_input: SettingsTextInputState,
+    /// 设置窗口“Jstack 线程名过滤”输入框状态。
+    pub settings_jstack_thread_name_filter_input: SettingsTextInputState,
+    /// 设置窗口“Jstack 线程段过滤”输入框状态。
+    pub settings_jstack_stack_segment_filter_input: SettingsTextInputState,
     /// 设置窗口“升级服务器”输入框状态。
     pub settings_upgrade_server_input: SettingsTextInputState,
     /// 设置窗口“升级验签公钥”输入框状态。
@@ -927,6 +1007,10 @@ impl ArgusApp {
         let is_cache_enabled = config.cache.enabled;
         let cache_limit_mb = config.cache.limit_mb.clamp(128, 2048);
         let quick_keywords_input_value = config.log_search.quick_keywords.clone();
+        let jstack_thread_name_filter_input_value =
+            config.log_display.jstack_thread_name_filters.clone();
+        let jstack_stack_segment_filter_input_value =
+            config.log_display.jstack_stack_segment_filters.clone();
         let upgrade_server_input_value = config.upgrade.server_url.clone();
         let upgrade_public_key_input_value = config.upgrade.public_key_base64.clone();
         config.appearance.theme_mode = selected_theme_id.clone();
@@ -1004,6 +1088,12 @@ impl ArgusApp {
             is_theme_dropdown_open: false,
             settings_quick_keywords_input: SettingsTextInputState::from_value(
                 quick_keywords_input_value,
+            ),
+            settings_jstack_thread_name_filter_input: SettingsTextInputState::from_value(
+                jstack_thread_name_filter_input_value,
+            ),
+            settings_jstack_stack_segment_filter_input: SettingsTextInputState::from_value(
+                jstack_stack_segment_filter_input_value,
             ),
             settings_upgrade_server_input: SettingsTextInputState::from_value(
                 upgrade_server_input_value,
@@ -1830,6 +1920,22 @@ impl ArgusApp {
         self.jstack_analyses.get(&analysis_id)
     }
 
+    /// 返回当前设置页配置的 Jstack 线程过滤器。
+    pub fn jstack_thread_filter(&self) -> JstackThreadFilter {
+        JstackThreadFilter::from_raw(
+            &self.config.log_display.jstack_thread_name_filters,
+            &self.config.log_display.jstack_stack_segment_filters,
+        )
+    }
+
+    /// 根据当前配置重建所有 Jstack 分析页的可见行缓存。
+    pub fn rebuild_all_jstack_visible_row_caches(&mut self) {
+        let thread_filter = self.jstack_thread_filter();
+        for state in self.jstack_analyses.values_mut() {
+            state.rebuild_visible_row_cache(&thread_filter);
+        }
+    }
+
     /// 根据频率矩阵格子定位线程详情，并延迟组装完整堆栈记录。
     ///
     /// 参数说明：
@@ -1989,6 +2095,10 @@ impl ArgusApp {
                 targets,
                 generation,
                 active_states: BTreeSet::from([JstackThreadState::Runnable]),
+                is_thread_filter_enabled: true,
+                selected_thread_name: None,
+                visible_row_indices: Vec::new(),
+                filtered_row_count: 0,
                 row_scroll: UniformListScrollHandle::new(),
                 task_state: JstackAnalysisTaskState::Loading {
                     message: "正在分析 Jstack 日志文件".to_string(),
@@ -2006,6 +2116,7 @@ impl ArgusApp {
         analysis_id: usize,
         thread_state: JstackThreadState,
     ) {
+        let thread_filter = self.jstack_thread_filter();
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Jstack 分析结果".to_string();
             return;
@@ -2014,6 +2125,7 @@ impl ArgusApp {
         if !state.active_states.insert(thread_state) {
             state.active_states.remove(&thread_state);
         }
+        state.rebuild_visible_row_cache(&thread_filter);
         state.row_scroll = UniformListScrollHandle::new();
         self.placeholder_notice = if state.active_states.is_empty() {
             "已隐藏全部 Jstack 线程状态".to_string()
@@ -2025,6 +2137,63 @@ impl ArgusApp {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("Jstack 状态筛选：{labels}")
+        };
+    }
+
+    /// 选中并复制 Jstack 分析矩阵中的线程名。
+    ///
+    /// 参数说明：
+    /// - `analysis_id`：分析页 ID。
+    /// - `thread_name`：用户点击的线程名。
+    /// - `cx`：应用上下文，用于写入系统剪贴板。
+    pub fn select_and_copy_jstack_thread_name(
+        &mut self,
+        analysis_id: usize,
+        thread_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Jstack 分析结果".to_string();
+            return;
+        };
+
+        state.selected_thread_name = Some(thread_name.clone());
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name.clone()));
+        self.placeholder_notice = format!("已复制线程名：{thread_name}");
+    }
+
+    /// 复制当前 Jstack 分析页已选中的线程名。
+    pub fn copy_selected_jstack_thread_name(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+        let Some(thread_name) = self
+            .jstack_analyses
+            .get(&analysis_id)
+            .and_then(|state| state.selected_thread_name.clone())
+        else {
+            self.placeholder_notice = "请先选中一个 Jstack 线程名".to_string();
+            return;
+        };
+
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name.clone()));
+        self.placeholder_notice = format!("已复制线程名：{thread_name}");
+    }
+
+    /// 切换 Jstack 分析页是否应用设置页中的线程堆栈过滤规则。
+    pub fn toggle_jstack_thread_filter(&mut self, analysis_id: usize) {
+        let thread_filter = self.jstack_thread_filter();
+        let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Jstack 分析结果".to_string();
+            return;
+        };
+
+        state.is_thread_filter_enabled = !state.is_thread_filter_enabled;
+        state.rebuild_visible_row_cache(&thread_filter);
+        state.row_scroll = UniformListScrollHandle::new();
+        self.placeholder_notice = if state.is_thread_filter_enabled {
+            "已启用 Jstack 配置过滤".to_string()
+        } else {
+            "已关闭 Jstack 配置过滤".to_string()
         };
     }
 
@@ -2096,6 +2265,7 @@ impl ArgusApp {
         generation: usize,
         result: JstackAnalysisResult,
     ) {
+        let thread_filter = self.jstack_thread_filter();
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             return;
         };
@@ -2107,6 +2277,7 @@ impl ArgusApp {
         let snapshot_count = result.snapshot_count();
         let skipped_count = result.skipped_count();
         state.task_state = JstackAnalysisTaskState::Ready(result);
+        state.rebuild_visible_row_cache(&thread_filter);
         self.placeholder_notice = format!(
             "Jstack 分析完成：{snapshot_count} 个快照，{thread_count} 个线程，跳过 {skipped_count} 个文件"
         );
@@ -3201,11 +3372,38 @@ mod tests {
             state.active_states,
             BTreeSet::from([JstackThreadState::Runnable])
         );
+        assert!(state.is_thread_filter_enabled);
         assert!(matches!(
             state.task_state,
             JstackAnalysisTaskState::Loading { .. }
         ));
         assert_eq!(app.active_tab_title(), "Jstack分析(2)");
+    }
+
+    /// 验证 Jstack 配置过滤开关默认开启，并可在分析页内临时关闭。
+    #[test]
+    fn toggling_jstack_thread_filter_updates_analysis_state() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_jstack_analysis_tab_state(targets)
+            .expect("应能创建 Jstack 分析 tab");
+
+        assert!(
+            app.jstack_analysis_state(analysis_id)
+                .expect("应保存分析状态")
+                .is_thread_filter_enabled
+        );
+
+        app.toggle_jstack_thread_filter(analysis_id);
+
+        assert!(
+            !app.jstack_analysis_state(analysis_id)
+                .expect("应保存分析状态")
+                .is_thread_filter_enabled
+        );
+        assert_eq!(app.placeholder_notice, "已关闭 Jstack 配置过滤");
     }
 
     /// 验证 Jstack 状态筛选开关可以增删状态并重置滚动句柄。
@@ -3695,6 +3893,8 @@ mod tests {
         app.adjust_archive_probe_concurrency(2);
         app.toggle_follow_symlinks();
         app.update_settings_quick_keywords("ERROR,WARN,timeout".to_string());
+        app.update_settings_jstack_thread_name_filter("Attach Listener".to_string());
+        app.update_settings_jstack_stack_segment_filter("Unsafe.park||Socket\nread".to_string());
 
         let saved =
             ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
@@ -3705,6 +3905,14 @@ mod tests {
         assert_eq!(saved.loader.archive_probe_concurrency, 6);
         assert!(saved.loader.follow_symlinks);
         assert_eq!(saved.log_search.quick_keywords, "ERROR,WARN,timeout");
+        assert_eq!(
+            saved.log_display.jstack_thread_name_filters,
+            "Attach Listener"
+        );
+        assert_eq!(
+            saved.log_display.jstack_stack_segment_filters,
+            "Unsafe.park||Socket\nread"
+        );
     }
 
     /// 验证新日志来源加载成功后会替换旧来源，并清理旧日志相关界面状态。

@@ -1,8 +1,8 @@
 //! 文件职责：提供 Argus 界面可复用的紧凑输入框组件。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
-//! 主要功能：统一输入框尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
+//! 主要功能：统一输入框和多行文本域尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
 
 use crate::text_selection::{
     NativeTextEdit, TextSelectionGranularity, byte_index_for_character, character_count,
@@ -21,6 +21,9 @@ use gpui::{
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
+
+/// 单行输入框自动横向滚动时给光标保留的可视边距。
+const INPUT_HORIZONTAL_SCROLL_MARGIN: f32 = 8.0;
 
 /// 输入框尺寸规格，便于不同工具栏复用同一组件。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +98,35 @@ pub struct Input {
     pub size: InputSize,
     /// 前置图标附件。
     pub leading_accessory: Option<InputAccessory>,
+    /// 后置可点击图标附件。
+    pub trailing_accessory: Option<InputAccessory>,
+    /// 系统文本输入桥接配置；为空时退回按键事件输入。
+    pub native_input: Option<NativeInput>,
+}
+
+/// 多行文本域渲染配置；业务输入状态由调用方维护。
+#[derive(Clone)]
+pub struct Textarea {
+    /// 文本域稳定元素 ID。
+    pub id: &'static str,
+    /// 文本域占位提示。
+    pub placeholder: &'static str,
+    /// 文本域当前展示值。
+    pub value: String,
+    /// 文本域是否禁用。
+    pub is_disabled: bool,
+    /// 文本域是否聚焦；聚焦时展示光标和选区。
+    pub is_focused: bool,
+    /// 当前光标字符位置。
+    pub cursor_index: usize,
+    /// 当前选区字符范围。
+    pub selection_range: Option<Range<usize>>,
+    /// 输入法 marked text 字符范围，用于候选态替换和候选窗定位。
+    pub marked_range: Option<Range<usize>>,
+    /// 当前文本域是否正在进行鼠标拖拽选择。
+    pub is_pointer_selecting: bool,
+    /// 文本域可见行数，内容超出后通过滚动条查看。
+    pub visible_lines: usize,
     /// 后置可点击图标附件。
     pub trailing_accessory: Option<InputAccessory>,
     /// 系统文本输入桥接配置；为空时退回按键事件输入。
@@ -278,6 +310,184 @@ pub fn render_input(
         })
 }
 
+/// 渲染通用多行文本域，并将键盘输入、鼠标选择和清空按钮事件交给调用方处理。
+///
+/// 参数说明：
+/// - `textarea`：文本域视觉和展示值配置。
+/// - `theme`：当前主题令牌。
+/// - `on_key_down`：键盘输入回调，通常更新调用方的本地状态。
+/// - `on_click`：点击文本域回调，通常负责聚焦业务输入状态。
+/// - `on_pointer_select`：鼠标选择回调，组件负责把位置转换为字符索引。
+/// - `on_trailing_click`：后置附件点击回调，未配置后置附件时不会触发。
+///
+/// 返回值：GPUI 元素树；组件自身不保存业务状态。
+pub fn render_textarea(
+    textarea: Textarea,
+    theme: &AppTheme,
+    on_key_down: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_pointer_select: impl Fn(&InputPointerEvent, &mut Window, &mut App) + 'static,
+    on_trailing_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let font_size = 13.0_f32;
+    let line_height = 18.0_f32;
+    let vertical_padding = 8.0_f32;
+    let horizontal_padding = 8.0_f32;
+    let trailing_button_size = 24.0_f32;
+    let visible_lines = textarea.visible_lines.max(3);
+    let height = line_height * visible_lines as f32 + vertical_padding * 2.0;
+    // 失焦后隐藏右侧清除按钮，并同步收回右侧预留空间。
+    let visible_trailing_accessory = textarea
+        .trailing_accessory
+        .filter(|_| textarea.is_focused && !textarea.is_disabled);
+    let right_padding = if visible_trailing_accessory.is_some() {
+        trailing_button_size + horizontal_padding
+    } else {
+        horizontal_padding
+    };
+    let display_text = if textarea.value.is_empty() {
+        textarea.placeholder.to_string()
+    } else {
+        textarea.value.clone()
+    };
+    let text_color = if textarea.value.is_empty() {
+        theme.foreground_muted
+    } else {
+        theme.foreground
+    };
+    let cursor_index = textarea.cursor_index.min(character_count(&textarea.value));
+    let selection_range = textarea
+        .selection_range
+        .clone()
+        .filter(|range| range.start < range.end);
+    let marked_range = textarea
+        .marked_range
+        .clone()
+        .filter(|range| range.start < range.end);
+    let on_pointer_select = Rc::new(on_pointer_select);
+    let pointer_value = textarea.value.clone();
+    let native_input = textarea.native_input.clone();
+    let native_input_for_focus = native_input.clone();
+    let native_input_for_click = native_input.clone();
+    let native_input_for_pointer = native_input.clone();
+    let native_input_for_key = native_input.clone();
+    let content_lines = textarea_text_lines(if textarea.value.is_empty() {
+        &display_text
+    } else {
+        &textarea.value
+    });
+    let content_line_count = content_lines.len().max(visible_lines);
+    let content_height = content_line_count as f32 * line_height;
+    let content_width = content_lines
+        .iter()
+        .map(|line| character_count(&line.text) as f32 * font_size * 0.65 + 8.0)
+        .fold(0.0_f32, f32::max);
+
+    div()
+        .id(textarea.id)
+        .h(px(height))
+        .w_full()
+        .relative()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.content))
+        .occlude()
+        .text_size(px(font_size))
+        .text_color(rgb(text_color))
+        .when(!textarea.is_disabled, |this| {
+            let element = this
+                .focusable()
+                .hover({
+                    let hover_border_color = theme.foreground_muted;
+                    move |this| this.border_color(rgb(hover_border_color))
+                })
+                .on_key_down(move |event, window, cx| {
+                    if native_input_for_key.is_some() && is_plain_text_key(event) {
+                        return;
+                    }
+                    on_key_down(event, window, cx);
+                })
+                .on_click(move |event, window, cx| {
+                    if let Some(native_input) = native_input_for_click.as_ref() {
+                        native_input.focus_handle.focus(window);
+                    }
+                    on_click(event, window, cx);
+                });
+            if let Some(native_input) = native_input_for_focus.as_ref() {
+                element.track_focus(&native_input.focus_handle)
+            } else {
+                element
+            }
+        })
+        .when(textarea.is_disabled, |this| this.opacity(0.55))
+        .child(
+            div()
+                .absolute()
+                .left(px(horizontal_padding))
+                .right(px(right_padding))
+                .top(px(vertical_padding))
+                .bottom(px(vertical_padding))
+                .child(
+                    div()
+                        .id((textarea.id, 14usize))
+                        .size_full()
+                        .overflow_scroll()
+                        .scrollbar_width(px(6.0))
+                        .child(
+                            div()
+                                .relative()
+                                .h(px(content_height))
+                                .w_full()
+                                .min_w(px(content_width))
+                                .child(render_textarea_text(
+                                    textarea.id,
+                                    &textarea.value,
+                                    &display_text,
+                                    font_size,
+                                    line_height,
+                                    cursor_index,
+                                    selection_range,
+                                    marked_range,
+                                    textarea.is_focused,
+                                    text_color,
+                                    theme.selection,
+                                    theme.foreground,
+                                ))
+                                .child(render_textarea_pointer_layer(
+                                    textarea.id,
+                                    pointer_value,
+                                    font_size,
+                                    line_height,
+                                    cursor_index,
+                                    textarea.selection_range.clone(),
+                                    textarea.marked_range.clone(),
+                                    textarea.is_pointer_selecting,
+                                    on_pointer_select,
+                                    native_input_for_pointer,
+                                )),
+                        ),
+                ),
+        )
+        .when_some(visible_trailing_accessory, |this, accessory| {
+            this.child(
+                div()
+                    .absolute()
+                    .right(px(4.0))
+                    .top(px(4.0))
+                    .child(render_icon_button(
+                        accessory.id,
+                        accessory.icon,
+                        accessory.tooltip,
+                        false,
+                        IconButtonSize::Tiny,
+                        theme,
+                        on_trailing_click,
+                    )),
+            )
+        })
+}
+
 /// 判断是否应交给系统输入法处理的普通文本键。
 fn is_plain_text_key(event: &KeyDownEvent) -> bool {
     event.keystroke.key_char.as_ref().is_some_and(|key_char| {
@@ -338,6 +548,16 @@ fn render_editable_text(
                             .flatten(),
                         window,
                     );
+                    let scroll_x = if is_placeholder {
+                        px(0.0)
+                    } else {
+                        input_scroll_x_for_shaped_line(
+                            &value_for_canvas,
+                            cursor_index,
+                            &shaped_line,
+                            bounds.size.width,
+                        )
+                    };
 
                     if !is_placeholder && let Some(range) = selection_range_for_canvas.as_ref() {
                         paint_input_selection(
@@ -345,12 +565,14 @@ fn render_editable_text(
                             range.clone(),
                             &shaped_line,
                             bounds,
+                            scroll_x,
                             selection_background,
                             window,
                         );
                     }
 
-                    let _ = shaped_line.paint(bounds.origin, bounds.size.height, window, cx);
+                    let text_origin = point(bounds.left() - scroll_x, bounds.top());
+                    let _ = shaped_line.paint(text_origin, bounds.size.height, window, cx);
                 },
             )
             .size_full(),
@@ -385,11 +607,16 @@ fn render_caret(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, _| {
-                    let caret_x =
-                        caret_x_for_character_index(&value, cursor_index, font_size, window);
+                    let (caret_x, scroll_x) = caret_x_and_scroll_for_character_index(
+                        &value,
+                        cursor_index,
+                        font_size,
+                        bounds.size.width,
+                        window,
+                    );
                     window.paint_quad(fill(
                         Bounds::new(
-                            point(bounds.left() + caret_x, bounds.top() + px(1.0)),
+                            point(bounds.left() + caret_x - scroll_x, bounds.top() + px(1.0)),
                             size(px(1.0), px(16.0)),
                         ),
                         rgb(cursor_color),
@@ -477,6 +704,7 @@ fn paint_input_selection(
     range: Range<usize>,
     shaped_line: &ShapedLine,
     bounds: Bounds<Pixels>,
+    scroll_x: Pixels,
     selection_background: u32,
     window: &mut Window,
 ) {
@@ -488,28 +716,33 @@ fn paint_input_selection(
 
     window.paint_quad(fill(
         Bounds::from_corners(
-            point(bounds.left() + start_x, bounds.top() + px(1.0)),
-            point(bounds.left() + end_x, bounds.bottom() - px(1.0)),
+            point(bounds.left() + start_x - scroll_x, bounds.top() + px(1.0)),
+            point(bounds.left() + end_x - scroll_x, bounds.bottom() - px(1.0)),
         ),
         rgb(selection_background),
     ));
 }
 
-/// 使用 GPUI 实际 shaped line 计算光标位置，保证显示和鼠标命中完全对齐。
-fn caret_x_for_character_index(
+/// 使用 GPUI 实际 shaped line 计算光标位置和横向滚动量，保证显示和鼠标命中完全对齐。
+fn caret_x_and_scroll_for_character_index(
     value: &str,
     cursor_index: usize,
     font_size: f32,
+    viewport_width: Pixels,
     window: &mut Window,
-) -> Pixels {
+) -> (Pixels, Pixels) {
     if value.is_empty() {
-        return px(0.0);
+        return (px(0.0), px(0.0));
     }
 
     let color = window.text_style().color;
     let shaped_line = shape_input_line(value, font_size, color, None, window);
+    let cursor_index = cursor_index.min(character_count(value));
+    let caret_x = caret_x_for_shaped_character_index(value, cursor_index, &shaped_line);
+    let scroll_x =
+        input_scroll_x_for_shaped_line(value, cursor_index, &shaped_line, viewport_width);
 
-    caret_x_for_shaped_character_index(value, cursor_index, &shaped_line)
+    (caret_x, scroll_x)
 }
 
 /// 返回指定字符索引对应的 shaped line 横坐标。
@@ -519,6 +752,65 @@ fn caret_x_for_shaped_character_index(
     shaped_line: &ShapedLine,
 ) -> Pixels {
     shaped_line.x_for_index(byte_index_for_character(value, cursor_index))
+}
+
+/// 根据当前光标和文本宽度计算单行输入框的横向滚动量。
+fn input_scroll_x_for_shaped_line(
+    value: &str,
+    cursor_index: usize,
+    shaped_line: &ShapedLine,
+    viewport_width: Pixels,
+) -> Pixels {
+    if value.is_empty() {
+        return px(0.0);
+    }
+
+    let text_length = character_count(value);
+    let caret_x =
+        caret_x_for_shaped_character_index(value, cursor_index.min(text_length), shaped_line);
+    let content_width = caret_x_for_shaped_character_index(value, text_length, shaped_line);
+
+    input_scroll_x_for_caret(caret_x, content_width, viewport_width)
+}
+
+/// 根据光标位置、内容宽度和视口宽度得到横向滚动量；该纯计算方便测试边界。
+fn input_scroll_x_for_caret(
+    caret_x: Pixels,
+    content_width: Pixels,
+    viewport_width: Pixels,
+) -> Pixels {
+    if viewport_width <= px(0.0) || content_width <= viewport_width {
+        return px(0.0);
+    }
+
+    let margin = px(INPUT_HORIZONTAL_SCROLL_MARGIN).min(viewport_width / 2.0);
+    // 末尾光标需要额外尾部空间，否则文本宽度刚好贴齐视口右侧时，1px 光标会被裁剪。
+    let max_scroll = (content_width + margin - viewport_width).max(px(0.0));
+    let visible_right = viewport_width - margin;
+    if caret_x <= visible_right {
+        px(0.0)
+    } else {
+        (caret_x + margin - viewport_width)
+            .max(px(0.0))
+            .min(max_scroll)
+    }
+}
+
+/// 根据当前输入框快照计算横向滚动量，鼠标命中和输入法候选框定位都复用该偏移。
+fn input_scroll_x_for_value(
+    value: &str,
+    cursor_index: usize,
+    font_size: f32,
+    viewport_width: Pixels,
+    window: &mut Window,
+) -> Pixels {
+    if value.is_empty() {
+        return px(0.0);
+    }
+
+    let color = window.text_style().color;
+    let shaped_line = shape_input_line(value, font_size, color, None, window);
+    input_scroll_x_for_shaped_line(value, cursor_index, &shaped_line, viewport_width)
 }
 
 /// 渲染输入框透明命中层，用于把鼠标选择转换成字符索引。
@@ -576,6 +868,7 @@ fn render_pointer_layer(
                             let character_index = input_character_index_from_pointer(
                                 &value,
                                 font_size,
+                                cursor_index,
                                 event.position.x,
                                 bounds,
                                 window,
@@ -606,7 +899,308 @@ fn render_pointer_layer(
                             let character_index = input_character_index_from_pointer(
                                 &value,
                                 font_size,
+                                cursor_index,
                                 event.position.x,
+                                bounds,
+                                window,
+                            );
+                            on_pointer_select(
+                                &InputPointerEvent {
+                                    action: InputPointerAction::Extend,
+                                    character_index,
+                                    granularity: TextSelectionGranularity::Character,
+                                },
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let on_pointer_select = on_pointer_select.clone();
+                        move |event: &MouseUpEvent, phase, window, cx| {
+                            if !phase.bubble()
+                                || event.button != MouseButton::Left
+                                || !is_pointer_selecting
+                            {
+                                return;
+                            }
+
+                            on_pointer_select(
+                                &InputPointerEvent {
+                                    action: InputPointerAction::Finish,
+                                    character_index: 0,
+                                    granularity: TextSelectionGranularity::Character,
+                                },
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+}
+
+/// 文本域单行布局信息，保存该行在完整文本中的字符范围。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TextareaLine {
+    /// 行内展示文本，不包含换行符。
+    text: String,
+    /// 行首在完整文本中的字符索引。
+    start: usize,
+    /// 行尾在完整文本中的字符索引，不包含换行符。
+    end: usize,
+}
+
+/// 渲染文本域多行文本、跨行选区、marked text 和光标。
+fn render_textarea_text(
+    textarea_id: &'static str,
+    value: &str,
+    display_text: &str,
+    font_size: f32,
+    line_height: f32,
+    cursor_index: usize,
+    selection_range: Option<Range<usize>>,
+    marked_range: Option<Range<usize>>,
+    is_focused: bool,
+    text_color: u32,
+    selection_background: u32,
+    cursor_color: u32,
+) -> impl IntoElement {
+    let value = value.to_string();
+    let display_text = display_text.to_string();
+    let is_placeholder = value.is_empty();
+    let painted_text = if is_placeholder {
+        display_text.clone()
+    } else {
+        value.clone()
+    };
+    let lines = textarea_text_lines(&painted_text);
+    let lines_for_canvas = lines.clone();
+    let lines_for_caret = lines.clone();
+    let value_for_canvas = value.clone();
+    let painted_text_for_canvas = painted_text.clone();
+    let selection_range_for_canvas = selection_range.clone();
+    let marked_range_for_canvas = marked_range.clone();
+
+    div()
+        .relative()
+        .size_full()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window: &mut Window, cx| {
+                    if painted_text_for_canvas.is_empty() {
+                        return;
+                    }
+
+                    for (line_index, line) in lines_for_canvas.iter().enumerate() {
+                        let line_origin = point(
+                            bounds.left(),
+                            bounds.top() + px(line_height * line_index as f32),
+                        );
+                        let shaped_line = shape_input_line(
+                            &line.text,
+                            font_size,
+                            rgb(text_color).into(),
+                            (!is_placeholder)
+                                .then(|| {
+                                    textarea_local_range(
+                                        line,
+                                        marked_range_for_canvas.clone(),
+                                        &value_for_canvas,
+                                    )
+                                })
+                                .flatten(),
+                            window,
+                        );
+
+                        if !is_placeholder
+                            && let Some(local_range) = textarea_local_range(
+                                line,
+                                selection_range_for_canvas.clone(),
+                                &value_for_canvas,
+                            )
+                        {
+                            paint_input_selection(
+                                &line.text,
+                                local_range,
+                                &shaped_line,
+                                Bounds::new(line_origin, size(bounds.size.width, px(line_height))),
+                                px(0.0),
+                                selection_background,
+                                window,
+                            );
+                        }
+
+                        if !line.text.is_empty() {
+                            let _ = shaped_line.paint(line_origin, px(line_height), window, cx);
+                        }
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .when(is_focused, |this| {
+            this.child(render_textarea_caret(
+                textarea_id,
+                lines_for_caret,
+                cursor_index,
+                font_size,
+                line_height,
+                cursor_color,
+            ))
+        })
+}
+
+/// 渲染文本域多行光标。
+fn render_textarea_caret(
+    textarea_id: &'static str,
+    lines: Vec<TextareaLine>,
+    cursor_index: usize,
+    font_size: f32,
+    line_height: f32,
+    cursor_color: u32,
+) -> impl IntoElement {
+    div()
+        .id((textarea_id, 11usize))
+        .absolute()
+        .left_0()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window: &mut Window, _| {
+                    let (line_index, column) =
+                        textarea_cursor_line_and_column(&lines, cursor_index);
+                    let line_text = lines
+                        .get(line_index)
+                        .map(|line| line.text.as_str())
+                        .unwrap_or("");
+                    let color = window.text_style().color;
+                    let shaped_line = shape_input_line(line_text, font_size, color, None, window);
+                    let caret_x = caret_x_for_shaped_character_index(
+                        line_text,
+                        column.min(character_count(line_text)),
+                        &shaped_line,
+                    );
+                    let caret_y = px(line_height * line_index as f32);
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(bounds.left() + caret_x, bounds.top() + caret_y + px(1.0)),
+                            size(px(1.0), px(line_height - 2.0)),
+                        ),
+                        rgb(cursor_color),
+                    ));
+                },
+            )
+            .size_full(),
+        )
+        .with_animation(
+            (textarea_id, 12usize),
+            Animation::new(Duration::from_millis(900))
+                .repeat()
+                .with_easing(gpui::pulsating_between(0.08, 1.0)),
+            |this, opacity| this.opacity(opacity),
+        )
+}
+
+/// 渲染文本域透明命中层，用于把鼠标选择转换成多行字符索引。
+fn render_textarea_pointer_layer(
+    textarea_id: &'static str,
+    value: String,
+    font_size: f32,
+    line_height: f32,
+    cursor_index: usize,
+    selection_range: Option<Range<usize>>,
+    marked_range: Option<Range<usize>>,
+    is_pointer_selecting: bool,
+    on_pointer_select: Rc<impl Fn(&InputPointerEvent, &mut Window, &mut App) + 'static>,
+    native_input: Option<NativeInput>,
+) -> impl IntoElement {
+    div()
+        .id((textarea_id, 13usize))
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window: &mut Window, cx| {
+                    if let Some(native_input) = native_input.as_ref() {
+                        install_native_textarea_handler(
+                            native_input,
+                            value.clone(),
+                            font_size,
+                            line_height,
+                            cursor_index,
+                            selection_range.clone(),
+                            marked_range.clone(),
+                            bounds,
+                            window,
+                            cx,
+                        );
+                    }
+
+                    window.on_mouse_event({
+                        let value = value.clone();
+                        let on_pointer_select = on_pointer_select.clone();
+                        let native_input = native_input.clone();
+                        move |event: &MouseDownEvent, phase, window, cx| {
+                            if !phase.bubble()
+                                || event.button != MouseButton::Left
+                                || !bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+
+                            if let Some(native_input) = native_input.as_ref() {
+                                native_input.focus_handle.focus(window);
+                            }
+                            let character_index = textarea_character_index_from_pointer(
+                                &value,
+                                font_size,
+                                line_height,
+                                event.position,
+                                bounds,
+                                window,
+                            );
+                            on_pointer_select(
+                                &InputPointerEvent {
+                                    action: InputPointerAction::Begin,
+                                    character_index,
+                                    granularity: input_granularity_for_click_count(
+                                        event.click_count,
+                                    ),
+                                },
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let value = value.clone();
+                        let on_pointer_select = on_pointer_select.clone();
+                        move |event: &MouseMoveEvent, phase, window, cx| {
+                            if !phase.bubble() || !event.dragging() || !is_pointer_selecting {
+                                return;
+                            }
+
+                            let character_index = textarea_character_index_from_pointer(
+                                &value,
+                                font_size,
+                                line_height,
+                                event.position,
                                 bounds,
                                 window,
                             );
@@ -771,11 +1365,17 @@ impl NativeInputHandler {
     ) -> Option<Bounds<Pixels>> {
         let color = window.text_style().color;
         let shaped_line = shape_input_line(&self.value, self.font_size, color, None, window);
+        let scroll_x = input_scroll_x_for_shaped_line(
+            &self.value,
+            self.cursor_index,
+            &shaped_line,
+            self.bounds.size.width,
+        );
         let start = caret_x_for_shaped_character_index(&self.value, range.start, &shaped_line);
         let end = caret_x_for_shaped_character_index(&self.value, range.end, &shaped_line);
         Some(Bounds::from_corners(
-            point(self.bounds.left() + start, self.bounds.top()),
-            point(self.bounds.left() + end, self.bounds.bottom()),
+            point(self.bounds.left() + start - scroll_x, self.bounds.top()),
+            point(self.bounds.left() + end - scroll_x, self.bounds.bottom()),
         ))
     }
 }
@@ -881,7 +1481,256 @@ impl InputHandler for NativeInputHandler {
         let character_index = input_character_index_from_pointer(
             &self.value,
             self.font_size,
+            self.cursor_index,
             point.x,
+            self.bounds,
+            window,
+        );
+        Some(utf16_range_for_character_range(&self.value, character_index..character_index).start)
+    }
+}
+
+/// 在文本域绘制阶段安装系统输入处理器。
+fn install_native_textarea_handler(
+    native_input: &NativeInput,
+    value: String,
+    font_size: f32,
+    line_height: f32,
+    cursor_index: usize,
+    selection_range: Option<Range<usize>>,
+    marked_range: Option<Range<usize>>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.handle_input(
+        &native_input.focus_handle,
+        NativeTextareaInputHandler {
+            value,
+            font_size,
+            line_height,
+            cursor_index,
+            selection_range,
+            marked_range,
+            bounds,
+            on_edit: native_input.on_edit.clone(),
+        },
+        cx,
+    );
+}
+
+/// 多行文本域系统输入处理器，把 UTF-16 输入法范围转换为项目内部字符范围。
+struct NativeTextareaInputHandler {
+    /// 当前文本快照。
+    value: String,
+    /// 当前文本域字号，用于候选窗定位。
+    font_size: f32,
+    /// 当前文本域行高，用于候选窗定位和鼠标命中。
+    line_height: f32,
+    /// 当前光标字符位置。
+    cursor_index: usize,
+    /// 当前选区字符范围。
+    selection_range: Option<Range<usize>>,
+    /// 当前输入法 marked text 字符范围。
+    marked_range: Option<Range<usize>>,
+    /// 文本域内容绘制边界。
+    bounds: Bounds<Pixels>,
+    /// 编辑写回回调。
+    on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+}
+
+impl NativeTextareaInputHandler {
+    /// 返回当前选区；无选区时使用光标空范围。
+    fn selected_range(&self) -> Range<usize> {
+        self.selection_range
+            .clone()
+            .unwrap_or(self.cursor_index..self.cursor_index)
+    }
+
+    /// 根据输入法给出的 UTF-16 范围选择替换范围。
+    fn replacement_range(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
+        range_utf16
+            .map(|range| character_range_for_utf16_range(&self.value, range))
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.selected_range())
+    }
+
+    /// 生成编辑后的选区范围。
+    fn selected_range_after_edit(
+        &self,
+        replacement_range: &Range<usize>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+    ) -> Range<usize> {
+        if let Some(new_selected_range_utf16) = new_selected_range_utf16 {
+            let relative_range =
+                character_range_for_utf16_range(new_text, new_selected_range_utf16);
+            replacement_range.start + relative_range.start
+                ..replacement_range.start + relative_range.end
+        } else {
+            let cursor = replacement_range.start + character_count(new_text);
+            cursor..cursor
+        }
+    }
+
+    /// 创建写回业务状态的编辑对象。
+    fn edit_for(
+        &self,
+        replacement_range: Range<usize>,
+        new_text: &str,
+        selected_range: Range<usize>,
+        marked_range: Option<Range<usize>>,
+    ) -> NativeTextEdit {
+        NativeTextEdit {
+            replacement_range,
+            text: new_text.to_string(),
+            selected_range,
+            marked_range,
+        }
+    }
+
+    /// 同步当前处理器快照，保证输入法同一事件内再次查询时能读到最新状态。
+    fn apply_edit_snapshot(&mut self, edit: &NativeTextEdit) {
+        self.value =
+            replace_character_range(&self.value, edit.replacement_range.clone(), &edit.text);
+        let text_length = character_count(&self.value);
+        let selection_start = edit.selected_range.start.min(text_length);
+        let selection_end = edit.selected_range.end.min(text_length);
+        self.cursor_index = selection_end;
+        self.selection_range =
+            (selection_start != selection_end).then_some(selection_start..selection_end);
+        self.marked_range = edit
+            .marked_range
+            .clone()
+            .map(|range| range.start.min(text_length)..range.end.min(text_length))
+            .filter(|range| range.start < range.end);
+    }
+
+    /// 计算指定字符范围在文本域中的屏幕边界，用于定位输入法候选窗。
+    fn bounds_for_character_range(
+        &self,
+        range: Range<usize>,
+        window: &mut Window,
+    ) -> Option<Bounds<Pixels>> {
+        let lines = textarea_text_lines(&self.value);
+        let (line_index, column) = textarea_cursor_line_and_column(&lines, range.start);
+        let line = lines.get(line_index)?;
+        let color = window.text_style().color;
+        let shaped_line = shape_input_line(&line.text, self.font_size, color, None, window);
+        let start = caret_x_for_shaped_character_index(&line.text, column, &shaped_line);
+        let end_column = (range.end.saturating_sub(line.start)).min(character_count(&line.text));
+        let end = caret_x_for_shaped_character_index(&line.text, end_column, &shaped_line);
+        let top = self.bounds.top() + px(self.line_height * line_index as f32);
+        Some(Bounds::from_corners(
+            point(self.bounds.left() + start, top),
+            point(self.bounds.left() + end, top + px(self.line_height)),
+        ))
+    }
+}
+
+impl InputHandler for NativeTextareaInputHandler {
+    /// 返回当前选区的 UTF-16 范围。
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: utf16_range_for_character_range(&self.value, self.selected_range()),
+            reversed: false,
+        })
+    }
+
+    /// 返回 marked text 的 UTF-16 范围。
+    fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut App) -> Option<Range<usize>> {
+        self.marked_range
+            .clone()
+            .map(|range| utf16_range_for_character_range(&self.value, range))
+    }
+
+    /// 返回指定 UTF-16 范围内的文本。
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<String> {
+        let range = character_range_for_utf16_range(&self.value, range_utf16);
+        adjusted_range.replace(utf16_range_for_character_range(&self.value, range.clone()));
+        Some(slice_character_range(&self.value, range))
+    }
+
+    /// 替换文本并清除 marked text。
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range_utf16: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let replacement_range = self.replacement_range(replacement_range_utf16);
+        let cursor = replacement_range.start + character_count(text);
+        let edit = self.edit_for(replacement_range, text, cursor..cursor, None);
+        (self.on_edit)(edit.clone(), window, cx);
+        self.apply_edit_snapshot(&edit);
+    }
+
+    /// 替换文本并设置 marked text，用于输入法候选态。
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        replacement_range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let replacement_range = self.replacement_range(replacement_range_utf16);
+        let selected_range =
+            self.selected_range_after_edit(&replacement_range, new_text, new_selected_range_utf16);
+        let marked_range = (!new_text.is_empty())
+            .then(|| replacement_range.start..replacement_range.start + character_count(new_text));
+        let edit = self.edit_for(replacement_range, new_text, selected_range, marked_range);
+        (self.on_edit)(edit.clone(), window, cx);
+        self.apply_edit_snapshot(&edit);
+    }
+
+    /// 清除 marked text。
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        let edit = NativeTextEdit {
+            replacement_range: self.cursor_index..self.cursor_index,
+            text: String::new(),
+            selected_range: self.cursor_index..self.cursor_index,
+            marked_range: None,
+        };
+        (self.on_edit)(edit, window, cx);
+        self.marked_range = None;
+    }
+
+    /// 返回指定 UTF-16 范围的屏幕边界。
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        let range = character_range_for_utf16_range(&self.value, range_utf16);
+        self.bounds_for_character_range(range, window)
+    }
+
+    /// 返回鼠标点对应的 UTF-16 字符偏移。
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<usize> {
+        let character_index = textarea_character_index_from_pointer(
+            &self.value,
+            self.font_size,
+            self.line_height,
+            point,
             self.bounds,
             window,
         );
@@ -898,10 +1747,101 @@ fn input_granularity_for_click_count(click_count: usize) -> TextSelectionGranula
     }
 }
 
+/// 按换行符拆分文本域内容，并保留每行在完整文本中的字符范围。
+fn textarea_text_lines(value: &str) -> Vec<TextareaLine> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut line_start = 0_usize;
+
+    for (character_index, character) in value.chars().enumerate() {
+        if character == '\n' {
+            lines.push(TextareaLine {
+                text: std::mem::take(&mut current),
+                start: line_start,
+                end: character_index,
+            });
+            line_start = character_index + 1;
+        } else {
+            current.push(character);
+        }
+    }
+
+    lines.push(TextareaLine {
+        text: current,
+        start: line_start,
+        end: character_count(value),
+    });
+    lines
+}
+
+/// 把完整文本范围转换为当前行内范围；空交集返回 `None`。
+fn textarea_local_range(
+    line: &TextareaLine,
+    range: Option<Range<usize>>,
+    value: &str,
+) -> Option<Range<usize>> {
+    let range = range?;
+    let start = range.start.max(line.start);
+    let mut end = range.end.min(line.end);
+    // 当选区覆盖行尾换行符时，将选区绘制到行尾，符合多行文本域的视觉预期。
+    if range.end > line.end && line.end < character_count(value) {
+        end = line.end;
+    }
+    (start < end).then_some(start - line.start..end - line.start)
+}
+
+/// 返回光标所在行和行内字符列。
+fn textarea_cursor_line_and_column(lines: &[TextareaLine], cursor_index: usize) -> (usize, usize) {
+    let Some(last_line) = lines.last() else {
+        return (0, 0);
+    };
+    let cursor_index = cursor_index.min(last_line.end);
+
+    for (line_index, line) in lines.iter().enumerate() {
+        let is_last = line_index + 1 == lines.len();
+        if cursor_index <= line.end || is_last {
+            return (line_index, cursor_index.saturating_sub(line.start));
+        }
+    }
+
+    let last_index = lines.len().saturating_sub(1);
+    (last_index, last_line.end.saturating_sub(last_line.start))
+}
+
+/// 根据鼠标位置和 GPUI 字形布局计算文本域内的字符位置。
+fn textarea_character_index_from_pointer(
+    value: &str,
+    font_size: f32,
+    line_height: f32,
+    pointer: gpui::Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) -> usize {
+    let lines = textarea_text_lines(value);
+    if lines.is_empty() {
+        return 0;
+    }
+
+    let relative_y = (pointer.y - bounds.top()).max(px(0.0));
+    let line_index = (((relative_y / px(1.0)) / line_height).floor() as usize)
+        .min(lines.len().saturating_sub(1));
+    let line = &lines[line_index];
+    let text_relative_x = pointer.x - bounds.left();
+    if text_relative_x <= px(0.0) {
+        return line.start;
+    }
+
+    let color = window.text_style().color;
+    let shaped_line = shape_input_line(&line.text, font_size, color, None, window);
+    let column = character_index_for_shaped_x(&line.text, &shaped_line, text_relative_x);
+    line.start + column
+}
+
 /// 根据鼠标横坐标和 GPUI 字形布局计算输入框内的字符位置。
 fn input_character_index_from_pointer(
     value: &str,
     font_size: f32,
+    cursor_index: usize,
     pointer_x: Pixels,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -910,7 +1850,9 @@ fn input_character_index_from_pointer(
         return 0;
     }
 
-    let text_relative_x = pointer_x - bounds.left();
+    let scroll_x =
+        input_scroll_x_for_value(value, cursor_index, font_size, bounds.size.width, window);
+    let text_relative_x = pointer_x - bounds.left() + scroll_x;
     if text_relative_x <= px(0.0) {
         return 0;
     }
@@ -945,4 +1887,39 @@ fn character_index_for_shaped_x(value: &str, shaped_line: &ShapedLine, x: Pixels
     }
 
     text_length
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 将 Pixels 转为 f32，便于断言横向滚动量。
+    fn pixels_to_f32(value: Pixels) -> f32 {
+        value / px(1.0)
+    }
+
+    /// 内容宽度未超过视口时，不应产生横向滚动。
+    #[test]
+    fn input_scroll_keeps_short_content_at_origin() {
+        let scroll = input_scroll_x_for_caret(px(80.0), px(180.0), px(200.0));
+
+        assert_eq!(scroll, px(0.0));
+    }
+
+    /// 光标超过可视右侧边距时，输入框应把内容横向滚到光标附近。
+    #[test]
+    fn input_scroll_follows_caret_past_right_edge() {
+        let scroll = input_scroll_x_for_caret(px(300.0), px(500.0), px(200.0));
+
+        assert!((pixels_to_f32(scroll) - 108.0).abs() < 0.01);
+    }
+
+    /// 光标位于文本末尾时，滚动量应包含尾部边距，避免光标被右边界裁剪。
+    #[test]
+    fn input_scroll_keeps_trailing_caret_visible() {
+        let scroll = input_scroll_x_for_caret(px(500.0), px(500.0), px(200.0));
+
+        assert_eq!(scroll, px(308.0));
+        assert!(px(500.0) - scroll <= px(192.0));
+    }
 }

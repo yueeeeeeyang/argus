@@ -1,6 +1,6 @@
 //! 文件职责：承接系统原生文本输入提交并写回 Argus 自绘输入框状态。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：把输入法 UTF-16 编辑结果转换后的字符范围应用到来源搜索、日志搜索、来源选择器和设置输入框。
 
@@ -40,6 +40,8 @@ impl ArgusApp {
         self.source_picker.path_input_selection_drag = None;
 
         clear_settings_input_focus(&mut self.settings_quick_keywords_input);
+        clear_settings_input_focus(&mut self.settings_jstack_thread_name_filter_input);
+        clear_settings_input_focus(&mut self.settings_jstack_stack_segment_filter_input);
         clear_settings_input_focus(&mut self.settings_upgrade_server_input);
         clear_settings_input_focus(&mut self.settings_upgrade_public_key_input);
 
@@ -122,6 +124,61 @@ impl ArgusApp {
                     self.persist_config_or_report();
                 }
             }
+            AppTextInputTarget::SettingsJstackThreadNameFilter => {
+                apply_native_edit_to_parts(
+                    NativeInputParts {
+                        value: &mut self.settings_jstack_thread_name_filter_input.value,
+                        cursor: &mut self.settings_jstack_thread_name_filter_input.cursor,
+                        selection_anchor: &mut self
+                            .settings_jstack_thread_name_filter_input
+                            .selection_anchor,
+                        marked_range: &mut self
+                            .settings_jstack_thread_name_filter_input
+                            .marked_range,
+                        selection_drag: &mut self
+                            .settings_jstack_thread_name_filter_input
+                            .selection_drag,
+                    },
+                    &edit,
+                );
+                if edit.marked_range.is_none() {
+                    self.config.log_display.jstack_thread_name_filters = self
+                        .settings_jstack_thread_name_filter_input
+                        .value
+                        .trim()
+                        .to_string();
+                    self.rebuild_all_jstack_visible_row_caches();
+                    self.placeholder_notice = "Jstack 线程名过滤已保存".to_string();
+                    self.persist_config_or_report();
+                }
+            }
+            AppTextInputTarget::SettingsJstackStackSegmentFilter => {
+                apply_native_edit_to_parts(
+                    NativeInputParts {
+                        value: &mut self.settings_jstack_stack_segment_filter_input.value,
+                        cursor: &mut self.settings_jstack_stack_segment_filter_input.cursor,
+                        selection_anchor: &mut self
+                            .settings_jstack_stack_segment_filter_input
+                            .selection_anchor,
+                        marked_range: &mut self
+                            .settings_jstack_stack_segment_filter_input
+                            .marked_range,
+                        selection_drag: &mut self
+                            .settings_jstack_stack_segment_filter_input
+                            .selection_drag,
+                    },
+                    &edit,
+                );
+                if edit.marked_range.is_none() {
+                    self.config.log_display.jstack_stack_segment_filters =
+                        normalized_native_textarea_value(
+                            &self.settings_jstack_stack_segment_filter_input.value,
+                        );
+                    self.rebuild_all_jstack_visible_row_caches();
+                    self.placeholder_notice = "Jstack 线程段过滤已保存".to_string();
+                    self.persist_config_or_report();
+                }
+            }
             AppTextInputTarget::SettingsUpgradeServer => {
                 apply_native_edit_to_parts(
                     NativeInputParts {
@@ -190,6 +247,34 @@ impl ArgusApp {
             AppTextInputTarget::SettingsQuickKeywords => {
                 self.is_theme_dropdown_open = false;
                 self.settings_quick_keywords_input.is_focused = true;
+                self.settings_jstack_thread_name_filter_input.is_focused = false;
+                self.settings_jstack_thread_name_filter_input.marked_range = None;
+                self.settings_jstack_stack_segment_filter_input.is_focused = false;
+                self.settings_jstack_stack_segment_filter_input.marked_range = None;
+                self.settings_upgrade_server_input.is_focused = false;
+                self.settings_upgrade_server_input.marked_range = None;
+                self.settings_upgrade_public_key_input.is_focused = false;
+                self.settings_upgrade_public_key_input.marked_range = None;
+            }
+            AppTextInputTarget::SettingsJstackThreadNameFilter => {
+                self.is_theme_dropdown_open = false;
+                self.settings_quick_keywords_input.is_focused = false;
+                self.settings_quick_keywords_input.marked_range = None;
+                self.settings_jstack_thread_name_filter_input.is_focused = true;
+                self.settings_jstack_stack_segment_filter_input.is_focused = false;
+                self.settings_jstack_stack_segment_filter_input.marked_range = None;
+                self.settings_upgrade_server_input.is_focused = false;
+                self.settings_upgrade_server_input.marked_range = None;
+                self.settings_upgrade_public_key_input.is_focused = false;
+                self.settings_upgrade_public_key_input.marked_range = None;
+            }
+            AppTextInputTarget::SettingsJstackStackSegmentFilter => {
+                self.is_theme_dropdown_open = false;
+                self.settings_quick_keywords_input.is_focused = false;
+                self.settings_quick_keywords_input.marked_range = None;
+                self.settings_jstack_thread_name_filter_input.is_focused = false;
+                self.settings_jstack_thread_name_filter_input.marked_range = None;
+                self.settings_jstack_stack_segment_filter_input.is_focused = true;
                 self.settings_upgrade_server_input.is_focused = false;
                 self.settings_upgrade_server_input.marked_range = None;
                 self.settings_upgrade_public_key_input.is_focused = false;
@@ -199,6 +284,10 @@ impl ArgusApp {
                 self.is_theme_dropdown_open = false;
                 self.settings_quick_keywords_input.is_focused = false;
                 self.settings_quick_keywords_input.marked_range = None;
+                self.settings_jstack_thread_name_filter_input.is_focused = false;
+                self.settings_jstack_thread_name_filter_input.marked_range = None;
+                self.settings_jstack_stack_segment_filter_input.is_focused = false;
+                self.settings_jstack_stack_segment_filter_input.marked_range = None;
                 self.settings_upgrade_server_input.is_focused = true;
                 self.settings_upgrade_public_key_input.is_focused = false;
                 self.settings_upgrade_public_key_input.marked_range = None;
@@ -207,6 +296,10 @@ impl ArgusApp {
                 self.is_theme_dropdown_open = false;
                 self.settings_quick_keywords_input.is_focused = false;
                 self.settings_quick_keywords_input.marked_range = None;
+                self.settings_jstack_thread_name_filter_input.is_focused = false;
+                self.settings_jstack_thread_name_filter_input.marked_range = None;
+                self.settings_jstack_stack_segment_filter_input.is_focused = false;
+                self.settings_jstack_stack_segment_filter_input.marked_range = None;
                 self.settings_upgrade_server_input.is_focused = false;
                 self.settings_upgrade_server_input.marked_range = None;
                 self.settings_upgrade_public_key_input.is_focused = true;
@@ -274,6 +367,11 @@ fn clear_settings_input_focus(input: &mut crate::app::SettingsTextInputState) {
     input.selection_anchor = None;
     input.marked_range = None;
     input.selection_drag = None;
+}
+
+/// 归一化原生输入提交的 textarea 文本，统一换行符并保留多行内容。
+fn normalized_native_textarea_value(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 #[cfg(test)]
