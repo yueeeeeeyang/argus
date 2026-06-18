@@ -125,6 +125,9 @@ impl Default for ConfigManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::app_config::{
+        DEFAULT_JSTACK_STACK_SEGMENT_FILTERS, DEFAULT_JSTACK_THREAD_NAME_FILTERS,
+    };
     use crate::config::{
         AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogDisplayConfig,
         LogSearchConfig, UpgradeConfig,
@@ -148,6 +151,35 @@ mod tests {
 
         assert_eq!(config.appearance.theme_mode, "dark.toml");
         assert_eq!(config.loader.max_archive_depth, 2);
+        assert_eq!(
+            config.log_display.jstack_thread_name_filters,
+            DEFAULT_JSTACK_THREAD_NAME_FILTERS
+        );
+        assert_eq!(
+            config.log_display.jstack_stack_segment_filters,
+            DEFAULT_JSTACK_STACK_SEGMENT_FILTERS
+        );
+    }
+
+    /// 验证旧配置缺少 Jstack 过滤字段时会补齐默认过滤，避免升级后设置页出现空值。
+    #[test]
+    fn missing_log_display_filter_fields_load_default_filters() {
+        let path = test_settings_path("missing-log-display-fields");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("测试目录应可创建");
+        }
+        fs::write(&path, "[log_display]\n").expect("测试旧配置应可写入");
+
+        let config = ConfigManager::load_from_path(&path).expect("旧配置应可使用字段默认值读取");
+
+        assert_eq!(
+            config.log_display.jstack_thread_name_filters,
+            DEFAULT_JSTACK_THREAD_NAME_FILTERS
+        );
+        assert_eq!(
+            config.log_display.jstack_stack_segment_filters,
+            DEFAULT_JSTACK_STACK_SEGMENT_FILTERS
+        );
     }
 
     /// 验证保存后再次读取可以恢复用户设置。

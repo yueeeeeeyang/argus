@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render, SharedString,
-    Subscription, Window, div, prelude::*, px, rgb,
+    App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render, ScrollHandle,
+    SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
 
 use crate::app::{AppTextInputTarget, ArgusApp, SettingsTextInputState};
@@ -20,7 +20,7 @@ use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, Textarea,
-    render_input, render_textarea,
+    TextareaScrollState, render_input, render_textarea,
 };
 use crate::ui::input_native::app_native_input;
 
@@ -74,6 +74,10 @@ struct SettingsInputFocusHandles {
     jstack_thread_names: FocusHandle,
     /// Jstack 完整线程段过滤输入框焦点。
     jstack_stack_segments: FocusHandle,
+    /// Jstack 完整线程段 textarea 滚动句柄，保证设置窗口刷新后仍能同步光标可见区域。
+    jstack_stack_segments_scroll: ScrollHandle,
+    /// Jstack 完整线程段 textarea 滚动交互状态，支持自绘滚动条拖拽。
+    jstack_stack_segments_scroll_state: TextareaScrollState,
     /// 升级服务器输入框焦点。
     upgrade_server: FocusHandle,
     /// 升级验签公钥输入框焦点。
@@ -111,6 +115,8 @@ impl SettingsWindow {
                 quick_keywords: cx.focus_handle(),
                 jstack_thread_names: cx.focus_handle(),
                 jstack_stack_segments: cx.focus_handle(),
+                jstack_stack_segments_scroll: ScrollHandle::new(),
+                jstack_stack_segments_scroll_state: TextareaScrollState::new(),
                 upgrade_server: cx.focus_handle(),
                 upgrade_public_key: cx.focus_handle(),
             },
@@ -250,6 +256,7 @@ fn render_settings_window(
                 .flex()
                 .items_center()
                 .justify_between()
+                .occlude()
                 .child(
                     div()
                         .flex()
@@ -273,6 +280,7 @@ fn render_settings_window(
                     IconButtonSize::Small,
                     &theme,
                     move |_, window, cx| {
+                        cx.stop_propagation();
                         update_settings_app(&close_app, cx, |app, _| app.close_settings_window());
                         window.remove_window();
                     },
@@ -818,6 +826,8 @@ fn jstack_stack_segment_filter_input_control(
             marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
             visible_lines: 5,
+            scroll_handle: input_focus_handles.jstack_stack_segments_scroll.clone(),
+            scroll_state: input_focus_handles.jstack_stack_segments_scroll_state.clone(),
             trailing_accessory: Some(InputAccessory {
                 id: "settings-jstack-stack-segment-filter-clear",
                 icon: ArgusIcon::Close,

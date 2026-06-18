@@ -13,17 +13,28 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClickEvent, FocusHandle, Hsla, InputHandler, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ShapedLine,
-    SharedString, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, size,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, FocusHandle, Hsla, InputHandler,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollHandle, ShapedLine, SharedString, TextRun, UTF16Selection, UnderlineStyle, Window,
+    canvas, div, fill, point, prelude::*, px, rgb, size,
 };
+use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
 /// 单行输入框自动横向滚动时给光标保留的可视边距。
 const INPUT_HORIZONTAL_SCROLL_MARGIN: f32 = 8.0;
+/// 多行文本域自动滚动时给光标上下保留的可视边距。
+const TEXTAREA_VERTICAL_SCROLL_MARGIN: f32 = 4.0;
+/// 多行文本域显式滚动条占用宽度。
+const TEXTAREA_SCROLLBAR_WIDTH: f32 = 6.0;
+/// 多行文本域滚动条和边缘之间的留白。
+const TEXTAREA_SCROLLBAR_PADDING: f32 = 1.0;
+/// 多行文本域滚动条滑块最小长度，避免长文本时滑块小到不可见。
+const TEXTAREA_SCROLLBAR_MIN_THUMB: f32 = 18.0;
+/// 多行文本域滚动条滑块厚度。
+const TEXTAREA_SCROLLBAR_THUMB_SIZE: f32 = 4.0;
 
 /// 输入框尺寸规格，便于不同工具栏复用同一组件。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +63,20 @@ pub struct NativeInput {
     pub focus_handle: FocusHandle,
     /// 系统输入提交后的业务写回回调。
     pub on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+}
+
+/// 文本域内部滚动状态，保存滚动条拖拽态等纯 UI 交互数据。
+#[derive(Clone, Default)]
+pub struct TextareaScrollState {
+    /// 当前滚动条拖拽状态；使用内部可变性避免把临时拖拽态写入业务配置。
+    scrollbar_drag: Rc<RefCell<Option<TextareaScrollbarDrag>>>,
+}
+
+impl TextareaScrollState {
+    /// 创建空文本域滚动状态。
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl NativeInput {
@@ -127,6 +152,10 @@ pub struct Textarea {
     pub is_pointer_selecting: bool,
     /// 文本域可见行数，内容超出后通过滚动条查看。
     pub visible_lines: usize,
+    /// 文本域滚动句柄，负责在光标移动到可视区外时同步横向和纵向滚动。
+    pub scroll_handle: ScrollHandle,
+    /// 文本域滚动交互状态，负责支持自绘滚动条拖拽。
+    pub scroll_state: TextareaScrollState,
     /// 后置可点击图标附件。
     pub trailing_accessory: Option<InputAccessory>,
     /// 系统文本输入桥接配置；为空时退回按键事件输入。
@@ -380,8 +409,16 @@ pub fn render_textarea(
     let content_height = content_line_count as f32 * line_height;
     let content_width = content_lines
         .iter()
-        .map(|line| character_count(&line.text) as f32 * font_size * 0.65 + 8.0)
+        // 这里使用偏保守的字符宽度估算，确保中文、英文标点和长线程段都有足够横向滚动空间。
+        .map(|line| character_count(&line.text) as f32 * font_size + 8.0)
         .fold(0.0_f32, f32::max);
+    let scroll_handle = textarea.scroll_handle.clone();
+    let scroll_handle_for_viewport = scroll_handle.clone();
+    let scroll_handle_for_pointer = scroll_handle.clone();
+    let scroll_handle_for_bars = scroll_handle.clone();
+    let scroll_state = textarea.scroll_state.clone();
+    let scroll_state_for_sync = scroll_state.clone();
+    let scroll_state_for_bars = scroll_state.clone();
 
     div()
         .id(textarea.id)
@@ -430,43 +467,66 @@ pub fn render_textarea(
                 .bottom(px(vertical_padding))
                 .child(
                     div()
-                        .id((textarea.id, 14usize))
+                        .relative()
                         .size_full()
-                        .overflow_scroll()
-                        .scrollbar_width(px(6.0))
                         .child(
                             div()
-                                .relative()
-                                .h(px(content_height))
-                                .w_full()
-                                .min_w(px(content_width))
-                                .child(render_textarea_text(
-                                    textarea.id,
-                                    &textarea.value,
-                                    &display_text,
-                                    font_size,
-                                    line_height,
-                                    cursor_index,
-                                    selection_range,
-                                    marked_range,
-                                    textarea.is_focused,
-                                    text_color,
-                                    theme.selection,
-                                    theme.foreground,
-                                ))
-                                .child(render_textarea_pointer_layer(
-                                    textarea.id,
-                                    pointer_value,
-                                    font_size,
-                                    line_height,
-                                    cursor_index,
-                                    textarea.selection_range.clone(),
-                                    textarea.marked_range.clone(),
-                                    textarea.is_pointer_selecting,
-                                    on_pointer_select,
-                                    native_input_for_pointer,
-                                )),
-                        ),
+                                .id((textarea.id, 14usize))
+                                .size_full()
+                                .overflow_scroll()
+                                .scrollbar_width(px(TEXTAREA_SCROLLBAR_WIDTH))
+                                .track_scroll(&scroll_handle_for_viewport)
+                                .child(
+                                    div()
+                                        .relative()
+                                        .h(px(content_height))
+                                        .w_full()
+                                        .min_w(px(content_width))
+                                        .child(render_textarea_scroll_sync(
+                                            textarea.id,
+                                            textarea.value.clone(),
+                                            font_size,
+                                            line_height,
+                                            cursor_index,
+                                            textarea.is_focused,
+                                            scroll_handle,
+                                            scroll_state_for_sync,
+                                        ))
+                                        .child(render_textarea_text(
+                                            textarea.id,
+                                            &textarea.value,
+                                            &display_text,
+                                            font_size,
+                                            line_height,
+                                            cursor_index,
+                                            selection_range,
+                                            marked_range,
+                                            textarea.is_focused,
+                                            text_color,
+                                            theme.selection,
+                                            theme.foreground,
+                                        )),
+                                ),
+                        )
+                        .child(render_textarea_pointer_layer(
+                            textarea.id,
+                            pointer_value,
+                            font_size,
+                            line_height,
+                            cursor_index,
+                            textarea.selection_range.clone(),
+                            textarea.marked_range.clone(),
+                            textarea.is_pointer_selecting,
+                            on_pointer_select,
+                            native_input_for_pointer,
+                            scroll_handle_for_pointer,
+                        ))
+                        .children(render_textarea_scrollbars(
+                            textarea.id,
+                            scroll_handle_for_bars,
+                            scroll_state_for_bars,
+                            theme.foreground_muted,
+                        )),
                 ),
         )
         .when_some(visible_trailing_accessory, |this, accessory| {
@@ -836,6 +896,7 @@ fn render_pointer_layer(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, cx| {
+                    let visible_bounds = bounds.intersect(&window.content_mask().bounds);
                     if let Some(native_input) = native_input.as_ref() {
                         install_native_input_handler(
                             native_input,
@@ -857,7 +918,7 @@ fn render_pointer_layer(
                         move |event: &MouseDownEvent, phase, window, cx| {
                             if !phase.bubble()
                                 || event.button != MouseButton::Left
-                                || !bounds.contains(&event.position)
+                                || !visible_bounds.contains(&event.position)
                             {
                                 return;
                             }
@@ -943,6 +1004,338 @@ fn render_pointer_layer(
             )
             .size_full(),
         )
+}
+
+/// 渲染文本域滚动同步层，使键盘输入或光标移动后光标始终保持在可视范围内。
+fn render_textarea_scroll_sync(
+    textarea_id: &'static str,
+    value: String,
+    font_size: f32,
+    line_height: f32,
+    cursor_index: usize,
+    is_focused: bool,
+    scroll_handle: ScrollHandle,
+    scroll_state: TextareaScrollState,
+) -> impl IntoElement {
+    div()
+        .id((textarea_id, 15usize))
+        .absolute()
+        .left_0()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |_, _, window: &mut Window, _| {
+                    if !is_focused
+                        || value.is_empty()
+                        || scroll_state.scrollbar_drag.borrow().is_some()
+                    {
+                        return;
+                    }
+
+                    let viewport_bounds = scroll_handle.bounds();
+                    if viewport_bounds.size.width <= px(0.0)
+                        || viewport_bounds.size.height <= px(0.0)
+                    {
+                        return;
+                    }
+
+                    let (caret_x, caret_y) = textarea_caret_local_position(
+                        &value,
+                        font_size,
+                        line_height,
+                        cursor_index,
+                        window,
+                    );
+                    let current_offset = scroll_handle.offset();
+                    let next_offset = textarea_scroll_offset_for_caret(
+                        current_offset,
+                        caret_x,
+                        caret_y,
+                        px(line_height),
+                        viewport_bounds.size,
+                        scroll_handle.max_offset(),
+                    );
+                    if next_offset != current_offset {
+                        scroll_handle.set_offset(next_offset);
+                    }
+                },
+            )
+            .size_full(),
+        )
+}
+
+/// 文本域滚动条布局度量，供横纵两个方向复用。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TextareaScrollbarMetrics {
+    /// 滑块起点，使用滚动视口内部局部坐标。
+    thumb_start: Pixels,
+    /// 滑块长度。
+    thumb_length: Pixels,
+    /// 轨道起点，使用滚动视口内部局部坐标。
+    track_start: Pixels,
+    /// 轨道长度。
+    track_length: Pixels,
+    /// 最大滚动距离。
+    max_scroll: Pixels,
+}
+
+/// 文本域自绘滚动条方向。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextareaScrollbarAxis {
+    /// 横向滚动条。
+    Horizontal,
+    /// 纵向滚动条。
+    Vertical,
+}
+
+/// 文本域自绘滚动条拖拽状态。
+#[derive(Clone, Copy, Debug)]
+struct TextareaScrollbarDrag {
+    /// 当前拖拽的滚动条方向。
+    axis: TextareaScrollbarAxis,
+    /// 鼠标按下位置到滑块起点的距离。
+    cursor_offset: Pixels,
+}
+
+/// 渲染文本域显式滚动条；只在对应方向内容溢出时显示。
+fn render_textarea_scrollbars(
+    textarea_id: &'static str,
+    scroll_handle: ScrollHandle,
+    scroll_state: TextareaScrollState,
+    color: u32,
+) -> Vec<AnyElement> {
+    let bounds = scroll_handle.bounds();
+    let max_offset = scroll_handle.max_offset();
+    let offset = scroll_handle.offset();
+    let has_vertical = max_offset.height > px(0.5);
+    let has_horizontal = max_offset.width > px(0.5);
+    let mut scrollbars = Vec::new();
+
+    if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+        return scrollbars;
+    }
+
+    if has_vertical {
+        let reserved_corner = if has_horizontal {
+            px(TEXTAREA_SCROLLBAR_WIDTH)
+        } else {
+            px(0.0)
+        };
+        if let Some(metrics) = textarea_scrollbar_metrics(
+            bounds.size.height - reserved_corner,
+            max_offset.height,
+            -offset.y,
+        ) {
+            scrollbars.push(render_textarea_scrollbar_thumb(
+                textarea_id,
+                TextareaScrollbarAxis::Vertical,
+                metrics,
+                bounds,
+                scroll_handle.clone(),
+                scroll_state.clone(),
+                color,
+            ));
+        }
+    }
+
+    if has_horizontal {
+        let reserved_corner = if has_vertical {
+            px(TEXTAREA_SCROLLBAR_WIDTH)
+        } else {
+            px(0.0)
+        };
+        if let Some(metrics) = textarea_scrollbar_metrics(
+            bounds.size.width - reserved_corner,
+            max_offset.width,
+            -offset.x,
+        ) {
+            scrollbars.push(render_textarea_scrollbar_thumb(
+                textarea_id,
+                TextareaScrollbarAxis::Horizontal,
+                metrics,
+                bounds,
+                scroll_handle.clone(),
+                scroll_state.clone(),
+                color,
+            ));
+        }
+    }
+
+    scrollbars
+}
+
+/// 渲染可拖拽的文本域滚动条滑块。
+fn render_textarea_scrollbar_thumb(
+    textarea_id: &'static str,
+    axis: TextareaScrollbarAxis,
+    metrics: TextareaScrollbarMetrics,
+    viewport_bounds: Bounds<Pixels>,
+    scroll_handle: ScrollHandle,
+    scroll_state: TextareaScrollState,
+    color: u32,
+) -> AnyElement {
+    let is_horizontal = axis == TextareaScrollbarAxis::Horizontal;
+    let mut thumb = div()
+        .id(SharedString::from(format!(
+            "{textarea_id}-scrollbar-{axis:?}"
+        )))
+        .absolute()
+        .rounded_full()
+        .bg(rgb(color))
+        .opacity(0.55)
+        .hover(|this| this.opacity(0.8))
+        .cursor_pointer()
+        .occlude();
+
+    thumb = if is_horizontal {
+        thumb
+            .left(metrics.thumb_start)
+            .bottom(px(TEXTAREA_SCROLLBAR_PADDING))
+            .w(metrics.thumb_length)
+            .h(px(TEXTAREA_SCROLLBAR_THUMB_SIZE))
+    } else {
+        thumb
+            .right(px(TEXTAREA_SCROLLBAR_PADDING))
+            .top(metrics.thumb_start)
+            .w(px(TEXTAREA_SCROLLBAR_THUMB_SIZE))
+            .h(metrics.thumb_length)
+    };
+
+    thumb
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |thumb_bounds, _, window: &mut Window, _| {
+                    window.on_mouse_event({
+                        let scroll_state = scroll_state.clone();
+                        move |event: &MouseDownEvent, phase, window, cx| {
+                            if !phase.bubble()
+                                || event.button != MouseButton::Left
+                                || !thumb_bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+
+                            let pointer = if is_horizontal {
+                                event.position.x
+                            } else {
+                                event.position.y
+                            };
+                            let thumb_start = if is_horizontal {
+                                thumb_bounds.origin.x
+                            } else {
+                                thumb_bounds.origin.y
+                            };
+                            scroll_state
+                                .scrollbar_drag
+                                .replace(Some(TextareaScrollbarDrag {
+                                    axis,
+                                    cursor_offset: pointer - thumb_start,
+                                }));
+                            cx.stop_propagation();
+                            window.refresh();
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let scroll_state = scroll_state.clone();
+                        move |event: &MouseUpEvent, phase, window, cx| {
+                            if !phase.bubble() || event.button != MouseButton::Left {
+                                return;
+                            }
+
+                            let handled = scroll_state.scrollbar_drag.borrow().is_some();
+                            if handled {
+                                scroll_state.scrollbar_drag.replace(None);
+                                cx.stop_propagation();
+                                window.refresh();
+                            }
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let scroll_state = scroll_state.clone();
+                        let scroll_handle = scroll_handle.clone();
+                        move |event: &MouseMoveEvent, phase, window, cx| {
+                            if !phase.bubble() || !event.dragging() {
+                                return;
+                            }
+
+                            let Some(drag) = *scroll_state.scrollbar_drag.borrow() else {
+                                return;
+                            };
+                            if drag.axis != axis {
+                                return;
+                            }
+
+                            let pointer = if is_horizontal {
+                                event.position.x - viewport_bounds.left()
+                            } else {
+                                event.position.y - viewport_bounds.top()
+                            };
+                            let scroll = textarea_scroll_for_scrollbar_drag(
+                                pointer,
+                                drag.cursor_offset,
+                                metrics,
+                            );
+                            let current = scroll_handle.offset();
+                            if is_horizontal {
+                                scroll_handle.set_offset(point(-scroll, current.y));
+                            } else {
+                                scroll_handle.set_offset(point(current.x, -scroll));
+                            }
+                            cx.stop_propagation();
+                            window.refresh();
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// 根据视口长度和最大滚动距离计算滚动条滑块位置。
+fn textarea_scrollbar_metrics(
+    viewport_length: Pixels,
+    max_scroll: Pixels,
+    current_scroll: Pixels,
+) -> Option<TextareaScrollbarMetrics> {
+    if viewport_length <= px(0.0) || max_scroll <= px(0.0) {
+        return None;
+    }
+
+    let track_padding = px(TEXTAREA_SCROLLBAR_PADDING);
+    let track_length = (viewport_length - track_padding * 2.0).max(px(1.0));
+    let content_length = viewport_length + max_scroll;
+    let thumb_length = ((viewport_length / content_length) * track_length)
+        .clamp(px(TEXTAREA_SCROLLBAR_MIN_THUMB), track_length);
+    let movable_length = (track_length - thumb_length).max(px(0.0));
+    let ratio = (current_scroll / max_scroll).clamp(0.0, 1.0);
+
+    Some(TextareaScrollbarMetrics {
+        thumb_start: track_padding + movable_length * ratio,
+        thumb_length,
+        track_start: track_padding,
+        track_length,
+        max_scroll,
+    })
+}
+
+/// 根据拖拽中的鼠标位置换算目标滚动距离。
+fn textarea_scroll_for_scrollbar_drag(
+    pointer: Pixels,
+    cursor_offset: Pixels,
+    metrics: TextareaScrollbarMetrics,
+) -> Pixels {
+    let movable_length = (metrics.track_length - metrics.thumb_length).max(px(1.0));
+    let thumb_start =
+        (pointer - cursor_offset).clamp(metrics.track_start, metrics.track_start + movable_length);
+    let ratio = (thumb_start - metrics.track_start) / movable_length;
+    metrics.max_scroll * ratio
 }
 
 /// 文本域单行布局信息，保存该行在完整文本中的字符范围。
@@ -1123,6 +1516,7 @@ fn render_textarea_pointer_layer(
     is_pointer_selecting: bool,
     on_pointer_select: Rc<impl Fn(&InputPointerEvent, &mut Window, &mut App) + 'static>,
     native_input: Option<NativeInput>,
+    scroll_handle: ScrollHandle,
 ) -> impl IntoElement {
     div()
         .id((textarea_id, 13usize))
@@ -1135,6 +1529,7 @@ fn render_textarea_pointer_layer(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, cx| {
+                    let visible_bounds = bounds.intersect(&window.content_mask().bounds);
                     if let Some(native_input) = native_input.as_ref() {
                         install_native_textarea_handler(
                             native_input,
@@ -1145,6 +1540,7 @@ fn render_textarea_pointer_layer(
                             selection_range.clone(),
                             marked_range.clone(),
                             bounds,
+                            scroll_handle.offset(),
                             window,
                             cx,
                         );
@@ -1154,10 +1550,11 @@ fn render_textarea_pointer_layer(
                         let value = value.clone();
                         let on_pointer_select = on_pointer_select.clone();
                         let native_input = native_input.clone();
+                        let scroll_handle = scroll_handle.clone();
                         move |event: &MouseDownEvent, phase, window, cx| {
                             if !phase.bubble()
                                 || event.button != MouseButton::Left
-                                || !bounds.contains(&event.position)
+                                || !visible_bounds.contains(&event.position)
                             {
                                 return;
                             }
@@ -1171,6 +1568,7 @@ fn render_textarea_pointer_layer(
                                 line_height,
                                 event.position,
                                 bounds,
+                                scroll_handle.offset(),
                                 window,
                             );
                             on_pointer_select(
@@ -1191,6 +1589,7 @@ fn render_textarea_pointer_layer(
                     window.on_mouse_event({
                         let value = value.clone();
                         let on_pointer_select = on_pointer_select.clone();
+                        let scroll_handle = scroll_handle.clone();
                         move |event: &MouseMoveEvent, phase, window, cx| {
                             if !phase.bubble() || !event.dragging() || !is_pointer_selecting {
                                 return;
@@ -1202,6 +1601,7 @@ fn render_textarea_pointer_layer(
                                 line_height,
                                 event.position,
                                 bounds,
+                                scroll_handle.offset(),
                                 window,
                             );
                             on_pointer_select(
@@ -1500,6 +1900,7 @@ fn install_native_textarea_handler(
     selection_range: Option<Range<usize>>,
     marked_range: Option<Range<usize>>,
     bounds: Bounds<Pixels>,
+    scroll_offset: gpui::Point<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1513,6 +1914,7 @@ fn install_native_textarea_handler(
             selection_range,
             marked_range,
             bounds,
+            scroll_offset,
             on_edit: native_input.on_edit.clone(),
         },
         cx,
@@ -1533,8 +1935,10 @@ struct NativeTextareaInputHandler {
     selection_range: Option<Range<usize>>,
     /// 当前输入法 marked text 字符范围。
     marked_range: Option<Range<usize>>,
-    /// 文本域内容绘制边界。
+    /// 文本域可见视口边界。
     bounds: Bounds<Pixels>,
+    /// 当前滚动内容相对可见视口的偏移，GPUI 向右/下滚动时为负值。
+    scroll_offset: gpui::Point<Pixels>,
     /// 编辑写回回调。
     on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
 }
@@ -1620,10 +2024,14 @@ impl NativeTextareaInputHandler {
         let start = caret_x_for_shaped_character_index(&line.text, column, &shaped_line);
         let end_column = (range.end.saturating_sub(line.start)).min(character_count(&line.text));
         let end = caret_x_for_shaped_character_index(&line.text, end_column, &shaped_line);
-        let top = self.bounds.top() + px(self.line_height * line_index as f32);
+        let top =
+            self.bounds.top() + self.scroll_offset.y + px(self.line_height * line_index as f32);
         Some(Bounds::from_corners(
-            point(self.bounds.left() + start, top),
-            point(self.bounds.left() + end, top + px(self.line_height)),
+            point(self.bounds.left() + self.scroll_offset.x + start, top),
+            point(
+                self.bounds.left() + self.scroll_offset.x + end,
+                top + px(self.line_height),
+            ),
         ))
     }
 }
@@ -1732,6 +2140,7 @@ impl InputHandler for NativeTextareaInputHandler {
             self.line_height,
             point,
             self.bounds,
+            self.scroll_offset,
             window,
         );
         Some(utf16_range_for_character_range(&self.value, character_index..character_index).start)
@@ -1819,13 +2228,78 @@ fn textarea_cursor_line_and_column(lines: &[TextareaLine], cursor_index: usize) 
     (last_index, last_line.end.saturating_sub(last_line.start))
 }
 
+/// 根据当前光标字符索引计算其在文本域内容坐标系中的位置。
+fn textarea_caret_local_position(
+    value: &str,
+    font_size: f32,
+    line_height: f32,
+    cursor_index: usize,
+    window: &mut Window,
+) -> (Pixels, Pixels) {
+    let lines = textarea_text_lines(value);
+    let (line_index, column) = textarea_cursor_line_and_column(&lines, cursor_index);
+    let line_text = lines
+        .get(line_index)
+        .map(|line| line.text.as_str())
+        .unwrap_or("");
+    let color = window.text_style().color;
+    let shaped_line = shape_input_line(line_text, font_size, color, None, window);
+    let caret_x = caret_x_for_shaped_character_index(
+        line_text,
+        column.min(character_count(line_text)),
+        &shaped_line,
+    );
+    let caret_y = px(line_height * line_index as f32);
+
+    (caret_x, caret_y)
+}
+
+/// 根据光标位置计算文本域滚动偏移，返回值使用 GPUI 负向滚动坐标。
+fn textarea_scroll_offset_for_caret(
+    current_offset: gpui::Point<Pixels>,
+    caret_x: Pixels,
+    caret_y: Pixels,
+    line_height: Pixels,
+    viewport_size: gpui::Size<Pixels>,
+    max_offset: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let horizontal_margin = px(INPUT_HORIZONTAL_SCROLL_MARGIN);
+    let vertical_margin = px(TEXTAREA_VERTICAL_SCROLL_MARGIN);
+    let max_scroll_x = max_offset.width.max(px(0.0));
+    let max_scroll_y = max_offset.height.max(px(0.0));
+    let mut scroll_x = (-current_offset.x).clamp(px(0.0), max_scroll_x);
+    let mut scroll_y = (-current_offset.y).clamp(px(0.0), max_scroll_y);
+
+    let caret_right = caret_x + px(1.0);
+    let viewport_right = scroll_x + viewport_size.width;
+    if caret_right + horizontal_margin > viewport_right {
+        scroll_x = caret_right + horizontal_margin - viewport_size.width;
+    } else if caret_x < scroll_x + horizontal_margin {
+        scroll_x = (caret_x - horizontal_margin).max(px(0.0));
+    }
+
+    let caret_bottom = caret_y + line_height;
+    let viewport_bottom = scroll_y + viewport_size.height;
+    if caret_bottom + vertical_margin > viewport_bottom {
+        scroll_y = caret_bottom + vertical_margin - viewport_size.height;
+    } else if caret_y < scroll_y + vertical_margin {
+        scroll_y = (caret_y - vertical_margin).max(px(0.0));
+    }
+
+    point(
+        -scroll_x.clamp(px(0.0), max_scroll_x),
+        -scroll_y.clamp(px(0.0), max_scroll_y),
+    )
+}
+
 /// 根据鼠标位置和 GPUI 字形布局计算文本域内的字符位置。
 fn textarea_character_index_from_pointer(
     value: &str,
     font_size: f32,
     line_height: f32,
     pointer: gpui::Point<Pixels>,
-    bounds: Bounds<Pixels>,
+    viewport_bounds: Bounds<Pixels>,
+    scroll_offset: gpui::Point<Pixels>,
     window: &mut Window,
 ) -> usize {
     let lines = textarea_text_lines(value);
@@ -1833,11 +2307,11 @@ fn textarea_character_index_from_pointer(
         return 0;
     }
 
-    let relative_y = (pointer.y - bounds.top()).max(px(0.0));
+    let relative_y = (pointer.y - viewport_bounds.top() - scroll_offset.y).max(px(0.0));
     let line_index = (((relative_y / px(1.0)) / line_height).floor() as usize)
         .min(lines.len().saturating_sub(1));
     let line = &lines[line_index];
-    let text_relative_x = pointer.x - bounds.left();
+    let text_relative_x = pointer.x - viewport_bounds.left() - scroll_offset.x;
     if text_relative_x <= px(0.0) {
         return line.start;
     }
@@ -1944,5 +2418,87 @@ mod tests {
         };
 
         assert_eq!(textarea_local_range(&stale_line, Some(0..12), "abc"), None);
+    }
+
+    /// 文本域光标越过右侧可视区时，应自动横向滚动并保留右侧边距。
+    #[test]
+    fn textarea_scroll_follows_caret_past_right_edge() {
+        let offset = textarea_scroll_offset_for_caret(
+            point(px(0.0), px(0.0)),
+            px(260.0),
+            px(0.0),
+            px(18.0),
+            size(px(120.0), px(80.0)),
+            size(px(240.0), px(100.0)),
+        );
+
+        assert!((pixels_to_f32(offset.x) + 149.0).abs() < 0.01);
+        assert_eq!(offset.y, px(0.0));
+    }
+
+    /// 文本域光标越过底部可视区时，应自动纵向滚动到当前行。
+    #[test]
+    fn textarea_scroll_follows_caret_past_bottom_edge() {
+        let offset = textarea_scroll_offset_for_caret(
+            point(px(0.0), px(0.0)),
+            px(0.0),
+            px(126.0),
+            px(18.0),
+            size(px(120.0), px(90.0)),
+            size(px(240.0), px(120.0)),
+        );
+
+        assert_eq!(offset.x, px(0.0));
+        assert!((pixels_to_f32(offset.y) + 58.0).abs() < 0.01);
+    }
+
+    /// 光标仍在当前可视区内时，文本域不应打断用户已有滚动位置。
+    #[test]
+    fn textarea_scroll_keeps_offset_when_caret_visible() {
+        let offset = textarea_scroll_offset_for_caret(
+            point(px(-80.0), px(-40.0)),
+            px(100.0),
+            px(54.0),
+            px(18.0),
+            size(px(120.0), px(90.0)),
+            size(px(240.0), px(120.0)),
+        );
+
+        assert_eq!(offset, point(px(-80.0), px(-40.0)));
+    }
+
+    /// 文本域内容没有溢出时，不应绘制无意义的滚动条滑块。
+    #[test]
+    fn textarea_scrollbar_metrics_hidden_without_overflow() {
+        assert_eq!(
+            textarea_scrollbar_metrics(px(120.0), px(0.0), px(0.0)),
+            None
+        );
+    }
+
+    /// 文本域内容溢出后，应根据当前滚动位置计算可见滑块。
+    #[test]
+    fn textarea_scrollbar_metrics_tracks_scroll_position() {
+        let metrics = textarea_scrollbar_metrics(px(100.0), px(300.0), px(150.0))
+            .expect("内容溢出时应显示滚动条");
+
+        assert_eq!(metrics.thumb_length, px(24.5));
+        assert!((pixels_to_f32(metrics.thumb_start) - 37.75).abs() < 0.01);
+    }
+
+    /// 拖拽文本域滚动条滑块时，应按轨道位置换算为目标滚动距离。
+    #[test]
+    fn textarea_scrollbar_drag_converts_pointer_to_scroll() {
+        let metrics = TextareaScrollbarMetrics {
+            thumb_start: px(10.0),
+            thumb_length: px(20.0),
+            track_start: px(2.0),
+            track_length: px(102.0),
+            max_scroll: px(400.0),
+        };
+
+        let scroll = textarea_scroll_for_scrollbar_drag(px(53.0), px(10.0), metrics);
+
+        assert_eq!(scroll, px(200.0));
     }
 }

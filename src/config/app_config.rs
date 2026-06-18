@@ -6,6 +6,58 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 默认 Jstack 线程名过滤规则，隐藏常见编译线程和 JVM 附加监听线程。
+pub const DEFAULT_JSTACK_THREAD_NAME_FILTERS: &str =
+    "C1 CompilerThread*,C2 CompilerThread*,Attach Listener";
+/// 默认 Jstack 完整线程段过滤规则，隐藏常见 Resin keepalive socket 读取和 accept 等待堆栈。
+pub const DEFAULT_JSTACK_STACK_SEGMENT_FILTERS: &str = concat!(
+    "java.lang.Thread.State: RUNNABLE\n",
+    "\tat java.net.SocketInputStream.socketRead0(Native Method)\n",
+    "\tat java.net.SocketInputStream.socketRead(SocketInputStream.java:116)\n",
+    "\tat java.net.SocketInputStream.read(SocketInputStream.java:171)\n",
+    "\tat java.net.SocketInputStream.read(SocketInputStream.java:141)\n",
+    "\tat sun.security.ssl.InputRecord.readFully(InputRecord.java:465)\n",
+    "\tat sun.security.ssl.InputRecord.read(InputRecord.java:503)\n",
+    "\tat sun.security.ssl.SSLSocketImpl.readRecord(SSLSocketImpl.java:983)\n",
+    "\t- locked <0x000000069ea415d8> (a java.lang.Object)\n",
+    "\tat sun.security.ssl.SSLSocketImpl.readDataRecord(SSLSocketImpl.java:940)\n",
+    "\tat sun.security.ssl.AppInputStream.read(AppInputStream.java:105)\n",
+    "\t- locked <0x000000069ea41620> (a sun.security.ssl.AppInputStream)\n",
+    "\tat com.caucho.vfs.SocketStream.read(SocketStream.java:187)\n",
+    "\tat com.caucho.vfs.SocketStream.readTimeout(SocketStream.java:239)\n",
+    "\tat com.caucho.vfs.ReadStream.fillWithTimeout(ReadStream.java:1147)\n",
+    "\tat com.caucho.network.listen.TcpSocketLink.threadKeepalive(TcpSocketLink.java:1482)\n",
+    "\tat com.caucho.network.listen.TcpSocketLink.processKeepalive(TcpSocketLink.java:1460)\n",
+    "\tat com.caucho.network.listen.TcpSocketLink.handleRequestsImpl(TcpSocketLink.java:1300)\n",
+    "\tat com.caucho.network.listen.TcpSocketLink.handleRequests(TcpSocketLink.java:1215)\n",
+    "\tat com.caucho.network.listen.TcpSocketLink.handleAcceptTaskImpl(TcpSocketLink.java:1011)\n",
+    "\tat com.caucho.network.listen.ConnectionTask.runThread(ConnectionTask.java:117)\n",
+    "\tat com.caucho.network.listen.ConnectionTask.run(ConnectionTask.java:93)\n",
+    "\tat com.caucho.network.listen.SocketLinkThreadLauncher.handleTasks(SocketLinkThreadLauncher.java:175)\n",
+    "\tat com.caucho.network.listen.TcpSocketAcceptThread.run(TcpSocketAcceptThread.java:61)\n",
+    "\tat com.caucho.env.thread2.ResinThread2.runTasks(ResinThread2.java:173)\n",
+    "\tat com.caucho.env.thread2.ResinThread2.run(ResinThread2.java:118)\n",
+    "||\n",
+    "java.lang.Thread.State: RUNNABLE\n",
+    "\tat java.net.DualStackPlainSocketImpl.accept0(Native Method)\n",
+    "\tat java.net.DualStackPlainSocketImpl.socketAccept(DualStackPlainSocketImpl.java:131)\n",
+    "\tat java.net.AbstractPlainSocketImpl.accept(AbstractPlainSocketImpl.java:409)\n",
+    "\tat java.net.PlainSocketImpl.accept(PlainSocketImpl.java:199)\n",
+    "\t- locked <0x000000061ff12688> (a java.net.SocksSocketImpl)\n",
+    "\tat java.net.ServerSocket.implAccept(ServerSocket.java:545)\n",
+    "\tat sun.security.ssl.SSLServerSocketImpl.accept(SSLServerSocketImpl.java:348)\n",
+    "\tat com.caucho.vfs.QServerSocketWrapper.accept(QServerSocketWrapper.java:105)\n",
+    "\tat com.caucho.network.listen.TcpPort.accept(TcpPort.java:1380)\n",
+    "\tat com.caucho.network.listen.TcpSocketLink.accept(TcpSocketLink.java:1039)\n",
+    "\tat com.caucho.network.listen.TcpSocketLink.handleAcceptTaskImpl(TcpSocketLink.java:989)\n",
+    "\tat com.caucho.network.listen.ConnectionTask.runThread(ConnectionTask.java:117)\n",
+    "\tat com.caucho.network.listen.ConnectionTask.run(ConnectionTask.java:93)\n",
+    "\tat com.caucho.network.listen.SocketLinkThreadLauncher.handleTasks(SocketLinkThreadLauncher.java:175)\n",
+    "\tat com.caucho.network.listen.TcpSocketAcceptThread.run(TcpSocketAcceptThread.java:61)\n",
+    "\tat com.caucho.env.thread2.ResinThread2.runTasks(ResinThread2.java:173)\n",
+    "\tat com.caucho.env.thread2.ResinThread2.run(ResinThread2.java:118)",
+);
+
 /// 应用配置根对象，字段结构与 `~/.argus/settings.toml` 保持一致。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -140,12 +192,34 @@ pub struct LogSearchConfig {
 }
 
 /// 日志显示配置，保存阅读区和线程日志分析的展示偏好。
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LogDisplayConfig {
     /// Jstack 线程名过滤关键字，多个关键字可用逗号、分号或竖线分隔。
+    #[serde(default = "default_jstack_thread_name_filters")]
     pub jstack_thread_name_filters: String,
     /// Jstack 完整线程段过滤片段，多个片段使用 `||` 分隔，`\n` 会按换行匹配。
+    #[serde(default = "default_jstack_stack_segment_filters")]
     pub jstack_stack_segment_filters: String,
+}
+
+impl Default for LogDisplayConfig {
+    /// 构造默认日志显示配置，默认过滤常见低价值 Jstack 系统线程和网络等待堆栈。
+    fn default() -> Self {
+        Self {
+            jstack_thread_name_filters: default_jstack_thread_name_filters(),
+            jstack_stack_segment_filters: default_jstack_stack_segment_filters(),
+        }
+    }
+}
+
+/// 返回默认 Jstack 线程名过滤规则，供 serde 缺失字段和默认配置复用。
+fn default_jstack_thread_name_filters() -> String {
+    DEFAULT_JSTACK_THREAD_NAME_FILTERS.to_string()
+}
+
+/// 返回默认 Jstack 线程段过滤规则，供 serde 缺失字段和默认配置复用。
+fn default_jstack_stack_segment_filters() -> String {
+    DEFAULT_JSTACK_STACK_SEGMENT_FILTERS.to_string()
 }
 
 /// 编码配置，当前先持久化用户选择，日志正文读取接入后再参与解码。
@@ -318,13 +392,31 @@ mod tests {
         assert!(LogSearchConfig::default().quick_keywords.is_empty());
     }
 
-    /// 验证日志显示配置默认不隐藏任何 Jstack 线程。
+    /// 验证日志显示配置默认隐藏常见低价值 Jstack 线程和网络等待堆栈。
     #[test]
-    fn default_log_display_filters_are_empty() {
+    fn default_log_display_filters_use_jstack_noise_patterns() {
         let config = LogDisplayConfig::default();
 
-        assert!(config.jstack_thread_name_filters.is_empty());
-        assert!(config.jstack_stack_segment_filters.is_empty());
+        assert_eq!(
+            config.jstack_thread_name_filters,
+            DEFAULT_JSTACK_THREAD_NAME_FILTERS
+        );
+        assert!(
+            config
+                .jstack_thread_name_filters
+                .contains("C1 CompilerThread*")
+        );
+        assert!(
+            config
+                .jstack_stack_segment_filters
+                .contains("SocketInputStream.socketRead0")
+        );
+        assert!(
+            config
+                .jstack_stack_segment_filters
+                .contains("DualStackPlainSocketImpl.accept0")
+        );
+        assert!(config.jstack_stack_segment_filters.contains("||"));
     }
 
     /// 验证默认升级配置不会在未配置服务器时发起自动检查。
