@@ -1,6 +1,6 @@
 //! 文件职责：Argus 桌面客户端启动入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-18
 //! 作者：Argus 开发团队
 //! 主要功能：初始化 GPUI 应用、打开主窗口、启动升级检查并处理应用重新打开和系统外部打开事件。
 
@@ -17,6 +17,14 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 /// 主窗口句柄共享引用；系统 open-url 监听和 reopen 逻辑共同维护最新可用窗口。
 type MainWindowSlot = Rc<RefCell<Option<WindowHandle<ArgusApp>>>>;
+
+/// 读取当前缓存的主窗口句柄，并在返回前释放 RefCell 借用。
+///
+/// 说明：系统右键打开文件可能在主窗口关闭或重建过程中到达，后续需要更新窗口或清理失效句柄；
+/// 如果把 RefCell 的只读借用延续到这些操作中，失效句柄分支会在清理缓存时触发 already borrowed panic。
+fn cached_main_window_handle(main_window_slot: &MainWindowSlot) -> Option<WindowHandle<ArgusApp>> {
+    *main_window_slot.borrow()
+}
 
 /// 启动 Argus GPUI 应用并创建透明原生标题栏的主窗口。
 fn main() {
@@ -111,7 +119,9 @@ fn observe_external_open_requests(
         while let Ok(paths) = receiver.recv().await {
             let mut pending_paths = Some(paths);
 
-            if let Some(window_handle) = *main_window_slot.borrow() {
+            // 先把句柄拷贝到局部变量，确保 RefCell 借用不会跨过 update 或后续 borrow_mut 调用。
+            let cached_window_handle = cached_main_window_handle(&main_window_slot);
+            if let Some(window_handle) = cached_window_handle {
                 let update_result = window_handle.update(cx, |app, window, cx| {
                     window.activate_window();
                     if let Some(paths) = pending_paths.take() {
