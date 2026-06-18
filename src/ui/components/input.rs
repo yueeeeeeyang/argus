@@ -1781,13 +1781,24 @@ fn textarea_local_range(
     value: &str,
 ) -> Option<Range<usize>> {
     let range = range?;
-    let start = range.start.max(line.start);
-    let mut end = range.end.min(line.end);
+    let value_length = character_count(value);
+    // 设置窗口关闭或输入法状态切换时，渲染层可能短暂拿到旧行范围；
+    // 这里先把完整文本范围和行范围裁剪到当前文本长度内，避免无符号下溢导致 UI 线程崩溃。
+    let line_start = line.start.min(value_length);
+    let line_end = line.end.min(value_length).max(line_start);
+    let start = range.start.min(value_length).max(line_start);
+    let mut end = range.end.min(value_length).min(line_end);
     // 当选区覆盖行尾换行符时，将选区绘制到行尾，符合多行文本域的视觉预期。
-    if range.end > line.end && line.end < character_count(value) {
-        end = line.end;
+    if range.end > line_end && line_end < value_length {
+        end = line_end;
     }
-    (start < end).then_some(start - line.start..end - line.start)
+    if start >= end {
+        return None;
+    }
+
+    let local_start = start.saturating_sub(line_start);
+    let local_end = end.saturating_sub(line_start);
+    (local_start < local_end).then_some(local_start..local_end)
 }
 
 /// 返回光标所在行和行内字符列。
@@ -1921,5 +1932,17 @@ mod tests {
 
         assert_eq!(scroll, px(308.0));
         assert!(px(500.0) - scroll <= px(192.0));
+    }
+
+    /// 文本域关闭或重新渲染时即使遇到旧行范围，也不能因范围相减导致崩溃。
+    #[test]
+    fn textarea_local_range_clamps_stale_line_bounds() {
+        let stale_line = TextareaLine {
+            text: String::new(),
+            start: 8,
+            end: 4,
+        };
+
+        assert_eq!(textarea_local_range(&stale_line, Some(0..12), "abc"), None);
     }
 }

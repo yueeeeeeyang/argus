@@ -18,7 +18,8 @@ use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior,
-    Render, SharedString, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
+    MouseMoveEvent, Render, SharedString, UniformListScrollHandle, Window, div, prelude::*, px,
+    rgb, uniform_list,
 };
 
 /// 分析页签顶部内边距和矩阵横向留白。
@@ -37,21 +38,47 @@ const JSTACK_SCROLLBAR_PADDING: f32 = 4.0;
 const JSTACK_SCROLLBAR_MIN_THUMB: f32 = 32.0;
 /// 自绘滚动条滑块厚度。
 const JSTACK_SCROLLBAR_THUMB_SIZE: f32 = 5.0;
+/// tooltip 中单行堆栈的软换行字符数，避免超长线程头在预览气泡中被裁掉。
+const TOOLTIP_STACK_WRAP_CHARS: usize = 110;
 
-/// 方块 tooltip，展示线程在某个快照中的聚合信息。
-struct JstackCellTooltip {
+/// Jstack 方块悬浮预览数据。
+#[derive(Clone)]
+pub struct JstackCellPreviewData {
     /// 当前主题令牌。
-    theme: AppTheme,
+    pub theme: AppTheme,
     /// 快照文件名称。
-    snapshot_label: String,
+    pub snapshot_label: String,
     /// 线程名称。
-    thread_name: String,
+    pub thread_name: String,
     /// 出现次数。
-    count: usize,
+    pub count: usize,
     /// 状态标签。
-    state_label: String,
-    /// 当前线程块前 20 行堆栈预览。
-    preview_stack_lines: Option<Arc<[String]>>,
+    pub state_label: String,
+    /// 当前线程块完整堆栈预览。
+    pub stack_lines: Option<Arc<[String]>>,
+}
+
+/// Jstack 方块悬浮预览弹出窗口。
+pub struct JstackCellPreviewWindow {
+    /// 当前预览内容。
+    data: JstackCellPreviewData,
+}
+
+impl JstackCellPreviewWindow {
+    /// 创建独立悬浮预览窗口。
+    ///
+    /// 参数说明：
+    /// - `data`：线程方块在当前快照中的聚合信息和完整堆栈。
+    ///
+    /// 返回值：可由 GPUI PopUp 窗口渲染的轻量级预览视图。
+    pub fn new(data: JstackCellPreviewData) -> Self {
+        Self { data }
+    }
+
+    /// 更新悬浮预览内容；复用窗口时避免重新创建根视图。
+    pub fn update_data(&mut self, data: JstackCellPreviewData) {
+        self.data = data;
+    }
 }
 
 /// 线程名复制提示气泡。
@@ -79,61 +106,61 @@ impl Render for ThreadNameCopyTooltip {
     }
 }
 
-impl Render for JstackCellTooltip {
-    /// 渲染紧凑 tooltip。
+impl Render for JstackCellPreviewWindow {
+    /// 渲染可越过主窗口边界的线程堆栈悬浮预览。
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let data = self.data.clone();
         div()
-            .max_w(px(420.0))
+            .size_full()
             .px_3()
             .py_2()
             .rounded_sm()
-            .bg(rgb(self.theme.title_bar))
+            .bg(rgb(data.theme.title_bar))
             .border_1()
-            .border_color(rgb(self.theme.border))
+            .border_color(rgb(data.theme.border))
             .text_size(px(12.0))
             .line_height(px(18.0))
-            .text_color(rgb(self.theme.foreground))
+            .text_color(rgb(data.theme.foreground))
             .flex()
             .flex_col()
             .gap_1()
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.thread_name.clone()),
+                    .child(data.thread_name.clone()),
             )
-            .child(format!("快照：{}", self.snapshot_label))
-            .child(format!("出现次数：{}", self.count))
-            .child(format!("状态：{}", self.state_label))
+            .child(format!("快照：{}", data.snapshot_label))
+            .child(format!("出现次数：{}", data.count))
+            .child(format!("状态：{}", data.state_label))
             .child(
                 div()
                     .pt_1()
-                    .text_color(rgb(self.theme.foreground_muted))
-                    .child("前 20 行堆栈："),
+                    .text_color(rgb(data.theme.foreground_muted))
+                    .child("完整堆栈："),
             )
             .child(
                 div()
                     .id("jstack-cell-tooltip-stack-preview")
-                    .max_h(px(260.0))
+                    .max_h(px(460.0))
                     .overflow_y_scroll()
+                    .overflow_x_scroll()
                     .scrollbar_width(px(6.0))
                     .rounded_sm()
-                    .bg(rgb(self.theme.background))
+                    .bg(rgb(data.theme.background))
                     .border_1()
-                    .border_color(rgb(self.theme.border))
+                    .border_color(rgb(data.theme.border))
                     .p_2()
                     .font_family(ARGUS_LOG_FONT_FAMILY)
                     .children(
-                        self.preview_stack_lines
+                        data.stack_lines
                             .as_ref()
                             .map(|lines| {
-                                lines
-                                    .iter()
-                                    .take(20)
-                                    .cloned()
+                                tooltip_stack_preview_lines(lines.as_ref())
+                                    .into_iter()
                                     .map(|line| {
                                         div()
                                             .min_w(px(0.0))
-                                            .whitespace_nowrap()
+                                            .whitespace_normal()
                                             .line_height(px(18.0))
                                             .child(line)
                                             .into_any_element()
@@ -144,7 +171,7 @@ impl Render for JstackCellTooltip {
                             .unwrap_or_else(|| {
                                 vec![
                                     div()
-                                        .text_color(rgb(self.theme.foreground_muted))
+                                        .text_color(rgb(data.theme.foreground_muted))
                                         .child("无堆栈内容")
                                         .into_any_element(),
                                 ]
@@ -152,6 +179,39 @@ impl Render for JstackCellTooltip {
                     ),
             )
     }
+}
+
+/// 生成 tooltip 中的完整堆栈预览行；超长行会软拆分，但不会丢弃原始内容。
+fn tooltip_stack_preview_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .flat_map(|line| split_tooltip_stack_line(line, TOOLTIP_STACK_WRAP_CHARS))
+        .collect()
+}
+
+/// 按字符边界拆分长堆栈行，避免 UTF-8 字符被截断。
+fn split_tooltip_stack_line(line: &str, max_chars: usize) -> Vec<String> {
+    if line.is_empty() || line.chars().count() <= max_chars {
+        return vec![line.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0_usize;
+    for character in line.chars() {
+        if current_len >= max_chars {
+            chunks.push(current);
+            current = "    ".to_string();
+            current_len = 4;
+        }
+        current.push(character);
+        current_len += 1;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
 }
 
 /// 渲染 Jstack 分析页签主体。
@@ -519,7 +579,7 @@ fn render_frequency_matrix(
                     let JstackAnalysisTaskState::Ready(result) = &state.task_state else {
                         return Vec::new();
                     };
-                    let selected_thread_name = state.selected_thread_name.clone();
+                    let selected_thread_identity = state.selected_thread_identity.clone();
                     let Some(row_indices) = visible_indices.as_slice().get(range) else {
                         return Vec::new();
                     };
@@ -534,7 +594,7 @@ fn render_frequency_matrix(
                                     row,
                                     result,
                                     active_states.as_ref(),
-                                    selected_thread_name.as_deref(),
+                                    selected_thread_identity.as_deref(),
                                     matrix_width,
                                     &theme,
                                     row_cx,
@@ -562,13 +622,14 @@ fn render_matrix_row(
     row: &JstackFrequencyRow,
     result: &JstackAnalysisResult,
     active_states: &BTreeSet<JstackThreadState>,
-    selected_thread_name: Option<&str>,
+    selected_thread_identity: Option<&str>,
     matrix_width: f32,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
     let thread_name = row.thread_name.clone();
-    let is_thread_name_selected = selected_thread_name == Some(thread_name.as_str());
+    let thread_identity = row.display_label();
+    let is_thread_name_selected = selected_thread_identity == Some(thread_identity.as_str());
     let cell_elements = row
         .cells
         .iter()
@@ -607,6 +668,7 @@ fn render_matrix_row(
                 .child(render_selectable_thread_name(
                     analysis_id,
                     thread_name,
+                    thread_identity,
                     is_thread_name_selected,
                     theme,
                     cx,
@@ -625,6 +687,7 @@ fn render_matrix_row(
 fn render_selectable_thread_name(
     analysis_id: usize,
     thread_name: String,
+    thread_identity: String,
     is_selected: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
@@ -632,7 +695,7 @@ fn render_selectable_thread_name(
     let tooltip_theme = theme.clone();
     div()
         .id(SharedString::from(format!(
-            "jstack-thread-name-{analysis_id}-{thread_name}"
+            "jstack-thread-name-{analysis_id}-{thread_identity}"
         )))
         .h(px(MATRIX_ROW_HEIGHT - 6.0))
         .w_full()
@@ -662,7 +725,12 @@ fn render_selectable_thread_name(
             }
         })
         .on_click(cx.listener(move |app, _, _, cx| {
-            app.select_and_copy_jstack_thread_name(analysis_id, thread_name.clone(), cx);
+            app.select_and_copy_jstack_thread_name(
+                analysis_id,
+                thread_name.clone(),
+                thread_identity.clone(),
+                cx,
+            );
             cx.notify();
         }))
 }
@@ -695,10 +763,7 @@ fn render_frequency_cell(
     let tooltip_state_label = state
         .map(|state| state.label().to_string())
         .unwrap_or_else(|| "未出现".to_string());
-    let tooltip_theme = theme.clone();
-    let tooltip_thread_name = thread_name.clone();
-    let tooltip_count = cell.count;
-    let tooltip_preview_stack_lines = if is_visible {
+    let tooltip_stack_lines = if is_visible {
         cell.stack_occurrences
             .first()
             .map(|occurrence| occurrence.stack_lines.clone())
@@ -714,11 +779,24 @@ fn render_frequency_cell(
         .map(|occurrence| occurrence.occurrence_index)
         .unwrap_or(1);
     let can_open_detail = is_visible && cell.count > 0;
+    let preview_key = format!("{analysis_id}:{row_index}:{}", cell.snapshot_index);
+    let preview_data = JstackCellPreviewData {
+        theme: theme.clone(),
+        snapshot_label,
+        thread_name: thread_name.clone(),
+        count: cell.count,
+        state_label: if is_visible {
+            tooltip_state_label
+        } else {
+            state_label
+        },
+        stack_lines: tooltip_stack_lines,
+    };
 
     div()
         .id(SharedString::from(format!(
-            "jstack-cell-{}-{}",
-            thread_name, cell.snapshot_index
+            "jstack-cell-{analysis_id}-{row_index}-{}",
+            cell.snapshot_index
         )))
         .w(px(SNAPSHOT_CELL_SIZE))
         .h(px(SNAPSHOT_CELL_SIZE))
@@ -732,23 +810,27 @@ fn render_frequency_cell(
         } else {
             background
         }))
-        .tooltip(move |_, cx| {
-            cx.new(|_| JstackCellTooltip {
-                theme: tooltip_theme.clone(),
-                snapshot_label: snapshot_label.clone(),
-                thread_name: tooltip_thread_name.clone(),
-                count: tooltip_count,
-                state_label: if is_visible {
-                    tooltip_state_label.clone()
-                } else {
-                    state_label.clone()
-                },
-                preview_stack_lines: tooltip_preview_stack_lines.clone(),
+        .on_mouse_move({
+            let preview_key = preview_key.clone();
+            let preview_data = preview_data.clone();
+            cx.listener(move |app, event: &MouseMoveEvent, window, cx| {
+                app.show_jstack_cell_preview_window(
+                    preview_key.clone(),
+                    preview_data.clone(),
+                    event.position,
+                    window,
+                    cx,
+                );
             })
-            .into()
         })
+        .on_hover(cx.listener(move |app, is_hovered: &bool, _, cx| {
+            if !*is_hovered {
+                app.close_jstack_cell_preview_window(cx);
+            }
+        }))
         .when(can_open_detail, |this| {
             this.on_click(cx.listener(move |app, _, _, cx| {
+                app.close_jstack_cell_preview_window(cx);
                 app.open_jstack_thread_detail_for_cell(
                     analysis_id,
                     row_index,

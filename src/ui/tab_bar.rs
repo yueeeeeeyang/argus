@@ -315,7 +315,7 @@ fn render_tab(
         .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
             if event.standard_click() {
                 cx.stop_propagation();
-                app.activate_tab(tab_id);
+                app.activate_tab_with_context(tab_id, cx);
                 cx.notify();
             }
         }))
@@ -365,7 +365,7 @@ fn render_tab_close_slot(
                     .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
                         if event.standard_click() {
                             cx.stop_propagation();
-                            app.close_tab(tab_id);
+                            app.close_tab_with_context(tab_id, cx);
                             cx.notify();
                         }
                     })),

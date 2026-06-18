@@ -1045,6 +1045,13 @@ impl ArgusApp {
             return;
         }
 
+        if self.select_pending_archive_probe_for_search_anchor(source_id) {
+            self.start_direct_source_archive_probe(source_id, source.clone(), cx);
+            self.scroll_source_into_view(source_id);
+            self.placeholder_notice = format!("已选择 {}，正在识别单文件日志", source.label);
+            return;
+        }
+
         if !source.kind.is_log_candidate() {
             return;
         }
@@ -1060,6 +1067,27 @@ impl ArgusApp {
     /// 返回来源节点是否属于搜索多选集合，用于来源树绘制选中态。
     pub fn is_source_selected_for_search(&self, source_id: SourceId) -> bool {
         self.selected_search_source_ids.contains(&source_id)
+    }
+
+    /// 将未完成单文件探测的压缩包设置为 Shift 范围选择锚点。
+    ///
+    /// 参数说明：
+    /// - `source_id`：来源树中用户普通点击的压缩包节点。
+    ///
+    /// 返回值：节点确认为待探测压缩包时返回 `true`，调用方可继续触发后台识别。
+    pub(crate) fn select_pending_archive_probe_for_search_anchor(
+        &mut self,
+        source_id: SourceId,
+    ) -> bool {
+        if !self.is_pending_archive_probe_candidate(source_id) {
+            return false;
+        }
+
+        self.selected_search_source_ids.clear();
+        self.selected_search_source_ids.insert(source_id);
+        self.last_source_selection_anchor = Some(source_id);
+        self.select_source(source_id);
+        true
     }
 
     /// 返回输入框当前选区范围。
@@ -1641,44 +1669,105 @@ impl ArgusApp {
             self.last_source_selection_anchor = Some(target_id);
             return;
         };
-        let visible_ids = self.visible_source_ids();
-        let Some(anchor_index) = visible_ids.iter().position(|id| *id == anchor_id) else {
+        let visible_ids = self.visible_source_ids().to_vec();
+        let Some(mut selected) =
+            self.source_tree_range_selection_from_order(&visible_ids, anchor_id, target_id, None)
+        else {
             // 原锚点已经不在当前可见树中时，用本次目标重建锚点，避免后续范围基于失效节点。
             self.selected_search_source_ids.clear();
             self.selected_search_source_ids.insert(target_id);
             self.last_source_selection_anchor = Some(target_id);
             return;
         };
-        let Some(target_index) = visible_ids.iter().position(|id| *id == target_id) else {
-            return;
-        };
 
+        if self.is_source_archive_probe_running_for_selection() {
+            let mut stable_order_allowed_ids = visible_ids.iter().copied().collect::<BTreeSet<_>>();
+            stable_order_allowed_ids.extend(
+                self.source_registry
+                    .tree_order_source_ids()
+                    .iter()
+                    .copied()
+                    .filter(|source_id| self.is_pending_archive_probe_candidate(*source_id)),
+            );
+            if let Some(stable_order_selected) = self.source_tree_range_selection_from_order(
+                self.source_registry.tree_order_source_ids(),
+                anchor_id,
+                target_id,
+                Some(&stable_order_allowed_ids),
+            ) && stable_order_selected.len() > selected.len()
+            {
+                selected = stable_order_selected;
+            }
+        }
+
+        if !selected.is_empty() {
+            self.selected_search_source_ids = selected;
+        }
+    }
+
+    /// 按指定来源 ID 顺序计算 Shift 范围选区。
+    ///
+    /// 参数说明：
+    /// - `ordered_ids`：可见顺序或稳定树序。
+    /// - `anchor_id`：范围起点。
+    /// - `target_id`：本次点击的范围终点。
+    /// - `allowed_ids`：使用稳定树序兜底时允许纳入的节点集合；为空时不做额外限制。
+    ///
+    /// 返回值：锚点和目标均存在时返回可选择来源集合，否则返回 `None`。
+    fn source_tree_range_selection_from_order(
+        &self,
+        ordered_ids: &[SourceId],
+        anchor_id: SourceId,
+        target_id: SourceId,
+        allowed_ids: Option<&BTreeSet<SourceId>>,
+    ) -> Option<BTreeSet<SourceId>> {
+        let anchor_index = ordered_ids.iter().position(|id| *id == anchor_id)?;
+        let target_index = ordered_ids.iter().position(|id| *id == target_id)?;
         let (start, end) = if anchor_index <= target_index {
             (anchor_index, target_index)
         } else {
             (target_index, anchor_index)
         };
-        let selected = visible_ids[start..=end]
-            .iter()
-            .filter(|source_id| self.is_source_selectable_for_search_selection(**source_id))
-            .copied()
-            .collect::<BTreeSet<_>>();
-        if !selected.is_empty() {
-            self.selected_search_source_ids = selected;
-        }
+
+        Some(
+            ordered_ids[start..=end]
+                .iter()
+                .filter(|source_id| {
+                    allowed_ids
+                        .map(|allowed_ids| allowed_ids.contains(source_id))
+                        .unwrap_or(true)
+                })
+                .filter(|source_id| self.is_source_selectable_for_search_selection(**source_id))
+                .copied()
+                .collect::<BTreeSet<_>>(),
+        )
     }
 
     /// 判断来源节点是否可参与来源树多选。
     ///
     /// 说明：单文件压缩包探测未完成前仍是 `Archive`，但用户已经能在树中看到它；
     /// 允许其临时进入多选集合，探测完成后如果变成 `SingleFileArchive` 会自然成为日志候选。
-    fn is_source_selectable_for_search_selection(&self, source_id: SourceId) -> bool {
+    pub(crate) fn is_source_selectable_for_search_selection(&self, source_id: SourceId) -> bool {
         self.source_registry.node(source_id).is_some_and(|node| {
-            node.kind.is_log_candidate()
-                || (matches!(node.kind, SourceKind::Archive(_))
-                    && !node.metadata.children_loaded
-                    && !self.source_archive_probe_completed_ids.contains(&source_id))
+            node.kind.is_log_candidate() || self.is_pending_archive_probe_candidate(source_id)
         })
+    }
+
+    /// 判断来源节点是否是单文件压缩包探测完成前的临时可选节点。
+    fn is_pending_archive_probe_candidate(&self, source_id: SourceId) -> bool {
+        self.source_registry.node(source_id).is_some_and(|node| {
+            matches!(node.kind, SourceKind::Archive(_))
+                && !node.metadata.children_loaded
+                && !self.source_archive_probe_completed_ids.contains(&source_id)
+        })
+    }
+
+    /// 返回来源树单文件压缩包探测是否仍有排队或执行中的任务。
+    fn is_source_archive_probe_running_for_selection(&self) -> bool {
+        !self.source_archive_probe_queue.is_empty()
+            || !self.source_archive_probe_queued_ids.is_empty()
+            || !self.source_archive_probe_inflight_ids.is_empty()
+            || !self.source_archive_probe_direct_inflight_ids.is_empty()
     }
 
     /// 写入搜索结果高亮状态。

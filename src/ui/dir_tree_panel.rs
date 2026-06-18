@@ -284,7 +284,10 @@ fn render_node(
                     MouseButton::Left,
                     cx.listener(move |app, event: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        if event.modifiers.shift || event.modifiers.secondary() {
+                        if event.modifiers.shift
+                            || event.modifiers.secondary()
+                            || app.is_source_selectable_for_search_selection(source_id)
+                        {
                             app.handle_source_tree_click(source_id, event.modifiers, cx);
                         } else if can_expand {
                             app.toggle_source_expanded(source_id, cx);

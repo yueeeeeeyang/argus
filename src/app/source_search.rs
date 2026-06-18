@@ -413,7 +413,7 @@ impl ArgusApp {
         self.is_source_tree_search_open && !self.source_tree_search_query.trim().is_empty()
     }
 
-    /// 重建来源树过滤结果；只匹配已加载日志候选节点，并保留祖先目录上下文。
+    /// 重建来源树过滤结果；匹配已加载日志候选和未完成单文件探测的压缩包，并保留祖先目录上下文。
     pub fn rebuild_filtered_source_ids(&mut self) {
         self.filtered_source_ids.clear();
 
@@ -426,10 +426,7 @@ impl ArgusApp {
         let mut included_ids = HashSet::new();
 
         for source_id in ordered_source_ids.iter().copied() {
-            let Some(source) = self.source_registry.node(source_id) else {
-                continue;
-            };
-            if !source.kind.is_log_candidate()
+            if !self.is_source_selectable_for_search_selection(source_id)
                 || !self
                     .source_registry
                     .search_key(source_id)

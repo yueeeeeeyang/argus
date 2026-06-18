@@ -451,7 +451,7 @@ impl ArgusApp {
                 .await;
 
             view.update(cx, |app, cx| {
-                app.apply_load_report(report);
+                app.apply_load_report_with_context(report, cx);
                 cx.notify();
             })
             .ok();

@@ -10,6 +10,10 @@ use std::ops::Range;
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{HighlightLanguage, HighlightTokenKind, SyntaxHighlighter};
 use crate::jstack_analysis::{JstackThreadDetail, JstackThreadStackOccurrence};
+use crate::text_selection::{
+    TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
+    character_count, slice_character_range, word_range_at,
+};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
@@ -78,6 +82,49 @@ struct DetailScrollbarMetrics {
     max_scroll: Pixels,
 }
 
+/// 堆栈文本中的字符位置。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StackTextPosition {
+    /// 0 基堆栈行号。
+    line_index: usize,
+    /// 行内字符列。
+    column: usize,
+}
+
+/// 堆栈文本选区。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StackTextSelection {
+    /// 鼠标按下时的锚点。
+    anchor: StackTextPosition,
+    /// 当前拖拽到的焦点。
+    focus: StackTextPosition,
+}
+
+impl StackTextSelection {
+    /// 返回按文档顺序排列的选区端点。
+    fn normalized(&self) -> (StackTextPosition, StackTextPosition) {
+        if stack_text_position_le(self.anchor, self.focus) {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    /// 返回选区是否没有覆盖任何字符。
+    fn is_empty(&self) -> bool {
+        self.anchor == self.focus
+    }
+}
+
+/// 堆栈文本拖拽选择状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StackTextSelectionDrag {
+    /// 开始拖拽时按点击次数得到的锚点范围。
+    anchor_range: StackTextSelection,
+    /// 本次拖拽的选择粒度。
+    granularity: TextSelectionGranularity,
+}
+
 /// Jstack 线程详情窗口根视图。
 pub struct JstackThreadDetailWindow {
     /// 打开窗口时的主题快照。
@@ -94,6 +141,10 @@ pub struct JstackThreadDetailWindow {
     scrollbar_drag: Option<DetailScrollbarDrag>,
     /// 是否已选中线程名，选中后支持复制快捷键并显示高亮反馈。
     is_thread_name_selected: bool,
+    /// 当前堆栈正文选区。
+    stack_selection: Option<StackTextSelection>,
+    /// 当前堆栈正文拖拽选择状态。
+    stack_selection_drag: Option<StackTextSelectionDrag>,
 }
 
 impl JstackThreadDetailWindow {
@@ -139,6 +190,8 @@ impl JstackThreadDetailWindow {
             stack_scroll: ScrollHandle::new(),
             scrollbar_drag: None,
             is_thread_name_selected: false,
+            stack_selection: None,
+            stack_selection_drag: None,
         }
     }
 
@@ -166,24 +219,140 @@ impl JstackThreadDetailWindow {
             .and_then(default_highlighted_line);
         self.stack_scroll.set_offset(point(px(0.0), px(0.0)));
         self.scrollbar_drag = None;
+        self.stack_selection = None;
+        self.stack_selection_drag = None;
     }
 
     /// 选中并复制当前线程详情的线程名。
     fn select_and_copy_thread_name(&mut self, cx: &mut Context<Self>) {
         self.is_thread_name_selected = true;
-        let thread_name = self.detail.thread_name.clone();
+        self.stack_selection = None;
+        self.stack_selection_drag = None;
+        let thread_name = self.detail.display_label();
         let app_context: &gpui::App = (&*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(thread_name));
     }
 
-    /// 复制已选中的线程名；若尚未选中，则先选中当前线程名再复制。
-    fn copy_selected_thread_name(&mut self, cx: &mut Context<Self>) {
+    /// 复制当前详情窗口选区；堆栈正文选区优先，没有正文选区时复制线程身份。
+    fn copy_detail_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(stack_text) = self.selected_stack_text() {
+            let app_context: &gpui::App = (&*cx).borrow();
+            app_context.write_to_clipboard(ClipboardItem::new_string(stack_text));
+            return;
+        }
+
         if !self.is_thread_name_selected {
             self.is_thread_name_selected = true;
         }
-        let thread_name = self.detail.thread_name.clone();
+        let thread_name = self.detail.display_label();
         let app_context: &gpui::App = (&*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(thread_name));
+    }
+
+    /// 根据鼠标位置开始堆栈正文选择。
+    fn begin_stack_text_selection(
+        &mut self,
+        line_index: usize,
+        line: &str,
+        pointer_x: Pixels,
+        click_count: usize,
+        window: &mut Window,
+    ) {
+        let position = self.stack_text_position_from_pointer(line_index, line, pointer_x, window);
+        let granularity = stack_text_granularity_for_click_count(click_count);
+        let anchor_range =
+            stack_text_range_for_granularity(line_index, line, position.column, granularity);
+        self.stack_selection = Some(anchor_range.clone());
+        self.stack_selection_drag = Some(StackTextSelectionDrag {
+            anchor_range,
+            granularity,
+        });
+        self.is_thread_name_selected = false;
+    }
+
+    /// 拖拽过程中更新堆栈正文选择。
+    fn update_stack_text_selection(
+        &mut self,
+        line_index: usize,
+        line: &str,
+        pointer_x: Pixels,
+        window: &mut Window,
+    ) {
+        let Some(drag) = self.stack_selection_drag.clone() else {
+            return;
+        };
+        let position = self.stack_text_position_from_pointer(line_index, line, pointer_x, window);
+        let focus_range =
+            stack_text_range_for_granularity(line_index, line, position.column, drag.granularity);
+        self.stack_selection = Some(merge_stack_text_ranges(&drag.anchor_range, &focus_range));
+        self.is_thread_name_selected = false;
+    }
+
+    /// 结束堆栈正文选择；没有选中字符时清理选区。
+    fn finish_stack_text_selection(&mut self) {
+        self.stack_selection_drag = None;
+        if self
+            .stack_selection
+            .as_ref()
+            .is_some_and(StackTextSelection::is_empty)
+        {
+            self.stack_selection = None;
+        }
+    }
+
+    /// 根据鼠标横坐标计算堆栈正文行内字符列。
+    fn stack_text_position_from_pointer(
+        &self,
+        line_index: usize,
+        line: &str,
+        pointer_x: Pixels,
+        window: &mut Window,
+    ) -> StackTextPosition {
+        let bounds = self.stack_scroll.bounds();
+        let horizontal_offset = self.stack_scroll.offset().x;
+        let text_relative_x = pointer_x
+            - bounds.left()
+            - horizontal_offset
+            - px(DETAIL_LINE_NUMBER_WIDTH + DETAIL_STACK_TEXT_HORIZONTAL_PADDING / 2.0);
+        if line.is_empty() || text_relative_x <= px(0.0) {
+            return StackTextPosition {
+                line_index,
+                column: 0,
+            };
+        }
+
+        let mut text_style = window.text_style();
+        text_style.font_family = ARGUS_LOG_FONT_FAMILY.into();
+        text_style.font_size = px(DETAIL_STACK_FONT_SIZE).into();
+        let run = TextRun {
+            len: line.len(),
+            font: text_style.font(),
+            color: text_style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped_line = window.text_system().shape_line(
+            SharedString::from(line.to_string()),
+            text_style.font_size.to_pixels(window.rem_size()),
+            &[run],
+            None,
+        );
+        let byte_index = shaped_line.closest_index_for_x(text_relative_x);
+        StackTextPosition {
+            line_index,
+            column: char_column_for_byte_index(line, byte_index),
+        }
+    }
+
+    /// 返回当前堆栈正文选中的文本。
+    fn selected_stack_text(&self) -> Option<String> {
+        let selection = self.stack_selection.as_ref()?;
+        if selection.is_empty() {
+            return None;
+        }
+        let occurrence = self.active_occurrence()?;
+        selected_stack_text_from_lines(occurrence.stack_lines.as_ref(), selection)
     }
 }
 
@@ -208,13 +377,13 @@ impl Render for JstackThreadDetailWindow {
                     && event.keystroke.key.eq_ignore_ascii_case("c")
                 {
                     cx.stop_propagation();
-                    view.copy_selected_thread_name(cx);
+                    view.copy_detail_selection(cx);
                     cx.notify();
                 }
             }))
             .child(render_detail_title_bar(
                 &theme,
-                &self.detail.thread_name,
+                &self.detail.display_label(),
                 self.is_thread_name_selected,
                 cx,
             ))
@@ -225,6 +394,7 @@ impl Render for JstackThreadDetailWindow {
                 self.active_index,
                 self.highlighted_line,
                 self.is_thread_name_selected,
+                self.stack_selection.as_ref(),
                 &self.stack_scroll,
                 window,
                 cx,
@@ -330,6 +500,7 @@ fn render_detail_body(
     active_index: usize,
     highlighted_line: Option<usize>,
     is_thread_name_selected: bool,
+    stack_selection: Option<&StackTextSelection>,
     stack_scroll: &ScrollHandle,
     window: &mut Window,
     cx: &mut Context<JstackThreadDetailWindow>,
@@ -363,6 +534,7 @@ fn render_detail_body(
             theme,
             &active_occurrence,
             highlighted_line,
+            stack_selection,
             stack_scroll,
             window,
             cx,
@@ -411,7 +583,7 @@ fn render_occurrence_summary(
                 .gap_1()
                 .child(render_copyable_detail_thread_name(
                     "jstack-thread-detail-summary-name",
-                    detail.thread_name.clone(),
+                    detail.display_label(),
                     is_thread_name_selected,
                     14.0,
                     true,
@@ -513,13 +685,13 @@ fn render_stack_content(
     theme: &AppTheme,
     occurrence: &JstackThreadStackOccurrence,
     highlighted_line: Option<usize>,
+    stack_selection: Option<&StackTextSelection>,
     stack_scroll: &ScrollHandle,
     window: &mut Window,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let lines = occurrence.stack_lines.iter().cloned().collect::<Vec<_>>();
     let content_width = detail_stack_content_width(&lines, window);
-    let scroll_handle = stack_scroll.clone();
 
     div()
         .id("jstack-thread-detail-stack")
@@ -535,17 +707,20 @@ fn render_stack_content(
                 .h_full()
                 .overflow_scroll()
                 .scrollbar_width(px(DETAIL_SCROLLBAR_WIDTH))
-                .track_scroll(&scroll_handle)
+                .track_scroll(stack_scroll)
                 .font_family(ARGUS_LOG_FONT_FAMILY)
                 .text_size(px(DETAIL_STACK_FONT_SIZE))
                 .text_color(rgb(theme.foreground))
                 .child(div().min_w(content_width).flex().flex_col().children(
                     lines.into_iter().enumerate().map(|(index, line)| {
+                        let selection_range =
+                            stack_selection_byte_range_for_line(stack_selection, index, &line);
                         render_stack_line(
                             theme,
                             index,
                             line,
                             highlighted_line == Some(index),
+                            selection_range,
                             content_width,
                             cx,
                         )
@@ -553,7 +728,7 @@ fn render_stack_content(
                     }),
                 )),
         )
-        .children(render_detail_scrollbars(&scroll_handle, theme, cx))
+        .children(render_detail_scrollbars(stack_scroll, theme, cx))
 }
 
 /// 根据堆栈滚动状态绘制横向和纵向滚动条。
@@ -811,11 +986,14 @@ fn render_stack_line(
     line_index: usize,
     line: String,
     is_highlighted: bool,
+    selection_range: Option<Range<usize>>,
     content_width: Pixels,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let row_background = is_highlighted.then_some(theme.current_line);
-    let text_element = render_highlighted_stack_text(line, theme);
+    let text_element = render_highlighted_stack_text(line.clone(), theme, selection_range);
+    let line_for_mouse_down = line.clone();
+    let line_for_mouse_move = line.clone();
 
     div()
         .id(SharedString::from(format!(
@@ -851,18 +1029,59 @@ fn render_stack_line(
                 .whitespace_nowrap()
                 .child(text_element),
         )
-        .on_click(cx.listener(move |view, _, _, cx| {
-            view.highlighted_line = Some(line_index);
-            cx.notify();
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                view.highlighted_line = Some(line_index);
+                view.begin_stack_text_selection(
+                    line_index,
+                    &line_for_mouse_down,
+                    event.position.x,
+                    event.click_count,
+                    window,
+                );
+                cx.notify();
+            }),
+        )
+        .on_mouse_move(
+            cx.listener(move |view, event: &MouseMoveEvent, window, cx| {
+                if !event.dragging() || view.stack_selection_drag.is_none() {
+                    return;
+                }
+                cx.stop_propagation();
+                view.update_stack_text_selection(
+                    line_index,
+                    &line_for_mouse_move,
+                    event.position.x,
+                    window,
+                );
+                cx.notify();
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |view, _, _, cx| {
+                if view.stack_selection_drag.is_some() {
+                    cx.stop_propagation();
+                    view.finish_stack_text_selection();
+                    cx.notify();
+                }
+            }),
+        )
 }
 
 /// 用 Java 线程栈规则渲染单行语法高亮。
-fn render_highlighted_stack_text(line: String, theme: &AppTheme) -> AnyElement {
+fn render_highlighted_stack_text(
+    line: String,
+    theme: &AppTheme,
+    selection_range: Option<Range<usize>>,
+) -> AnyElement {
     let highlights = SyntaxHighlighter::highlight(&line, HighlightLanguage::JavaThreadDump)
         .into_iter()
         .filter_map(|span| highlight_style_for_span(span.range, span.kind, theme))
         .collect::<Vec<_>>();
+    let highlights = merge_detail_stack_highlights(highlights, selection_range, theme);
 
     if highlights.is_empty() {
         line.into_any_element()
@@ -871,6 +1090,186 @@ fn render_highlighted_stack_text(line: String, theme: &AppTheme) -> AnyElement {
             .with_highlights(highlights)
             .into_any_element()
     }
+}
+
+/// 判断堆栈文本位置是否按文档顺序不晚于另一个位置。
+fn stack_text_position_le(left: StackTextPosition, right: StackTextPosition) -> bool {
+    left.line_index < right.line_index
+        || (left.line_index == right.line_index && left.column <= right.column)
+}
+
+/// 根据鼠标点击次数选择堆栈正文的选择粒度。
+fn stack_text_granularity_for_click_count(click_count: usize) -> TextSelectionGranularity {
+    match click_count {
+        0 | 1 => TextSelectionGranularity::Character,
+        2 => TextSelectionGranularity::Word,
+        _ => TextSelectionGranularity::Line,
+    }
+}
+
+/// 按指定粒度把鼠标命中的堆栈位置扩展成可拖拽合并的选区范围。
+fn stack_text_range_for_granularity(
+    line_index: usize,
+    line: &str,
+    column: usize,
+    granularity: TextSelectionGranularity,
+) -> StackTextSelection {
+    let character_count = character_count(line);
+    let range = match granularity {
+        TextSelectionGranularity::Character => {
+            column.min(character_count)..column.min(character_count)
+        }
+        TextSelectionGranularity::Word => word_range_at(line, column)
+            .unwrap_or_else(|| column.min(character_count)..column.min(character_count)),
+        TextSelectionGranularity::Line => 0..character_count,
+    };
+
+    StackTextSelection {
+        anchor: StackTextPosition {
+            line_index,
+            column: range.start,
+        },
+        focus: StackTextPosition {
+            line_index,
+            column: range.end,
+        },
+    }
+}
+
+/// 合并拖拽起点和当前命中范围，得到跨行或跨词的最终正文选区。
+fn merge_stack_text_ranges(
+    anchor_range: &StackTextSelection,
+    focus_range: &StackTextSelection,
+) -> StackTextSelection {
+    let (anchor_start, anchor_end) = anchor_range.normalized();
+    let (focus_start, focus_end) = focus_range.normalized();
+    StackTextSelection {
+        anchor: if stack_text_position_le(anchor_start, focus_start) {
+            anchor_start
+        } else {
+            focus_start
+        },
+        focus: if stack_text_position_le(anchor_end, focus_end) {
+            focus_end
+        } else {
+            anchor_end
+        },
+    }
+}
+
+/// 计算当前行被堆栈正文选区覆盖的 UTF-8 字节范围，用于叠加选择背景。
+fn stack_selection_byte_range_for_line(
+    selection: Option<&StackTextSelection>,
+    line_index: usize,
+    line: &str,
+) -> Option<Range<usize>> {
+    let selection = selection?;
+    let (start, end) = selection.normalized();
+    if line_index < start.line_index || line_index > end.line_index {
+        return None;
+    }
+
+    let line_character_count = character_count(line);
+    let start_column = if line_index == start.line_index {
+        start.column.min(line_character_count)
+    } else {
+        0
+    };
+    let end_column = if line_index == end.line_index {
+        end.column.min(line_character_count)
+    } else {
+        line_character_count
+    };
+    (start_column < end_column).then(|| {
+        byte_index_for_character(line, start_column)..byte_index_for_character(line, end_column)
+    })
+}
+
+/// 从堆栈行集合中提取当前正文选区文本，保留跨行换行符以便复制后仍可阅读。
+fn selected_stack_text_from_lines(
+    lines: &[String],
+    selection: &StackTextSelection,
+) -> Option<String> {
+    if selection.is_empty() || lines.is_empty() {
+        return None;
+    }
+
+    let (start, end) = selection.normalized();
+    if start.line_index >= lines.len() {
+        return None;
+    }
+
+    let end_line = end.line_index.min(lines.len().saturating_sub(1));
+    let mut selected = String::new();
+    for line_index in start.line_index..=end_line {
+        if line_index > start.line_index {
+            selected.push('\n');
+        }
+        let line = &lines[line_index];
+        let line_character_count = character_count(line);
+        let start_column = if line_index == start.line_index {
+            start.column.min(line_character_count)
+        } else {
+            0
+        };
+        let end_column = if line_index == end.line_index {
+            end.column.min(line_character_count)
+        } else {
+            line_character_count
+        };
+        if start_column < end_column {
+            selected.push_str(&slice_character_range(line, start_column..end_column));
+        }
+    }
+
+    (!selected.is_empty()).then_some(selected)
+}
+
+/// 合并语法高亮和正文选区；选区背景优先，避免普通 token 背景覆盖选择反馈。
+fn merge_detail_stack_highlights(
+    syntax_highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selection_range: Option<Range<usize>>,
+    theme: &AppTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(selection_range) = selection_range.filter(|range| range.start < range.end) else {
+        return syntax_highlights;
+    };
+
+    let mut merged = Vec::new();
+    for (range, style) in syntax_highlights {
+        for visible_range in subtract_detail_selection_range(range, &selection_range) {
+            merged.push((visible_range, style.clone()));
+        }
+    }
+    merged.push((
+        selection_range,
+        HighlightStyle {
+            color: Some(rgb(theme.foreground).into()),
+            background_color: Some(rgb(theme.selection).into()),
+            ..Default::default()
+        },
+    ));
+    merged.sort_by_key(|(range, _)| range.start);
+    merged
+}
+
+/// 从一个高亮范围中扣除选区覆盖部分，防止两个高亮背景相互叠加。
+fn subtract_detail_selection_range(
+    range: Range<usize>,
+    selection_range: &Range<usize>,
+) -> Vec<Range<usize>> {
+    if range.end <= selection_range.start || range.start >= selection_range.end {
+        return vec![range];
+    }
+
+    let mut ranges = Vec::new();
+    if range.start < selection_range.start {
+        ranges.push(range.start..selection_range.start.min(range.end));
+    }
+    if range.end > selection_range.end {
+        ranges.push(selection_range.end.max(range.start)..range.end);
+    }
+    ranges
 }
 
 /// 把高亮 token 转换成当前主题下的 GPUI 文本样式。

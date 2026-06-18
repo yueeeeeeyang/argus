@@ -7,9 +7,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
-use crate::loader::{SourceId, SourceLocation};
+use crate::config::LoaderConfig;
+use crate::loader::{
+    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceLocation, SourceTreeNode,
+};
 use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
 
 /// Jstack 线程状态，聚合 UI 会按该枚举映射颜色。
@@ -72,6 +75,8 @@ impl JstackThreadState {
 pub struct JstackThreadSample {
     /// 线程名称，取自 jstack 线程头第一段双引号内容。
     pub thread_name: String,
+    /// 线程 ID 摘要，优先包含 `#id`、`tid=` 和 `nid=`，用于区分同名线程。
+    pub thread_id: String,
     /// 解析出的线程状态。
     pub state: JstackThreadState,
     /// 当前线程块的完整堆栈行，包含线程头、状态行和后续 `at ...` 明细。
@@ -89,6 +94,8 @@ pub struct JstackThreadStackOccurrence {
     pub snapshot_path: String,
     /// 线程名称。
     pub thread_name: String,
+    /// 线程 ID 摘要，和线程名共同构成线程身份。
+    pub thread_id: String,
     /// 该次出现解析出的状态。
     pub state: JstackThreadState,
     /// 同一线程名在同一快照内的出现序号，从 1 开始。
@@ -104,6 +111,8 @@ pub struct JstackThreadStackOccurrence {
 pub struct JstackThreadDetail {
     /// 被查看的线程名称。
     pub thread_name: String,
+    /// 被查看线程的 ID 摘要。
+    pub thread_id: String,
     /// 该线程跨多个快照的出现记录，保持快照输入顺序。
     pub occurrences: Vec<JstackThreadStackOccurrence>,
 }
@@ -128,6 +137,8 @@ pub struct JstackAnalysisTarget {
     pub source_id: SourceId,
     /// 来源位置，可能是本地文件或压缩包内条目。
     pub location: SourceLocation,
+    /// 待探测单文件压缩包节点快照；存在时分析后台会先独立探测真实日志条目。
+    pub archive_probe_node: Option<SourceTreeNode>,
     /// UI 展示名称。
     pub label: String,
     /// 路径展示文本。
@@ -152,10 +163,33 @@ pub struct JstackFrequencyCell {
 pub struct JstackFrequencyRow {
     /// 线程名称。
     pub thread_name: String,
+    /// 线程 ID 摘要，避免同名不同线程被聚合到同一行。
+    pub thread_id: String,
     /// 该线程在全部快照中的总出现次数。
     pub total_count: usize,
     /// 每个快照对应一个格子，顺序和快照列一致。
     pub cells: Vec<JstackFrequencyCell>,
+}
+
+impl JstackThreadDetail {
+    /// 返回适合 UI 展示和复制的线程身份文本。
+    pub fn display_label(&self) -> String {
+        thread_display_label(&self.thread_name, &self.thread_id)
+    }
+}
+
+impl JstackThreadStackOccurrence {
+    /// 返回当前堆栈出现记录的线程身份文本。
+    pub fn display_label(&self) -> String {
+        thread_display_label(&self.thread_name, &self.thread_id)
+    }
+}
+
+impl JstackFrequencyRow {
+    /// 返回矩阵行使用的线程身份文本。
+    pub fn display_label(&self) -> String {
+        thread_display_label(&self.thread_name, &self.thread_id)
+    }
 }
 
 /// 被跳过或读取失败的快照。
@@ -272,8 +306,8 @@ impl JstackThreadFilter {
 struct JstackSnapshotParser {
     /// 已完成解析的线程样本。
     samples: Vec<JstackThreadSample>,
-    /// 当前正在收集的线程名。
-    current_thread: Option<String>,
+    /// 当前正在收集的线程名和线程 ID。
+    current_thread: Option<(String, String)>,
     /// 当前线程块解析到的状态。
     current_state: JstackThreadState,
     /// 当前线程块原始堆栈行。
@@ -328,13 +362,14 @@ impl JstackAnalysisResult {
 pub fn analyze_jstack_targets(
     targets: Vec<JstackAnalysisTarget>,
     default_encoding: String,
+    loader_config: LoaderConfig,
 ) -> JstackAnalysisResult {
     let total_files = targets.len();
     let mut snapshots = Vec::new();
     let mut skipped_snapshots = Vec::new();
 
     for target in targets {
-        match read_jstack_snapshot(target.clone(), &default_encoding) {
+        match read_jstack_snapshot(target.clone(), &default_encoding, &loader_config) {
             Ok(snapshot) if snapshot.samples.is_empty() => {
                 skipped_snapshots.push(JstackSkippedSnapshot {
                     source_id: target.source_id,
@@ -388,17 +423,18 @@ pub fn build_analysis_result(
     skipped_snapshots: Vec<JstackSkippedSnapshot>,
     total_files: usize,
 ) -> JstackAnalysisResult {
-    let mut thread_names = BTreeSet::new();
-    let mut per_snapshot_threads: Vec<HashMap<String, JstackSnapshotThreadAggregate>> =
+    let mut thread_identities = BTreeSet::new();
+    let mut per_snapshot_threads: Vec<HashMap<(String, String), JstackSnapshotThreadAggregate>> =
         Vec::with_capacity(snapshots.len());
     let mut total_samples = 0_usize;
 
     for (snapshot_index, snapshot) in snapshots.iter().enumerate() {
-        let mut threads = HashMap::<String, JstackSnapshotThreadAggregate>::new();
+        let mut threads = HashMap::<(String, String), JstackSnapshotThreadAggregate>::new();
         for sample in &snapshot.samples {
-            thread_names.insert(sample.thread_name.clone());
+            let thread_identity = (sample.thread_name.clone(), sample.thread_id.clone());
+            thread_identities.insert(thread_identity.clone());
             total_samples += 1;
-            let aggregate = threads.entry(sample.thread_name.clone()).or_default();
+            let aggregate = threads.entry(thread_identity).or_default();
             *aggregate.state_counts.entry(sample.state).or_default() += 1;
             let occurrence_index = aggregate.stack_occurrences.len() + 1;
             aggregate
@@ -408,6 +444,7 @@ pub fn build_analysis_result(
                     snapshot_label: snapshot.label.clone(),
                     snapshot_path: snapshot.path.clone(),
                     thread_name: sample.thread_name.clone(),
+                    thread_id: sample.thread_id.clone(),
                     state: sample.state,
                     occurrence_index,
                     stack_lines: sample.stack_lines.clone(),
@@ -419,15 +456,15 @@ pub fn build_analysis_result(
         per_snapshot_threads.push(threads);
     }
 
-    let mut rows = thread_names
+    let mut rows = thread_identities
         .into_iter()
-        .map(|thread_name| {
+        .map(|(thread_name, thread_id)| {
             let mut total_count = 0_usize;
             let cells = per_snapshot_threads
                 .iter()
                 .enumerate()
                 .map(|(snapshot_index, threads)| {
-                    let aggregate = threads.get(&thread_name);
+                    let aggregate = threads.get(&(thread_name.clone(), thread_id.clone()));
                     let count = aggregate
                         .map(|aggregate| aggregate.stack_occurrences.len())
                         .unwrap_or_default();
@@ -446,6 +483,7 @@ pub fn build_analysis_result(
 
             JstackFrequencyRow {
                 thread_name,
+                thread_id,
                 total_count,
                 cells,
             }
@@ -457,6 +495,7 @@ pub fn build_analysis_result(
             .total_count
             .cmp(&left.total_count)
             .then_with(|| left.thread_name.cmp(&right.thread_name))
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
     });
 
     JstackAnalysisResult {
@@ -472,10 +511,12 @@ pub fn build_analysis_result(
 fn read_jstack_snapshot(
     target: JstackAnalysisTarget,
     default_encoding: &str,
+    loader_config: &LoaderConfig,
 ) -> Result<JstackSnapshot> {
+    let location = resolve_jstack_target_location(&target, loader_config)?;
     let handle = LogFileReader::open(OpenLogRequest {
         source_id: target.source_id,
-        location: target.location,
+        location,
         label: target.label.clone(),
         default_encoding: default_encoding.to_string(),
     })?;
@@ -486,6 +527,28 @@ fn read_jstack_snapshot(
         path: target.path,
         samples,
     })
+}
+
+/// 解析 Jstack 输入目标的真实读取位置；待探测压缩包会在后台独立判断是否为单文件日志。
+fn resolve_jstack_target_location(
+    target: &JstackAnalysisTarget,
+    loader_config: &LoaderConfig,
+) -> Result<SourceLocation> {
+    let Some(node) = target.archive_probe_node.clone() else {
+        return Ok(target.location.clone());
+    };
+
+    let probe_result = LogSourceLoader::new(loader_config.clone())
+        .probe_archive_nodes(vec![SourceArchiveProbeRequest {
+            source_id: target.source_id,
+            node,
+        }])
+        .into_iter()
+        .next()
+        .and_then(|result| result.patch)
+        .ok_or_else(|| anyhow!("压缩包根层不是单文件日志，请展开后选择具体日志条目"))?;
+
+    Ok(probe_result.location)
 }
 
 /// 按批次读取日志文档并增量解析 Jstack，避免把完整日志拼成一个大字符串。
@@ -512,9 +575,9 @@ fn parse_jstack_document(document: &LogDocument) -> Result<Vec<JstackThreadSampl
 impl JstackSnapshotParser {
     /// 追加一行 Jstack 文本并更新当前线程块状态。
     fn push_line(&mut self, line: &str) {
-        if let Some(thread_name) = parse_thread_header(line) {
+        if let Some((thread_name, thread_id)) = parse_thread_header(line) {
             self.flush_current_thread();
-            self.current_thread = Some(thread_name);
+            self.current_thread = Some((thread_name, thread_id));
             self.current_state = JstackThreadState::Other;
             self.current_stack_lines.push(line.to_string());
             return;
@@ -549,21 +612,22 @@ impl JstackSnapshotParser {
 /// 把当前线程写入样本列表。
 fn flush_thread_sample(
     samples: &mut Vec<JstackThreadSample>,
-    thread_name: Option<String>,
+    thread_identity: Option<(String, String)>,
     state: JstackThreadState,
     stack_lines: Vec<String>,
 ) {
-    if let Some(thread_name) = thread_name {
+    if let Some((thread_name, thread_id)) = thread_identity {
         samples.push(JstackThreadSample {
             thread_name,
+            thread_id,
             state,
             stack_lines: Arc::from(stack_lines),
         });
     }
 }
 
-/// 解析 Jstack 线程头；只接受行首双引号中的线程名。
-fn parse_thread_header(line: &str) -> Option<String> {
+/// 解析 Jstack 线程头；只接受行首双引号中的线程名，并提取 `#id`、`tid=`、`nid=` 作为身份补充。
+fn parse_thread_header(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('"') {
         return None;
@@ -575,8 +639,51 @@ fn parse_thread_header(line: &str) -> Option<String> {
     if thread_name.is_empty() {
         None
     } else {
-        Some(thread_name.to_string())
+        let header_tail = rest[end + 1..].trim_start();
+        Some((
+            thread_name.to_string(),
+            parse_thread_id_summary(header_tail),
+        ))
     }
+}
+
+/// 拼出 UI 展示用线程身份；没有可用线程 ID 时保持旧版线程名展示。
+fn thread_display_label(thread_name: &str, thread_id: &str) -> String {
+    if thread_id.is_empty() {
+        thread_name.to_string()
+    } else {
+        format!("{thread_name} · {thread_id}")
+    }
+}
+
+/// 从 jstack 线程头尾部提取线程 ID 摘要。
+///
+/// 说明：不同 JVM 输出可能同时包含 `#id`、`tid=` 和 `nid=`，这里全部保留用于区分同名线程；
+/// 如果这些字段都缺失，则返回空串并退回到按线程名聚合。
+fn parse_thread_id_summary(header_tail: &str) -> String {
+    let mut parts = Vec::new();
+    if let Some(java_thread_id) = header_tail
+        .split_whitespace()
+        .find(|token| token.starts_with('#') && token[1..].chars().all(|ch| ch.is_ascii_digit()))
+    {
+        parts.push(java_thread_id.to_string());
+    }
+    if let Some(tid) = thread_header_token(header_tail, "tid=") {
+        parts.push(tid);
+    }
+    if let Some(nid) = thread_header_token(header_tail, "nid=") {
+        parts.push(nid);
+    }
+
+    parts.join(" · ")
+}
+
+/// 提取线程头中的 `key=value` 片段，保留 key 便于用户识别 ID 来源。
+fn thread_header_token(header_tail: &str, prefix: &str) -> Option<String> {
+    header_tail
+        .split_whitespace()
+        .find(|token| token.starts_with(prefix))
+        .map(|token| token.trim_end_matches(',').to_string())
 }
 
 /// 根据状态出现次数选择主状态，平票时使用业务优先级。
@@ -669,11 +776,16 @@ fn wildcard_pattern_matches(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::loader::SourceLocation;
+    use crate::loader::archive::ArchiveFormat;
+    use crate::loader::{SourceKind, SourceLocation, SourceMetadata};
 
     use super::*;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     /// 返回标准 Jstack 文本片段。
     fn sample_jstack_text() -> &'static str {
@@ -698,6 +810,12 @@ mod tests {
 
         assert_eq!(snapshot.samples.len(), 3);
         assert_eq!(snapshot.samples[0].thread_name, "main");
+        assert!(snapshot.samples[0].thread_id.contains("#1"));
+        assert!(
+            snapshot.samples[0]
+                .thread_id
+                .contains("tid=0x0000000149010000")
+        );
         assert_eq!(snapshot.samples[0].state, JstackThreadState::Runnable);
         assert!(snapshot.samples[0].stack_lines[0].contains("\"main\""));
         assert!(
@@ -744,7 +862,7 @@ mod tests {
         assert!(plain.samples.is_empty());
     }
 
-    /// 验证同名线程在同一快照中会累加频率。
+    /// 验证同名同 ID 线程会累加频率，同名不同 ID 线程会拆成独立行。
     #[test]
     fn aggregates_duplicate_thread_names() {
         let snapshot = parse_jstack_snapshot(
@@ -753,8 +871,10 @@ mod tests {
             "/tmp/dup.log",
             r#""pool-1" #1
    java.lang.Thread.State: RUNNABLE
-"pool-1" #2
+"pool-1" #1
    java.lang.Thread.State: BLOCKED (on object monitor)
+"pool-1" #2
+   java.lang.Thread.State: RUNNABLE
 "pool-2" #3
    java.lang.Thread.State: TIMED_WAITING (sleeping)
 "#,
@@ -764,13 +884,19 @@ mod tests {
         let pool_1 = result
             .rows
             .iter()
-            .find(|row| row.thread_name == "pool-1")
+            .find(|row| row.thread_name == "pool-1" && row.thread_id.contains("#1"))
             .expect("应存在同名线程聚合行");
         assert_eq!(pool_1.total_count, 2);
         assert_eq!(pool_1.cells[0].count, 2);
         assert_eq!(pool_1.cells[0].state, Some(JstackThreadState::Blocked));
         assert_eq!(pool_1.cells[0].stack_occurrences.len(), 2);
         assert_eq!(pool_1.cells[0].stack_occurrences[1].occurrence_index, 2);
+        let pool_1_other_id = result
+            .rows
+            .iter()
+            .find(|row| row.thread_name == "pool-1" && row.thread_id.contains("#2"))
+            .expect("同名不同 ID 线程应拆成独立行");
+        assert_eq!(pool_1_other_id.total_count, 1);
     }
 
     /// 验证矩阵按快照输入顺序生成列，并按总频率排序行。
@@ -792,7 +918,7 @@ mod tests {
             "/tmp/002.log",
             r#""busy" #1
    java.lang.Thread.State: RUNNABLE
-"busy" #2
+"busy" #1
    java.lang.Thread.State: RUNNABLE
 "#,
         );
@@ -976,17 +1102,20 @@ mod tests {
                 JstackAnalysisTarget {
                     source_id: SourceId(1),
                     location: SourceLocation::LocalPath(path.clone()),
+                    archive_probe_node: None,
                     label: "ok.log".to_string(),
                     path: path.display().to_string(),
                 },
                 JstackAnalysisTarget {
                     source_id: SourceId(2),
                     location: SourceLocation::LocalPath(missing_path),
+                    archive_probe_node: None,
                     label: "missing.log".to_string(),
                     path: "missing.log".to_string(),
                 },
             ],
             "UTF-8".to_string(),
+            LoaderConfig::default(),
         );
 
         assert_eq!(result.total_files, 2);
@@ -995,5 +1124,64 @@ mod tests {
         assert_eq!(result.thread_count(), 3);
 
         let _ = fs::remove_file(path);
+    }
+
+    /// 验证 Jstack 分析能独立探测待识别的单文件压缩包，不依赖来源树先完成节点替换。
+    #[test]
+    fn analyzes_pending_single_file_archive_without_registry_replacement() {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间应晚于 UNIX_EPOCH")
+            .as_nanos();
+        let zip_path = std::env::temp_dir().join(format!(
+            "argus-jstack-analysis-{}-{timestamp}.zip",
+            std::process::id()
+        ));
+        let file = fs::File::create(&zip_path).expect("应能创建 Jstack ZIP 测试文件");
+        let mut writer = ZipWriter::new(file);
+        writer
+            .start_file("thread.log", SimpleFileOptions::default())
+            .expect("应能写入 ZIP 条目");
+        writer
+            .write_all(sample_jstack_text().as_bytes())
+            .expect("应能写入 Jstack 文本");
+        writer.finish().expect("应能完成 ZIP 写入");
+
+        let source_id = SourceId(7);
+        let archive_node = SourceTreeNode {
+            id: source_id,
+            parent_id: None,
+            depth: 0,
+            label: "thread.zip".to_string(),
+            kind: SourceKind::Archive(ArchiveFormat::Zip),
+            location: SourceLocation::LocalPath(zip_path.clone()),
+            metadata: SourceMetadata {
+                size: fs::metadata(&zip_path).ok().map(|metadata| metadata.len()),
+                children_loaded: false,
+                is_loading: true,
+                message: None,
+            },
+            selected: false,
+            expanded: false,
+        };
+
+        let result = analyze_jstack_targets(
+            vec![JstackAnalysisTarget {
+                source_id,
+                location: SourceLocation::LocalPath(PathBuf::from(&zip_path)),
+                archive_probe_node: Some(archive_node),
+                label: "thread.zip".to_string(),
+                path: zip_path.display().to_string(),
+            }],
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+        );
+
+        assert_eq!(result.total_files, 1);
+        assert_eq!(result.snapshot_count(), 1);
+        assert_eq!(result.skipped_count(), 0);
+        assert_eq!(result.thread_count(), 3);
+
+        let _ = fs::remove_file(zip_path);
     }
 }
