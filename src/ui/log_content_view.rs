@@ -541,7 +541,9 @@ fn render_log_line(
         .log_tab_view_state(tab_id)
         .and_then(|state| state.active_search_match.as_ref())
         .is_some_and(|active_match| active_match.line_number == line_number);
-    let row_background = if is_active_line_marker_jump || is_active_search_line {
+    let row_background = if is_active_search_line {
+        Some(active_search_line_background(theme))
+    } else if is_active_line_marker_jump {
         Some(theme.selection)
     } else {
         None
@@ -862,6 +864,32 @@ fn merge_syntax_and_selection_highlights(
     theme: &AppTheme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     merge_log_line_highlights(syntax_spans, selection_range, None, None, theme)
+}
+
+/// 生成搜索跳转当前行背景色。
+///
+/// 搜索命中行需要有整行定位感，但不能复用 `theme.selection`，否则用户在当前行上
+/// 选择文本时，行背景和选区背景会混在一起。这里用 WARN 色少量混入内容底色，
+/// 让行背景和搜索词高亮保持同一语义，同时把视觉层级让给真正的文本选区。
+fn active_search_line_background(theme: &AppTheme) -> u32 {
+    blend_rgb(theme.content, theme.warning, 0.18)
+}
+
+/// 按比例混合两个 RGB 颜色；只处理界面主题常用的低 24 位颜色。
+fn blend_rgb(base: u32, overlay: u32, overlay_ratio: f32) -> u32 {
+    let ratio = overlay_ratio.clamp(0.0, 1.0);
+    let inverse_ratio = 1.0 - ratio;
+    let base_r = ((base >> 16) & 0xff) as f32;
+    let base_g = ((base >> 8) & 0xff) as f32;
+    let base_b = (base & 0xff) as f32;
+    let overlay_r = ((overlay >> 16) & 0xff) as f32;
+    let overlay_g = ((overlay >> 8) & 0xff) as f32;
+    let overlay_b = (overlay & 0xff) as f32;
+
+    let red = (base_r * inverse_ratio + overlay_r * ratio).round() as u32;
+    let green = (base_g * inverse_ratio + overlay_g * ratio).round() as u32;
+    let blue = (base_b * inverse_ratio + overlay_b * ratio).round() as u32;
+    (red << 16) | (green << 8) | blue
 }
 
 /// 将一段搜索高亮加入现有集合，并避开选区范围。
@@ -2191,6 +2219,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ranges, vec![0..5, 5..9, 9..15]);
+    }
+
+    /// 验证搜索跳转行背景不再复用文本选区色，避免选中当前行时视觉混淆。
+    #[test]
+    fn active_search_line_background_differs_from_selection() {
+        let theme = AppTheme::dark();
+        let background = active_search_line_background(&theme);
+
+        assert_ne!(background, theme.selection);
+        assert_ne!(background, theme.content);
+        assert_eq!(blend_rgb(0x000000, 0xffffff, 0.5), 0x808080);
     }
 
     /// 验证分页长行可按展示列直接截取，并保持 tab 展开为 4 个空格。
