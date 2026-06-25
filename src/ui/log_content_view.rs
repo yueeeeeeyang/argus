@@ -26,6 +26,7 @@ use crate::ui::components::icon::render_icon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::jstack_analysis_view;
+use crate::ui::runtime_analysis_view;
 use crate::ui::settings_page;
 use gpui::{
     AnyElement, Context, HighlightStyle, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior,
@@ -129,6 +130,9 @@ fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusA
         TabKind::Settings => settings_page::render(app, cx).into_any_element(),
         TabKind::JstackAnalysis { analysis_id } => {
             jstack_analysis_view::render(app, analysis_id, cx).into_any_element()
+        }
+        TabKind::RuntimeAnalysis { analysis_id } => {
+            runtime_analysis_view::render(app, analysis_id, cx).into_any_element()
         }
         TabKind::LogSource { source_id, path } => {
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();

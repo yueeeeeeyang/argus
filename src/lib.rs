@@ -13,6 +13,7 @@ pub mod jstack_analysis;
 pub mod loader;
 pub mod platform;
 pub mod reader;
+pub mod runtime_analysis;
 pub mod search;
 pub mod text_selection;
 pub mod theme;

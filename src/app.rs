@@ -36,6 +36,10 @@ use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
 use crate::reader::read_mode::ReadMode;
+use crate::runtime_analysis::{
+    RuntimeAnalysisResult, RuntimeAnalysisTarget, RuntimeAnalysisTargetKind,
+    analyze_runtime_targets,
+};
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
 use crate::text_selection::{
@@ -56,7 +60,7 @@ use gpui::{
     AppContext, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point,
     Render, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
-use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
+use gpui::{ListAlignment, ListState, ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 #[cfg(test)]
@@ -194,6 +198,11 @@ pub enum TabKind {
         /// 分析状态 ID，用于从应用状态表中读取结果。
         analysis_id: usize,
     },
+    /// Runtime 请求日志分析标签页。
+    RuntimeAnalysis {
+        /// 分析状态 ID，用于从应用状态表中读取结果。
+        analysis_id: usize,
+    },
     /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
     Settings,
 }
@@ -207,6 +216,30 @@ pub struct ArgusTab {
     pub title: String,
     /// 标签内容类型。
     pub kind: TabKind,
+}
+
+/// 子级懒加载完成后需要自动续做的来源树分析动作。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingSourceAnalysisAction {
+    /// 加载完成后打开 Jstack 线程日志分析。
+    Jstack {
+        /// 触发右键菜单的来源目录 ID。
+        source_id: SourceId,
+    },
+    /// 加载完成后打开 Runtime 日志解析。
+    Runtime {
+        /// 触发右键菜单的来源目录 ID。
+        source_id: SourceId,
+    },
+}
+
+impl PendingSourceAnalysisAction {
+    /// 返回等待加载的来源目录 ID，便于子级加载回调精确匹配。
+    fn source_id(self) -> SourceId {
+        match self {
+            Self::Jstack { source_id } | Self::Runtime { source_id } => source_id,
+        }
+    }
 }
 
 /// 日志正文中的文本位置，使用行号和字符列表达。
@@ -696,6 +729,151 @@ pub struct JstackAnalysisState {
     pub task_state: JstackAnalysisTaskState,
 }
 
+/// Runtime 分析任务状态，供内容区页签展示加载、结果或失败。
+#[derive(Clone, Debug)]
+pub enum RuntimeAnalysisTaskState {
+    /// 后台任务正在读取和聚合 Runtime 日志。
+    Loading {
+        /// 当前加载提示。
+        message: String,
+    },
+    /// 分析完成，可渲染三层统计表格。
+    Ready(RuntimeAnalysisResult),
+    /// 分析任务启动或后台执行失败。
+    Failed {
+        /// 用户可读失败原因。
+        message: String,
+    },
+}
+
+/// Runtime 分析页当前显示层级。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeAnalysisView {
+    /// 总解析结果总览。
+    Summary,
+    /// 指定请求地址的请求明细表。
+    RequestDetails {
+        /// 请求地址。
+        request_path: String,
+    },
+    /// 指定请求日志的 SQL 明细表。
+    SqlList {
+        /// 请求地址，用于返回上一级详情页。
+        request_path: String,
+        /// 请求记录在结果集中的稳定索引。
+        request_index: usize,
+    },
+}
+
+/// Runtime 表格排序方向。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeSortDirection {
+    /// 升序。
+    Ascending,
+    /// 降序。
+    Descending,
+}
+
+impl RuntimeSortDirection {
+    /// 返回切换后的排序方向。
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Ascending => Self::Descending,
+            Self::Descending => Self::Ascending,
+        }
+    }
+
+    /// 返回表头展示箭头。
+    pub fn indicator(self) -> &'static str {
+        match self {
+            Self::Ascending => " ↑",
+            Self::Descending => " ↓",
+        }
+    }
+}
+
+/// Runtime 总览表排序字段。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeSummarySortKey {
+    /// 请求次数。
+    RequestCount,
+    /// 请求地址。
+    RequestPath,
+    /// 平均耗时。
+    AverageDuration,
+    /// 慢 SQL 比例。
+    SlowSqlRatio,
+}
+
+/// Runtime 请求明细表排序字段。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeRequestSortKey {
+    /// 请求时间。
+    RequestTime,
+    /// 用户名。
+    Username,
+    /// 请求耗时。
+    RequestDuration,
+    /// 请求地址。
+    RequestPath,
+}
+
+/// Runtime SQL 明细表排序字段。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeSqlSortKey {
+    /// SQL 执行总耗时。
+    ExecuteDuration,
+    /// 获取连接耗时。
+    AcquireConnectionDuration,
+    /// 事务提交耗时。
+    CommitDuration,
+    /// 释放连接耗时。
+    ReleaseConnectionDuration,
+    /// 解析结果集耗时。
+    ParseResultDuration,
+    /// SQL 文本。
+    SqlText,
+}
+
+/// 单个 Runtime 分析页签的持久状态。
+#[derive(Clone, Debug)]
+pub struct RuntimeAnalysisState {
+    /// 分析 ID，与 `TabKind::RuntimeAnalysis` 对应。
+    pub id: usize,
+    /// 页签标题。
+    pub title: String,
+    /// 本次分析的来源目标快照，保持创建页签时的来源树顺序。
+    pub targets: Vec<RuntimeAnalysisTarget>,
+    /// 后台任务 generation，避免旧任务覆盖新结果。
+    pub generation: usize,
+    /// 当前三层 drill-down 视图。
+    pub view: RuntimeAnalysisView,
+    /// 总览表排序字段。
+    pub summary_sort_key: RuntimeSummarySortKey,
+    /// 总览表排序方向。
+    pub summary_sort_direction: RuntimeSortDirection,
+    /// 请求明细表排序字段。
+    pub request_sort_key: RuntimeRequestSortKey,
+    /// 请求明细表排序方向。
+    pub request_sort_direction: RuntimeSortDirection,
+    /// SQL 明细表排序字段。
+    pub sql_sort_key: RuntimeSqlSortKey,
+    /// SQL 明细表排序方向。
+    pub sql_sort_direction: RuntimeSortDirection,
+    /// 已展开完整 SQL 文本的稳定行 key。
+    pub expanded_sql_rows: BTreeSet<String>,
+    /// 总览表滚动句柄。
+    pub summary_scroll: UniformListScrollHandle,
+    /// 请求明细表滚动句柄。
+    pub request_scroll: UniformListScrollHandle,
+    /// SQL 明细表滚动句柄。
+    pub sql_scroll: UniformListScrollHandle,
+    /// SQL 明细表可变行高列表状态；展开 SQL 后需要重新测量对应行高。
+    pub sql_list: ListState,
+    /// 当前任务状态。
+    pub task_state: RuntimeAnalysisTaskState,
+}
+
 /// Jstack 分析矩阵左侧线程名的单行文本选区。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JstackThreadNameSelection {
@@ -1022,6 +1200,8 @@ pub struct ArgusApp {
     pub source_archive_probe_click_intents: BTreeSet<SourceId>,
     /// 压缩包探测批次 generation，用于丢弃旧来源树返回的过期结果。
     pub source_archive_probe_generation: usize,
+    /// 压缩包内目录子级加载完成后需要自动继续的分析动作。
+    pub pending_source_analysis_after_load: Option<PendingSourceAnalysisAction>,
     /// 自定义日志来源选择器状态，用于替代系统路径选择器。
     pub source_picker: SourcePickerState,
     /// 当前内容区状态。
@@ -1042,6 +1222,10 @@ pub struct ArgusApp {
     pub jstack_analyses: HashMap<usize, JstackAnalysisState>,
     /// 下一个 Jstack 分析 ID。
     pub next_jstack_analysis_id: usize,
+    /// Runtime 请求日志分析页签状态表。
+    pub runtime_analyses: HashMap<usize, RuntimeAnalysisState>,
+    /// 下一个 Runtime 分析 ID。
+    pub next_runtime_analysis_id: usize,
     /// 当前 Jstack 频率方块的内部悬浮气泡数据。
     pub jstack_cell_hover_preview: Option<JstackCellHoverPreview>,
     /// 来源树中用于“选中文件搜索”的多选日志节点。
@@ -1201,6 +1385,7 @@ impl ArgusApp {
             source_archive_probe_completed_ids: BTreeSet::new(),
             source_archive_probe_click_intents: BTreeSet::new(),
             source_archive_probe_generation: 0,
+            pending_source_analysis_after_load: None,
             source_picker: SourcePickerState::default(),
             content_state: ContentState::SourceNotSelected,
             logs: Vec::new(),
@@ -1211,6 +1396,8 @@ impl ArgusApp {
             log_search: LogSearchState::default(),
             jstack_analyses: HashMap::new(),
             next_jstack_analysis_id: 1,
+            runtime_analyses: HashMap::new(),
+            next_runtime_analysis_id: 1,
             jstack_cell_hover_preview: None,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,
@@ -1822,6 +2009,9 @@ impl ArgusApp {
             TabKind::JstackAnalysis { analysis_id } => {
                 self.jstack_analyses.remove(analysis_id);
             }
+            TabKind::RuntimeAnalysis { analysis_id } => {
+                self.runtime_analyses.remove(analysis_id);
+            }
             TabKind::Empty | TabKind::Settings => {}
         }
     }
@@ -1847,8 +2037,27 @@ impl ArgusApp {
                 self.jstack_analyses
                     .retain(|existing_id, _| *existing_id == *analysis_id);
             }
-            TabKind::Empty | TabKind::LogSource { .. } | TabKind::Settings => {
+            TabKind::Empty
+            | TabKind::LogSource { .. }
+            | TabKind::RuntimeAnalysis { .. }
+            | TabKind::Settings => {
                 self.jstack_analyses.clear();
+            }
+        }
+    }
+
+    /// 只保留指定 Runtime 分析 tab 的结果；非 Runtime 分析 tab 会清空全部 Runtime 状态。
+    fn retain_runtime_analysis_for_tab_kind(&mut self, kept_kind: &TabKind) {
+        match kept_kind {
+            TabKind::RuntimeAnalysis { analysis_id } => {
+                self.runtime_analyses
+                    .retain(|existing_id, _| *existing_id == *analysis_id);
+            }
+            TabKind::Empty
+            | TabKind::LogSource { .. }
+            | TabKind::JstackAnalysis { .. }
+            | TabKind::Settings => {
+                self.runtime_analyses.clear();
             }
         }
     }
@@ -1960,13 +2169,13 @@ impl ArgusApp {
         });
     }
 
-    /// 在来源树指定窗口坐标打开日志候选节点右键菜单。
+    /// 在来源树指定窗口坐标打开日志候选或 Runtime 目录节点右键菜单。
     pub fn open_source_tree_context_menu(&mut self, source_id: SourceId, anchor: Point<Pixels>) {
         let Some(source) = self.source_registry.node(source_id) else {
             self.placeholder_notice = "未找到可操作的来源节点".to_string();
             return;
         };
-        if !self.is_source_selectable_for_search_selection(source_id) {
+        if !self.source_supports_any_analysis_context_menu(source_id) {
             self.placeholder_notice = format!("{} 不是可分析的日志候选", source.label);
             return;
         }
@@ -2010,10 +2219,22 @@ impl ArgusApp {
                 MenuEntry::new("全部展开", MenuAction::ExpandAllSearchResults),
                 MenuEntry::new("全部收起", MenuAction::CollapseAllSearchResults),
             ],
-            ActiveMenuKind::SourceTree { source_id } => vec![MenuEntry::new(
-                "Jstack线程日志分析",
-                MenuAction::OpenJstackAnalysis { source_id },
-            )],
+            ActiveMenuKind::SourceTree { source_id } => {
+                let mut entries = Vec::new();
+                if self.source_supports_jstack_analysis(source_id) {
+                    entries.push(MenuEntry::new(
+                        "Jstack线程日志分析",
+                        MenuAction::OpenJstackAnalysis { source_id },
+                    ));
+                }
+                if self.source_supports_runtime_analysis(source_id) {
+                    entries.push(MenuEntry::new(
+                        "Runtime日志解析",
+                        MenuAction::OpenRuntimeAnalysis { source_id },
+                    ));
+                }
+                entries
+            }
         }
     }
 
@@ -2028,6 +2249,9 @@ impl ArgusApp {
             MenuAction::CollapseAllSearchResults => self.collapse_all_search_result_groups(),
             MenuAction::OpenJstackAnalysis { .. } => {
                 self.placeholder_notice = "Jstack 分析需要从界面菜单触发".to_string();
+            }
+            MenuAction::OpenRuntimeAnalysis { .. } => {
+                self.placeholder_notice = "Runtime 分析需要从界面菜单触发".to_string();
             }
         }
 
@@ -2057,12 +2281,100 @@ impl ArgusApp {
                 self.open_jstack_analysis_tab(source_id, cx);
                 self.close_active_menu();
             }
+            MenuAction::OpenRuntimeAnalysis { source_id } => {
+                self.open_runtime_analysis_tab(source_id, cx);
+                self.close_active_menu();
+            }
             other => self.handle_menu_action(other),
         }
     }
 
+    /// 判断来源节点是否至少支持一种右键分析动作。
+    fn source_supports_any_analysis_context_menu(&self, source_id: SourceId) -> bool {
+        self.source_supports_jstack_analysis(source_id)
+            || self.source_supports_runtime_analysis(source_id)
+    }
+
+    /// 判断来源节点是否是分析功能可以展开收集的目录。
+    fn source_is_analysis_directory(&self, source_id: SourceId) -> bool {
+        self.source_registry.node(source_id).is_some_and(|node| {
+            matches!(
+                node.kind,
+                SourceKind::Directory | SourceKind::ArchiveDirectory
+            )
+        })
+    }
+
+    /// 判断来源节点是否是本地真实目录；本地目录可以直接交给后台递归文件系统。
+    fn source_is_local_directory(&self, source_id: SourceId) -> bool {
+        self.source_registry.node(source_id).is_some_and(|node| {
+            matches!(node.kind, SourceKind::Directory)
+                && matches!(node.location, SourceLocation::LocalPath(_))
+        })
+    }
+
+    /// 判断来源节点是否是压缩包内目录；需要先加载子级再收集已加载后代文件。
+    fn source_is_archive_directory(&self, source_id: SourceId) -> bool {
+        self.source_registry
+            .node(source_id)
+            .is_some_and(|node| matches!(node.kind, SourceKind::ArchiveDirectory))
+    }
+
+    /// 判断来源节点是否支持 Jstack 线程日志分析入口。
+    fn source_supports_jstack_analysis(&self, source_id: SourceId) -> bool {
+        self.is_source_selectable_for_search_selection(source_id)
+            || self.source_is_analysis_directory(source_id)
+    }
+
+    /// 判断来源节点是否支持 Runtime 日志解析入口。
+    fn source_supports_runtime_analysis(&self, source_id: SourceId) -> bool {
+        self.source_registry.node(source_id).is_some_and(|node| {
+            node.kind.is_log_candidate()
+                || self.is_source_selectable_for_search_selection(source_id)
+                || self.source_is_analysis_directory(source_id)
+        })
+    }
+
+    /// 确保压缩包内目录子级已经加载；未加载时先触发加载并记录待续做动作。
+    fn ensure_source_directory_ready_for_analysis(
+        &mut self,
+        source_id: SourceId,
+        pending_action: PendingSourceAnalysisAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.source_is_archive_directory(source_id) {
+            return true;
+        }
+
+        let Some(node) = self.source_registry.node(source_id).cloned() else {
+            self.placeholder_notice = "未找到可分析的来源目录".to_string();
+            return false;
+        };
+        if node.metadata.children_loaded {
+            return true;
+        }
+
+        self.pending_source_analysis_after_load = Some(pending_action);
+        if node.metadata.is_loading {
+            self.placeholder_notice = format!("正在加载 {} 的子级，完成后自动开始分析", node.label);
+            return false;
+        }
+
+        self.start_source_child_load(source_id, node.clone(), cx);
+        self.placeholder_notice = format!("正在加载 {} 的子级，完成后自动开始分析", node.label);
+        false
+    }
+
     /// 创建 Jstack 分析标签页，并启动后台读取与聚合任务。
     pub fn open_jstack_analysis_tab(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+        if !self.ensure_source_directory_ready_for_analysis(
+            source_id,
+            PendingSourceAnalysisAction::Jstack { source_id },
+            cx,
+        ) {
+            return;
+        }
+
         let target_ids = self.jstack_source_ids_for_context(source_id);
         if target_ids.is_empty() {
             self.placeholder_notice = "请选择至少一个可分析的 Jstack 日志文件".to_string();
@@ -2491,7 +2803,13 @@ impl ArgusApp {
         if self.source_registry.node(source_id).is_none() {
             return Vec::new();
         }
-        if !self.is_source_selectable_for_search_selection(source_id) {
+        if self.source_is_local_directory(source_id) {
+            return vec![source_id];
+        }
+        if self.source_is_archive_directory(source_id) {
+            return self.loaded_descendant_analysis_source_ids(source_id);
+        }
+        if !self.source_supports_jstack_analysis(source_id) {
             return Vec::new();
         }
 
@@ -2521,15 +2839,43 @@ impl ArgusApp {
         ordered_ids
     }
 
+    /// 收集已加载目录下所有可分析文件来源，保持来源树展示顺序。
+    fn loaded_descendant_analysis_source_ids(&self, parent_id: SourceId) -> Vec<SourceId> {
+        let mut source_ids = Vec::new();
+        self.collect_loaded_descendant_analysis_source_ids(parent_id, &mut source_ids);
+        source_ids
+    }
+
+    /// 递归收集已加载后代文件；未加载目录不主动展开，避免在纯读取阶段阻塞 UI。
+    fn collect_loaded_descendant_analysis_source_ids(
+        &self,
+        parent_id: SourceId,
+        source_ids: &mut Vec<SourceId>,
+    ) {
+        for child_id in self.source_registry.child_ids(parent_id).iter().copied() {
+            let Some(child) = self.source_registry.node(child_id) else {
+                continue;
+            };
+
+            if child.kind.is_log_candidate()
+                || self.is_source_selectable_for_search_selection(child_id)
+            {
+                source_ids.push(child_id);
+            }
+
+            if child.kind.can_expand() && child.metadata.children_loaded {
+                self.collect_loaded_descendant_analysis_source_ids(child_id, source_ids);
+            }
+        }
+    }
+
     /// 将来源树节点转换为 Jstack 分析目标。
     fn jstack_targets_from_source_ids(&self, source_ids: &[SourceId]) -> Vec<JstackAnalysisTarget> {
         source_ids
             .iter()
             .filter_map(|source_id| {
                 let node = self.source_registry.node(*source_id)?;
-                if !node.kind.is_log_candidate()
-                    && !self.is_source_selectable_for_search_selection(*source_id)
-                {
+                if !self.source_supports_jstack_analysis(*source_id) {
                     return None;
                 }
                 Some(JstackAnalysisTarget {
@@ -2578,6 +2924,377 @@ impl ArgusApp {
         );
     }
 
+    /// 创建 Runtime 分析标签页，并启动后台读取与聚合任务。
+    pub fn open_runtime_analysis_tab(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+        if !self.ensure_source_directory_ready_for_analysis(
+            source_id,
+            PendingSourceAnalysisAction::Runtime { source_id },
+            cx,
+        ) {
+            return;
+        }
+
+        let targets = self.runtime_targets_for_context(source_id);
+        if targets.is_empty() {
+            self.placeholder_notice = "请选择至少一个 Runtime 日志文件或本地目录".to_string();
+            return;
+        }
+
+        let background_targets = targets.clone();
+        let Some((analysis_id, generation)) = self.create_runtime_analysis_tab_state(targets)
+        else {
+            self.placeholder_notice = "未找到可读取的 Runtime 日志来源".to_string();
+            return;
+        };
+
+        let default_encoding = self.selected_encoding.clone();
+        let loader_config = self.config.loader.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    analyze_runtime_targets(background_targets, default_encoding, loader_config)
+                })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_runtime_analysis_result(analysis_id, generation, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 返回指定 Runtime 分析状态。
+    pub fn runtime_analysis_state(&self, analysis_id: usize) -> Option<&RuntimeAnalysisState> {
+        self.runtime_analyses.get(&analysis_id)
+    }
+
+    /// 返回指定 Runtime 分析状态的可变引用。
+    pub fn runtime_analysis_state_mut(
+        &mut self,
+        analysis_id: usize,
+    ) -> Option<&mut RuntimeAnalysisState> {
+        self.runtime_analyses.get_mut(&analysis_id)
+    }
+
+    /// 创建 Runtime 分析 tab 和加载状态；后台任务由调用方负责启动。
+    fn create_runtime_analysis_tab_state(
+        &mut self,
+        targets: Vec<RuntimeAnalysisTarget>,
+    ) -> Option<(usize, usize)> {
+        if targets.is_empty() {
+            return None;
+        }
+
+        let analysis_id = self.next_runtime_analysis_id;
+        self.next_runtime_analysis_id = self.next_runtime_analysis_id.saturating_add(1);
+        let title = if targets.len() > 1 {
+            format!("Runtime分析({})", targets.len())
+        } else {
+            "Runtime分析".to_string()
+        };
+        let tab_id = if self.tabs.len() == 1 && matches!(self.tabs[0].kind, TabKind::Empty) {
+            self.tabs[0].id
+        } else {
+            let next_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(ArgusTab {
+                id: next_id,
+                title: String::new(),
+                kind: TabKind::Empty,
+            });
+            next_id
+        };
+
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.title = title.clone();
+            tab.kind = TabKind::RuntimeAnalysis { analysis_id };
+        }
+        self.active_tab_id = tab_id;
+        self.log_tab_view_states.remove(&tab_id);
+
+        let generation = 1;
+        self.runtime_analyses.insert(
+            analysis_id,
+            RuntimeAnalysisState {
+                id: analysis_id,
+                title: title.clone(),
+                targets,
+                generation,
+                view: RuntimeAnalysisView::Summary,
+                summary_sort_key: RuntimeSummarySortKey::RequestCount,
+                summary_sort_direction: RuntimeSortDirection::Descending,
+                request_sort_key: RuntimeRequestSortKey::RequestTime,
+                request_sort_direction: RuntimeSortDirection::Descending,
+                sql_sort_key: RuntimeSqlSortKey::ExecuteDuration,
+                sql_sort_direction: RuntimeSortDirection::Descending,
+                expanded_sql_rows: BTreeSet::new(),
+                summary_scroll: UniformListScrollHandle::new(),
+                request_scroll: UniformListScrollHandle::new(),
+                sql_scroll: UniformListScrollHandle::new(),
+                sql_list: ListState::new(0, ListAlignment::Top, px(240.0)),
+                task_state: RuntimeAnalysisTaskState::Loading {
+                    message: "正在分析 Runtime 日志文件".to_string(),
+                },
+            },
+        );
+        self.placeholder_notice = format!("已创建 {title} 页签");
+
+        Some((analysis_id, generation))
+    }
+
+    /// 根据右键来源节点生成 Runtime 分析输入；文件多选命中时沿用多选，目录直接递归解析。
+    fn runtime_targets_for_context(&mut self, source_id: SourceId) -> Vec<RuntimeAnalysisTarget> {
+        let Some(node) = self.source_registry.node(source_id) else {
+            return Vec::new();
+        };
+
+        if self.source_is_local_directory(source_id) {
+            return self.runtime_targets_from_source_ids(&[source_id]);
+        }
+        if self.source_is_archive_directory(source_id) {
+            let source_ids = self.loaded_descendant_analysis_source_ids(source_id);
+            return self.runtime_targets_from_source_ids(&source_ids);
+        }
+
+        if !node.kind.is_log_candidate()
+            && !self.is_source_selectable_for_search_selection(source_id)
+        {
+            return Vec::new();
+        }
+
+        if !self.selected_search_source_ids.contains(&source_id) {
+            self.selected_search_source_ids.clear();
+            self.selected_search_source_ids.insert(source_id);
+            self.last_source_selection_anchor = Some(source_id);
+            return self.runtime_targets_from_source_ids(&[source_id]);
+        }
+
+        let selected_ids = self.selected_search_source_ids.clone();
+        let mut ordered_ids = self
+            .visible_source_ids()
+            .iter()
+            .filter(|visible_id| selected_ids.contains(visible_id))
+            .filter(|visible_id| {
+                self.source_registry
+                    .node(**visible_id)
+                    .is_some_and(|node| node.kind.is_log_candidate())
+                    || self.is_source_selectable_for_search_selection(**visible_id)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for selected_id in selected_ids {
+            if !ordered_ids.contains(&selected_id)
+                && (self
+                    .source_registry
+                    .node(selected_id)
+                    .is_some_and(|node| node.kind.is_log_candidate())
+                    || self.is_source_selectable_for_search_selection(selected_id))
+            {
+                ordered_ids.push(selected_id);
+            }
+        }
+
+        self.runtime_targets_from_source_ids(&ordered_ids)
+    }
+
+    /// 将来源树节点转换为 Runtime 分析目标。
+    fn runtime_targets_from_source_ids(
+        &self,
+        source_ids: &[SourceId],
+    ) -> Vec<RuntimeAnalysisTarget> {
+        source_ids
+            .iter()
+            .filter_map(|source_id| {
+                let node = self.source_registry.node(*source_id)?;
+                let kind = if matches!(node.kind, SourceKind::Directory) {
+                    if !matches!(node.location, SourceLocation::LocalPath(_)) {
+                        return None;
+                    }
+                    RuntimeAnalysisTargetKind::Directory
+                } else if node.kind.is_log_candidate()
+                    || self.is_source_selectable_for_search_selection(*source_id)
+                {
+                    RuntimeAnalysisTargetKind::File
+                } else {
+                    return None;
+                };
+
+                Some(RuntimeAnalysisTarget {
+                    source_id: *source_id,
+                    location: node.location.clone(),
+                    archive_probe_node: self.runtime_archive_probe_node(*source_id),
+                    label: node.label.clone(),
+                    path: node.location.display_path(),
+                    kind,
+                })
+            })
+            .collect()
+    }
+
+    /// 为 Runtime 分析生成待探测压缩包快照；已识别日志节点不需要额外探测。
+    fn runtime_archive_probe_node(&self, source_id: SourceId) -> Option<SourceTreeNode> {
+        let node = self.source_registry.node(source_id)?;
+        (!node.kind.is_log_candidate() && self.is_source_selectable_for_search_selection(source_id))
+            .then(|| node.clone())
+    }
+
+    /// 应用后台 Runtime 分析结果，过期 generation 会被忽略。
+    fn apply_runtime_analysis_result(
+        &mut self,
+        analysis_id: usize,
+        generation: usize,
+        result: RuntimeAnalysisResult,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        if state.generation != generation {
+            return;
+        }
+
+        let file_count = result.total_files;
+        let request_count = result.request_count();
+        let sql_count = result.total_sql_records;
+        let skipped_count = result.skipped_count();
+        state.task_state = RuntimeAnalysisTaskState::Ready(result);
+        self.placeholder_notice = format!(
+            "Runtime 分析完成：{file_count} 个文件，{request_count} 个请求，{sql_count} 条 SQL，跳过 {skipped_count} 个文件"
+        );
+    }
+
+    /// 切换 Runtime 分析总览表排序字段。
+    pub fn set_runtime_summary_sort(
+        &mut self,
+        analysis_id: usize,
+        sort_key: RuntimeSummarySortKey,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        if state.summary_sort_key == sort_key {
+            state.summary_sort_direction = state.summary_sort_direction.toggled();
+        } else {
+            state.summary_sort_key = sort_key;
+            state.summary_sort_direction = default_runtime_summary_sort_direction(sort_key);
+        }
+        state.summary_scroll = UniformListScrollHandle::new();
+    }
+
+    /// 切换 Runtime 请求明细表排序字段。
+    pub fn set_runtime_request_sort(
+        &mut self,
+        analysis_id: usize,
+        sort_key: RuntimeRequestSortKey,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        if state.request_sort_key == sort_key {
+            state.request_sort_direction = state.request_sort_direction.toggled();
+        } else {
+            state.request_sort_key = sort_key;
+            state.request_sort_direction = default_runtime_request_sort_direction(sort_key);
+        }
+        state.request_scroll = UniformListScrollHandle::new();
+    }
+
+    /// 切换 Runtime SQL 明细表排序字段。
+    pub fn set_runtime_sql_sort(&mut self, analysis_id: usize, sort_key: RuntimeSqlSortKey) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        if state.sql_sort_key == sort_key {
+            state.sql_sort_direction = state.sql_sort_direction.toggled();
+        } else {
+            state.sql_sort_key = sort_key;
+            state.sql_sort_direction = default_runtime_sql_sort_direction(sort_key);
+        }
+        state.sql_scroll = UniformListScrollHandle::new();
+        state.sql_list.reset(0);
+    }
+
+    /// 从 Runtime 总览进入指定请求地址的详情页。
+    pub fn open_runtime_request_details(&mut self, analysis_id: usize, request_path: String) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.view = RuntimeAnalysisView::RequestDetails {
+            request_path: request_path.clone(),
+        };
+        state.request_scroll = UniformListScrollHandle::new();
+        state.expanded_sql_rows.clear();
+        self.placeholder_notice = format!("查看 Runtime 请求详情：{request_path}");
+    }
+
+    /// 从 Runtime 请求详情进入指定请求日志的 SQL 列表。
+    pub fn open_runtime_sql_list(
+        &mut self,
+        analysis_id: usize,
+        request_path: String,
+        request_index: usize,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.view = RuntimeAnalysisView::SqlList {
+            request_path,
+            request_index,
+        };
+        state.sql_scroll = UniformListScrollHandle::new();
+        state.sql_list.reset(0);
+        state.expanded_sql_rows.clear();
+        self.placeholder_notice = "查看 Runtime SQL 列表".to_string();
+    }
+
+    /// 返回 Runtime 总览页。
+    pub fn show_runtime_summary(&mut self, analysis_id: usize) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.view = RuntimeAnalysisView::Summary;
+        state.summary_scroll = UniformListScrollHandle::new();
+        state.expanded_sql_rows.clear();
+    }
+
+    /// 从 Runtime SQL 列表返回请求详情页。
+    pub fn show_runtime_request_details(&mut self, analysis_id: usize, request_path: String) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.view = RuntimeAnalysisView::RequestDetails { request_path };
+        state.request_scroll = UniformListScrollHandle::new();
+        state.expanded_sql_rows.clear();
+    }
+
+    /// 展开或收起 Runtime SQL 文本完整内容。
+    pub fn toggle_runtime_sql_row_expanded(
+        &mut self,
+        analysis_id: usize,
+        request_index: usize,
+        sql_index: usize,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        let key = runtime_sql_row_key(request_index, sql_index);
+        if !state.expanded_sql_rows.insert(key.clone()) {
+            state.expanded_sql_rows.remove(&key);
+        }
+        let item_count = state.sql_list.item_count();
+        state.sql_list.reset(item_count);
+    }
+
     /// 更新鼠标悬停标签，仅影响标题栏标签视觉状态。
     pub fn set_hovered_tab(&mut self, tab_id: usize, is_hovered: bool) {
         if is_hovered {
@@ -2604,6 +3321,8 @@ impl ArgusApp {
             self.log_tab_view_states.clear();
             self.jstack_analyses.clear();
             self.next_jstack_analysis_id = 1;
+            self.runtime_analyses.clear();
+            self.next_runtime_analysis_id = 1;
             self.ensure_log_tab_view_state(self.active_tab_id);
             self.reset_log_text_selection();
             self.log_scrollbar_drag = None;
@@ -2666,6 +3385,7 @@ impl ArgusApp {
         self.ensure_log_tab_view_state(tab_id);
         self.retain_reader_for_source(kept_source_id);
         self.retain_jstack_analysis_for_tab_kind(&kept_kind);
+        self.retain_runtime_analysis_for_tab_kind(&kept_kind);
         self.active_tab_id = tab_id;
         self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
@@ -2697,6 +3417,8 @@ impl ArgusApp {
         self.log_tab_view_states.clear();
         self.jstack_analyses.clear();
         self.next_jstack_analysis_id = 1;
+        self.runtime_analyses.clear();
+        self.next_runtime_analysis_id = 1;
         self.ensure_log_tab_view_state(empty_tab_id);
         self.active_tab_id = empty_tab_id;
         self.hovered_tab_id = None;
@@ -2813,7 +3535,7 @@ impl ArgusApp {
                 .await;
 
             view.update(cx, |app, cx| {
-                app.apply_child_load_report(source_id, load_generation, report);
+                app.apply_child_load_report_with_context(source_id, load_generation, report, cx);
                 cx.notify();
             })
             .ok();
@@ -2851,6 +3573,8 @@ impl ArgusApp {
         self.log_tab_view_states.clear();
         self.jstack_analyses.clear();
         self.next_jstack_analysis_id = 1;
+        self.runtime_analyses.clear();
+        self.next_runtime_analysis_id = 1;
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
         self.reset_log_search_runtime_state();
@@ -2880,6 +3604,7 @@ impl ArgusApp {
         self.filtered_source_ids.clear();
         self.source_tree_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
+        self.pending_source_analysis_after_load = None;
     }
 
     /// 应用根来源加载报告。
@@ -2931,8 +3656,31 @@ impl ArgusApp {
         load_generation: usize,
         report: LoadReport,
     ) {
+        self.apply_child_load_report_internal(parent_id, load_generation, report);
+    }
+
+    /// 在 UI 回调中应用子级加载报告，并在压缩包目录加载完毕后自动续做分析动作。
+    pub fn apply_child_load_report_with_context(
+        &mut self,
+        parent_id: SourceId,
+        load_generation: usize,
+        report: LoadReport,
+        cx: &mut Context<Self>,
+    ) {
+        if self.apply_child_load_report_internal(parent_id, load_generation, report) {
+            self.resume_pending_source_analysis(parent_id, cx);
+        }
+    }
+
+    /// 应用懒加载子级报告的共享实现，返回是否处理了当前有效 generation。
+    fn apply_child_load_report_internal(
+        &mut self,
+        parent_id: SourceId,
+        load_generation: usize,
+        report: LoadReport,
+    ) -> bool {
         if self.source_child_load_generations.get(&parent_id).copied() != Some(load_generation) {
-            return;
+            return false;
         }
         self.source_child_load_generations.remove(&parent_id);
 
@@ -2942,7 +3690,7 @@ impl ArgusApp {
                 .mark_children_load_failed(parent_id, message.clone());
             self.rebuild_filtered_source_ids();
             self.placeholder_notice = format!("子级加载失败：{message}");
-            return;
+            return true;
         }
 
         let should_keep_expanded = self
@@ -2976,6 +3724,35 @@ impl ArgusApp {
                 report.errors.join("；")
             )
         };
+        true
+    }
+
+    /// 子级加载成功返回后续做被挂起的分析动作，避免用户二次右键。
+    fn resume_pending_source_analysis(&mut self, parent_id: SourceId, cx: &mut Context<Self>) {
+        let Some(action) = self.pending_source_analysis_after_load else {
+            return;
+        };
+        if action.source_id() != parent_id {
+            return;
+        }
+
+        self.pending_source_analysis_after_load = None;
+        if !self
+            .source_registry
+            .node(parent_id)
+            .is_some_and(|node| node.metadata.children_loaded)
+        {
+            return;
+        }
+
+        match action {
+            PendingSourceAnalysisAction::Jstack { source_id } => {
+                self.open_jstack_analysis_tab(source_id, cx);
+            }
+            PendingSourceAnalysisAction::Runtime { source_id } => {
+                self.open_runtime_analysis_tab(source_id, cx);
+            }
+        }
     }
 
     /// 清理来源树压缩包探测队列；来源树整体替换时调用。
@@ -2987,6 +3764,7 @@ impl ArgusApp {
         self.source_archive_probe_completed_ids.clear();
         self.source_archive_probe_click_intents.clear();
         self.source_archive_probe_generation = self.source_archive_probe_generation.wrapping_add(1);
+        self.pending_source_analysis_after_load = None;
     }
 
     /// 将可见来源节点提升到压缩包探测队列前端。
@@ -3280,6 +4058,11 @@ impl ArgusApp {
                 .get(&analysis_id)
                 .map(|state| format!("Argus / {}", state.title))
                 .unwrap_or_else(|| "Argus / Jstack分析".to_string()),
+            TabKind::RuntimeAnalysis { analysis_id } => self
+                .runtime_analyses
+                .get(&analysis_id)
+                .map(|state| format!("Argus / {}", state.title))
+                .unwrap_or_else(|| "Argus / Runtime分析".to_string()),
             TabKind::Settings => "Argus / 设置".to_string(),
             TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
             TabKind::Empty => "未选择来源".to_string(),
@@ -3513,8 +4296,50 @@ impl ArgusApp {
 fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
     match kind {
         TabKind::LogSource { source_id, .. } => Some(*source_id),
-        TabKind::Empty | TabKind::JstackAnalysis { .. } | TabKind::Settings => None,
+        TabKind::Empty
+        | TabKind::JstackAnalysis { .. }
+        | TabKind::RuntimeAnalysis { .. }
+        | TabKind::Settings => None,
     }
+}
+
+/// 返回 Runtime 总览排序字段的默认方向。
+fn default_runtime_summary_sort_direction(sort_key: RuntimeSummarySortKey) -> RuntimeSortDirection {
+    match sort_key {
+        RuntimeSummarySortKey::RequestPath => RuntimeSortDirection::Ascending,
+        RuntimeSummarySortKey::RequestCount
+        | RuntimeSummarySortKey::AverageDuration
+        | RuntimeSummarySortKey::SlowSqlRatio => RuntimeSortDirection::Descending,
+    }
+}
+
+/// 返回 Runtime 请求明细排序字段的默认方向。
+fn default_runtime_request_sort_direction(sort_key: RuntimeRequestSortKey) -> RuntimeSortDirection {
+    match sort_key {
+        RuntimeRequestSortKey::Username | RuntimeRequestSortKey::RequestPath => {
+            RuntimeSortDirection::Ascending
+        }
+        RuntimeRequestSortKey::RequestTime | RuntimeRequestSortKey::RequestDuration => {
+            RuntimeSortDirection::Descending
+        }
+    }
+}
+
+/// 返回 Runtime SQL 明细排序字段的默认方向。
+fn default_runtime_sql_sort_direction(sort_key: RuntimeSqlSortKey) -> RuntimeSortDirection {
+    match sort_key {
+        RuntimeSqlSortKey::SqlText => RuntimeSortDirection::Ascending,
+        RuntimeSqlSortKey::ExecuteDuration
+        | RuntimeSqlSortKey::AcquireConnectionDuration
+        | RuntimeSqlSortKey::CommitDuration
+        | RuntimeSqlSortKey::ReleaseConnectionDuration
+        | RuntimeSqlSortKey::ParseResultDuration => RuntimeSortDirection::Descending,
+    }
+}
+
+/// 生成 Runtime SQL 行展开状态使用的稳定 key。
+pub fn runtime_sql_row_key(request_index: usize, sql_index: usize) -> String {
+    format!("{request_index}:{sql_index}")
 }
 
 /// 根据来源位置选择读取模式，避免 UI 或状态栏分散判断来源类型。
@@ -3608,9 +4433,95 @@ mod tests {
             .expect("测试样例来源应存在")
     }
 
-    /// 验证来源树右键菜单只对日志候选节点展示 Jstack 分析入口。
+    /// 构造一个已加载的压缩包内目录，模拟用户在压缩包树上直接右键目录。
+    fn app_with_loaded_archive_directory() -> (ArgusApp, SourceId, SourceId, SourceId) {
+        let mut app = test_app();
+        let mut registry = SourceRegistry::new();
+        let archive_format = crate::loader::archive::ArchiveFormat::Zip;
+        let archive_path = PathBuf::from("runtime.zip");
+        let dir_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: dir_id,
+            parent_id: None,
+            depth: 0,
+            label: "runtime".to_string(),
+            kind: SourceKind::ArchiveDirectory,
+            location: SourceLocation::ArchiveEntry {
+                archive_path: archive_path.clone(),
+                root_format: archive_format,
+                container_entries: Vec::new(),
+                entry_path: "runtime".to_string(),
+                format: archive_format,
+                archive_depth: 0,
+            },
+            metadata: SourceMetadata {
+                size: None,
+                children_loaded: true,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: true,
+        });
+
+        let first_log_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: first_log_id,
+            parent_id: Some(dir_id),
+            depth: 1,
+            label: "thread0100.log".to_string(),
+            kind: SourceKind::ArchiveFile,
+            location: SourceLocation::ArchiveEntry {
+                archive_path: archive_path.clone(),
+                root_format: archive_format,
+                container_entries: Vec::new(),
+                entry_path: "runtime/thread0100.log".to_string(),
+                format: archive_format,
+                archive_depth: 0,
+            },
+            metadata: SourceMetadata {
+                size: Some(128),
+                children_loaded: true,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: false,
+        });
+
+        let second_log_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: second_log_id,
+            parent_id: Some(dir_id),
+            depth: 1,
+            label: "thread0200.log".to_string(),
+            kind: SourceKind::ArchiveFile,
+            location: SourceLocation::ArchiveEntry {
+                archive_path,
+                root_format: archive_format,
+                container_entries: Vec::new(),
+                entry_path: "runtime/thread0200.log".to_string(),
+                format: archive_format,
+                archive_depth: 0,
+            },
+            metadata: SourceMetadata {
+                size: Some(256),
+                children_loaded: true,
+                is_loading: false,
+                message: None,
+            },
+            selected: false,
+            expanded: false,
+        });
+
+        registry.rebuild_all_indices();
+        app.source_registry = registry;
+        (app, dir_id, first_log_id, second_log_id)
+    }
+
+    /// 验证来源树右键菜单对日志候选和本地目录节点展示 Jstack 与 Runtime 分析入口。
     #[test]
-    fn source_tree_context_menu_shows_jstack_action_for_log_candidates() {
+    fn source_tree_context_menu_shows_analysis_actions_for_supported_sources() {
         let mut app = app_with_placeholder_sources();
         let app_log_id = source_id_by_label(&app, "app.log");
         let logs_dir_id = source_id_by_label(&app, "logs");
@@ -3621,17 +4532,32 @@ mod tests {
             app.active_menu.as_ref().map(|menu| &menu.kind),
             Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == app_log_id
         ));
-        assert_eq!(app.active_menu_entries().len(), 1);
+        assert_eq!(app.active_menu_entries().len(), 2);
         assert!(matches!(
             app.active_menu_entries()[0].action,
             MenuAction::OpenJstackAnalysis { source_id } if source_id == app_log_id
+        ));
+        assert!(matches!(
+            app.active_menu_entries()[1].action,
+            MenuAction::OpenRuntimeAnalysis { source_id } if source_id == app_log_id
         ));
 
         app.close_active_menu();
         app.open_source_tree_context_menu(logs_dir_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
 
-        assert!(app.active_menu.is_none());
-        assert!(app.placeholder_notice.contains("不是可分析"));
+        assert!(matches!(
+            app.active_menu.as_ref().map(|menu| &menu.kind),
+            Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == logs_dir_id
+        ));
+        assert_eq!(app.active_menu_entries().len(), 2);
+        assert!(matches!(
+            app.active_menu_entries()[0].action,
+            MenuAction::OpenJstackAnalysis { source_id } if source_id == logs_dir_id
+        ));
+        assert!(matches!(
+            app.active_menu_entries()[1].action,
+            MenuAction::OpenRuntimeAnalysis { source_id } if source_id == logs_dir_id
+        ));
     }
 
     /// 验证单文件探测未完成的压缩包已被选中时，也能立即打开 Jstack 分析右键菜单。
@@ -3672,6 +4598,31 @@ mod tests {
         ));
     }
 
+    /// 验证压缩包内目录也能显示 Jstack 与 Runtime 分析入口。
+    #[test]
+    fn source_tree_context_menu_shows_analysis_actions_for_archive_directory() {
+        let (mut app, archive_dir_id, _, _) = app_with_loaded_archive_directory();
+
+        app.open_source_tree_context_menu(
+            archive_dir_id,
+            gpui::point(gpui::px(1.0), gpui::px(1.0)),
+        );
+
+        assert!(matches!(
+            app.active_menu.as_ref().map(|menu| &menu.kind),
+            Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == archive_dir_id
+        ));
+        assert_eq!(app.active_menu_entries().len(), 2);
+        assert!(matches!(
+            app.active_menu_entries()[0].action,
+            MenuAction::OpenJstackAnalysis { source_id } if source_id == archive_dir_id
+        ));
+        assert!(matches!(
+            app.active_menu_entries()[1].action,
+            MenuAction::OpenRuntimeAnalysis { source_id } if source_id == archive_dir_id
+        ));
+    }
+
     /// 验证右键未选中文件时会把分析输入切换为该文件。
     #[test]
     fn jstack_context_selection_switches_to_right_clicked_file() {
@@ -3688,6 +4639,39 @@ mod tests {
             BTreeSet::from([error_log_id])
         );
         assert_eq!(app.last_source_selection_anchor, Some(error_log_id));
+    }
+
+    /// 验证本地目录右键触发 Jstack 分析时会把目录作为独立目标交给后台递归展开。
+    #[test]
+    fn jstack_context_accepts_local_directory_target() {
+        let mut app = app_with_placeholder_sources();
+        let logs_dir_id = source_id_by_label(&app, "logs");
+
+        let source_ids = app.jstack_source_ids_for_context(logs_dir_id);
+        let targets = app.jstack_targets_from_source_ids(&source_ids);
+
+        assert_eq!(source_ids, vec![logs_dir_id]);
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(targets[0].location, SourceLocation::LocalPath(_)));
+        assert_eq!(targets[0].label, "logs");
+    }
+
+    /// 验证 Jstack 右键压缩包内目录时，会按来源树顺序收集已加载的后代日志文件。
+    #[test]
+    fn jstack_context_archive_directory_collects_loaded_descendants() {
+        let (mut app, archive_dir_id, first_log_id, second_log_id) =
+            app_with_loaded_archive_directory();
+
+        let source_ids = app.jstack_source_ids_for_context(archive_dir_id);
+        let targets = app.jstack_targets_from_source_ids(&source_ids);
+
+        assert_eq!(source_ids, vec![first_log_id, second_log_id]);
+        assert_eq!(targets.len(), 2);
+        assert!(
+            targets
+                .iter()
+                .all(|target| matches!(target.location, SourceLocation::ArchiveEntry { .. }))
+        );
     }
 
     /// 验证右键已在多选集合中时，会按来源树可见顺序保留多选输入。
@@ -3762,6 +4746,110 @@ mod tests {
                 .is_thread_filter_enabled
         );
         assert_eq!(app.placeholder_notice, "已关闭 Jstack 配置过滤");
+    }
+
+    /// 验证 Runtime 右键已在多选集合中时，会按来源树可见顺序保留多选输入。
+    #[test]
+    fn runtime_context_selection_keeps_multi_selection_in_tree_order() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+        let nested_log_id = source_id_by_label(&app, "nested.log");
+        app.selected_search_source_ids = BTreeSet::from([nested_log_id, error_log_id, app_log_id]);
+
+        let targets = app.runtime_targets_for_context(error_log_id);
+
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].source_id, app_log_id);
+        assert_eq!(targets[1].source_id, error_log_id);
+        assert_eq!(targets[2].source_id, nested_log_id);
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.kind == RuntimeAnalysisTargetKind::File)
+        );
+    }
+
+    /// 验证 Runtime 右键本地目录会生成目录目标，由后台递归展开。
+    #[test]
+    fn runtime_context_accepts_local_directory_target() {
+        let mut app = app_with_placeholder_sources();
+        let logs_dir_id = source_id_by_label(&app, "logs");
+
+        let targets = app.runtime_targets_for_context(logs_dir_id);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].source_id, logs_dir_id);
+        assert_eq!(targets[0].kind, RuntimeAnalysisTargetKind::Directory);
+    }
+
+    /// 验证 Runtime 右键压缩包内目录时，会把已加载的后代日志条目作为文件目标解析。
+    #[test]
+    fn runtime_context_archive_directory_collects_loaded_descendant_files() {
+        let (mut app, archive_dir_id, first_log_id, second_log_id) =
+            app_with_loaded_archive_directory();
+
+        let targets = app.runtime_targets_for_context(archive_dir_id);
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].source_id, first_log_id);
+        assert_eq!(targets[1].source_id, second_log_id);
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.kind == RuntimeAnalysisTargetKind::File)
+        );
+    }
+
+    /// 验证创建 Runtime 分析 tab 会复用空 tab 并写入加载状态。
+    #[test]
+    fn creating_runtime_analysis_tab_reuses_empty_tab() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id, error_log_id]);
+
+        let (analysis_id, generation) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        assert_eq!(generation, 1);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(matches!(
+            app.active_tab_kind(),
+            TabKind::RuntimeAnalysis { analysis_id: active_id } if active_id == analysis_id
+        ));
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应保存 Runtime 分析状态");
+        assert_eq!(state.targets.len(), 2);
+        assert_eq!(state.summary_sort_key, RuntimeSummarySortKey::RequestCount);
+        assert_eq!(
+            state.summary_sort_direction,
+            RuntimeSortDirection::Descending
+        );
+        assert!(matches!(
+            state.task_state,
+            RuntimeAnalysisTaskState::Loading { .. }
+        ));
+        assert_eq!(app.active_tab_title(), "Runtime分析(2)");
+    }
+
+    /// 验证关闭 Runtime 分析 tab 会清理对应分析状态。
+    #[test]
+    fn closing_runtime_analysis_tab_clears_analysis_state() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+        let tab_id = app.active_tab_id;
+
+        app.close_tab(tab_id);
+
+        assert!(app.runtime_analysis_state(analysis_id).is_none());
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     }
 
     /// 验证 Jstack 线程名复制入口只记录用户拖选的局部文本范围。

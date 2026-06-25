@@ -20,10 +20,12 @@ const TAB_CONTEXT_MENU_WIDTH: f32 = 132.0;
 const TAB_OVERFLOW_MENU_WIDTH: f32 = 220.0;
 /// 搜索结果面板菜单宽度，仅包含展开/收起两项批量动作。
 const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
-/// 来源树右键菜单宽度，容纳 Jstack 分析中文动作。
-const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 178.0;
+/// 来源树右键菜单宽度，容纳 Jstack 和 Runtime 分析中文动作。
+const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
 /// 菜单项固定行高，供 `uniform_list` 稳定计算滚动范围。
-const MENU_ROW_HEIGHT: f32 = 30.0;
+const MENU_ROW_HEIGHT: f32 = 34.0;
+/// 菜单项水平内边距，和标签页右键菜单保持一致的舒展感。
+const MENU_ENTRY_HORIZONTAL_PADDING: f32 = 12.0;
 /// 菜单最大高度，超出后只在菜单内部滚动。
 const MENU_MAX_HEIGHT: f32 = 280.0;
 /// 菜单贴边保护距离，避免浮层紧贴窗口边缘。
@@ -86,6 +88,11 @@ pub enum MenuAction {
         /// 右键触发分析的来源节点 ID。
         source_id: SourceId,
     },
+    /// 打开 Runtime 请求日志分析页签。
+    OpenRuntimeAnalysis {
+        /// 右键触发分析的来源节点 ID。
+        source_id: SourceId,
+    },
 }
 
 impl MenuAction {
@@ -100,6 +107,9 @@ impl MenuAction {
             Self::CollapseAllSearchResults => "collapse-all-search-results".to_string(),
             Self::OpenJstackAnalysis { source_id } => {
                 format!("open-jstack-analysis-{source_id}")
+            }
+            Self::OpenRuntimeAnalysis { source_id } => {
+                format!("open-runtime-analysis-{source_id}")
             }
         }
     }
@@ -275,14 +285,14 @@ fn render_menu_entry(
         )))
         .w(px(menu_width))
         .h(px(MENU_ROW_HEIGHT))
-        .px_3()
+        .px(px(MENU_ENTRY_HORIZONTAL_PADDING))
         .flex()
         .items_center()
         .cursor_pointer()
         .occlude()
         .bg(rgb(background))
         .hover(move |this| this.bg(rgb(hover_background)))
-        .text_size(px(12.0))
+        .text_size(px(12.5))
         .text_color(rgb(foreground))
         .child(div().flex_1().truncate().child(entry.label))
         .on_click(cx.listener(move |app, _, _, cx| {

@@ -5,15 +5,22 @@
 //! 主要功能：把多个线程栈日志快照聚合为线程频率矩阵，供主内容区分析页签渲染。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 
 use crate::config::LoaderConfig;
+use crate::loader::archive::detect_archive_format;
 use crate::loader::{
-    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceLocation, SourceTreeNode,
+    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceKind, SourceLocation,
+    SourceMetadata, SourceTreeNode,
 };
 use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
+
+/// Jstack 本地目录递归时识别的普通文本日志扩展名。
+const JSTACK_TEXT_EXTENSIONS: &[&str] = &["log", "txt", "out", "dump"];
 
 /// Jstack 线程状态，聚合 UI 会按该枚举映射颜色。
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -364,11 +371,23 @@ pub fn analyze_jstack_targets(
     default_encoding: String,
     loader_config: LoaderConfig,
 ) -> JstackAnalysisResult {
-    let total_files = targets.len();
+    let mut snapshot_targets = Vec::new();
     let mut snapshots = Vec::new();
     let mut skipped_snapshots = Vec::new();
 
     for target in targets {
+        match expand_jstack_target(target, &loader_config) {
+            Ok(mut expanded) => snapshot_targets.append(&mut expanded),
+            Err((source_id, label, reason)) => skipped_snapshots.push(JstackSkippedSnapshot {
+                source_id,
+                label,
+                reason,
+            }),
+        }
+    }
+
+    let total_files = snapshot_targets.len();
+    for target in snapshot_targets {
         match read_jstack_snapshot(target.clone(), &default_encoding, &loader_config) {
             Ok(snapshot) if snapshot.samples.is_empty() => {
                 skipped_snapshots.push(JstackSkippedSnapshot {
@@ -387,6 +406,145 @@ pub fn analyze_jstack_targets(
     }
 
     build_analysis_result(snapshots, skipped_snapshots, total_files)
+}
+
+/// 展开 Jstack 分析目标；本地目录会递归转换为可读取的日志或单文件压缩包快照。
+fn expand_jstack_target(
+    target: JstackAnalysisTarget,
+    loader_config: &LoaderConfig,
+) -> std::result::Result<Vec<JstackAnalysisTarget>, (SourceId, String, String)> {
+    let SourceLocation::LocalPath(path) = &target.location else {
+        return Ok(vec![target]);
+    };
+    if !path.is_dir() {
+        return Ok(vec![target]);
+    }
+
+    collect_jstack_log_files(target.source_id, path, loader_config).map_err(|error| {
+        (
+            target.source_id,
+            target.label.clone(),
+            format!("读取 Jstack 目录失败：{error}"),
+        )
+    })
+}
+
+/// 递归收集本地目录中的 Jstack 文本日志和可独立探测的压缩包文件。
+fn collect_jstack_log_files(
+    source_id: SourceId,
+    root: &Path,
+    loader_config: &LoaderConfig,
+) -> Result<Vec<JstackAnalysisTarget>> {
+    if !root.is_dir() {
+        return Err(anyhow!("{} 不是本地目录", root.display()));
+    }
+
+    let mut paths = Vec::new();
+    let mut visited_dirs = BTreeSet::new();
+    collect_jstack_log_file_paths(
+        root,
+        loader_config.follow_symlinks,
+        &mut visited_dirs,
+        &mut paths,
+    )?;
+    paths.sort();
+
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| jstack_target_for_local_file(source_id, path))
+        .collect())
+}
+
+/// 深度优先收集候选文件；符号链接策略与来源加载配置保持一致。
+fn collect_jstack_log_file_paths(
+    dir: &Path,
+    follow_symlinks: bool,
+    visited_dirs: &mut BTreeSet<PathBuf>,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let canonical_dir = fs::canonicalize(dir)
+        .map_err(|error| anyhow!("无法解析目录真实路径 {}：{error}", dir.display()))?;
+    if !visited_dirs.insert(canonical_dir) {
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| anyhow!("无法读取目录 {}：{error}", dir.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| anyhow!("无法遍历目录 {}：{error}", dir.display()))?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let link_metadata = fs::symlink_metadata(&path)
+            .map_err(|error| anyhow!("无法读取文件元数据 {}：{error}", path.display()))?;
+        let is_symlink = link_metadata.file_type().is_symlink();
+        if is_symlink && !follow_symlinks {
+            continue;
+        }
+
+        let metadata = if is_symlink && follow_symlinks {
+            fs::metadata(&path)
+        } else {
+            Ok(link_metadata)
+        }
+        .map_err(|error| anyhow!("无法读取文件元数据 {}：{error}", path.display()))?;
+
+        if metadata.is_dir() {
+            collect_jstack_log_file_paths(&path, follow_symlinks, visited_dirs, paths)?;
+        } else if metadata.is_file() && is_jstack_candidate_file(&path) {
+            paths.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+/// 判断本地文件是否值得作为 Jstack 快照尝试解析。
+fn is_jstack_candidate_file(path: &Path) -> bool {
+    if detect_archive_format(path).is_some() {
+        return true;
+    }
+
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            let extension = extension.to_ascii_lowercase();
+            JSTACK_TEXT_EXTENSIONS.contains(&extension.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// 把本地文件路径转换为 Jstack 分析目标；压缩包会附带单文件探测快照。
+fn jstack_target_for_local_file(
+    source_id: SourceId,
+    path: PathBuf,
+) -> Option<JstackAnalysisTarget> {
+    let label = path.file_name()?.to_string_lossy().to_string();
+    let archive_probe_node = detect_archive_format(&path).map(|format| SourceTreeNode {
+        id: source_id,
+        parent_id: None,
+        depth: 0,
+        label: label.clone(),
+        kind: SourceKind::Archive(format),
+        location: SourceLocation::LocalPath(path.clone()),
+        metadata: SourceMetadata {
+            size: fs::metadata(&path).ok().map(|metadata| metadata.len()),
+            children_loaded: false,
+            is_loading: false,
+            message: None,
+        },
+        selected: false,
+        expanded: false,
+    });
+
+    Some(JstackAnalysisTarget {
+        source_id,
+        location: SourceLocation::LocalPath(path.clone()),
+        archive_probe_node,
+        label,
+        path: path.display().to_string(),
+    })
 }
 
 /// 解析单份 Jstack 文本。
@@ -1229,6 +1387,81 @@ mod tests {
         assert_eq!(result.thread_count(), 3);
 
         let _ = fs::remove_file(path);
+    }
+
+    /// 验证本地目录目标会递归展开为多个 Jstack 快照，非候选文件不会进入统计。
+    #[test]
+    fn analyzes_local_directory_recursively() {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间应晚于 UNIX_EPOCH")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "argus-jstack-analysis-dir-{}-{timestamp}",
+            std::process::id()
+        ));
+        let nested_dir = dir.join("nested");
+        fs::create_dir_all(&nested_dir).expect("应能创建 Jstack 目录测试路径");
+        fs::write(dir.join("thread-a.log"), sample_jstack_text()).expect("应能写入 Jstack 日志");
+        fs::write(nested_dir.join("thread-b.txt"), sample_jstack_text())
+            .expect("应能写入嵌套 Jstack 日志");
+        fs::write(dir.join("ignore.dat"), sample_jstack_text()).expect("应能写入非候选文件");
+
+        let result = analyze_jstack_targets(
+            vec![JstackAnalysisTarget {
+                source_id: SourceId(9),
+                location: SourceLocation::LocalPath(dir.clone()),
+                archive_probe_node: None,
+                label: "thread-dir".to_string(),
+                path: dir.display().to_string(),
+            }],
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+        );
+
+        assert_eq!(result.total_files, 2);
+        assert_eq!(result.snapshot_count(), 2);
+        assert_eq!(result.skipped_count(), 0);
+        assert_eq!(result.thread_count(), 3);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// 验证开启跟随符号链接时，目录回环不会导致 Jstack 递归扫描卡死。
+    #[cfg(unix)]
+    #[test]
+    fn jstack_directory_recursion_skips_symlink_cycles() {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间应晚于 UNIX_EPOCH")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "argus-jstack-analysis-symlink-{}-{timestamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("应能创建 Jstack 符号链接测试路径");
+        fs::write(dir.join("thread-a.log"), sample_jstack_text()).expect("应能写入 Jstack 日志");
+        std::os::unix::fs::symlink(&dir, dir.join("loop")).expect("应能创建目录符号链接回环");
+        let mut config = LoaderConfig::default();
+        config.follow_symlinks = true;
+
+        let result = analyze_jstack_targets(
+            vec![JstackAnalysisTarget {
+                source_id: SourceId(10),
+                location: SourceLocation::LocalPath(dir.clone()),
+                archive_probe_node: None,
+                label: "thread-dir".to_string(),
+                path: dir.display().to_string(),
+            }],
+            "UTF-8".to_string(),
+            config,
+        );
+
+        assert_eq!(result.total_files, 1);
+        assert_eq!(result.snapshot_count(), 1);
+        assert_eq!(result.skipped_count(), 0);
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// 验证 Jstack 分析能独立探测待识别的单文件压缩包，不依赖来源树先完成节点替换。

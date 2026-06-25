@@ -186,6 +186,14 @@ fn render_node(
         .w_full()
         .px_2()
         .py(px(SOURCE_ROW_VERTICAL_INSET))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                app.open_source_tree_context_menu(source_id, event.position);
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .id(SharedString::from(format!(
@@ -211,6 +219,15 @@ fn render_node(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme.foreground))
                 .cursor_pointer()
+                // 右键菜单绑定在真实内容命中区，避免行外层在缩进、滚动替换时漏掉目录节点右键。
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        app.open_source_tree_context_menu(source_id, event.position);
+                        cx.notify();
+                    }),
+                )
                 .when(source.depth > 0, |this| {
                     this.children(tree_connection_lines(
                         source.depth,
@@ -294,14 +311,6 @@ fn render_node(
                         } else {
                             app.handle_source_tree_click(source_id, event.modifiers, cx);
                         }
-                        cx.notify();
-                    }),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |app, event: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        app.open_source_tree_context_menu(source_id, event.position);
                         cx.notify();
                     }),
                 ),

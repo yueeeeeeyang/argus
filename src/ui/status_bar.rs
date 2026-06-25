@@ -27,6 +27,10 @@ pub fn render(app: &ArgusApp) -> impl IntoElement {
             .jstack_analysis_state(analysis_id)
             .map(|state| state.title.clone())
             .unwrap_or_else(|| "Jstack分析".to_string()),
+        TabKind::RuntimeAnalysis { analysis_id } => app
+            .runtime_analysis_state(analysis_id)
+            .map(|state| state.title.clone())
+            .unwrap_or_else(|| "Runtime分析".to_string()),
         TabKind::Settings => "设置".to_string(),
     };
 

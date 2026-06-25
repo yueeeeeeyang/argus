@@ -15,6 +15,7 @@ pub mod log_content_view;
 pub mod log_search_window;
 pub mod main_window;
 pub mod placeholder_dialog;
+pub mod runtime_analysis_view;
 pub mod settings_page;
 pub mod settings_window;
 pub mod source_panel;
