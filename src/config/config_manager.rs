@@ -201,7 +201,7 @@ mod tests {
             },
             log_display: LogDisplayConfig {
                 jstack_thread_name_filters: "Attach Listener,Signal Dispatcher".to_string(),
-                jstack_stack_segment_filters: "Unsafe.park||SocketInputStream\\nread".to_string(),
+                jstack_stack_segment_filters: "Unsafe.park\n\nSocketInputStream\\nread".to_string(),
             },
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
@@ -234,7 +234,7 @@ mod tests {
         );
         assert_eq!(
             loaded.log_display.jstack_stack_segment_filters,
-            "Unsafe.park||SocketInputStream\\nread"
+            "Unsafe.park\n\nSocketInputStream\\nread"
         );
         assert_eq!(loaded.encoding.selected, "GBK");
         assert!(!loaded.cache.enabled);

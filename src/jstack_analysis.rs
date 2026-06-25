@@ -1,6 +1,6 @@
 //! 文件职责：实现 Jstack 线程日志解析、聚合和读取入口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-18
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
 //! 主要功能：把多个线程栈日志快照聚合为线程频率矩阵，供主内容区分析页签渲染。
 
@@ -241,7 +241,7 @@ impl JstackThreadFilter {
     ///
     /// 参数说明：
     /// - `thread_name_filters`：线程名关键字，支持逗号、分号、竖线和换行分隔。
-    /// - `stack_segment_filters`：完整线程段片段，支持 `||` 分隔多个片段。
+    /// - `stack_segment_filters`：完整线程段片段，使用空行分隔多个片段；兼容旧版 `||` 分隔。
     ///
     /// 返回值：归一化后的过滤器；空白配置会被忽略。
     pub fn from_raw(thread_name_filters: &str, stack_segment_filters: &str) -> Self {
@@ -714,11 +714,78 @@ fn parse_thread_name_filter_patterns(raw: &str) -> Vec<JstackThreadNamePattern> 
         .collect()
 }
 
-/// 解析完整线程段过滤片段；使用 `||` 分隔可以保留单个片段中的空格和转义换行。
+/// 解析完整线程段过滤片段；使用空行分隔可以保留单个片段内的堆栈换行。
 fn parse_stack_segment_filter_patterns(raw: &str) -> Vec<String> {
-    raw.split("||")
-        .filter_map(|pattern| normalized_filter_pattern(&unescape_stack_filter_pattern(pattern)))
+    let legacy_delimiter_normalized = raw.replace("||", "\n\n");
+    let unescaped = unescape_stack_filter_pattern(&legacy_delimiter_normalized);
+    split_stack_segment_filter_blocks(&unescaped)
+        .into_iter()
+        .filter_map(|pattern| normalized_filter_pattern(&pattern))
         .collect()
+}
+
+/// 按空行切分完整线程段过滤配置，忽略连续空行产生的空片段。
+///
+/// 说明：标准 jstack 在线程块内部也可能包含空行，例如 `Locked ownable
+/// synchronizers` 段前的空行；这些续段不应被拆成独立过滤条件，否则会让
+/// `- None` 这类通用文本误过滤大量线程。
+pub(crate) fn split_stack_segment_filter_blocks(raw: &str) -> Vec<String> {
+    let lines = raw.lines().collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut current_lines = Vec::new();
+
+    for (line_index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            if stack_segment_blank_line_should_split(&lines, line_index) {
+                push_stack_segment_filter_block(&mut blocks, &mut current_lines);
+            } else if !current_lines.is_empty() {
+                current_lines.push(String::new());
+            }
+        } else {
+            current_lines.push((*line).to_string());
+        }
+    }
+    push_stack_segment_filter_block(&mut blocks, &mut current_lines);
+
+    blocks
+}
+
+/// 判断当前空行是否是真正的多个过滤块分隔符。
+fn stack_segment_blank_line_should_split(lines: &[&str], line_index: usize) -> bool {
+    next_non_empty_line_after(lines, line_index)
+        .is_some_and(|line| !is_jstack_thread_block_continuation_after_blank(line))
+}
+
+/// 查找当前行之后的下一个非空行。
+fn next_non_empty_line_after<'a>(lines: &'a [&str], line_index: usize) -> Option<&'a str> {
+    lines
+        .iter()
+        .skip(line_index + 1)
+        .find(|line| !line.trim().is_empty())
+        .copied()
+}
+
+/// 识别标准 jstack 在线程块内部空行之后的续段标题或条目。
+fn is_jstack_thread_block_continuation_after_blank(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("Locked ownable synchronizers:")
+        || trimmed.starts_with("Locked synchronizers:")
+        || trimmed.starts_with("JNI global references:")
+        || trimmed.starts_with("JNI weak global references:")
+        || trimmed.starts_with("- ")
+}
+
+/// 将当前收集的线程段写入结果，并清空临时行缓存。
+fn push_stack_segment_filter_block(blocks: &mut Vec<String>, current_lines: &mut Vec<String>) {
+    if current_lines.is_empty() {
+        return;
+    }
+
+    let block = current_lines.join("\n");
+    if !block.trim().is_empty() {
+        blocks.push(block);
+    }
+    current_lines.clear();
 }
 
 /// 归一化过滤片段，空片段返回 `None`。
@@ -1025,6 +1092,44 @@ mod tests {
                     .expect("应存在业务线程行")
             )
         );
+    }
+
+    /// 验证完整线程段过滤使用空行分隔，并兼容旧版 `||` 配置。
+    #[test]
+    fn stack_segment_filter_patterns_split_on_blank_lines() {
+        let patterns = parse_stack_segment_filter_patterns(
+            "SocketInputStream.socketRead\n    at java.net.SocketInputStream.read\n\n\nUnsafe.park\\nLockSupport.park",
+        );
+
+        assert_eq!(
+            patterns,
+            vec![
+                "socketinputstream.socketread\n    at java.net.socketinputstream.read",
+                "unsafe.park\nlocksupport.park"
+            ]
+        );
+
+        let legacy_patterns =
+            parse_stack_segment_filter_patterns("Unsafe.park||SocketInputStream\\nread");
+        assert_eq!(
+            legacy_patterns,
+            vec!["unsafe.park", "socketinputstream\nread"]
+        );
+    }
+
+    /// 验证标准 jstack 线程块内部的空行不会把同步器段拆成独立过滤条件。
+    #[test]
+    fn stack_segment_filter_keeps_thread_internal_blank_lines() {
+        let patterns = parse_stack_segment_filter_patterns(
+            "java.lang.Thread.State: RUNNABLE\n    at java.net.SocketInputStream.read(SocketInputStream.java:171)\n\n    Locked ownable synchronizers:\n    - None\n\njava.lang.Thread.State: WAITING\n    at sun.misc.Unsafe.park(Native Method)",
+        );
+
+        assert_eq!(patterns.len(), 2);
+        assert!(patterns[0].contains("socketinputstream.read"));
+        assert!(patterns[0].contains("locked ownable synchronizers"));
+        assert!(patterns[0].contains("- none"));
+        assert!(patterns[1].contains("java.lang.thread.state: waiting"));
+        assert!(patterns[1].contains("unsafe.park"));
     }
 
     /// 验证完整线程段过滤能匹配转义换行后的堆栈片段。

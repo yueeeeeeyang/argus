@@ -1,6 +1,6 @@
 //! 文件职责：提供 Argus 界面可复用的紧凑输入框组件。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-18
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
 //! 主要功能：统一输入框和多行文本域尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
 
@@ -70,6 +70,8 @@ pub struct NativeInput {
 pub struct TextareaScrollState {
     /// 当前滚动条拖拽状态；使用内部可变性避免把临时拖拽态写入业务配置。
     scrollbar_drag: Rc<RefCell<Option<TextareaScrollbarDrag>>>,
+    /// 最近一次自动跟随光标的内容签名，避免用户手动滚动后被每帧强制拉回光标。
+    last_caret_sync: Rc<RefCell<Option<TextareaCaretSyncSignature>>>,
 }
 
 impl TextareaScrollState {
@@ -77,6 +79,15 @@ impl TextareaScrollState {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// 文本域自动滚动到光标位置时使用的轻量签名。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TextareaCaretSyncSignature {
+    /// 当前文本字符数；内容变化时通常需要重新确认光标可见。
+    text_length: usize,
+    /// 当前光标字符位置。
+    cursor_index: usize,
 }
 
 impl NativeInput {
@@ -152,6 +163,8 @@ pub struct Textarea {
     pub is_pointer_selecting: bool,
     /// 文本域可见行数，内容超出后通过滚动条查看。
     pub visible_lines: usize,
+    /// 是否填满父级剩余高度；大编辑器使用该模式避免底部空白。
+    pub fill_height: bool,
     /// 文本域滚动句柄，负责在光标移动到可视区外时同步横向和纵向滚动。
     pub scroll_handle: ScrollHandle,
     /// 文本域滚动交互状态，负责支持自绘滚动条拖拽。
@@ -422,7 +435,6 @@ pub fn render_textarea(
 
     div()
         .id(textarea.id)
-        .h(px(height))
         .w_full()
         .relative()
         .rounded_sm()
@@ -432,6 +444,8 @@ pub fn render_textarea(
         .occlude()
         .text_size(px(font_size))
         .text_color(rgb(text_color))
+        .when(textarea.fill_height, |this| this.flex_1().min_h(px(0.0)))
+        .when(!textarea.fill_height, |this| this.h(px(height)))
         .when(!textarea.is_disabled, |this| {
             let element = this
                 .focusable()
@@ -1035,6 +1049,14 @@ fn render_textarea_scroll_sync(
                         return;
                     }
 
+                    let sync_signature = TextareaCaretSyncSignature {
+                        text_length: character_count(&value),
+                        cursor_index,
+                    };
+                    if !textarea_should_sync_caret(&scroll_state, sync_signature) {
+                        return;
+                    }
+
                     let viewport_bounds = scroll_handle.bounds();
                     if viewport_bounds.size.width <= px(0.0)
                         || viewport_bounds.size.height <= px(0.0)
@@ -1061,10 +1083,19 @@ fn render_textarea_scroll_sync(
                     if next_offset != current_offset {
                         scroll_handle.set_offset(next_offset);
                     }
+                    scroll_state.last_caret_sync.replace(Some(sync_signature));
                 },
             )
             .size_full(),
         )
+}
+
+/// 判断本次绘制是否需要自动把 textarea 滚动到光标位置。
+fn textarea_should_sync_caret(
+    scroll_state: &TextareaScrollState,
+    signature: TextareaCaretSyncSignature,
+) -> bool {
+    scroll_state.last_caret_sync.borrow().as_ref() != Some(&signature)
 }
 
 /// 文本域滚动条布局度量，供横纵两个方向复用。
@@ -2465,6 +2496,27 @@ mod tests {
         );
 
         assert_eq!(offset, point(px(-80.0), px(-40.0)));
+    }
+
+    /// 同一光标和内容签名已经同步过时，不应再次强制滚动，避免覆盖用户手动滚动。
+    #[test]
+    fn textarea_caret_sync_signature_prevents_repeated_auto_scroll() {
+        let scroll_state = TextareaScrollState::new();
+        let signature = TextareaCaretSyncSignature {
+            text_length: 20,
+            cursor_index: 8,
+        };
+
+        assert!(textarea_should_sync_caret(&scroll_state, signature));
+        scroll_state.last_caret_sync.replace(Some(signature));
+        assert!(!textarea_should_sync_caret(&scroll_state, signature));
+        assert!(textarea_should_sync_caret(
+            &scroll_state,
+            TextareaCaretSyncSignature {
+                text_length: 21,
+                cursor_index: 9,
+            }
+        ));
     }
 
     /// 文本域内容没有溢出时，不应绘制无意义的滚动条滑块。

@@ -1,6 +1,6 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-18
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、Jstack 分析、升级状态、未读取内容提示和保留的日志样例数据。
 
@@ -38,22 +38,23 @@ use crate::reader::log_file_reader::{
 use crate::reader::read_mode::ReadMode;
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
-use crate::text_selection::{TextSelectionGranularity, character_count};
+use crate::text_selection::{
+    TextSelectionGranularity, character_count, slice_character_range, word_range_at,
+};
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
-use crate::ui::jstack_analysis_view::{JstackCellPreviewData, JstackCellPreviewWindow};
+use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
 use crate::ui::log_search_window::LogSearchWindow;
 use crate::ui::main_window;
-use crate::ui::settings_window::SettingsWindow;
+use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
 use crate::updater::{
     AvailableUpgrade, UpgradeCheckOutcome, UpgradeService, current_platform_arch,
     current_platform_os,
 };
 use gpui::{
     AppContext, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point,
-    Render, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, point, px, size,
+    Render, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -94,14 +95,6 @@ const JSTACK_THREAD_DETAIL_WINDOW_HEIGHT: f32 = 640.0;
 const JSTACK_THREAD_DETAIL_WINDOW_MIN_WIDTH: f32 = 600.0;
 /// Jstack 线程详情窗口最小高度。
 const JSTACK_THREAD_DETAIL_WINDOW_MIN_HEIGHT: f32 = 420.0;
-/// Jstack 方块悬浮预览窗口宽度。
-const JSTACK_CELL_PREVIEW_WINDOW_WIDTH: f32 = 620.0;
-/// Jstack 方块悬浮预览窗口高度。
-const JSTACK_CELL_PREVIEW_WINDOW_HEIGHT: f32 = 430.0;
-/// Jstack 方块悬浮预览窗口相对鼠标的横向偏移。
-const JSTACK_CELL_PREVIEW_OFFSET_X: f32 = 18.0;
-/// Jstack 方块悬浮预览窗口相对鼠标的纵向偏移。
-const JSTACK_CELL_PREVIEW_OFFSET_Y: f32 = 18.0;
 /// 日志正文固定行高；分页滚动和 UI 渲染必须保持一致。
 pub const LOG_VIEWER_ROW_HEIGHT: f32 = 20.0;
 /// 行号栏最小宽度，保证小文件也有稳定的视觉留白。
@@ -368,6 +361,8 @@ pub struct AppInputFocusHandles {
     pub root: FocusHandle,
     /// 来源树过滤输入框焦点。
     pub source_tree_search: FocusHandle,
+    /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。
+    pub jstack_analysis: FocusHandle,
 }
 
 impl Default for SettingsTextInputState {
@@ -685,10 +680,12 @@ pub struct JstackAnalysisState {
     pub active_states: BTreeSet<JstackThreadState>,
     /// 是否启用设置页配置的线程堆栈过滤；新分析页默认开启。
     pub is_thread_filter_enabled: bool,
-    /// 当前在分析矩阵中选中的线程名，用于复制。
-    pub selected_thread_name: Option<String>,
-    /// 当前在分析矩阵中选中的线程身份 key，用于区分同名不同线程 ID 的行高亮。
-    pub selected_thread_identity: Option<String>,
+    /// 当前在分析矩阵左侧线程名列中选中的文本范围。
+    pub thread_name_selection: Option<JstackThreadNameSelection>,
+    /// 当前线程名列拖拽选择状态，用于持续扩展选区。
+    pub thread_name_selection_drag: Option<JstackThreadNameSelectionDrag>,
+    /// 当前点击过的线程方块 key，用于在矩阵中高亮具体快照格子。
+    pub selected_cell_key: Option<String>,
     /// 当前筛选条件下可见的结果行索引，避免矩阵滚动渲染时重复扫描全部线程。
     pub visible_row_indices: Vec<usize>,
     /// 当前线程堆栈配置过滤隐藏的线程数量，用于标题统计展示。
@@ -697,6 +694,42 @@ pub struct JstackAnalysisState {
     pub row_scroll: UniformListScrollHandle,
     /// 当前任务状态。
     pub task_state: JstackAnalysisTaskState,
+}
+
+/// Jstack 分析矩阵左侧线程名的单行文本选区。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JstackThreadNameSelection {
+    /// 线程身份 key，包含线程名和线程 ID，用于区分同名线程。
+    pub thread_identity: String,
+    /// 当前显示的线程名文本；复制时只复制该文本的选中片段。
+    pub thread_name: String,
+    /// 选区锚点字符列。
+    pub anchor: usize,
+    /// 选区焦点字符列。
+    pub focus: usize,
+}
+
+impl JstackThreadNameSelection {
+    /// 返回按字符顺序归一化后的非空选区。
+    pub fn normalized_range(&self) -> Option<Range<usize>> {
+        let text_length = character_count(&self.thread_name);
+        let start = self.anchor.min(self.focus).min(text_length);
+        let end = self.anchor.max(self.focus).min(text_length);
+        (start < end).then_some(start..end)
+    }
+}
+
+/// Jstack 分析矩阵左侧线程名拖拽选择状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JstackThreadNameSelectionDrag {
+    /// 本次拖拽起始的线程身份 key。
+    pub thread_identity: String,
+    /// 本次拖拽起始的线程名文本。
+    pub thread_name: String,
+    /// 鼠标按下时按点击次数扩展后的基础字符范围。
+    pub anchor_range: Range<usize>,
+    /// 当前选择粒度，支持单击字符、双击词和三击整行。
+    pub granularity: TextSelectionGranularity,
 }
 
 impl JstackAnalysisState {
@@ -850,6 +883,41 @@ fn jstack_detail_occurrences_for_visible_cells(
         .collect()
 }
 
+/// 生成 Jstack 频率矩阵方块的稳定选择 key。
+///
+/// 参数说明：
+/// - `row_index`：分析结果中的线程行索引。
+/// - `snapshot_index`：快照列索引。
+///
+/// 返回值：可在状态和 UI 之间共享的方块标识。
+pub fn jstack_cell_selection_key(row_index: usize, snapshot_index: usize) -> String {
+    format!("{row_index}:{snapshot_index}")
+}
+
+/// 根据点击次数返回 Jstack 线程名文本的字符选区。
+///
+/// 参数说明：
+/// - `thread_name`：当前显示的线程名。
+/// - `character_index`：命中的字符列。
+/// - `granularity`：选择粒度。
+///
+/// 返回值：按字符索引表示的选区范围。
+fn jstack_thread_name_range_for_granularity(
+    thread_name: &str,
+    character_index: usize,
+    granularity: TextSelectionGranularity,
+) -> Range<usize> {
+    let text_length = character_count(thread_name);
+    let cursor = character_index.min(text_length);
+    match granularity {
+        TextSelectionGranularity::Character => cursor..cursor,
+        TextSelectionGranularity::Word => {
+            word_range_at(thread_name, cursor).unwrap_or(cursor..cursor)
+        }
+        TextSelectionGranularity::Line => 0..text_length,
+    }
+}
+
 /// 来源树占位节点，用于模拟文件、目录和压缩包结构。
 #[derive(Clone, Debug)]
 pub struct SourceNode {
@@ -974,10 +1042,8 @@ pub struct ArgusApp {
     pub jstack_analyses: HashMap<usize, JstackAnalysisState>,
     /// 下一个 Jstack 分析 ID。
     pub next_jstack_analysis_id: usize,
-    /// Jstack 频率方块悬浮预览弹窗句柄。
-    pub jstack_cell_preview_window_handle: Option<WindowHandle<JstackCellPreviewWindow>>,
-    /// 当前悬浮预览对应的矩阵方块 key，用于避免同一个方块重复打开窗口。
-    pub jstack_cell_preview_key: Option<String>,
+    /// 当前 Jstack 频率方块的内部悬浮气泡数据。
+    pub jstack_cell_hover_preview: Option<JstackCellHoverPreview>,
     /// 来源树中用于“选中文件搜索”的多选日志节点。
     pub selected_search_source_ids: BTreeSet<SourceId>,
     /// 来源树 Shift 范围选择锚点。
@@ -1046,6 +1112,11 @@ pub struct ArgusApp {
     pub is_settings_window_open: bool,
     /// 设置窗口句柄，用于重复点击设置按钮时置前已有窗口。
     pub settings_window_handle: Option<WindowHandle<SettingsWindow>>,
+    /// Jstack 线程段过滤编辑器是否处于打开状态。
+    pub is_jstack_stack_segment_filter_editor_open: bool,
+    /// Jstack 线程段过滤编辑器窗口句柄，用于从设置页重复点击时置前已有编辑器。
+    pub jstack_stack_segment_filter_editor_handle:
+        Option<WindowHandle<JstackStackSegmentFilterEditorWindow>>,
     /// 系统“用 Argus 打开”右键菜单注册状态。
     pub open_with_registration_status: RegistrationStatus,
     /// 是否正在执行系统右键菜单注册或卸载任务。
@@ -1140,8 +1211,7 @@ impl ArgusApp {
             log_search: LogSearchState::default(),
             jstack_analyses: HashMap::new(),
             next_jstack_analysis_id: 1,
-            jstack_cell_preview_window_handle: None,
-            jstack_cell_preview_key: None,
+            jstack_cell_hover_preview: None,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,
             tabs: vec![ArgusTab {
@@ -1190,6 +1260,8 @@ impl ArgusApp {
             ),
             is_settings_window_open: false,
             settings_window_handle: None,
+            is_jstack_stack_segment_filter_editor_open: false,
+            jstack_stack_segment_filter_editor_handle: None,
             open_with_registration_status: RegistrationStatus::Unknown("尚未检查".to_string()),
             is_open_with_registration_busy: false,
             open_with_registration_message: None,
@@ -1211,6 +1283,7 @@ impl ArgusApp {
             self.input_focus_handles = Some(AppInputFocusHandles {
                 root: cx.focus_handle(),
                 source_tree_search: cx.focus_handle(),
+                jstack_analysis: cx.focus_handle(),
             });
         }
         self.input_focus_handles
@@ -1830,9 +1903,9 @@ impl ArgusApp {
         }
     }
 
-    /// 在 UI 事件中切换标签页，并同步关闭 Jstack 方块悬浮预览窗口。
-    pub fn activate_tab_with_context(&mut self, tab_id: usize, cx: &mut Context<Self>) {
-        self.close_jstack_cell_preview_window(cx);
+    /// 在 UI 事件中切换标签页，并同步清理 Jstack 方块悬浮气泡。
+    pub fn activate_tab_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
+        self.clear_jstack_cell_hover_preview();
         self.activate_tab(tab_id);
     }
 
@@ -2064,7 +2137,7 @@ impl ArgusApp {
         active_occurrence_index: usize,
         cx: &mut Context<Self>,
     ) {
-        let detail_result: std::result::Result<JstackThreadDetail, String> = (|| {
+        let detail_result: std::result::Result<(JstackThreadDetail, String), String> = (|| {
             let Some(state) = self.jstack_analyses.get(&analysis_id) else {
                 return Err("未找到 Jstack 分析结果".to_string());
             };
@@ -2074,6 +2147,8 @@ impl ArgusApp {
             let Some(row) = result.rows.get(row_index) else {
                 return Err("未找到当前线程行".to_string());
             };
+            let thread_name = row.thread_name.clone();
+            let selected_cell_key = jstack_cell_selection_key(row_index, active_snapshot_index);
 
             // 详情窗口用于对比同一线程在不同日志快照中的表现；同一快照内重复出现时只取
             // 一个代表堆栈，避免单个文件里的多段采样被误看成多个日志文件。
@@ -2087,20 +2162,30 @@ impl ArgusApp {
                 return Err("当前线程没有可展示的堆栈详情".to_string());
             }
 
-            Ok(JstackThreadDetail {
-                thread_name: row.thread_name.clone(),
-                thread_id: row.thread_id.clone(),
-                occurrences,
-            })
+            Ok((
+                JstackThreadDetail {
+                    thread_name,
+                    thread_id: row.thread_id.clone(),
+                    occurrences,
+                },
+                selected_cell_key,
+            ))
         })();
 
         match detail_result {
-            Ok(detail) => self.open_jstack_thread_detail_window(
-                detail,
-                active_snapshot_index,
-                active_occurrence_index,
-                cx,
-            ),
+            Ok((detail, selected_cell_key)) => {
+                if let Some(state) = self.jstack_analyses.get_mut(&analysis_id) {
+                    state.selected_cell_key = Some(selected_cell_key);
+                    state.thread_name_selection = None;
+                    state.thread_name_selection_drag = None;
+                }
+                self.open_jstack_thread_detail_window(
+                    detail,
+                    active_snapshot_index,
+                    active_occurrence_index,
+                    cx,
+                );
+            }
             Err(message) => {
                 self.placeholder_notice = message;
             }
@@ -2147,12 +2232,13 @@ impl ArgusApp {
 
         let thread_name = detail.display_label();
         match cx.open_window(window_options, move |_, cx| {
-            cx.new(|_| {
+            cx.new(|cx| {
                 JstackThreadDetailWindow::new(
                     initial_theme,
                     detail,
                     active_snapshot_index,
                     active_occurrence_index,
+                    cx,
                 )
             })
         }) {
@@ -2165,84 +2251,17 @@ impl ArgusApp {
         }
     }
 
-    /// 打开或更新 Jstack 方块悬浮预览弹窗。
+    /// 打开或更新 Jstack 方块内部悬浮气泡。
     ///
     /// 参数说明：
-    /// - `preview_key`：当前方块的稳定 key，用于避免同一方块重复创建窗口。
-    /// - `preview_data`：弹窗展示的快照、线程状态和完整堆栈。
-    /// - `cursor_position`：鼠标在主窗口内的位置，用于换算屏幕坐标。
-    /// - `window`：当前主窗口，用于读取屏幕坐标下的窗口边界。
-    /// - `cx`：主应用上下文，用于创建轻量级 PopUp 窗口。
-    pub fn show_jstack_cell_preview_window(
-        &mut self,
-        preview_key: String,
-        preview_data: JstackCellPreviewData,
-        cursor_position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.jstack_cell_preview_key.as_deref() == Some(preview_key.as_str())
-            && let Some(handle) = self.jstack_cell_preview_window_handle.clone()
-        {
-            if handle
-                .update(cx, |preview, _, cx| {
-                    preview.update_data(preview_data.clone());
-                    cx.notify();
-                })
-                .is_ok()
-            {
-                return;
-            }
-            self.jstack_cell_preview_window_handle = None;
-            self.jstack_cell_preview_key = None;
-        }
-
-        self.close_jstack_cell_preview_window(cx);
-        let window_bounds = window.bounds();
-        let bounds = Bounds {
-            origin: point(
-                window_bounds.origin.x + cursor_position.x + px(JSTACK_CELL_PREVIEW_OFFSET_X),
-                window_bounds.origin.y + cursor_position.y + px(JSTACK_CELL_PREVIEW_OFFSET_Y),
-            ),
-            size: size(
-                px(JSTACK_CELL_PREVIEW_WINDOW_WIDTH),
-                px(JSTACK_CELL_PREVIEW_WINDOW_HEIGHT),
-            ),
-        };
-        let window_options = WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_background: WindowBackgroundAppearance::Transparent,
-            focus: false,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            ..Default::default()
-        };
-
-        match cx.open_window(window_options, move |_, cx| {
-            cx.new(|_| JstackCellPreviewWindow::new(preview_data))
-        }) {
-            Ok(handle) => {
-                self.jstack_cell_preview_window_handle = Some(handle);
-                self.jstack_cell_preview_key = Some(preview_key);
-            }
-            Err(error) => {
-                self.jstack_cell_preview_window_handle = None;
-                self.jstack_cell_preview_key = None;
-                self.placeholder_notice = format!("打开线程预览失败：{error}");
-            }
-        }
+    /// - `preview`：当前方块的稳定 key、位置和预览内容。
+    pub fn show_jstack_cell_hover_preview(&mut self, preview: JstackCellHoverPreview) {
+        self.jstack_cell_hover_preview = Some(preview);
     }
 
-    /// 关闭 Jstack 方块悬浮预览弹窗。
-    pub fn close_jstack_cell_preview_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.jstack_cell_preview_window_handle.take() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
-        }
-        self.jstack_cell_preview_key = None;
+    /// 清理 Jstack 方块内部悬浮气泡。
+    pub fn clear_jstack_cell_hover_preview(&mut self) {
+        self.jstack_cell_hover_preview = None;
     }
 
     /// 创建 Jstack 分析 tab 和加载状态；后台任务由调用方负责启动。
@@ -2291,8 +2310,9 @@ impl ArgusApp {
                 generation,
                 active_states: BTreeSet::from([JstackThreadState::Runnable]),
                 is_thread_filter_enabled: true,
-                selected_thread_name: None,
-                selected_thread_identity: None,
+                thread_name_selection: None,
+                thread_name_selection_drag: None,
+                selected_cell_key: None,
                 visible_row_indices: Vec::new(),
                 filtered_row_count: 0,
                 row_scroll: UniformListScrollHandle::new(),
@@ -2336,46 +2356,116 @@ impl ArgusApp {
         };
     }
 
-    /// 选中并复制 Jstack 分析矩阵中的线程名。
+    /// 开始在 Jstack 分析矩阵左侧线程名列中选择文本。
     ///
     /// 参数说明：
     /// - `analysis_id`：分析页 ID。
-    /// - `thread_name`：用户看到并复制的线程名，不包含线程 ID。
-    /// - `thread_identity`：内部高亮使用的稳定线程身份，包含线程名和线程 ID。
-    /// - `cx`：应用上下文，用于写入系统剪贴板。
-    pub fn select_and_copy_jstack_thread_name(
+    /// - `thread_identity`：内部稳定线程身份，包含线程名和线程 ID。
+    /// - `thread_name`：当前行显示的线程名文本。
+    /// - `character_index`：鼠标按下位置命中的字符列。
+    /// - `granularity`：按点击次数决定的选择粒度。
+    pub fn begin_jstack_thread_name_selection(
         &mut self,
         analysis_id: usize,
-        thread_name: String,
         thread_identity: String,
-        cx: &mut Context<Self>,
+        thread_name: String,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
     ) {
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Jstack 分析结果".to_string();
             return;
         };
 
-        state.selected_thread_name = Some(thread_name.clone());
-        state.selected_thread_identity = Some(thread_identity);
-        let app_context: &gpui::App = (&*cx).borrow();
-        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name.clone()));
-        self.placeholder_notice = format!("已复制线程名：{thread_name}");
+        let anchor_range =
+            jstack_thread_name_range_for_granularity(&thread_name, character_index, granularity);
+        state.thread_name_selection = Some(JstackThreadNameSelection {
+            thread_identity: thread_identity.clone(),
+            thread_name: thread_name.clone(),
+            anchor: anchor_range.start,
+            focus: anchor_range.end,
+        });
+        state.thread_name_selection_drag = Some(JstackThreadNameSelectionDrag {
+            thread_identity,
+            thread_name,
+            anchor_range,
+            granularity,
+        });
+        state.selected_cell_key = None;
     }
 
-    /// 复制当前 Jstack 分析页已选中的线程名。
+    /// 拖拽更新 Jstack 分析矩阵左侧线程名列中的文本选区。
+    ///
+    /// 返回值：本次拖拽是否命中当前分析页和当前线程行。
+    pub fn update_jstack_thread_name_selection(
+        &mut self,
+        analysis_id: usize,
+        thread_identity: &str,
+        character_index: usize,
+    ) -> bool {
+        let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
+            return false;
+        };
+        let Some(drag) = state.thread_name_selection_drag.clone() else {
+            return false;
+        };
+        if drag.thread_identity != thread_identity {
+            return false;
+        }
+
+        let focus_range = jstack_thread_name_range_for_granularity(
+            &drag.thread_name,
+            character_index,
+            drag.granularity,
+        );
+        state.thread_name_selection = Some(JstackThreadNameSelection {
+            thread_identity: drag.thread_identity,
+            thread_name: drag.thread_name,
+            anchor: drag.anchor_range.start.min(focus_range.start),
+            focus: drag.anchor_range.end.max(focus_range.end),
+        });
+        true
+    }
+
+    /// 结束 Jstack 线程名文本选择；如果没有选中字符则清理空选区。
+    ///
+    /// 返回值：当前分析页是否存在需要结束的拖拽状态。
+    pub fn finish_jstack_thread_name_selection(&mut self, analysis_id: usize) -> bool {
+        let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
+            return false;
+        };
+        let had_drag = state.thread_name_selection_drag.take().is_some();
+        if state
+            .thread_name_selection
+            .as_ref()
+            .and_then(JstackThreadNameSelection::normalized_range)
+            .is_none()
+        {
+            state.thread_name_selection = None;
+        }
+        had_drag
+    }
+
+    /// 复制当前 Jstack 分析页左侧线程名列中拖选的文本。
     pub fn copy_selected_jstack_thread_name(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
-        let Some(thread_name) = self
+        let Some((thread_name, range)) = self
             .jstack_analyses
             .get(&analysis_id)
-            .and_then(|state| state.selected_thread_name.clone())
+            .and_then(|state| state.thread_name_selection.as_ref())
+            .and_then(|selection| {
+                selection
+                    .normalized_range()
+                    .map(|range| (selection.thread_name.clone(), range))
+            })
         else {
-            self.placeholder_notice = "请先选中一个 Jstack 线程名".to_string();
+            self.placeholder_notice = "请先拖选一个 Jstack 线程名片段".to_string();
             return;
         };
 
+        let selected_text = slice_character_range(&thread_name, range);
         let app_context: &gpui::App = (&*cx).borrow();
-        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name.clone()));
-        self.placeholder_notice = format!("已复制线程名：{thread_name}");
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
+        self.placeholder_notice = format!("已复制线程名片段：{selected_text}");
     }
 
     /// 切换 Jstack 分析页是否应用设置页中的线程堆栈过滤规则。
@@ -2554,9 +2644,9 @@ impl ArgusApp {
         self.placeholder_notice = "已关闭标签页".to_string();
     }
 
-    /// 在 UI 事件中关闭指定标签页，并同步关闭 Jstack 方块悬浮预览窗口。
-    pub fn close_tab_with_context(&mut self, tab_id: usize, cx: &mut Context<Self>) {
-        self.close_jstack_cell_preview_window(cx);
+    /// 在 UI 事件中关闭指定标签页，并同步清理 Jstack 方块悬浮气泡。
+    pub fn close_tab_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
+        self.clear_jstack_cell_hover_preview();
         self.close_tab(tab_id);
     }
 
@@ -2587,9 +2677,9 @@ impl ArgusApp {
         };
     }
 
-    /// 在 UI 事件中关闭其他标签页，并同步关闭 Jstack 方块悬浮预览窗口。
-    pub fn close_other_tabs_with_context(&mut self, tab_id: usize, cx: &mut Context<Self>) {
-        self.close_jstack_cell_preview_window(cx);
+    /// 在 UI 事件中关闭其他标签页，并同步清理 Jstack 方块悬浮气泡。
+    pub fn close_other_tabs_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
+        self.clear_jstack_cell_hover_preview();
         self.close_other_tabs(tab_id);
     }
 
@@ -2617,9 +2707,9 @@ impl ArgusApp {
         self.placeholder_notice = "已关闭全部标签".to_string();
     }
 
-    /// 在 UI 事件中关闭全部标签页，并同步关闭 Jstack 方块悬浮预览窗口。
-    pub fn close_all_tabs_with_context(&mut self, cx: &mut Context<Self>) {
-        self.close_jstack_cell_preview_window(cx);
+    /// 在 UI 事件中关闭全部标签页，并同步清理 Jstack 方块悬浮气泡。
+    pub fn close_all_tabs_with_context(&mut self, _cx: &mut Context<Self>) {
+        self.clear_jstack_cell_hover_preview();
         self.close_all_tabs();
     }
 
@@ -2828,9 +2918,9 @@ impl ArgusApp {
         };
     }
 
-    /// 在 UI 事件中应用根来源加载报告，并同步关闭 Jstack 方块悬浮预览窗口。
-    pub fn apply_load_report_with_context(&mut self, report: LoadReport, cx: &mut Context<Self>) {
-        self.close_jstack_cell_preview_window(cx);
+    /// 在 UI 事件中应用根来源加载报告，并同步清理 Jstack 方块悬浮气泡。
+    pub fn apply_load_report_with_context(&mut self, report: LoadReport, _cx: &mut Context<Self>) {
+        self.clear_jstack_cell_hover_preview();
         self.apply_load_report(report);
     }
 
@@ -3674,6 +3764,34 @@ mod tests {
         assert_eq!(app.placeholder_notice, "已关闭 Jstack 配置过滤");
     }
 
+    /// 验证 Jstack 线程名复制入口只记录用户拖选的局部文本范围。
+    #[test]
+    fn jstack_thread_name_selection_keeps_character_range() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_jstack_analysis_tab_state(targets)
+            .expect("应能创建 Jstack 分析 tab");
+
+        app.begin_jstack_thread_name_selection(
+            analysis_id,
+            "worker-1#123".to_string(),
+            "worker-1".to_string(),
+            0,
+            TextSelectionGranularity::Character,
+        );
+        assert!(app.update_jstack_thread_name_selection(analysis_id, "worker-1#123", 4));
+        assert!(app.finish_jstack_thread_name_selection(analysis_id));
+
+        let selection = app
+            .jstack_analysis_state(analysis_id)
+            .and_then(|state| state.thread_name_selection.as_ref())
+            .expect("应保留非空线程名选区");
+        let range = selection.normalized_range().expect("应存在非空选区");
+        assert_eq!(slice_character_range(&selection.thread_name, range), "work");
+    }
+
     /// 验证 Jstack 状态筛选开关可以增删状态并重置滚动句柄。
     #[test]
     fn toggling_jstack_state_filter_updates_active_states() {
@@ -4379,7 +4497,7 @@ mod tests {
         app.toggle_follow_symlinks();
         app.update_settings_quick_keywords("ERROR,WARN,timeout".to_string());
         app.update_settings_jstack_thread_name_filter("Attach Listener".to_string());
-        app.update_settings_jstack_stack_segment_filter("Unsafe.park||Socket\nread".to_string());
+        app.update_settings_jstack_stack_segment_filter("Unsafe.park\n\nSocket\nread".to_string());
 
         let saved =
             ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
@@ -4396,7 +4514,7 @@ mod tests {
         );
         assert_eq!(
             saved.log_display.jstack_stack_segment_filters,
-            "Unsafe.park||Socket\nread"
+            "Unsafe.park\n\nSocket\nread"
         );
     }
 

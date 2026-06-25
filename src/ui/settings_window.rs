@@ -1,8 +1,8 @@
 //! 文件职责：渲染 Argus 独立设置窗口。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-18
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
-//! 主要功能：以无系统标题栏窗口展示关于、外观、日志显示、日志搜索、升级和日志加载设置，并通过主应用状态持久化配置。
+//! 主要功能：以无系统标题栏窗口展示关于、外观、日志显示、日志搜索、升级和日志加载设置，并提供 Jstack 线程段过滤大编辑器。
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use gpui::{
 
 use crate::app::{AppTextInputTarget, ArgusApp, SettingsTextInputState};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
+use crate::jstack_analysis::split_stack_segment_filter_blocks;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::theme::{AppTheme, ThemeOption};
 use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};
@@ -28,6 +29,10 @@ use crate::ui::input_native::app_native_input;
 const SETTINGS_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 /// 设置窗口标题图标尺寸，和 14px 标题文字保持协调比例。
 const SETTINGS_WINDOW_TITLE_ICON_SIZE: f32 = 16.0;
+/// Jstack 线程段过滤编辑器标题图标尺寸，复用设置窗口标题栏视觉比例。
+const JSTACK_STACK_SEGMENT_EDITOR_TITLE_ICON_SIZE: f32 = 16.0;
+/// Jstack 线程段过滤编辑器 textarea 默认可见行数。
+const JSTACK_STACK_SEGMENT_EDITOR_VISIBLE_LINES: usize = 22;
 /// 设置窗口主内容滚动条宽度；GPUI 需要显式宽度才会绘制滚动条。
 const SETTINGS_WINDOW_SCROLLBAR_WIDTH: f32 = 8.0;
 /// 主题下拉框固定宽度，需和通用下拉框按钮宽度保持一致。
@@ -72,12 +77,6 @@ struct SettingsInputFocusHandles {
     quick_keywords: FocusHandle,
     /// Jstack 线程名过滤输入框焦点。
     jstack_thread_names: FocusHandle,
-    /// Jstack 完整线程段过滤输入框焦点。
-    jstack_stack_segments: FocusHandle,
-    /// Jstack 完整线程段 textarea 滚动句柄，保证设置窗口刷新后仍能同步光标可见区域。
-    jstack_stack_segments_scroll: ScrollHandle,
-    /// Jstack 完整线程段 textarea 滚动交互状态，支持自绘滚动条拖拽。
-    jstack_stack_segments_scroll_state: TextareaScrollState,
     /// 升级服务器输入框焦点。
     upgrade_server: FocusHandle,
     /// 升级验签公钥输入框焦点。
@@ -114,9 +113,6 @@ impl SettingsWindow {
                 root: cx.focus_handle(),
                 quick_keywords: cx.focus_handle(),
                 jstack_thread_names: cx.focus_handle(),
-                jstack_stack_segments: cx.focus_handle(),
-                jstack_stack_segments_scroll: ScrollHandle::new(),
-                jstack_stack_segments_scroll_state: TextareaScrollState::new(),
                 upgrade_server: cx.focus_handle(),
                 upgrade_public_key: cx.focus_handle(),
             },
@@ -212,6 +208,99 @@ pub struct SettingsWindowSnapshot {
     pub is_open_with_registration_busy: bool,
     /// 系统右键菜单最近一次操作提示。
     pub open_with_registration_message: Option<String>,
+}
+
+/// Jstack 线程段过滤大编辑器窗口；使用独立窗口承载长 textarea，避免设置页行内编辑困难。
+pub struct JstackStackSegmentFilterEditorWindow {
+    /// 主应用实体，编辑内容直接写回 `ArgusApp` 的设置输入状态。
+    app: Entity<ArgusApp>,
+    /// 当前编辑器渲染快照。
+    snapshot: JstackStackSegmentFilterEditorSnapshot,
+    /// 编辑器内焦点和滚动句柄。
+    focus_handles: JstackStackSegmentFilterEditorFocusHandles,
+    /// 主应用状态订阅，确保设置页清空或主题切换后编辑器同步刷新。
+    _app_observer: Subscription,
+}
+
+/// Jstack 线程段过滤编辑器焦点与滚动句柄集合。
+#[derive(Clone)]
+struct JstackStackSegmentFilterEditorFocusHandles {
+    /// 编辑器根焦点，用于点击空白区域时承接键盘焦点。
+    root: FocusHandle,
+    /// 大 textarea 的真实输入焦点。
+    textarea: FocusHandle,
+    /// 大 textarea 的滚动句柄，支持横纵滚动条和光标跟随。
+    textarea_scroll: ScrollHandle,
+    /// 大 textarea 的滚动条拖拽状态。
+    textarea_scroll_state: TextareaScrollState,
+}
+
+impl JstackStackSegmentFilterEditorWindow {
+    /// 创建 Jstack 线程段过滤大编辑器。
+    ///
+    /// 参数说明：
+    /// - `app`：主应用实体。
+    /// - `theme`：首次绘制使用的主题。
+    /// - `snapshot`：首次绘制使用的输入快照。
+    /// - `cx`：编辑器窗口上下文，用于订阅主应用状态。
+    ///
+    /// 返回值：可渲染的编辑器窗口视图。
+    pub fn new(
+        app: Entity<ArgusApp>,
+        theme: AppTheme,
+        mut snapshot: JstackStackSegmentFilterEditorSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        snapshot.theme = theme;
+        let _app_observer = cx.observe(&app, |editor, app_entity, cx| {
+            editor.snapshot = app_entity.read_with(cx, |app, _| {
+                JstackStackSegmentFilterEditorWindow::snapshot_from_app(app)
+            });
+            cx.notify();
+        });
+
+        Self {
+            app,
+            snapshot,
+            focus_handles: JstackStackSegmentFilterEditorFocusHandles {
+                root: cx.focus_handle(),
+                textarea: cx.focus_handle(),
+                textarea_scroll: ScrollHandle::new(),
+                textarea_scroll_state: TextareaScrollState::new(),
+            },
+            _app_observer,
+        }
+    }
+
+    /// 从主应用状态提取编辑器渲染快照。
+    pub fn snapshot_from_app(app: &ArgusApp) -> JstackStackSegmentFilterEditorSnapshot {
+        JstackStackSegmentFilterEditorSnapshot {
+            theme: app.theme.clone(),
+            input: app.settings_jstack_stack_segment_filter_input.clone(),
+        }
+    }
+}
+
+impl Render for JstackStackSegmentFilterEditorWindow {
+    /// 渲染 Jstack 线程段过滤编辑器主体。
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_jstack_stack_segment_filter_editor_window(
+            &self.snapshot,
+            &self.app,
+            &self.focus_handles,
+            window,
+            cx,
+        )
+    }
+}
+
+/// Jstack 线程段过滤编辑器快照。
+#[derive(Clone, Debug)]
+pub struct JstackStackSegmentFilterEditorSnapshot {
+    /// 当前主题令牌。
+    pub theme: AppTheme,
+    /// 当前线程段过滤输入状态。
+    pub input: SettingsTextInputState,
 }
 
 /// 渲染设置窗口主体布局。
@@ -353,6 +442,188 @@ fn render_settings_window(
                         )),
                 ),
         )
+}
+
+/// 渲染 Jstack 线程段过滤大编辑器窗口。
+fn render_jstack_stack_segment_filter_editor_window(
+    snapshot: &JstackStackSegmentFilterEditorSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    focus_handles: &JstackStackSegmentFilterEditorFocusHandles,
+    _window: &mut Window,
+    _cx: &mut Context<JstackStackSegmentFilterEditorWindow>,
+) -> impl IntoElement + use<> {
+    let theme = snapshot.theme.clone();
+    let close_app = app_handle.clone();
+    let root_focus_for_track = focus_handles.root.clone();
+    let root_focus_for_click = focus_handles.root.clone();
+
+    div()
+        .id("jstack-stack-segment-editor-root")
+        .size_full()
+        .relative()
+        .flex()
+        .flex_col()
+        .bg(rgb(theme.content))
+        .font_family(ARGUS_UI_FONT_FAMILY)
+        .text_color(rgb(theme.foreground))
+        .occlude()
+        .focusable()
+        .track_focus(&root_focus_for_track)
+        .on_click({
+            let app_handle = app_handle.clone();
+            move |_, window, cx| {
+                root_focus_for_click.focus(window);
+                update_settings_app(&app_handle, cx, |app, _| {
+                    app.clear_all_text_input_focus();
+                });
+            }
+        })
+        .child(
+            div()
+                .h(px(56.0))
+                .px_5()
+                .flex()
+                .items_center()
+                .justify_between()
+                .occlude()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(14.0))
+                        .line_height(px(18.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(render_icon(
+                            ArgusIcon::FileText,
+                            theme.foreground_muted,
+                            JSTACK_STACK_SEGMENT_EDITOR_TITLE_ICON_SIZE,
+                        ))
+                        .child("线程段过滤编辑"),
+                )
+                .child(render_icon_button(
+                    "jstack-stack-segment-editor-close",
+                    ArgusIcon::Close,
+                    "关闭编辑器",
+                    false,
+                    IconButtonSize::Small,
+                    &theme,
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        update_settings_app(&close_app, cx, |app, _| {
+                            app.close_jstack_stack_segment_filter_editor();
+                        });
+                        window.remove_window();
+                    },
+                )),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.0))
+                .px_5()
+                .pb_5()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(rgb(theme.foreground_muted))
+                        .child("每个完整线程段用空行分隔；内容会自动保存并立即作用于线程日志分析过滤。"),
+                )
+                .child(render_jstack_stack_segment_editor_textarea(
+                    snapshot,
+                    app_handle,
+                    focus_handles,
+                    &theme,
+                )),
+        )
+}
+
+/// 渲染 Jstack 线程段过滤编辑器中的大 textarea。
+fn render_jstack_stack_segment_editor_textarea(
+    snapshot: &JstackStackSegmentFilterEditorSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    focus_handles: &JstackStackSegmentFilterEditorFocusHandles,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    let input_state = snapshot.input.clone();
+    let key_app = app_handle.clone();
+    let click_app = app_handle.clone();
+    let pointer_app = app_handle.clone();
+    let clear_app = app_handle.clone();
+    let native_input = app_native_input(
+        app_handle.clone(),
+        AppTextInputTarget::SettingsJstackStackSegmentFilter,
+        focus_handles.textarea.clone(),
+    );
+
+    div()
+        .w_full()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .child(render_textarea(
+        Textarea {
+            id: "jstack-stack-segment-editor-textarea",
+            placeholder: "SocketInputStream.socketRead\n    at java.net.SocketInputStream.read\n\nUnsafe.park",
+            value: input_state.value.clone(),
+            is_disabled: false,
+            is_focused: input_state.is_focused,
+            cursor_index: input_state.cursor,
+            selection_range: settings_input_selection_range(&input_state),
+            marked_range: input_state.marked_range.clone(),
+            is_pointer_selecting: input_state.selection_drag.is_some(),
+            visible_lines: JSTACK_STACK_SEGMENT_EDITOR_VISIBLE_LINES,
+            fill_height: true,
+            scroll_handle: focus_handles.textarea_scroll.clone(),
+            scroll_state: focus_handles.textarea_scroll_state.clone(),
+            trailing_accessory: Some(InputAccessory {
+                id: "jstack-stack-segment-editor-clear",
+                icon: ArgusIcon::Close,
+                tooltip: "清空线程段过滤",
+            }),
+            native_input: Some(native_input),
+        },
+        theme,
+        move |event: &KeyDownEvent, _, cx| {
+            update_settings_app(&key_app, cx, |app, app_cx| {
+                app.handle_settings_jstack_stack_segment_filter_key(&event.keystroke, app_cx);
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&click_app, cx, |app, _| {
+                app.focus_settings_jstack_stack_segment_filter_input();
+            });
+        },
+        move |event: &InputPointerEvent, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&pointer_app, cx, |app, _| match event.action {
+                InputPointerAction::Begin => app
+                    .begin_settings_jstack_stack_segment_filter_pointer_selection(
+                        event.character_index,
+                        event.granularity,
+                    ),
+                InputPointerAction::Extend => app
+                    .update_settings_jstack_stack_segment_filter_pointer_selection(
+                        event.character_index,
+                    ),
+                InputPointerAction::Finish => {
+                    app.finish_settings_jstack_stack_segment_filter_pointer_selection()
+                }
+            });
+        },
+        move |_, _, cx| {
+            cx.stop_propagation();
+            update_settings_app(&clear_app, cx, |app, _| {
+                app.clear_settings_jstack_stack_segment_filter_input();
+            });
+        },
+    ))
 }
 
 /// 渲染外观分组内的主题下拉菜单浮层。
@@ -556,12 +827,7 @@ fn render_log_display_section(
         ))
         .child(setting_row(
             "线程段过滤",
-            jstack_stack_segment_filter_input_control(
-                snapshot,
-                app_handle,
-                input_focus_handles,
-                theme,
-            ),
+            jstack_stack_segment_filter_input_control(snapshot, app_handle, theme),
             theme,
         ))
 }
@@ -796,81 +1062,66 @@ fn jstack_thread_name_filter_input_control(
     ))
 }
 
-/// 渲染 Jstack 完整线程段过滤配置 textarea。
+/// 渲染 Jstack 完整线程段过滤配置摘要和编辑入口。
 fn jstack_stack_segment_filter_input_control(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
-    input_focus_handles: &SettingsInputFocusHandles,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
     let input_state = snapshot.jstack_stack_segment_filter_input.clone();
-    let key_app = app_handle.clone();
-    let click_app = app_handle.clone();
-    let pointer_app = app_handle.clone();
     let clear_app = app_handle.clone();
-    let native_input = app_native_input(
-        app_handle.clone(),
-        AppTextInputTarget::SettingsJstackStackSegmentFilter,
-        input_focus_handles.jstack_stack_segments.clone(),
-    );
+    let edit_app = app_handle.clone();
+    let is_empty = input_state.value.trim().is_empty();
+    let summary = jstack_stack_segment_filter_summary(&input_state.value);
 
-    div().w(px(360.0)).child(render_textarea(
-        Textarea {
-            id: "settings-jstack-stack-segment-filter-input",
-            placeholder: "SocketInputStream.socketRead\n    at java.net.SocketInputStream.read\n||\nUnsafe.park",
-            value: input_state.value.clone(),
-            is_disabled: false,
-            is_focused: input_state.is_focused,
-            cursor_index: input_state.cursor,
-            selection_range: settings_input_selection_range(&input_state),
-            marked_range: input_state.marked_range.clone(),
-            is_pointer_selecting: input_state.selection_drag.is_some(),
-            visible_lines: 5,
-            scroll_handle: input_focus_handles.jstack_stack_segments_scroll.clone(),
-            scroll_state: input_focus_handles.jstack_stack_segments_scroll_state.clone(),
-            trailing_accessory: Some(InputAccessory {
-                id: "settings-jstack-stack-segment-filter-clear",
-                icon: ArgusIcon::Close,
-                tooltip: "清空线程段过滤",
-            }),
-            native_input: Some(native_input),
-        },
-        theme,
-        move |event: &KeyDownEvent, _, cx| {
-            update_settings_app(&key_app, cx, |app, app_cx| {
-                app.handle_settings_jstack_stack_segment_filter_key(&event.keystroke, app_cx);
-            });
-        },
-        move |_, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&click_app, cx, |app, _| {
-                app.focus_settings_jstack_stack_segment_filter_input();
-            });
-        },
-        move |event: &InputPointerEvent, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&pointer_app, cx, |app, _| match event.action {
-                InputPointerAction::Begin => app
-                    .begin_settings_jstack_stack_segment_filter_pointer_selection(
-                        event.character_index,
-                        event.granularity,
-                    ),
-                InputPointerAction::Extend => app
-                    .update_settings_jstack_stack_segment_filter_pointer_selection(
-                        event.character_index,
-                    ),
-                InputPointerAction::Finish => {
-                    app.finish_settings_jstack_stack_segment_filter_pointer_selection()
-                }
-            });
-        },
-        move |_, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&clear_app, cx, |app, _| {
-                app.clear_settings_jstack_stack_segment_filter_input();
-            });
-        },
-    ))
+    div()
+        .w(px(360.0))
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_2()
+        .child(
+            div()
+                .max_w(px(180.0))
+                .h(px(28.0))
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .bg(rgb(theme.content))
+                .text_size(px(12.0))
+                .line_height(px(28.0))
+                .text_color(rgb(if is_empty {
+                    theme.foreground_muted
+                } else {
+                    theme.foreground
+                }))
+                .child(div().truncate().child(summary)),
+        )
+        .child(registration_action_button(
+            "settings-jstack-stack-segment-filter-clear",
+            "清空",
+            ArgusIcon::Close,
+            is_empty,
+            theme,
+            move |cx| {
+                update_settings_app(&clear_app, cx, |app, _| {
+                    app.clear_settings_jstack_stack_segment_filter_input();
+                });
+            },
+        ))
+        .child(registration_action_button(
+            "settings-jstack-stack-segment-filter-edit",
+            "编辑",
+            ArgusIcon::FileText,
+            false,
+            theme,
+            move |cx| {
+                update_settings_app(&edit_app, cx, |app, app_cx| {
+                    app.open_jstack_stack_segment_filter_editor(app_cx);
+                });
+            },
+        ))
 }
 
 /// 渲染升级服务器配置输入框。
@@ -1082,6 +1333,28 @@ fn text_value(value: &str, theme: &AppTheme) -> impl IntoElement {
         .text_size(px(12.0))
         .text_color(rgb(theme.foreground_muted))
         .child(value.to_string())
+}
+
+/// 汇总 Jstack 完整线程段过滤配置，供设置页行内展示。
+fn jstack_stack_segment_filter_summary(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "未配置".to_string();
+    }
+
+    // 线程段过滤以空行分隔，兼容旧版 `||` 分隔，摘要帮助用户判断配置规模。
+    let segment_count = stack_segment_filter_blocks_for_summary(trimmed).len();
+    let line_count = trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    format!("{segment_count} 段，{line_count} 行")
+}
+
+/// 按当前线程段过滤规则统计配置块数量；旧版 `||` 仅用于兼容历史配置展示。
+fn stack_segment_filter_blocks_for_summary(value: &str) -> Vec<String> {
+    let value = value.replace("||", "\n\n");
+    split_stack_segment_filter_blocks(&value)
 }
 
 /// 渲染日志字号步进控件。

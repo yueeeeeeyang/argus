@@ -1,6 +1,6 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-18
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
 //! 主要功能：提供外观、日志加载、日志搜索、编码、缓存和升级设置的默认值、校验和 TOML 序列化结构。
 
@@ -37,7 +37,7 @@ pub const DEFAULT_JSTACK_STACK_SEGMENT_FILTERS: &str = concat!(
     "\tat com.caucho.network.listen.TcpSocketAcceptThread.run(TcpSocketAcceptThread.java:61)\n",
     "\tat com.caucho.env.thread2.ResinThread2.runTasks(ResinThread2.java:173)\n",
     "\tat com.caucho.env.thread2.ResinThread2.run(ResinThread2.java:118)\n",
-    "||\n",
+    "\n\n",
     "java.lang.Thread.State: RUNNABLE\n",
     "\tat java.net.DualStackPlainSocketImpl.accept0(Native Method)\n",
     "\tat java.net.DualStackPlainSocketImpl.socketAccept(DualStackPlainSocketImpl.java:131)\n",
@@ -109,7 +109,7 @@ impl AppConfig {
         self.log_display.jstack_thread_name_filters =
             normalized_inline_text(self.log_display.jstack_thread_name_filters);
         self.log_display.jstack_stack_segment_filters =
-            normalized_multiline_text(self.log_display.jstack_stack_segment_filters);
+            normalized_stack_segment_filter_text(self.log_display.jstack_stack_segment_filters);
         self.cache.limit_mb = self.cache.limit_mb.clamp(128, 2048);
         if self.encoding.selected.trim().is_empty() {
             self.encoding.selected = EncodingConfig::default().selected;
@@ -197,7 +197,7 @@ pub struct LogDisplayConfig {
     /// Jstack 线程名过滤关键字，多个关键字可用逗号、分号或竖线分隔。
     #[serde(default = "default_jstack_thread_name_filters")]
     pub jstack_thread_name_filters: String,
-    /// Jstack 完整线程段过滤片段，多个片段使用 `||` 分隔，`\n` 会按换行匹配。
+    /// Jstack 完整线程段过滤片段，多个片段使用空行分隔，`\n` 会按换行匹配。
     #[serde(default = "default_jstack_stack_segment_filters")]
     pub jstack_stack_segment_filters: String,
 }
@@ -309,6 +309,11 @@ fn normalized_multiline_text(value: String) -> String {
         .to_string()
 }
 
+/// 归一化 Jstack 线程段过滤配置，并把旧版 `||` 分隔迁移为空行分隔。
+fn normalized_stack_segment_filter_text(value: String) -> String {
+    normalized_multiline_text(value).replace("||", "\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,7 +336,7 @@ mod tests {
             },
             log_display: LogDisplayConfig {
                 jstack_thread_name_filters: " main, Attach Listener ".to_string(),
-                jstack_stack_segment_filters: " java.net.SocketInputStream\nread ".to_string(),
+                jstack_stack_segment_filters: " java.net.SocketInputStream||read ".to_string(),
             },
             encoding: EncodingConfig {
                 selected: String::new(),
@@ -361,7 +366,7 @@ mod tests {
         );
         assert_eq!(
             config.log_display.jstack_stack_segment_filters,
-            "java.net.SocketInputStream\nread"
+            "java.net.SocketInputStream\n\nread"
         );
         assert_eq!(config.encoding.selected, "UTF-8");
         assert_eq!(config.cache.limit_mb, 128);
@@ -416,7 +421,8 @@ mod tests {
                 .jstack_stack_segment_filters
                 .contains("DualStackPlainSocketImpl.accept0")
         );
-        assert!(config.jstack_stack_segment_filters.contains("||"));
+        assert!(!config.jstack_stack_segment_filters.contains("||"));
+        assert!(config.jstack_stack_segment_filters.contains("\n\n"));
     }
 
     /// 验证默认升级配置不会在未配置服务器时发起自动检查。

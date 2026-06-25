@@ -1,8 +1,8 @@
 //! 文件职责：维护独立设置窗口的打开、置前和关闭状态。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-18
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
-//! 主要功能：将设置页从标签页迁移到无标题栏独立窗口，同时复用主应用配置、日志搜索和升级偏好持久化逻辑。
+//! 主要功能：维护设置窗口和 Jstack 线程段过滤编辑器窗口，同时复用主应用配置、日志搜索和升级偏好持久化逻辑。
 
 use std::borrow::Borrow;
 use std::ops::Range;
@@ -19,7 +19,7 @@ use crate::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, slice_character_range, word_range_at,
 };
-use crate::ui::settings_window::SettingsWindow;
+use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
 
 /// 设置窗口默认宽度，保证单页设置内容不过度拉伸。
 const SETTINGS_WINDOW_WIDTH: f32 = 760.0;
@@ -29,6 +29,14 @@ const SETTINGS_WINDOW_HEIGHT: f32 = 560.0;
 const SETTINGS_WINDOW_MIN_WIDTH: f32 = 560.0;
 /// 设置窗口最小高度。
 const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 420.0;
+/// Jstack 线程段过滤编辑器默认宽度，给长堆栈保留横向阅读空间。
+const JSTACK_STACK_SEGMENT_EDITOR_WIDTH: f32 = 920.0;
+/// Jstack 线程段过滤编辑器默认高度，避免大段过滤配置挤在设置页小区域内。
+const JSTACK_STACK_SEGMENT_EDITOR_HEIGHT: f32 = 680.0;
+/// Jstack 线程段过滤编辑器最小宽度。
+const JSTACK_STACK_SEGMENT_EDITOR_MIN_WIDTH: f32 = 680.0;
+/// Jstack 线程段过滤编辑器最小高度。
+const JSTACK_STACK_SEGMENT_EDITOR_MIN_HEIGHT: f32 = 520.0;
 
 impl ArgusApp {
     /// 打开设置独立窗口；若窗口已存在，则直接激活并显示到最前。
@@ -94,6 +102,83 @@ impl ArgusApp {
         self.settings_window_handle = None;
         self.is_theme_dropdown_open = false;
         self.placeholder_notice = "已关闭设置窗口".to_string();
+    }
+
+    /// 打开 Jstack 线程段过滤大编辑器；若编辑器已存在，则直接激活已有窗口。
+    ///
+    /// 参数说明：
+    /// - `cx`：主应用上下文，用于创建或激活独立编辑窗口。
+    pub fn open_jstack_stack_segment_filter_editor(&mut self, cx: &mut Context<Self>) {
+        if self.is_jstack_stack_segment_filter_editor_open {
+            if let Some(window_handle) = self.jstack_stack_segment_filter_editor_handle.clone()
+                && window_handle
+                    .update(cx, |_, window, _| window.activate_window())
+                    .is_ok()
+            {
+                self.placeholder_notice = "线程段过滤编辑器已显示到最前".to_string();
+                return;
+            }
+
+            // 句柄失效通常表示窗口已被系统关闭；清理后重新创建，避免按钮无响应。
+            self.is_jstack_stack_segment_filter_editor_open = false;
+            self.jstack_stack_segment_filter_editor_handle = None;
+        }
+
+        let app_entity = cx.entity();
+        let initial_theme = self.theme.clone();
+        let initial_snapshot = JstackStackSegmentFilterEditorWindow::snapshot_from_app(self);
+        let bounds = Bounds::centered(
+            None,
+            size(
+                px(JSTACK_STACK_SEGMENT_EDITOR_WIDTH),
+                px(JSTACK_STACK_SEGMENT_EDITOR_HEIGHT),
+            ),
+            cx,
+        );
+        let window_options = WindowOptions {
+            titlebar: None,
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(JSTACK_STACK_SEGMENT_EDITOR_MIN_WIDTH),
+                px(JSTACK_STACK_SEGMENT_EDITOR_MIN_HEIGHT),
+            )),
+            ..Default::default()
+        };
+
+        self.is_jstack_stack_segment_filter_editor_open = true;
+        self.is_theme_dropdown_open = false;
+        self.placeholder_notice = "已打开线程段过滤编辑器".to_string();
+
+        match cx.open_window(window_options, move |_, cx| {
+            cx.new(|cx| {
+                JstackStackSegmentFilterEditorWindow::new(
+                    app_entity,
+                    initial_theme,
+                    initial_snapshot,
+                    cx,
+                )
+            })
+        }) {
+            Ok(window_handle) => {
+                self.jstack_stack_segment_filter_editor_handle = Some(window_handle);
+            }
+            Err(error) => {
+                self.is_jstack_stack_segment_filter_editor_open = false;
+                self.jstack_stack_segment_filter_editor_handle = None;
+                self.placeholder_notice = format!("打开线程段过滤编辑器失败：{error}");
+            }
+        }
+    }
+
+    /// 清理 Jstack 线程段过滤编辑器打开状态；关闭按钮和窗口销毁都走该入口。
+    pub fn close_jstack_stack_segment_filter_editor(&mut self) {
+        self.is_jstack_stack_segment_filter_editor_open = false;
+        self.jstack_stack_segment_filter_editor_handle = None;
+        self.settings_jstack_stack_segment_filter_input.is_focused = false;
+        self.settings_jstack_stack_segment_filter_input.marked_range = None;
+        self.settings_jstack_stack_segment_filter_input
+            .selection_drag = None;
+        self.placeholder_notice = "已关闭线程段过滤编辑器".to_string();
     }
 
     /// 刷新系统“用 Argus 打开”右键菜单注册状态。
@@ -909,7 +994,9 @@ impl ArgusApp {
     /// 将 Jstack 完整线程段过滤输入框内容写回配置并保存。
     fn commit_settings_jstack_stack_segment_filter_input(&mut self) {
         self.config.log_display.jstack_stack_segment_filters =
-            normalized_textarea_value(&self.settings_jstack_stack_segment_filter_input.value);
+            normalized_stack_segment_filter_value(
+                &self.settings_jstack_stack_segment_filter_input.value,
+            );
         self.rebuild_all_jstack_visible_row_caches();
         self.placeholder_notice = "Jstack 线程段过滤已保存".to_string();
         self.persist_config_or_report();
@@ -1660,6 +1747,11 @@ fn settings_textarea_range_for_granularity(
 /// 归一化 textarea 文本，统一系统换行符但保留真实多行结构。
 fn normalized_textarea_value(value: &str) -> String {
     value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// 归一化 Jstack 线程段过滤配置，并把旧版 `||` 分隔迁移为空行分隔。
+fn normalized_stack_segment_filter_value(value: &str) -> String {
+    normalized_textarea_value(value).replace("||", "\n\n")
 }
 
 /// 返回光标所在行的字符范围，不包含行尾换行符。

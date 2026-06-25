@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Jstack 线程详情独立窗口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-18
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
 //! 主要功能：在无系统标题栏窗口中展示线程完整堆栈，并支持在不同快照间切换同名线程。
 
@@ -18,10 +18,10 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use gpui::{
-    AnyElement, Bounds, ClipboardItem, Context, FontWeight, HighlightStyle, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
-    ScrollHandle, SharedString, StyledText, TextRun, Window, canvas, div, point, prelude::*, px,
-    rgb,
+    AnyElement, Bounds, ClipboardItem, Context, FocusHandle, FontWeight, HighlightStyle,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Render, ScrollHandle, SharedString, StyledText, TextRun, Window, canvas, div, point,
+    prelude::*, px, rgb,
 };
 
 /// 详情窗口顶部标题栏高度。
@@ -145,6 +145,8 @@ pub struct JstackThreadDetailWindow {
     stack_selection: Option<StackTextSelection>,
     /// 当前堆栈正文拖拽选择状态。
     stack_selection_drag: Option<StackTextSelectionDrag>,
+    /// 根视图焦点句柄；堆栈文本选择后仍用它稳定接收 Cmd/Ctrl+C。
+    focus_handle: FocusHandle,
 }
 
 impl JstackThreadDetailWindow {
@@ -162,6 +164,7 @@ impl JstackThreadDetailWindow {
         detail: JstackThreadDetail,
         active_snapshot_index: usize,
         active_occurrence_index: usize,
+        cx: &mut Context<Self>,
     ) -> Self {
         let active_index = detail
             .occurrences
@@ -192,6 +195,7 @@ impl JstackThreadDetailWindow {
             is_thread_name_selected: false,
             stack_selection: None,
             stack_selection_drag: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -258,6 +262,7 @@ impl JstackThreadDetailWindow {
         click_count: usize,
         window: &mut Window,
     ) {
+        self.focus_handle.focus(window);
         let position = self.stack_text_position_from_pointer(line_index, line, pointer_x, window);
         let granularity = stack_text_granularity_for_click_count(click_count);
         let anchor_range =
@@ -361,6 +366,11 @@ impl Render for JstackThreadDetailWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active_occurrence = self.active_occurrence().cloned();
+        let focus_handle = self.focus_handle.clone();
+        let click_focus_handle = self.focus_handle.clone();
+        if !focus_handle.is_focused(window) {
+            focus_handle.focus(window);
+        }
 
         div()
             .id("jstack-thread-detail-window-root")
@@ -372,6 +382,13 @@ impl Render for JstackThreadDetailWindow {
             .text_color(rgb(theme.foreground))
             .occlude()
             .focusable()
+            .track_focus(&focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_view, _event: &MouseDownEvent, window, _cx| {
+                    click_focus_handle.focus(window);
+                }),
+            )
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.modifiers.platform
                     && event.keystroke.key.eq_ignore_ascii_case("c")
