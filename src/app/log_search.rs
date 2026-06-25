@@ -1,6 +1,6 @@
 //! 文件职责：维护日志搜索窗口、后台搜索任务、来源树多选和结果跳转逻辑。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
 //! 主要功能：把真实日志搜索能力接入 ArgusApp，同时保持搜索 UI 状态与日志读取状态解耦。
 
@@ -447,6 +447,7 @@ impl ArgusApp {
                 let mut failed_message = None;
                 let mut finished_summary = None;
                 let mut should_continue = true;
+                let mut receiver_disconnected = false;
 
                 for _ in 0..LOG_SEARCH_MAX_EVENTS_PER_TICK {
                     match receiver.try_recv() {
@@ -479,6 +480,7 @@ impl ArgusApp {
                         Err(mpsc::TryRecvError::Empty) => break,
                         Err(mpsc::TryRecvError::Disconnected) => {
                             should_continue = false;
+                            receiver_disconnected = true;
                             break;
                         }
                     }
@@ -489,6 +491,7 @@ impl ArgusApp {
                     || !pending_results.is_empty()
                     || failed_message.is_some()
                     || finished_summary.is_some()
+                    || receiver_disconnected
                 {
                     view.update(cx, |app, cx| {
                         if let Some(event) = prepared_event {
@@ -514,6 +517,9 @@ impl ArgusApp {
                                 generation,
                                 SearchWorkerEvent::Finished(summary),
                             );
+                        }
+                        if receiver_disconnected {
+                            app.mark_search_worker_disconnected(generation);
                         }
                         cx.notify();
                     })
@@ -570,12 +576,11 @@ impl ArgusApp {
 
     /// 取消当前搜索任务。
     pub fn cancel_log_search(&mut self) {
-        if let Some(cancel_token) = self.log_search.cancel_token.take() {
-            cancel_token.store(true, Ordering::Relaxed);
-        }
-        if self.log_search.task_state.is_running() {
+        let was_running = self.cancel_active_log_search_task();
+        if was_running {
             self.log_search.task_state = SearchTaskState::Cancelled;
             self.log_search.message = Some("搜索已取消".to_string());
+            self.placeholder_notice = "搜索已取消".to_string();
         }
     }
 
@@ -961,6 +966,8 @@ impl ArgusApp {
 
     /// 关闭底部搜索结果面板并清理当前正文高亮。
     pub fn close_log_search_results_panel(&mut self) {
+        self.cancel_active_log_search_task();
+        self.log_search.task_state = SearchTaskState::Idle;
         self.clear_quick_log_search_state();
         self.log_search.results.clear();
         self.log_search.result_groups.clear();
@@ -980,9 +987,7 @@ impl ArgusApp {
     /// 清理搜索运行期状态，通常在重新加载来源或关闭全部标签时调用。
     pub(crate) fn reset_log_search_runtime_state(&mut self) {
         self.clear_quick_log_search_state();
-        if let Some(cancel_token) = self.log_search.cancel_token.take() {
-            cancel_token.store(true, Ordering::Relaxed);
-        }
+        self.cancel_active_log_search_task();
         self.log_search.progress = SearchProgress::default();
         self.log_search.task_state = SearchTaskState::Idle;
         self.log_search.run_kind = SearchRunKind::Normal;
@@ -1316,6 +1321,42 @@ impl ArgusApp {
             return;
         }
         self.log_search.progress = progress;
+    }
+
+    /// 标记后台搜索通道异常断开，避免 UI 一直停留在“搜索中”。
+    ///
+    /// 参数说明：
+    /// - `generation`：断开通道所属搜索代次；旧代次会被忽略。
+    fn mark_search_worker_disconnected(&mut self, generation: usize) {
+        if self.log_search.generation != generation || !self.log_search.task_state.is_running() {
+            return;
+        }
+
+        let message = "搜索任务已中断，请重试".to_string();
+        self.log_search.cancel_token = None;
+        self.log_search.task_state = SearchTaskState::Failed(message.clone());
+        self.log_search.message = Some(message.clone());
+        self.placeholder_notice = message;
+    }
+
+    /// 取消当前活跃搜索任务并推进 generation，让旧后台事件立即失效。
+    ///
+    /// 返回值：存在运行中任务返回 `true`，用于调用方决定是否展示取消提示。
+    fn cancel_active_log_search_task(&mut self) -> bool {
+        let was_running = self.log_search.task_state.is_running();
+        let had_cancel_token = if let Some(cancel_token) = self.log_search.cancel_token.take() {
+            cancel_token.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        };
+
+        if was_running || had_cancel_token {
+            self.log_search.generation = self.log_search.generation.wrapping_add(1);
+            true
+        } else {
+            false
+        }
     }
 
     /// 追加搜索结果批次；generation 不一致时丢弃。
@@ -2525,7 +2566,8 @@ fn reset_log_search_input_state(input: &mut LogSearchInputState) {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
     use crate::app::{ArgusTab, LogTextPosition, LogTextSelection};
@@ -2644,6 +2686,19 @@ mod tests {
         (registry, first_id, second_id, third_id)
     }
 
+    /// 构造搜索结果样本，便于验证旧 generation 事件不会污染当前面板。
+    fn sample_search_result(source_id: SourceId) -> SearchResult {
+        SearchResult {
+            source_id,
+            label: "app.log".to_string(),
+            path: "logs/app.log".to_string(),
+            line_number: 1,
+            line_text: "ERROR".to_string(),
+            match_ranges: vec![0..5],
+            matched_keywords: vec!["ERROR".to_string()],
+        }
+    }
+
     /// 验证目录搜索会收集该目录下已加载的所有日志候选。
     #[test]
     fn directory_scope_collects_loaded_log_targets() {
@@ -2746,6 +2801,82 @@ mod tests {
         assert!(app.log_search.directory_input.value.is_empty());
         assert_eq!(app.log_search.directory_source_id, None);
         assert_eq!(app.log_search.task_state, SearchTaskState::Idle);
+    }
+
+    /// 验证取消搜索会推进 generation，旧后台结果不能继续追加到搜索面板。
+    #[test]
+    fn cancelling_search_invalidates_stale_worker_events() {
+        let (_registry, _root_id, first_id, _second_id) = registry_with_directory_logs();
+        let mut app = test_app();
+        let old_generation = 7;
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        app.log_search.generation = old_generation;
+        app.log_search.task_state = SearchTaskState::Running;
+        app.log_search.cancel_token = Some(cancel_token.clone());
+        app.log_search.progress.total_files = 3;
+
+        app.cancel_log_search();
+        app.apply_search_progress(
+            old_generation,
+            SearchProgress {
+                scanned_files: 2,
+                total_files: 3,
+                ..SearchProgress::default()
+            },
+        );
+        app.append_search_results(old_generation, vec![sample_search_result(first_id)]);
+
+        assert!(cancel_token.load(Ordering::Relaxed));
+        assert_eq!(app.log_search.generation, old_generation + 1);
+        assert_eq!(app.log_search.task_state, SearchTaskState::Cancelled);
+        assert_eq!(app.log_search.progress.scanned_files, 0);
+        assert!(app.log_search.results.is_empty());
+    }
+
+    /// 验证后台线程异常断开时会收敛为失败状态，避免搜索按钮长期停在取消态。
+    #[test]
+    fn disconnected_search_worker_does_not_leave_task_running() {
+        let mut app = test_app();
+        let generation = 3;
+        app.log_search.generation = generation;
+        app.log_search.task_state = SearchTaskState::Running;
+        app.log_search.cancel_token = Some(Arc::new(AtomicBool::new(false)));
+
+        app.mark_search_worker_disconnected(generation - 1);
+        assert_eq!(app.log_search.task_state, SearchTaskState::Running);
+
+        app.mark_search_worker_disconnected(generation);
+
+        assert!(matches!(
+            app.log_search.task_state,
+            SearchTaskState::Failed(_)
+        ));
+        assert!(app.log_search.cancel_token.is_none());
+        assert_eq!(
+            app.log_search.message.as_deref(),
+            Some("搜索任务已中断，请重试")
+        );
+    }
+
+    /// 验证关闭结果面板会取消搜索任务并让旧任务事件失效。
+    #[test]
+    fn closing_search_results_panel_cancels_running_search() {
+        let (_registry, _root_id, first_id, _second_id) = registry_with_directory_logs();
+        let mut app = test_app();
+        let old_generation = 11;
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        app.log_search.generation = old_generation;
+        app.log_search.task_state = SearchTaskState::Running;
+        app.log_search.cancel_token = Some(cancel_token.clone());
+        app.log_search.results.push(sample_search_result(first_id));
+
+        app.close_log_search_results_panel();
+        app.append_search_results(old_generation, vec![sample_search_result(first_id)]);
+
+        assert!(cancel_token.load(Ordering::Relaxed));
+        assert_eq!(app.log_search.generation, old_generation + 1);
+        assert_eq!(app.log_search.task_state, SearchTaskState::Idle);
+        assert!(app.log_search.results.is_empty());
     }
 
     /// 验证唤起搜索窗口时会保留上次关键字并自动全选，方便直接覆盖输入。

@@ -1,6 +1,6 @@
 //! 文件职责：组合 Argus 主窗口的整体布局。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-23
 //! 作者：Argus 开发团队
 //! 主要功能：渲染自定义标题栏、来源侧栏、日志内容区、升级弹窗和设置页占位界面。
 
@@ -11,8 +11,8 @@ use crate::ui::{
     source_resizer, upgrade_dialog,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, ClickEvent, Context, IntoElement, MouseButton,
-    MouseMoveEvent, MouseUpEvent, Window, div, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
+    MouseButton, MouseMoveEvent, MouseUpEvent, Window, div, prelude::*, px, rgb,
 };
 use std::time::Duration;
 
@@ -73,6 +73,13 @@ pub fn render(
                 }
             }),
         )
+        .on_drop(cx.listener(|app, paths: &ExternalPaths, _, cx| {
+            // 系统文件拖拽会被 GPUI 包装成 `ExternalPaths`，这里只负责接收事件；
+            // 文件、目录、压缩包是否可读仍由统一的来源加载器判断并反馈。
+            if app.load_dropped_sources(paths.paths(), cx) {
+                cx.notify();
+            }
+        }))
         .child(custom_title_bar::render(app, window, cx))
         .child(
             div()

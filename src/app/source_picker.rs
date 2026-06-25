@@ -1,6 +1,6 @@
 //! 文件职责：维护自定义日志来源选择器的应用状态与业务动作。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-16
+//! 修改日期：2026-06-23
 //! 作者：Argus 开发团队
 //! 主要功能：替代系统文件选择器，提供跨平台目录浏览、多选和确认加载流程。
 
@@ -68,6 +68,8 @@ pub enum ExternalSourceTrigger {
     OpenWith,
     /// 应用启动参数中携带了待打开路径。
     StartupArgs,
+    /// 用户把本地日志文件、目录或压缩包拖拽到主窗口。
+    DragDrop,
 }
 
 impl ExternalSourceTrigger {
@@ -77,6 +79,7 @@ impl ExternalSourceTrigger {
             Self::SourcePicker => "日志来源",
             Self::OpenWith => "系统右键来源",
             Self::StartupArgs => "启动参数来源",
+            Self::DragDrop => "拖拽来源",
         }
     }
 }
@@ -459,6 +462,18 @@ impl ArgusApp {
         .detach();
 
         true
+    }
+
+    /// 加载用户拖拽到主窗口上的日志来源。
+    ///
+    /// 参数说明：
+    /// - `paths`：GPUI 从系统拖拽事件中解析出的本地路径切片。
+    /// - `cx`：应用上下文，用于启动统一来源加载任务。
+    ///
+    /// 返回值：成功启动后台加载任务返回 `true`；无路径或已有任务时返回 `false`。
+    pub fn load_dropped_sources(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
+        // 拖拽事件只提供借用切片；统一加载流程需要拥有路径列表，以便移动到后台任务中。
+        self.load_sources_from_paths(paths.to_vec(), ExternalSourceTrigger::DragDrop, cx)
     }
 
     /// 返回路径是否在待加载选择列表中。
