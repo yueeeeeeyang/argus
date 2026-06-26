@@ -16,6 +16,7 @@ pub mod platform;
 pub mod reader;
 pub mod runtime_analysis;
 pub mod search;
+pub mod sftp;
 pub mod terminal;
 pub mod text_selection;
 pub mod theme;

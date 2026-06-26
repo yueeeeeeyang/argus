@@ -1304,7 +1304,8 @@ fn render_host_key_prompt(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
-    let session_id = prompt.session_id;
+    let reject_prompt = prompt.clone();
+    let confirm_prompt = prompt.clone();
     div()
         .size_full()
         .flex()
@@ -1342,7 +1343,7 @@ fn render_host_key_prompt(
                         .justify_end()
                         .gap_2()
                         .child(action_button("拒绝", false, theme, cx, move |app, cx| {
-                            app.reject_terminal_host_key(session_id);
+                            app.reject_connection_host_key_prompt(reject_prompt.clone());
                             cx.notify();
                         }))
                         .child(action_button(
@@ -1351,7 +1352,7 @@ fn render_host_key_prompt(
                             theme,
                             cx,
                             move |app, cx| {
-                                app.confirm_terminal_host_key(session_id);
+                                app.confirm_connection_host_key_prompt(confirm_prompt.clone());
                                 cx.notify();
                             },
                         )),

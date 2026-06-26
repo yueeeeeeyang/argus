@@ -29,6 +29,7 @@ use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::jstack_analysis_view;
 use crate::ui::runtime_analysis_view;
 use crate::ui::settings_page;
+use crate::ui::sftp_file_manager_view;
 use crate::ui::terminal_view;
 use gpui::{
     AnyElement, Context, HighlightStyle, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior,
@@ -143,6 +144,9 @@ fn render_content_body(
         }
         TabKind::SshTerminal { session_id } => {
             terminal_view::render(app, session_id, window, cx).into_any_element()
+        }
+        TabKind::SftpFileManager { session_id } => {
+            sftp_file_manager_view::render(app, session_id, cx).into_any_element()
         }
         TabKind::LogSource { source_id, path } => {
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();

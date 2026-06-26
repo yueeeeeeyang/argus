@@ -52,6 +52,14 @@ pub enum ArgusIcon {
     ArrowDown,
     /// 刷新。
     Refresh,
+    /// 上传文件。
+    Upload,
+    /// 下载文件。
+    Download,
+    /// 重命名。
+    Rename,
+    /// 删除。
+    Trash,
     /// 折叠或向上收起。
     Collapse,
     /// 全部收起目录树。
@@ -117,6 +125,10 @@ impl ArgusIcon {
             Self::ArrowRight,
             Self::ArrowDown,
             Self::Refresh,
+            Self::Upload,
+            Self::Download,
+            Self::Rename,
+            Self::Trash,
             Self::Collapse,
             Self::ListCollapse,
             Self::Expand,
@@ -168,6 +180,10 @@ impl ArgusIcon {
             Self::ArrowRight => "icons/arrow-right.svg",
             Self::ArrowDown => "icons/arrow-down.svg",
             Self::Refresh => "icons/refresh.svg",
+            Self::Upload => "icons/upload.svg",
+            Self::Download => "icons/download.svg",
+            Self::Rename => "icons/rename.svg",
+            Self::Trash => "icons/trash.svg",
             Self::Collapse => "icons/collapse.svg",
             Self::ListCollapse => "icons/list-collapse.svg",
             Self::Expand => "icons/expand.svg",
@@ -236,6 +252,10 @@ impl ArgusIcon {
             Self::ArrowRight => icondata::LuArrowRight,
             Self::ArrowDown => icondata::LuArrowDown,
             Self::Refresh => icondata::LuRefreshCw,
+            Self::Upload => icondata::LuUpload,
+            Self::Download => icondata::LuDownload,
+            Self::Rename => icondata::LuPencil,
+            Self::Trash => icondata::LuTrash2,
             Self::Collapse => icondata::LuChevronDown,
             Self::ListCollapse => icondata::LuListCollapse,
             Self::Expand => icondata::LuChevronRight,

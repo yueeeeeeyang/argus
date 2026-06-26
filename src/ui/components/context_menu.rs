@@ -25,6 +25,10 @@ const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
 const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
 /// 链接树右键菜单宽度，容纳编辑和删除动作。
 const CONNECTION_TREE_CONTEXT_MENU_WIDTH: f32 = 132.0;
+/// 终端右键菜单宽度，容纳文件管理动作。
+const TERMINAL_CONTEXT_MENU_WIDTH: f32 = 132.0;
+/// SFTP 文件行右键菜单宽度，容纳下载、重命名和删除动作。
+const SFTP_ENTRY_CONTEXT_MENU_WIDTH: f32 = 132.0;
 /// 菜单项固定行高，供 `uniform_list` 稳定计算滚动范围。
 const MENU_ROW_HEIGHT: f32 = 34.0;
 /// 菜单项水平内边距，和标签页右键菜单保持一致的舒展感。
@@ -55,6 +59,16 @@ pub enum ActiveMenuKind {
     ConnectionTree {
         /// 被右键点击的连接节点 ID。
         node_id: ConnectionNodeId,
+    },
+    /// 终端右键菜单，动作作用于指定 SSH 终端会话。
+    TerminalContext {
+        /// 被右键点击的终端会话 ID。
+        session_id: usize,
+    },
+    /// SFTP 文件管理表格行右键菜单，动作作用于当前选中的远程条目。
+    SftpEntry {
+        /// 被右键点击的 SFTP 会话 ID。
+        session_id: usize,
     },
 }
 
@@ -111,6 +125,26 @@ pub enum MenuAction {
         /// 右键触发删除的连接节点 ID。
         node_id: ConnectionNodeId,
     },
+    /// 从 SSH 终端打开 SFTP 文件管理标签页。
+    OpenSftpFileManager {
+        /// 终端会话 ID。
+        terminal_session_id: usize,
+    },
+    /// 下载 SFTP 文件管理中当前选中的普通文件。
+    DownloadSftpSelection {
+        /// SFTP 会话 ID。
+        session_id: usize,
+    },
+    /// 重命名 SFTP 文件管理中当前选中的文件或目录。
+    RenameSftpSelection {
+        /// SFTP 会话 ID。
+        session_id: usize,
+    },
+    /// 删除 SFTP 文件管理中当前选中的普通文件或空目录。
+    DeleteSftpSelection {
+        /// SFTP 会话 ID。
+        session_id: usize,
+    },
 }
 
 impl MenuAction {
@@ -132,6 +166,18 @@ impl MenuAction {
             Self::EditConnectionNode { node_id } => format!("edit-connection-node-{node_id}"),
             Self::DeleteConnectionNode { node_id } => {
                 format!("delete-connection-node-{node_id}")
+            }
+            Self::OpenSftpFileManager {
+                terminal_session_id,
+            } => format!("open-sftp-file-manager-{terminal_session_id}"),
+            Self::DownloadSftpSelection { session_id } => {
+                format!("download-sftp-selection-{session_id}")
+            }
+            Self::RenameSftpSelection { session_id } => {
+                format!("rename-sftp-selection-{session_id}")
+            }
+            Self::DeleteSftpSelection { session_id } => {
+                format!("delete-sftp-selection-{session_id}")
             }
         }
     }
@@ -193,6 +239,8 @@ pub fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl In
         ActiveMenuKind::SearchResultsPanel => SEARCH_RESULTS_MENU_WIDTH,
         ActiveMenuKind::SourceTree { .. } => SOURCE_TREE_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::ConnectionTree { .. } => CONNECTION_TREE_CONTEXT_MENU_WIDTH,
+        ActiveMenuKind::TerminalContext { .. } => TERMINAL_CONTEXT_MENU_WIDTH,
+        ActiveMenuKind::SftpEntry { .. } => SFTP_ENTRY_CONTEXT_MENU_WIDTH,
     };
     let menu_height = (entry_count as f32 * MENU_ROW_HEIGHT)
         .min(MENU_MAX_HEIGHT)

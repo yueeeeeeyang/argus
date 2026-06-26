@@ -36,6 +36,17 @@ pub fn render(app: &ArgusApp) -> impl IntoElement {
             .get(&session_id)
             .map(|state| state.address.clone())
             .unwrap_or_else(|| "SSH终端".to_string()),
+        TabKind::SftpFileManager { session_id } => app
+            .sftp_sessions
+            .get(&session_id)
+            .map(|state| {
+                if state.current_dir.is_empty() {
+                    state.address.clone()
+                } else {
+                    format!("{} {}", state.address, state.current_dir)
+                }
+            })
+            .unwrap_or_else(|| "SFTP文件管理".to_string()),
         TabKind::Settings => "设置".to_string(),
     };
 

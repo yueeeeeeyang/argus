@@ -38,6 +38,7 @@ impl ArgusApp {
         self.source_tree_search_selection_drag = None;
 
         self.clear_connection_text_input_focuses();
+        self.clear_sftp_text_input_focuses();
 
         self.source_picker.is_path_input_focused = false;
         self.source_picker.path_input_selection_anchor = None;
@@ -113,6 +114,9 @@ impl ArgusApp {
             | AppTextInputTarget::ConnectionLinkPrivateKeyPath
             | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
                 apply_native_connection_edit(self, target, &edit);
+            }
+            AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
+                self.apply_native_sftp_edit(target, &edit);
             }
             AppTextInputTarget::SourcePickerPath => {
                 apply_native_edit_to_parts(
@@ -269,6 +273,9 @@ impl ArgusApp {
             | AppTextInputTarget::ConnectionLinkPrivateKeyPath
             | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
                 self.focus_connection_text_input_target(target);
+            }
+            AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
+                self.focus_sftp_text_input_target(target);
             }
             AppTextInputTarget::SourcePickerPath => {
                 self.source_picker.is_path_input_focused = true;

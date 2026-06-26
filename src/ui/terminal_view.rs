@@ -156,6 +156,14 @@ fn render_terminal_body(
             }
         }))
         .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                app.open_terminal_context_menu(session_id, event.position);
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |app, event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();

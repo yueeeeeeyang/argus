@@ -435,7 +435,7 @@ impl ArgusApp {
     pub fn close_connection_dialog(&mut self) {
         if let Some(ConnectionDialogState::ConfirmHostKey(prompt)) = self.connection_dialog.clone()
         {
-            self.reject_terminal_host_key(prompt.session_id);
+            self.reject_connection_host_key_prompt(prompt);
             return;
         }
         self.connection_dialog = None;
@@ -450,7 +450,7 @@ impl ArgusApp {
             }
             Some(ConnectionDialogState::NewSshLink(form)) => self.submit_ssh_link_form(form),
             Some(ConnectionDialogState::ConfirmHostKey(prompt)) => {
-                self.confirm_terminal_host_key(prompt.session_id)
+                self.confirm_connection_host_key_prompt(prompt)
             }
             Some(ConnectionDialogState::ConfirmDelete(prompt)) => {
                 self.confirm_delete_connection_node(prompt.node_id)
@@ -718,6 +718,7 @@ impl ArgusApp {
         self.connection_dialog = Some(ConnectionDialogState::ConfirmHostKey(
             ConnectionHostKeyPromptState {
                 session_id,
+                owner: crate::app::HostKeyPromptOwner::Terminal { session_id },
                 link_id,
                 host: pending.host,
                 port: pending.port,

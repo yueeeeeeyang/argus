@@ -9,6 +9,7 @@ mod log_search;
 mod log_text;
 mod placeholder_data;
 mod settings_window;
+mod sftp_actions;
 mod source_picker;
 mod source_search;
 mod terminal_actions;
@@ -45,6 +46,7 @@ use crate::runtime_analysis::{
 };
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
+use crate::sftp::SftpSessionState;
 use crate::terminal::TerminalSessionState;
 use crate::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range, slice_character_range,
@@ -217,6 +219,11 @@ pub enum TabKind {
         /// 终端会话 ID，用于从应用状态表中读取终端输出和连接状态。
         session_id: usize,
     },
+    /// SFTP 文件管理标签页。
+    SftpFileManager {
+        /// SFTP 会话 ID，用于从应用状态表中读取远程文件列表和操作状态。
+        session_id: usize,
+    },
     /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
     Settings,
 }
@@ -383,6 +390,13 @@ pub enum AppTextInputTarget {
     ConnectionLinkPrivateKeyPath,
     /// 新增 SSH 链接表单中的私钥口令输入框。
     ConnectionLinkPrivateKeyPassphrase,
+    /// SFTP 文件管理地址栏输入框。
+    SftpAddress {
+        /// SFTP 会话 ID。
+        session_id: usize,
+    },
+    /// SFTP 重命名弹窗名称输入框。
+    SftpRenameName,
     /// 来源选择器路径输入框。
     SourcePickerPath,
     /// 独立日志搜索窗口输入框。
@@ -494,6 +508,10 @@ pub struct AppInputFocusHandles {
     pub connection_link_private_key_path: FocusHandle,
     /// 新增 SSH 链接私钥口令输入框焦点。
     pub connection_link_private_key_passphrase: FocusHandle,
+    /// SFTP 文件管理地址栏焦点。
+    pub sftp_address: FocusHandle,
+    /// SFTP 重命名弹窗输入框焦点。
+    pub sftp_rename_name: FocusHandle,
     /// 右侧终端面板焦点。
     pub terminal: FocusHandle,
     /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。
@@ -565,10 +583,27 @@ pub struct ConnectionLinkFormState {
 }
 
 /// SSH 主机指纹确认弹窗状态。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostKeyPromptOwner {
+    /// 终端会话触发的主机指纹确认。
+    Terminal {
+        /// 终端会话 ID。
+        session_id: usize,
+    },
+    /// SFTP 文件管理会话触发的主机指纹确认。
+    Sftp {
+        /// SFTP 会话 ID。
+        session_id: usize,
+    },
+}
+
+/// SSH 主机指纹确认弹窗状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionHostKeyPromptState {
-    /// 等待确认的终端会话 ID。
+    /// 等待确认的会话 ID；具体类型由 `owner` 区分。
     pub session_id: usize,
+    /// 触发确认的会话类型。
+    pub owner: HostKeyPromptOwner,
     /// 关联链接节点 ID。
     pub link_id: ConnectionNodeId,
     /// 远程主机。
@@ -587,6 +622,43 @@ pub struct ConnectionDeletePromptState {
     /// 待删除节点展示名称。
     pub label: String,
     /// 是否为目录；目录删除前会额外要求为空。
+    pub is_directory: bool,
+}
+
+/// SFTP 文件管理内的应用弹窗。
+#[derive(Clone, Debug)]
+pub enum SftpDialogState {
+    /// 重命名远程文件或目录。
+    Rename(SftpRenameDialogState),
+    /// 删除远程普通文件或空目录前的二次确认。
+    ConfirmDelete(SftpDeletePromptState),
+}
+
+/// SFTP 重命名弹窗状态。
+#[derive(Clone, Debug)]
+pub struct SftpRenameDialogState {
+    /// SFTP 会话 ID。
+    pub session_id: usize,
+    /// 原始远程路径。
+    pub remote_path: String,
+    /// 原始名称。
+    pub original_name: String,
+    /// 名称输入框。
+    pub name_input: SettingsTextInputState,
+    /// 最近一次校验错误。
+    pub error_message: Option<String>,
+}
+
+/// SFTP 删除二次确认弹窗状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SftpDeletePromptState {
+    /// SFTP 会话 ID。
+    pub session_id: usize,
+    /// 待删除远程路径。
+    pub remote_path: String,
+    /// 待删除文件或目录名称。
+    pub name: String,
+    /// 是否为目录。
     pub is_directory: bool,
 }
 
@@ -1856,6 +1928,12 @@ pub struct ArgusApp {
     pub terminal_sessions: HashMap<usize, TerminalSessionState>,
     /// 下一个 SSH 终端会话 ID。
     pub next_terminal_session_id: usize,
+    /// SFTP 文件管理会话状态表。
+    pub sftp_sessions: HashMap<usize, SftpSessionState>,
+    /// 下一个 SFTP 文件管理会话 ID。
+    pub next_sftp_session_id: usize,
+    /// 当前打开的 SFTP 文件管理弹窗。
+    pub sftp_dialog: Option<SftpDialogState>,
     /// 当前 Jstack 频率方块的内部悬浮气泡数据。
     pub jstack_cell_hover_preview: Option<JstackCellHoverPreview>,
     /// 来源树中用于“选中文件搜索”的多选日志节点。
@@ -2041,6 +2119,9 @@ impl ArgusApp {
             next_runtime_analysis_id: 1,
             terminal_sessions: HashMap::new(),
             next_terminal_session_id: 1,
+            sftp_sessions: HashMap::new(),
+            next_sftp_session_id: 1,
+            sftp_dialog: None,
             jstack_cell_hover_preview: None,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,
@@ -2123,6 +2204,8 @@ impl ArgusApp {
                 connection_link_password: cx.focus_handle(),
                 connection_link_private_key_path: cx.focus_handle(),
                 connection_link_private_key_passphrase: cx.focus_handle(),
+                sftp_address: cx.focus_handle(),
+                sftp_rename_name: cx.focus_handle(),
                 terminal: cx.focus_handle(),
                 jstack_analysis: cx.focus_handle(),
                 runtime_analysis: cx.focus_handle(),
@@ -2706,6 +2789,9 @@ impl ArgusApp {
             TabKind::SshTerminal { session_id } => {
                 self.disconnect_terminal_session(*session_id);
             }
+            TabKind::SftpFileManager { session_id } => {
+                self.disconnect_sftp_session(*session_id);
+            }
             TabKind::Empty | TabKind::Settings => {}
         }
     }
@@ -2734,6 +2820,7 @@ impl ArgusApp {
             TabKind::Empty
             | TabKind::LogSource { .. }
             | TabKind::SshTerminal { .. }
+            | TabKind::SftpFileManager { .. }
             | TabKind::RuntimeAnalysis { .. }
             | TabKind::Settings => {
                 self.jstack_analyses.clear();
@@ -2752,6 +2839,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::SshTerminal { .. }
+            | TabKind::SftpFileManager { .. }
             | TabKind::Settings => {
                 self.runtime_analyses.clear();
             }
@@ -2765,6 +2853,7 @@ impl ArgusApp {
             TabKind::Empty
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
+            | TabKind::SftpFileManager { .. }
             | TabKind::RuntimeAnalysis { .. }
             | TabKind::Settings => None,
         };
@@ -2776,6 +2865,28 @@ impl ArgusApp {
             .collect::<Vec<_>>();
         for session_id in sessions_to_disconnect {
             self.disconnect_terminal_session(session_id);
+        }
+    }
+
+    /// 只保留指定 SFTP 文件管理 tab 的会话；非 SFTP tab 会断开全部文件管理会话。
+    fn retain_sftp_session_for_tab_kind(&mut self, kept_kind: &TabKind) {
+        let kept_session_id = match kept_kind {
+            TabKind::SftpFileManager { session_id } => Some(*session_id),
+            TabKind::Empty
+            | TabKind::LogSource { .. }
+            | TabKind::JstackAnalysis { .. }
+            | TabKind::RuntimeAnalysis { .. }
+            | TabKind::SshTerminal { .. }
+            | TabKind::Settings => None,
+        };
+        let sessions_to_disconnect = self
+            .sftp_sessions
+            .keys()
+            .copied()
+            .filter(|session_id| Some(*session_id) != kept_session_id)
+            .collect::<Vec<_>>();
+        for session_id in sessions_to_disconnect {
+            self.disconnect_sftp_session(session_id);
         }
     }
 
@@ -2985,6 +3096,17 @@ impl ArgusApp {
                         .danger(),
                 ]
             }
+            ActiveMenuKind::TerminalContext { session_id } => vec![MenuEntry::new(
+                "文件管理",
+                MenuAction::OpenSftpFileManager {
+                    terminal_session_id: session_id,
+                },
+            )],
+            ActiveMenuKind::SftpEntry { session_id } => vec![
+                MenuEntry::new("下载", MenuAction::DownloadSftpSelection { session_id }),
+                MenuEntry::new("重命名", MenuAction::RenameSftpSelection { session_id }),
+                MenuEntry::new("删除", MenuAction::DeleteSftpSelection { session_id }).danger(),
+            ],
         }
     }
 
@@ -3008,6 +3130,18 @@ impl ArgusApp {
             }
             MenuAction::DeleteConnectionNode { node_id } => {
                 self.request_delete_connection_node(node_id);
+            }
+            MenuAction::OpenSftpFileManager { .. } => {
+                self.placeholder_notice = "文件管理需要从界面菜单触发".to_string();
+            }
+            MenuAction::DownloadSftpSelection { .. } => {
+                self.placeholder_notice = "SFTP 下载需要从界面菜单触发".to_string();
+            }
+            MenuAction::RenameSftpSelection { session_id } => {
+                self.open_sftp_rename_dialog(session_id);
+            }
+            MenuAction::DeleteSftpSelection { session_id } => {
+                self.request_delete_sftp_entry(session_id);
             }
         }
 
@@ -3047,6 +3181,24 @@ impl ArgusApp {
             }
             MenuAction::DeleteConnectionNode { node_id } => {
                 self.request_delete_connection_node(node_id);
+                self.close_active_menu();
+            }
+            MenuAction::OpenSftpFileManager {
+                terminal_session_id,
+            } => {
+                self.open_sftp_file_manager_from_terminal(terminal_session_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::DownloadSftpSelection { session_id } => {
+                self.choose_sftp_download_target(session_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::RenameSftpSelection { session_id } => {
+                self.open_sftp_rename_dialog(session_id);
+                self.close_active_menu();
+            }
+            MenuAction::DeleteSftpSelection { session_id } => {
+                self.request_delete_sftp_entry(session_id);
                 self.close_active_menu();
             }
             other => self.handle_menu_action(other),
@@ -4991,6 +5143,7 @@ impl ArgusApp {
             self.runtime_analyses.clear();
             self.next_runtime_analysis_id = 1;
             self.disconnect_all_terminal_sessions();
+            self.disconnect_all_sftp_sessions();
             self.ensure_log_tab_view_state(self.active_tab_id);
             self.reset_log_text_selection();
             self.log_scrollbar_drag = None;
@@ -5055,6 +5208,7 @@ impl ArgusApp {
         self.retain_jstack_analysis_for_tab_kind(&kept_kind);
         self.retain_runtime_analysis_for_tab_kind(&kept_kind);
         self.retain_terminal_session_for_tab_kind(&kept_kind);
+        self.retain_sftp_session_for_tab_kind(&kept_kind);
         self.active_tab_id = tab_id;
         self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
@@ -5089,6 +5243,7 @@ impl ArgusApp {
         self.runtime_analyses.clear();
         self.next_runtime_analysis_id = 1;
         self.disconnect_all_terminal_sessions();
+        self.disconnect_all_sftp_sessions();
         self.ensure_log_tab_view_state(empty_tab_id);
         self.active_tab_id = empty_tab_id;
         self.hovered_tab_id = None;
@@ -5738,6 +5893,11 @@ impl ArgusApp {
                 .get(&session_id)
                 .map(|state| format!("SSH / {}", state.address))
                 .unwrap_or_else(|| "SSH / 终端".to_string()),
+            TabKind::SftpFileManager { session_id } => self
+                .sftp_sessions
+                .get(&session_id)
+                .map(|state| format!("SFTP / {}:{}", state.address, state.current_dir))
+                .unwrap_or_else(|| "SFTP / 文件管理".to_string()),
             TabKind::Settings => "Argus / 设置".to_string(),
             TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
             TabKind::Empty => "未选择来源".to_string(),
@@ -5975,6 +6135,7 @@ fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
         | TabKind::JstackAnalysis { .. }
         | TabKind::RuntimeAnalysis { .. }
         | TabKind::SshTerminal { .. }
+        | TabKind::SftpFileManager { .. }
         | TabKind::Settings => None,
     }
 }
@@ -6066,6 +6227,65 @@ mod tests {
     /// 构造使用临时配置路径的应用状态，避免测试污染 `~/.argus`。
     fn test_app() -> ArgusApp {
         ArgusApp::new_with_config_manager(isolated_config_manager())
+    }
+
+    /// 在配置中创建一个测试 SSH 链接。
+    fn add_test_ssh_link(app: &mut ArgusApp) -> ConnectionNodeId {
+        app.config
+            .connections
+            .add_ssh_link(
+                None,
+                "测试服务器",
+                crate::connections::SshLinkConfig {
+                    host: "127.0.0.1".to_string(),
+                    port: 22,
+                    username: "tester".to_string(),
+                    password: "secret".to_string(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .expect("应能创建测试 SSH 链接")
+    }
+
+    /// 插入不连接真实服务器的终端会话。
+    fn insert_test_terminal_session(
+        app: &mut ArgusApp,
+        session_id: usize,
+        link_id: ConnectionNodeId,
+    ) {
+        let link = app
+            .config
+            .connections
+            .link(link_id)
+            .expect("应存在测试链接")
+            .clone();
+        let (sender, _) = std::sync::mpsc::channel();
+        let mut session =
+            crate::terminal::TerminalSessionState::connecting(session_id, &link, sender);
+        session.status = crate::terminal::TerminalStatus::Connected;
+        app.terminal_sessions.insert(session_id, session);
+    }
+
+    /// 插入不连接真实服务器的 SFTP 会话，并返回命令接收端。
+    fn insert_test_sftp_session(
+        app: &mut ArgusApp,
+        session_id: usize,
+        link_id: ConnectionNodeId,
+    ) -> std::sync::mpsc::Receiver<crate::sftp::SftpCommand> {
+        let link = app
+            .config
+            .connections
+            .link(link_id)
+            .expect("应存在测试链接")
+            .clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut session = crate::sftp::SftpSessionState::connecting(session_id, &link, sender);
+        session.status = crate::sftp::SftpStatus::Connected;
+        session.current_dir = "/home/tester".to_string();
+        session.address_input = SettingsTextInputState::from_value(session.current_dir.clone());
+        app.sftp_sessions.insert(session_id, session);
+        receiver
     }
 
     /// 日志阅读区展示文本会把制表符固定展开为 4 个空格。
@@ -6256,6 +6476,224 @@ mod tests {
             app.active_menu_entries()[1].action,
             MenuAction::OpenRuntimeAnalysis { source_id } if source_id == logs_dir_id
         ));
+    }
+
+    /// 验证 SSH 终端正文右键菜单展示文件管理入口。
+    #[test]
+    fn terminal_context_menu_shows_file_manager_action() {
+        let mut app = test_app();
+        let link_id = add_test_ssh_link(&mut app);
+        insert_test_terminal_session(&mut app, 7, link_id);
+
+        app.open_terminal_context_menu(7, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+
+        assert!(matches!(
+            app.active_menu.as_ref().map(|menu| &menu.kind),
+            Some(ActiveMenuKind::TerminalContext { session_id }) if *session_id == 7
+        ));
+        let entries = app.active_menu_entries();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            entries[0].action,
+            MenuAction::OpenSftpFileManager {
+                terminal_session_id
+            } if terminal_session_id == 7
+        ));
+    }
+
+    /// 验证 SFTP 文件行右键菜单展示下载、重命名和删除动作。
+    #[test]
+    fn sftp_entry_context_menu_shows_file_actions() {
+        let mut app = test_app();
+        let link_id = add_test_ssh_link(&mut app);
+        let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
+        let remote_path = "/home/tester/app.log".to_string();
+        if let Some(session) = app.sftp_sessions.get_mut(&1) {
+            session.entries = vec![crate::sftp::SftpEntry {
+                name: "app.log".to_string(),
+                path: remote_path.clone(),
+                kind: crate::sftp::SftpEntryKind::RegularFile,
+                size: Some(128),
+                mtime: None,
+                permissions: Some(0o100644),
+            }];
+        }
+
+        app.open_sftp_entry_context_menu(
+            1,
+            remote_path.clone(),
+            gpui::point(gpui::px(2.0), gpui::px(3.0)),
+        );
+
+        assert!(matches!(
+            app.active_menu.as_ref().map(|menu| &menu.kind),
+            Some(ActiveMenuKind::SftpEntry { session_id }) if *session_id == 1
+        ));
+        assert_eq!(
+            app.sftp_sessions
+                .get(&1)
+                .expect("应存在 SFTP 会话")
+                .selected_paths
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![remote_path]
+        );
+        let entries = app.active_menu_entries();
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(
+            entries[0].action,
+            MenuAction::DownloadSftpSelection { session_id } if session_id == 1
+        ));
+        assert!(matches!(
+            entries[1].action,
+            MenuAction::RenameSftpSelection { session_id } if session_id == 1
+        ));
+        assert!(matches!(
+            entries[2].action,
+            MenuAction::DeleteSftpSelection { session_id } if session_id == 1
+        ));
+        assert!(entries[2].is_danger);
+    }
+
+    /// 验证右键已选集合内文件时保留多选，方便从菜单下载多个文件。
+    #[test]
+    fn sftp_entry_context_menu_preserves_existing_multi_selection() {
+        let mut app = test_app();
+        let link_id = add_test_ssh_link(&mut app);
+        let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
+        let first_path = "/home/tester/app.log".to_string();
+        let second_path = "/home/tester/error.log".to_string();
+        if let Some(session) = app.sftp_sessions.get_mut(&1) {
+            session.entries = vec![
+                crate::sftp::SftpEntry {
+                    name: "app.log".to_string(),
+                    path: first_path.clone(),
+                    kind: crate::sftp::SftpEntryKind::RegularFile,
+                    size: Some(128),
+                    mtime: None,
+                    permissions: Some(0o100644),
+                },
+                crate::sftp::SftpEntry {
+                    name: "error.log".to_string(),
+                    path: second_path.clone(),
+                    kind: crate::sftp::SftpEntryKind::RegularFile,
+                    size: Some(256),
+                    mtime: None,
+                    permissions: Some(0o100644),
+                },
+            ];
+            session.selected_paths.insert(first_path.clone());
+            session.selected_paths.insert(second_path.clone());
+        }
+
+        app.open_sftp_entry_context_menu(1, second_path, gpui::point(gpui::px(2.0), gpui::px(3.0)));
+
+        let selected_paths = &app
+            .sftp_sessions
+            .get(&1)
+            .expect("应存在 SFTP 会话")
+            .selected_paths;
+        assert_eq!(selected_paths.len(), 2);
+        assert!(selected_paths.contains(&first_path));
+        assert!(selected_paths.contains("/home/tester/error.log"));
+    }
+
+    /// 验证同一个 SSH 链接可以打开多个独立 SFTP 文件管理标签。
+    #[test]
+    fn sftp_file_manager_tabs_allow_multiple_same_link() {
+        let mut app = test_app();
+        let link_id = add_test_ssh_link(&mut app);
+        let _first_receiver = insert_test_sftp_session(&mut app, 1, link_id);
+        let _second_receiver = insert_test_sftp_session(&mut app, 2, link_id);
+
+        app.create_sftp_tab_for_session(1);
+        app.create_sftp_tab_for_session(2);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert!(matches!(
+            app.tabs[0].kind,
+            TabKind::SftpFileManager { session_id } if session_id == 1
+        ));
+        assert!(matches!(
+            app.tabs[1].kind,
+            TabKind::SftpFileManager { session_id } if session_id == 2
+        ));
+        assert_eq!(app.active_tab_id, app.tabs[1].id);
+    }
+
+    /// 验证关闭 SFTP 文件管理标签会断开并清理对应会话。
+    #[test]
+    fn close_sftp_tab_disconnects_session() {
+        let mut app = test_app();
+        let link_id = add_test_ssh_link(&mut app);
+        let receiver = insert_test_sftp_session(&mut app, 1, link_id);
+        app.tabs[0].title = "文件管理 - 测试服务器".to_string();
+        app.tabs[0].kind = TabKind::SftpFileManager { session_id: 1 };
+        app.active_tab_id = app.tabs[0].id;
+
+        app.close_tab(app.tabs[0].id);
+
+        assert!(app.sftp_sessions.is_empty());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::sftp::SftpCommand::Disconnect)
+        ));
+        assert!(matches!(app.tabs[0].kind, TabKind::Empty));
+    }
+
+    /// 验证 SFTP 删除入口只允许普通文件和目录，避免误删符号链接等特殊条目。
+    #[test]
+    fn sftp_delete_selection_rejects_special_entries() {
+        let mut app = test_app();
+        let link_id = add_test_ssh_link(&mut app);
+        let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
+        let remote_path = "/home/tester/current".to_string();
+        if let Some(session) = app.sftp_sessions.get_mut(&1) {
+            session.entries = vec![crate::sftp::SftpEntry {
+                name: "current".to_string(),
+                path: remote_path.clone(),
+                kind: crate::sftp::SftpEntryKind::Symlink,
+                size: None,
+                mtime: None,
+                permissions: None,
+            }];
+            session.selected_paths.insert(remote_path);
+        }
+
+        assert!(!app.can_delete_sftp_selection(1));
+        app.request_delete_sftp_entry(1);
+
+        assert!(app.sftp_dialog.is_none());
+        assert!(
+            app.placeholder_notice
+                .contains("仅支持删除普通文件或空目录")
+        );
+    }
+
+    /// 验证 SFTP 忙碌状态下不会继续启用文件操作按钮。
+    #[test]
+    fn sftp_file_actions_are_disabled_while_busy() {
+        let mut app = test_app();
+        let link_id = add_test_ssh_link(&mut app);
+        let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
+        let remote_path = "/home/tester/app.log".to_string();
+        if let Some(session) = app.sftp_sessions.get_mut(&1) {
+            session.entries = vec![crate::sftp::SftpEntry {
+                name: "app.log".to_string(),
+                path: remote_path.clone(),
+                kind: crate::sftp::SftpEntryKind::RegularFile,
+                size: Some(128),
+                mtime: None,
+                permissions: Some(0o100644),
+            }];
+            session.selected_paths.insert(remote_path);
+            session.status = crate::sftp::SftpStatus::Transferring;
+        }
+
+        assert!(!app.can_download_sftp_selection(1));
+        assert!(!app.can_rename_sftp_selection(1));
+        assert!(!app.can_delete_sftp_selection(1));
     }
 
     /// 验证单文件探测未完成的压缩包已被选中时，也能立即打开 Jstack 分析右键菜单。

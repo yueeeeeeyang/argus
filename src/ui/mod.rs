@@ -20,6 +20,8 @@ pub mod placeholder_dialog;
 pub mod runtime_analysis_view;
 pub mod settings_page;
 pub mod settings_window;
+pub mod sftp_dialog;
+pub mod sftp_file_manager_view;
 pub mod source_panel;
 pub mod source_picker;
 pub mod source_resizer;

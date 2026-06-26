@@ -105,6 +105,7 @@ impl ArgusApp {
                 | TabKind::JstackAnalysis { .. }
                 | TabKind::RuntimeAnalysis { .. }
                 | TabKind::SshTerminal { .. }
+                | TabKind::SftpFileManager { .. }
                 | TabKind::Settings => None,
             }
         })?;
