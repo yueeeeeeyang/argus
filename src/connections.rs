@@ -510,6 +510,7 @@ impl ConnectionConfig {
                         parent_id: directory.parent_id,
                         depth,
                         label: directory.name.clone(),
+                        tooltip: None,
                         kind: ConnectionTreeRowKind::Directory,
                         expanded: directory.expanded || is_filtering,
                         has_children,
@@ -545,6 +546,7 @@ impl ConnectionConfig {
                         parent_id: link.parent_id,
                         depth,
                         label: link.name.clone(),
+                        tooltip: Some(link.address_label()),
                         kind: ConnectionTreeRowKind::SshLink,
                         expanded: false,
                         has_children: false,
@@ -675,6 +677,8 @@ pub struct ConnectionTreeRow {
     pub depth: usize,
     /// 当前行展示名称。
     pub label: String,
+    /// 链接悬浮提示；目录节点为空，SSH 链接展示用户名、主机和端口。
+    pub tooltip: Option<String>,
     /// 当前行节点类型。
     pub kind: ConnectionTreeRowKind,
     /// 目录是否展开；链接始终为 false。
@@ -901,6 +905,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(labels, vec!["生产环境", "应用服务器", "app-01"]);
+    }
+
+    /// 验证 SSH 链接行会携带远程地址悬浮提示，目录行不展示连接提示。
+    #[test]
+    fn visible_rows_include_ssh_link_tooltip() {
+        let config = sample_config();
+
+        let rows = config.visible_rows("", None);
+        let directory_row = rows
+            .iter()
+            .find(|row| row.label == "生产环境")
+            .expect("应存在目录行");
+        let link_row = rows
+            .iter()
+            .find(|row| row.label == "app-01")
+            .expect("应存在链接行");
+
+        assert_eq!(directory_row.tooltip, None);
+        assert_eq!(link_row.tooltip.as_deref(), Some("deploy@10.0.0.1:22"));
     }
 
     /// 验证同级目录和链接不能重名。

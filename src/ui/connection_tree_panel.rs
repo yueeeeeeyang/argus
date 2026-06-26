@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, SharedString, div,
-    prelude::*, px, rgb, uniform_list,
+    AnyElement, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, Render,
+    SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::app::ArgusApp;
@@ -32,6 +32,32 @@ const CONNECTION_TREE_LINE_INDENT_STEP: f32 = 16.0;
 const CONNECTION_TREE_BRANCH_Y: f32 = 14.0;
 /// 链接树节点横向分支线长度。
 const CONNECTION_TREE_BRANCH_LENGTH: f32 = 14.0;
+
+/// SSH 链接悬浮提示，用于快速查看远程用户名、主机和端口。
+struct ConnectionLinkTooltip {
+    /// 提示文本。
+    label: String,
+    /// 当前主题令牌。
+    theme: AppTheme,
+}
+
+impl Render for ConnectionLinkTooltip {
+    /// 渲染紧凑 tooltip 内容。
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(360.0))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(self.theme.title_bar))
+            .border_1()
+            .border_color(rgb(self.theme.border))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(rgb(self.theme.foreground))
+            .child(self.label.clone())
+    }
+}
 
 /// 渲染链接目录树面板。
 pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
@@ -112,6 +138,8 @@ fn render_row(
         ConnectionTreeRowKind::Directory => "",
         ConnectionTreeRowKind::SshLink => "ssh",
     };
+    let tooltip = row.tooltip.clone();
+    let tooltip_theme = theme.clone();
 
     div()
         .id(SharedString::from(format!("connection-node-{node_id}")))
@@ -142,6 +170,15 @@ fn render_row(
                 .pr_2()
                 .rounded(px(CONNECTION_ROW_RADIUS))
                 .cursor_pointer()
+                .when_some(tooltip, |this, tooltip| {
+                    this.tooltip(move |_, cx| {
+                        cx.new(|_| ConnectionLinkTooltip {
+                            label: tooltip.clone(),
+                            theme: tooltip_theme.clone(),
+                        })
+                        .into()
+                    })
+                })
                 .text_size(px(CONNECTION_TREE_FONT_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme.foreground))
@@ -188,7 +225,13 @@ fn render_row(
                     theme.foreground_muted,
                     CONNECTION_TREE_ICON_SIZE,
                 ))
-                .child(div().flex_1().truncate().child(row.label))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("connection-label-{node_id}")))
+                        .flex_1()
+                        .truncate()
+                        .child(row.label),
+                )
                 .when(!meta_text.is_empty(), |this| {
                     this.child(
                         div()

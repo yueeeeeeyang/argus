@@ -4,19 +4,23 @@
 //! 作者：Argus 开发团队
 //! 主要功能：展示连接状态、远程终端输出，并将键盘输入转发给终端会话。
 
+use std::ops::Range;
+use std::time::Duration;
+
 use gpui::{
-    App, Bounds, Context, Entity, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, SharedString, TextRun,
-    UnderlineStyle, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
+    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, FontWeight, HighlightStyle,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollWheelEvent, SharedString, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*,
+    px, rgb,
 };
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::terminal::{
-    TerminalCellRun, TerminalCellStyle, TerminalColor, TerminalScreenSnapshot,
-    TerminalSessionState, TerminalStatus,
+    TerminalCellStyle, TerminalColor, TerminalGridPosition, TerminalScreenLine,
+    TerminalScreenSnapshot, TerminalSessionState, TerminalStatus, TerminalTextSelection,
 };
-use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::theme::AppTheme;
 
 /// 终端正文行高。
 const TERMINAL_LINE_HEIGHT: f32 = 18.0;
@@ -42,7 +46,12 @@ const TERMINAL_SCROLLBAR_PADDING: f32 = 4.0;
 const TERMINAL_SCROLLBAR_MIN_THUMB: f32 = 32.0;
 
 /// 渲染 SSH 终端面板。
-pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub fn render(
+    app: &ArgusApp,
+    session_id: usize,
+    window: &mut Window,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(session) = app.terminal_sessions.get(&session_id) else {
         return div()
@@ -78,79 +87,67 @@ pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> 
         }))
         .on_key_down(cx.listener(move |app, event: &KeyDownEvent, _, cx| {
             cx.stop_propagation();
-            app.handle_terminal_key(&event.keystroke);
+            app.handle_terminal_key(&event.keystroke, cx);
             cx.notify();
         }))
-        .child(render_terminal_header(session, &theme))
-        .child(render_terminal_body(session, app, cx))
+        .child(render_terminal_body(session, app, window, cx))
         .into_any_element()
 }
 
-/// 渲染终端顶部状态条。
-fn render_terminal_header(
-    session: &TerminalSessionState,
-    theme: &crate::theme::AppTheme,
-) -> impl IntoElement {
-    let status_text = match session.status {
-        TerminalStatus::Connecting => "连接中",
-        TerminalStatus::AwaitingHostKey => "等待确认指纹",
-        TerminalStatus::Connected => "已连接",
-        TerminalStatus::Disconnected => "已断开",
-        TerminalStatus::Failed => "连接失败",
-    };
-    div()
-        .h(px(38.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .justify_between()
-        .border_b_1()
-        .border_color(rgb(theme.border))
-        .bg(rgb(theme.content))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_size(px(12.5))
-                .text_color(rgb(theme.foreground))
-                .child(render_icon(
-                    ArgusIcon::Terminal,
-                    theme.foreground_muted,
-                    16.0,
-                ))
-                .child(session.address.clone()),
-        )
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.foreground_muted))
-                .child(status_text),
-        )
-}
-
-/// 渲染终端正文区域。
+/// 渲染终端正文区域；正文文本使用 GPUI 文本元素渲染，避免 canvas 文字发虚。
 fn render_terminal_body(
     session: &TerminalSessionState,
     app: &ArgusApp,
+    window: &mut Window,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let theme = app.theme.clone();
+    let metrics = terminal_metrics(window);
     let session_id = session.id;
     let current_rows = session.rows;
     let current_cols = session.cols;
+    let viewport_handle = session.viewport_scroll.clone();
+    let viewport_bounds = viewport_handle.bounds();
     let snapshot = session.screen_snapshot();
     let placeholder = terminal_placeholder(session, &snapshot);
-    let resize_entity = cx.entity();
-    let scrollbar_event_entity = resize_entity.clone();
+    let scrollbar_metrics = terminal_scrollbar_metrics(viewport_bounds, &snapshot, metrics);
+    let is_terminal_focused = app
+        .input_focus_handles
+        .as_ref()
+        .is_some_and(|handles| handles.terminal.is_focused(window));
+    let entity = cx.entity();
 
     div()
+        .on_children_prepainted({
+            let viewport_handle = viewport_handle.clone();
+            move |_, window, _| {
+                let bounds = viewport_handle.bounds();
+                if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+                    return;
+                }
+                let metrics = terminal_metrics(window);
+                let desired_rows = terminal_rows_for_bounds(bounds, metrics.line_height);
+                let desired_cols = terminal_cols_for_bounds(bounds, metrics.cell_width);
+                if desired_rows == current_rows && desired_cols == current_cols {
+                    return;
+                }
+                let entity = entity.clone();
+                window.on_next_frame(move |_, cx| {
+                    entity.update(cx, |app, cx| {
+                        app.resize_terminal_session(session_id, desired_rows, desired_cols);
+                        cx.notify();
+                    });
+                });
+            }
+        })
         .id("ssh-terminal-body")
         .relative()
         .flex_1()
         .min_h(px(0.0))
         .overflow_hidden()
         .bg(rgb(theme.background))
+        .cursor(CursorStyle::IBeam)
+        .track_scroll(&viewport_handle)
         .on_scroll_wheel(cx.listener(move |app, event: &ScrollWheelEvent, _, cx| {
             cx.stop_propagation();
             let line_delta = terminal_scroll_line_delta(event);
@@ -158,82 +155,96 @@ fn render_terminal_body(
                 cx.notify();
             }
         }))
-        .child(
-            canvas(
-                move |bounds, window: &mut Window, _| {
-                    let metrics = terminal_metrics(window);
-                    let desired_rows = terminal_rows_for_bounds(bounds, metrics.line_height);
-                    let desired_cols = terminal_cols_for_bounds(bounds, metrics.cell_width);
-                    let scrollbar_metrics = terminal_scrollbar_metrics(bounds, &snapshot, metrics);
-                    if desired_rows != current_rows || desired_cols != current_cols {
-                        let resize_entity = resize_entity.clone();
-                        window.on_next_frame(move |_, cx| {
-                            resize_entity.update(cx, |app, cx| {
-                                app.resize_terminal_session(session_id, desired_rows, desired_cols);
-                                cx.notify();
-                            });
-                        });
-                    }
-                    TerminalPaintState {
-                        metrics,
-                        snapshot,
-                        placeholder,
-                        scrollbar_metrics,
-                    }
-                },
-                move |bounds, paint_state, window: &mut Window, cx| {
-                    if let Some(scrollbar_metrics) = paint_state.scrollbar_metrics {
-                        register_terminal_scrollbar_events(
-                            session_id,
-                            bounds,
-                            scrollbar_metrics,
-                            scrollbar_event_entity.clone(),
-                            window,
-                        );
-                    }
-                    paint_terminal_body(bounds, paint_state, &theme, window, cx);
-                },
-            )
-            .size_full(),
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                if let Some(handles) = app.input_focus_handles.as_ref() {
+                    handles.terminal.focus(window);
+                }
+                let metrics = terminal_metrics(window);
+                if let Some(position) =
+                    terminal_position_from_pointer(app, session_id, event.position, metrics)
+                {
+                    app.begin_terminal_selection(session_id, position, event.click_count);
+                    cx.notify();
+                }
+            }),
         )
-}
+        .on_mouse_move(cx.listener(move |app, event: &MouseMoveEvent, window, cx| {
+            if !event.dragging() {
+                return;
+            }
 
-/// 终端 canvas 绘制需要的预计算状态。
-struct TerminalPaintState {
-    /// 当前字体和单元格尺寸。
-    metrics: TerminalMetrics,
-    /// vt100 屏幕快照。
-    snapshot: TerminalScreenSnapshot,
-    /// 连接中/失败等空屏提示。
-    placeholder: Option<String>,
-    /// 当前终端历史滚动条指标。
-    scrollbar_metrics: Option<TerminalScrollbarMetrics>,
-}
+            let mut handled = false;
+            if let Some(metrics) = scrollbar_metrics {
+                let bounds = app
+                    .terminal_sessions
+                    .get(&session_id)
+                    .map(|session| session.viewport_scroll.bounds())
+                    .unwrap_or_default();
+                handled |= app.drag_terminal_scrollbar(
+                    session_id,
+                    f32::from(event.position.y),
+                    f32::from(bounds.top()),
+                    f32::from(metrics.track_start),
+                    f32::from(metrics.track_length),
+                    f32::from(metrics.thumb_length),
+                    metrics.max_scrollback_offset,
+                );
+            }
 
-/// 终端单元格测量结果。
-#[derive(Clone, Copy)]
-struct TerminalMetrics {
-    /// 单个终端列宽。
-    cell_width: Pixels,
-    /// 单行高度。
-    line_height: Pixels,
-    /// 文本字号。
-    font_size: Pixels,
-}
+            if app.is_terminal_selection_drag_active(session_id) {
+                let metrics = terminal_metrics(window);
+                if let Some(position) =
+                    terminal_position_from_pointer(app, session_id, event.position, metrics)
+                {
+                    handled |= app.update_terminal_selection(session_id, position);
+                }
+            }
 
-/// 终端历史滚动条几何指标。
-#[derive(Clone, Copy)]
-struct TerminalScrollbarMetrics {
-    /// 滑块相对正文顶部的起始位置。
-    thumb_start: Pixels,
-    /// 滑块长度。
-    thumb_length: Pixels,
-    /// 滚动轨道相对正文顶部的起始位置。
-    track_start: Pixels,
-    /// 滚动轨道长度。
-    track_length: Pixels,
-    /// 最大 scrollback 偏移。
-    max_scrollback_offset: usize,
+            if handled {
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |app, _: &MouseUpEvent, _, cx| {
+                let handled = app.finish_terminal_selection(session_id)
+                    | app.finish_terminal_scrollbar_drag(session_id);
+                if handled {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(move |app, _: &MouseUpEvent, _, cx| {
+                let handled = app.finish_terminal_selection(session_id)
+                    | app.finish_terminal_scrollbar_drag(session_id);
+                if handled {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }),
+        )
+        .child(if let Some(placeholder) = placeholder {
+            render_terminal_placeholder(placeholder, &theme).into_any_element()
+        } else {
+            render_terminal_screen(&snapshot, session_id, metrics, is_terminal_focused, &theme)
+                .into_any_element()
+        })
+        .when_some(scrollbar_metrics, |this, metrics| {
+            this.child(render_terminal_scrollbar(
+                session_id,
+                viewport_bounds,
+                metrics,
+                &theme,
+                cx,
+            ))
+        })
 }
 
 /// 根据当前窗口字体环境测量终端等宽单元格。
@@ -258,8 +269,31 @@ fn terminal_metrics(window: &mut Window) -> TerminalMetrics {
     TerminalMetrics {
         cell_width: shaped.width.max(px(1.0)),
         line_height: px(TERMINAL_LINE_HEIGHT),
-        font_size,
     }
+}
+
+/// 终端单元格测量结果。
+#[derive(Clone, Copy)]
+struct TerminalMetrics {
+    /// 单个终端列宽。
+    cell_width: Pixels,
+    /// 单行高度。
+    line_height: Pixels,
+}
+
+/// 终端历史滚动条几何指标。
+#[derive(Clone, Copy)]
+struct TerminalScrollbarMetrics {
+    /// 滑块相对正文顶部的起始位置。
+    thumb_start: Pixels,
+    /// 滑块长度。
+    thumb_length: Pixels,
+    /// 滚动轨道相对正文顶部的起始位置。
+    track_start: Pixels,
+    /// 滚动轨道长度。
+    track_length: Pixels,
+    /// 最大 scrollback 偏移。
+    max_scrollback_offset: usize,
 }
 
 /// 根据正文区域高度计算远程 PTY 行数。
@@ -317,84 +351,6 @@ fn terminal_scroll_line_delta(event: &ScrollWheelEvent) -> f32 {
     f32::from(pixel_delta.y) / TERMINAL_LINE_HEIGHT
 }
 
-/// 注册终端历史滚动条拖拽事件。
-fn register_terminal_scrollbar_events(
-    session_id: usize,
-    viewport_bounds: Bounds<Pixels>,
-    metrics: TerminalScrollbarMetrics,
-    entity: Entity<ArgusApp>,
-    window: &mut Window,
-) {
-    let thumb_bounds = terminal_scrollbar_thumb_bounds(viewport_bounds, metrics);
-    window.on_mouse_event({
-        let entity = entity.clone();
-        move |event: &MouseDownEvent, phase, _, cx| {
-            if !phase.bubble()
-                || event.button != MouseButton::Left
-                || !thumb_bounds.contains(&event.position)
-            {
-                return;
-            }
-            let cursor_offset = f32::from(event.position.y - thumb_bounds.top());
-            entity.update(cx, |app, _| {
-                app.begin_terminal_scrollbar_drag(session_id, cursor_offset);
-            });
-            cx.stop_propagation();
-            cx.notify(entity.entity_id());
-        }
-    });
-
-    window.on_mouse_event({
-        let entity = entity.clone();
-        move |event: &MouseUpEvent, phase, _, cx| {
-            if !phase.bubble() || event.button != MouseButton::Left {
-                return;
-            }
-            let handled =
-                entity.update(cx, |app, _| app.finish_terminal_scrollbar_drag(session_id));
-            if handled {
-                cx.stop_propagation();
-                cx.notify(entity.entity_id());
-            }
-        }
-    });
-
-    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-        if !phase.bubble() || !event.dragging() {
-            return;
-        }
-        let handled = entity.update(cx, |app, _| {
-            app.drag_terminal_scrollbar(
-                session_id,
-                f32::from(event.position.y),
-                f32::from(viewport_bounds.top()),
-                f32::from(metrics.track_start),
-                f32::from(metrics.track_length),
-                f32::from(metrics.thumb_length),
-                metrics.max_scrollback_offset,
-            )
-        });
-        if handled {
-            cx.stop_propagation();
-            cx.notify(entity.entity_id());
-        }
-    });
-}
-
-/// 计算终端历史滚动条滑块区域。
-fn terminal_scrollbar_thumb_bounds(
-    bounds: Bounds<Pixels>,
-    metrics: TerminalScrollbarMetrics,
-) -> Bounds<Pixels> {
-    Bounds::new(
-        point(
-            bounds.right() - px(TERMINAL_SCROLLBAR_PADDING + TERMINAL_SCROLLBAR_WIDTH),
-            bounds.top() + metrics.thumb_start,
-        ),
-        size(px(TERMINAL_SCROLLBAR_WIDTH), metrics.thumb_length),
-    )
-}
-
 /// 连接中或失败时，如果屏幕没有远端内容，则展示状态提示。
 fn terminal_placeholder(
     session: &TerminalSessionState,
@@ -411,201 +367,287 @@ fn terminal_placeholder(
     )
 }
 
-/// 绘制终端正文、颜色背景和光标。
-fn paint_terminal_body(
-    bounds: Bounds<Pixels>,
-    state: TerminalPaintState,
-    theme: &crate::theme::AppTheme,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let origin = point(
-        bounds.left() + px(TERMINAL_HORIZONTAL_PADDING),
-        bounds.top() + px(TERMINAL_VERTICAL_PADDING),
-    );
-
-    if let Some(placeholder) = state.placeholder {
-        paint_terminal_placeholder(placeholder, origin, state.metrics, theme, window, cx);
-        return;
-    }
-
-    for run in &state.snapshot.runs {
-        paint_terminal_run_background(run, origin, state.metrics, theme, window);
-    }
-    for run in &state.snapshot.runs {
-        paint_terminal_run_text(run, origin, state.metrics, theme, window, cx);
-    }
-    paint_terminal_cursor(&state.snapshot, origin, state.metrics, theme, window);
-    if let Some(scrollbar_metrics) = state.scrollbar_metrics {
-        paint_terminal_scrollbar(bounds, scrollbar_metrics, theme, window);
-    }
+/// 渲染空终端状态提示。
+fn render_terminal_placeholder(text: String, theme: &AppTheme) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(TERMINAL_HORIZONTAL_PADDING))
+        .top(px(TERMINAL_VERTICAL_PADDING))
+        .font_family(ARGUS_LOG_FONT_FAMILY)
+        .text_size(px(TERMINAL_FONT_SIZE))
+        .line_height(px(TERMINAL_LINE_HEIGHT))
+        .text_color(rgb(theme.foreground_muted))
+        .child(text)
 }
 
-/// 绘制空终端状态提示。
-fn paint_terminal_placeholder(
-    text: String,
-    origin: gpui::Point<Pixels>,
-    metrics: TerminalMetrics,
-    theme: &crate::theme::AppTheme,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let run = terminal_text_run(
-        &text,
-        TerminalCellStyle {
-            fg: TerminalColor::Default,
-            bg: TerminalColor::Default,
-            is_bold: false,
-            is_dim: false,
-            is_underline: false,
-            is_inverse: false,
-        },
-        theme.foreground_muted,
-        None,
-        window,
-    );
-    let shaped =
-        window
-            .text_system()
-            .shape_line(SharedString::from(text), metrics.font_size, &[run], None);
-    let _ = shaped.paint(origin, metrics.line_height, window, cx);
-}
-
-/// 绘制终端片段背景色。
-fn paint_terminal_run_background(
-    run: &TerminalCellRun,
-    origin: gpui::Point<Pixels>,
-    metrics: TerminalMetrics,
-    theme: &crate::theme::AppTheme,
-    window: &mut Window,
-) {
-    let (_, background) = resolved_terminal_colors(run.style, theme);
-    if background == theme.background {
-        return;
-    }
-    let run_origin = terminal_cell_origin(origin, run.row, run.start_col, metrics);
-    window.paint_quad(fill(
-        Bounds::new(
-            run_origin,
-            size(metrics.cell_width * run.cols as f32, metrics.line_height),
-        ),
-        rgb(background),
-    ));
-}
-
-/// 绘制终端片段文本。
-fn paint_terminal_run_text(
-    run: &TerminalCellRun,
-    origin: gpui::Point<Pixels>,
-    metrics: TerminalMetrics,
-    theme: &crate::theme::AppTheme,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let (foreground, background) = resolved_terminal_colors(run.style, theme);
-    let text_run = terminal_text_run(&run.text, run.style, foreground, Some(background), window);
-    let shaped = window.text_system().shape_line(
-        SharedString::from(run.text.clone()),
-        metrics.font_size,
-        &[text_run],
-        None,
-    );
-    let _ = shaped.paint(
-        terminal_cell_origin(origin, run.row, run.start_col, metrics),
-        metrics.line_height,
-        window,
-        cx,
-    );
-}
-
-/// 绘制终端块状光标。
-fn paint_terminal_cursor(
+/// 渲染当前终端屏幕文本、颜色、选区和光标。
+fn render_terminal_screen(
     snapshot: &TerminalScreenSnapshot,
-    origin: gpui::Point<Pixels>,
+    session_id: usize,
     metrics: TerminalMetrics,
-    theme: &crate::theme::AppTheme,
-    window: &mut Window,
-) {
-    if snapshot.is_cursor_hidden || snapshot.rows == 0 || snapshot.cols == 0 {
-        return;
-    }
-    let cursor_row = snapshot.cursor_row.min(snapshot.rows.saturating_sub(1));
-    let cursor_col = snapshot.cursor_col.min(snapshot.cols.saturating_sub(1));
-    window.paint_quad(fill(
-        Bounds::new(
-            terminal_cell_origin(origin, cursor_row, cursor_col, metrics),
-            size(metrics.cell_width, metrics.line_height),
-        ),
-        rgb(theme.selection),
-    ));
-}
+    is_terminal_focused: bool,
+    theme: &AppTheme,
+) -> impl IntoElement {
+    let content_width =
+        px(TERMINAL_HORIZONTAL_PADDING * 2.0) + metrics.cell_width * snapshot.cols as f32;
+    let content_height =
+        px(TERMINAL_VERTICAL_PADDING * 2.0) + metrics.line_height * snapshot.rows as f32;
 
-/// 绘制终端历史滚动条滑块；终端和日志查看一样不绘制背景轨道。
-fn paint_terminal_scrollbar(
-    bounds: Bounds<Pixels>,
-    metrics: TerminalScrollbarMetrics,
-    theme: &crate::theme::AppTheme,
-    window: &mut Window,
-) {
-    let mut thumb_color = rgb(theme.foreground_muted);
-    thumb_color.a = 0.38;
-    window.paint_quad(
-        fill(
-            terminal_scrollbar_thumb_bounds(bounds, metrics),
-            thumb_color,
+    div()
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .child(
+            div()
+                .relative()
+                .w(content_width)
+                .h(content_height)
+                .pt(px(TERMINAL_VERTICAL_PADDING))
+                .pl(px(TERMINAL_HORIZONTAL_PADDING))
+                .children(
+                    snapshot
+                        .lines
+                        .iter()
+                        .enumerate()
+                        .map(|(row, line)| {
+                            render_terminal_line(row as u16, line, snapshot, theme)
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
         )
-        .corner_radii(px(TERMINAL_SCROLLBAR_WIDTH / 2.0)),
-    );
+        .when(!snapshot.is_cursor_hidden && is_terminal_focused, |this| {
+            this.child(render_terminal_cursor(snapshot, session_id, metrics, theme))
+        })
 }
 
-/// 生成终端文本片段的 GPUI TextRun。
-fn terminal_text_run(
-    text: &str,
-    style: TerminalCellStyle,
-    foreground: u32,
-    background: Option<u32>,
-    window: &mut Window,
-) -> TextRun {
-    let mut text_style = window.text_style();
-    text_style.font_family = ARGUS_LOG_FONT_FAMILY.into();
-    text_style.font_size = px(TERMINAL_FONT_SIZE).into();
-    text_style.font_weight = if style.is_bold {
-        FontWeight::BOLD
+/// 渲染一行终端文本，并合成 ANSI 颜色、背景色和当前选区高亮。
+fn render_terminal_line(
+    row: u16,
+    line: &TerminalScreenLine,
+    snapshot: &TerminalScreenSnapshot,
+    theme: &AppTheme,
+) -> impl IntoElement {
+    let highlights = terminal_line_highlights(row, line, snapshot, theme);
+    let text_element = if highlights.is_empty() {
+        line.text.clone().into_any_element()
     } else {
-        FontWeight::NORMAL
+        StyledText::new(line.text.clone())
+            .with_highlights(highlights)
+            .into_any_element()
     };
-    TextRun {
-        len: text.len(),
-        font: text_style.font(),
-        color: rgb(foreground).into(),
-        background_color: background.map(|color| rgb(color).into()),
+
+    div()
+        .h(px(TERMINAL_LINE_HEIGHT))
+        .line_height(px(TERMINAL_LINE_HEIGHT))
+        .font_family(ARGUS_LOG_FONT_FAMILY)
+        .text_size(px(TERMINAL_FONT_SIZE))
+        .text_color(rgb(theme.foreground))
+        .whitespace_nowrap()
+        .child(text_element)
+}
+
+/// 合成终端行内所有非重叠高亮范围，选区覆盖 ANSI 背景。
+fn terminal_line_highlights(
+    row: u16,
+    line: &TerminalScreenLine,
+    snapshot: &TerminalScreenSnapshot,
+    theme: &AppTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let selection_range =
+        terminal_selection_column_range_for_row(snapshot.selection, row, snapshot.cols)
+            .map(|range| line.byte_range_for_columns(range))
+            .filter(|range| range.start < range.end);
+    let mut highlights = Vec::new();
+
+    for run in snapshot.runs.iter().filter(|run| run.row == row) {
+        let run_range = line.byte_range_for_columns(run.start_col..run.start_col + run.cols);
+        if run_range.start >= run_range.end {
+            continue;
+        }
+        for visible_range in subtract_optional_range(run_range, selection_range.as_ref()) {
+            highlights.push((visible_range, terminal_highlight_style(run.style, theme)));
+        }
+    }
+
+    if let Some(selection_range) = selection_range {
+        highlights.push((
+            selection_range,
+            HighlightStyle {
+                background_color: Some(rgb(theme.selection).into()),
+                color: Some(rgb(theme.foreground).into()),
+                ..Default::default()
+            },
+        ));
+    }
+
+    highlights.sort_by_key(|(range, _)| range.start);
+    highlights
+}
+
+/// 返回当前行被终端选区覆盖的列范围。
+fn terminal_selection_column_range_for_row(
+    selection: Option<TerminalTextSelection>,
+    row: u16,
+    cols: u16,
+) -> Option<Range<u16>> {
+    let selection = selection?;
+    let (start, end) = selection.normalized();
+    if row < start.row || row > end.row {
+        return None;
+    }
+
+    let range = if start.row == end.row {
+        start.col..end.col
+    } else if row == start.row {
+        start.col..cols
+    } else if row == end.row {
+        0..end.col
+    } else {
+        0..cols
+    };
+
+    (range.start < range.end).then_some(range)
+}
+
+/// 从基础高亮范围中扣除选区范围，避免 StyledText 收到重叠 highlight。
+fn subtract_optional_range(
+    range: Range<usize>,
+    protected: Option<&Range<usize>>,
+) -> Vec<Range<usize>> {
+    let Some(protected) = protected else {
+        return vec![range];
+    };
+    if protected.end <= range.start || protected.start >= range.end {
+        return vec![range];
+    }
+
+    let mut ranges = Vec::new();
+    if range.start < protected.start {
+        ranges.push(range.start..protected.start.min(range.end));
+    }
+    if protected.end < range.end {
+        ranges.push(protected.end.max(range.start)..range.end);
+    }
+    ranges
+        .into_iter()
+        .filter(|range| range.start < range.end)
+        .collect()
+}
+
+/// 将终端样式转换为 GPUI 文本高亮样式。
+fn terminal_highlight_style(style: TerminalCellStyle, theme: &AppTheme) -> HighlightStyle {
+    let (foreground, background) = resolved_terminal_colors(style, theme);
+    HighlightStyle {
+        color: Some(rgb(foreground).into()),
+        background_color: (background != theme.background).then_some(rgb(background).into()),
+        font_weight: style.is_bold.then_some(FontWeight::BOLD),
         underline: style.is_underline.then_some(UnderlineStyle {
             color: Some(rgb(foreground).into()),
             thickness: px(1.0),
             wavy: false,
         }),
-        strikethrough: None,
+        ..Default::default()
     }
 }
 
-/// 计算终端单元格在 canvas 中的左上角。
-fn terminal_cell_origin(
-    origin: gpui::Point<Pixels>,
-    row: u16,
-    col: u16,
+/// 渲染终端线条光标；样式、宽度、高度和闪烁频率与输入框光标保持一致。
+fn render_terminal_cursor(
+    snapshot: &TerminalScreenSnapshot,
+    session_id: usize,
     metrics: TerminalMetrics,
-) -> gpui::Point<Pixels> {
-    point(
-        origin.x + metrics.cell_width * col as f32,
-        origin.y + metrics.line_height * row as f32,
-    )
+    theme: &AppTheme,
+) -> impl IntoElement {
+    let cursor_row = snapshot.cursor_row.min(snapshot.rows.saturating_sub(1));
+    let cursor_col = snapshot.cursor_col.min(snapshot.cols);
+    div()
+        .id(SharedString::from(format!("terminal-cursor-{session_id}")))
+        .absolute()
+        .left(px(TERMINAL_HORIZONTAL_PADDING) + metrics.cell_width * cursor_col as f32)
+        .top(px(TERMINAL_VERTICAL_PADDING) + metrics.line_height * cursor_row as f32 + px(1.0))
+        .w(px(1.0))
+        .h((metrics.line_height - px(2.0)).max(px(1.0)))
+        .bg(rgb(theme.foreground))
+        .with_animation(
+            ("terminal-cursor-blink", session_id),
+            Animation::new(Duration::from_millis(900))
+                .repeat()
+                .with_easing(gpui::pulsating_between(0.08, 1.0)),
+            |this, opacity| this.opacity(opacity),
+        )
+}
+
+/// 渲染终端历史滚动条滑块；终端和日志查看一样不绘制背景轨道。
+fn render_terminal_scrollbar(
+    session_id: usize,
+    viewport_bounds: Bounds<Pixels>,
+    metrics: TerminalScrollbarMetrics,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!(
+            "terminal-scrollbar-{session_id}"
+        )))
+        .absolute()
+        .occlude()
+        .top(metrics.thumb_start)
+        .right(px(TERMINAL_SCROLLBAR_PADDING))
+        .w(px(TERMINAL_SCROLLBAR_WIDTH))
+        .h(metrics.thumb_length)
+        .rounded_lg()
+        .bg(rgb(theme.foreground_muted))
+        .opacity(0.38)
+        .hover(|this| this.opacity(0.72))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                let cursor_offset =
+                    f32::from(event.position.y - viewport_bounds.top() - metrics.thumb_start);
+                app.begin_terminal_scrollbar_drag(session_id, cursor_offset);
+                cx.notify();
+            }),
+        )
+        .into_any_element()
+}
+
+/// 把鼠标位置转换为当前终端屏幕行列。
+fn terminal_position_from_pointer(
+    app: &ArgusApp,
+    session_id: usize,
+    position: gpui::Point<Pixels>,
+    metrics: TerminalMetrics,
+) -> Option<TerminalGridPosition> {
+    let session = app.terminal_sessions.get(&session_id)?;
+    if session.rows == 0 || session.cols == 0 {
+        return None;
+    }
+    let bounds = session.viewport_scroll.bounds();
+    if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+        return None;
+    }
+
+    let local_x = f32::from(position.x - bounds.left()) - TERMINAL_HORIZONTAL_PADDING;
+    let local_y = f32::from(position.y - bounds.top()) - TERMINAL_VERTICAL_PADDING;
+    let col = if local_x <= 0.0 {
+        0
+    } else {
+        (local_x / f32::from(metrics.cell_width)).floor() as u16
+    }
+    .min(session.cols);
+    let row = if local_y <= 0.0 {
+        0
+    } else {
+        (local_y / f32::from(metrics.line_height)).floor() as u16
+    }
+    .min(session.rows.saturating_sub(1));
+
+    Some(TerminalGridPosition { row, col })
 }
 
 /// 根据终端样式和主题解析最终前景/背景色。
-fn resolved_terminal_colors(
-    style: TerminalCellStyle,
-    theme: &crate::theme::AppTheme,
-) -> (u32, u32) {
+fn resolved_terminal_colors(style: TerminalCellStyle, theme: &AppTheme) -> (u32, u32) {
     let mut foreground = terminal_color_to_rgb(style.fg, theme.foreground, style.is_bold);
     let mut background = terminal_color_to_rgb(style.bg, theme.background, false);
     if style.is_inverse {

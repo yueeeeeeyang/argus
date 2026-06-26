@@ -137,7 +137,7 @@ fn available_tab_bar_width(app: &ArgusApp, window: &Window) -> f32 {
     let left_reserved_width = if app.is_source_panel_collapsed {
         COMPACT_LEFT_CONTROLS_WIDTH
     } else {
-        app.source_panel_width
+        app.current_source_panel_width()
     };
 
     (viewport_width - left_reserved_width - TAB_EXTERNAL_LEFT_GAP - TAB_EXTERNAL_RIGHT_GAP)

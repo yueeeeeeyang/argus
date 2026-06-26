@@ -6,6 +6,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
@@ -14,9 +15,14 @@ use std::time::Duration;
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use async_channel::{Receiver, Sender};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use gpui::ScrollHandle;
 use ssh2::{HashType, Session};
 
 use crate::connections::{ConnectionLinkConfig, ConnectionNodeId, SshLinkConfig};
+use crate::text_selection::{
+    TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
+    character_count, word_range_at,
+};
 
 /// 终端默认行数。
 pub const DEFAULT_TERMINAL_ROWS: u16 = 30;
@@ -55,6 +61,12 @@ pub struct TerminalSessionState {
     scrollback_line_remainder: f32,
     /// 终端滚动条拖拽时鼠标在滑块内的纵向偏移。
     scrollbar_drag_cursor_offset: Option<f32>,
+    /// 终端正文视口句柄，用于元素化渲染时读取可用尺寸和鼠标局部坐标。
+    pub viewport_scroll: ScrollHandle,
+    /// 当前终端文本选区；行列坐标均基于当前可见屏幕。
+    pub selection: Option<TerminalTextSelection>,
+    /// 鼠标拖拽中的终端文本选区锚点与粒度；没有拖拽时为空。
+    selection_drag: Option<TerminalSelectionDrag>,
     /// 最近一次失败或断开提示。
     pub message: Option<String>,
 }
@@ -84,6 +96,9 @@ impl TerminalSessionState {
             max_scrollback_offset: 0,
             scrollback_line_remainder: 0.0,
             scrollbar_drag_cursor_offset: None,
+            viewport_scroll: ScrollHandle::new(),
+            selection: None,
+            selection_drag: None,
             message: Some("正在建立 SSH 连接...".to_string()),
         }
     }
@@ -96,10 +111,9 @@ impl TerminalSessionState {
 
     /// 返回终端屏幕当前可见行。
     pub fn visible_lines(&self) -> Vec<String> {
-        self.parser
-            .screen()
-            .rows(0, self.cols)
-            .map(|line| line.trim_end().to_string())
+        self.screen_lines()
+            .into_iter()
+            .map(|line| line.text.trim_end().to_string())
             .collect()
     }
 
@@ -108,6 +122,7 @@ impl TerminalSessionState {
         let screen = self.parser.screen();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let scrollback_offset = screen.scrollback();
+        let lines = self.screen_lines();
         let mut runs = Vec::new();
         for row in 0..self.rows {
             let mut active_run: Option<TerminalCellRun> = None;
@@ -152,8 +167,18 @@ impl TerminalSessionState {
             is_cursor_hidden: screen.hide_cursor() || scrollback_offset > 0,
             scrollback_offset,
             max_scrollback_offset: self.max_scrollback_offset,
+            lines,
+            selection: self.selection,
             runs,
         }
+    }
+
+    /// 返回可见屏幕的完整文本行，并保留终端列到 UTF-8 字节位置的映射。
+    fn screen_lines(&self) -> Vec<TerminalScreenLine> {
+        let screen = self.parser.screen();
+        (0..self.rows)
+            .map(|row| terminal_screen_line(screen, row, self.cols))
+            .collect()
     }
 
     /// 根据滚轮行数调整 scrollback 偏移；正数查看更早输出，负数回到更新输出。
@@ -213,6 +238,101 @@ impl TerminalSessionState {
         was_dragging
     }
 
+    /// 从指定终端行列开始文本选择。
+    pub fn begin_selection(&mut self, position: TerminalGridPosition) {
+        self.begin_selection_with_granularity(position, TextSelectionGranularity::Character);
+    }
+
+    /// 根据点击次数从指定终端行列开始文本选择。
+    pub fn begin_selection_with_click_count(
+        &mut self,
+        position: TerminalGridPosition,
+        click_count: usize,
+    ) {
+        self.begin_selection_with_granularity(
+            position,
+            terminal_selection_granularity_for_click_count(click_count),
+        );
+    }
+
+    /// 从指定终端行列和选择粒度开始文本选择。
+    pub fn begin_selection_with_granularity(
+        &mut self,
+        position: TerminalGridPosition,
+        granularity: TextSelectionGranularity,
+    ) {
+        let position = self.clamp_grid_position(position);
+        let selection = self.selection_for_position(position, granularity);
+        self.selection = Some(selection);
+        self.selection_drag = Some(TerminalSelectionDrag {
+            anchor_range: selection,
+            granularity,
+        });
+    }
+
+    /// 拖拽过程中更新终端文本选择范围。
+    pub fn update_selection(&mut self, position: TerminalGridPosition) -> bool {
+        let Some(drag) = self.selection_drag.clone() else {
+            return false;
+        };
+        let focus_range =
+            self.selection_for_position(self.clamp_grid_position(position), drag.granularity);
+        let next_selection = merge_terminal_text_selections(&drag.anchor_range, &focus_range);
+        if self.selection == Some(next_selection) {
+            return false;
+        }
+        self.selection = Some(next_selection);
+        true
+    }
+
+    /// 结束终端文本选择；空选区会被清除。
+    pub fn finish_selection(&mut self) -> bool {
+        let was_dragging = self.selection_drag.is_some();
+        self.selection_drag = None;
+        if self.selection.is_some_and(|selection| selection.is_empty()) {
+            self.selection = None;
+        }
+        was_dragging
+    }
+
+    /// 返回当前是否正在拖拽终端文本选区。
+    pub fn is_selection_drag_active(&self) -> bool {
+        self.selection_drag.is_some()
+    }
+
+    /// 清除终端文本选区。
+    pub fn clear_selection(&mut self) -> bool {
+        let changed = self.selection.is_some() || self.selection_drag.is_some();
+        self.selection = None;
+        self.selection_drag = None;
+        changed
+    }
+
+    /// 选择当前可见终端屏幕，供平台全选快捷键使用。
+    pub fn select_visible_screen(&mut self) -> bool {
+        if self.rows == 0 || self.cols == 0 {
+            return false;
+        }
+        self.selection = Some(TerminalTextSelection {
+            anchor: TerminalGridPosition { row: 0, col: 0 },
+            focus: TerminalGridPosition {
+                row: self.rows.saturating_sub(1),
+                col: self.cols,
+            },
+        });
+        self.selection_drag = None;
+        true
+    }
+
+    /// 返回当前终端选区文本；空选区或无选区时返回空。
+    pub fn selected_text(&self) -> Option<String> {
+        let selection = self.selection.filter(|selection| !selection.is_empty())?;
+        let (start, end) = selection.normalized();
+        let screen = self.parser.screen();
+        let text = screen.contents_between(start.row, start.col, end.row, end.col);
+        (!text.is_empty()).then_some(text)
+    }
+
     /// 更新终端尺寸，并同步本地解析器尺寸。
     pub fn resize(&mut self, rows: u16, cols: u16) {
         if self.rows == rows && self.cols == cols {
@@ -220,6 +340,7 @@ impl TerminalSessionState {
         }
         self.rows = rows.max(1);
         self.cols = cols.max(1);
+        self.clear_selection();
         self.parser.screen_mut().set_size(self.rows, self.cols);
         self.refresh_max_scrollback_offset();
         if let Some(sender) = &self.command_sender {
@@ -238,6 +359,175 @@ impl TerminalSessionState {
         let max_offset = screen.scrollback();
         screen.set_scrollback(current.min(max_offset));
         self.max_scrollback_offset = max_offset;
+    }
+
+    /// 把外部传入的行列坐标限制在当前屏幕范围内。
+    fn clamp_grid_position(&self, position: TerminalGridPosition) -> TerminalGridPosition {
+        TerminalGridPosition {
+            row: position.row.min(self.rows.saturating_sub(1)),
+            col: position.col.min(self.cols),
+        }
+    }
+
+    /// 根据终端行列和选择粒度生成选区范围。
+    fn selection_for_position(
+        &self,
+        position: TerminalGridPosition,
+        granularity: TextSelectionGranularity,
+    ) -> TerminalTextSelection {
+        match granularity {
+            TextSelectionGranularity::Character => TerminalTextSelection {
+                anchor: position,
+                focus: position,
+            },
+            TextSelectionGranularity::Word => self.word_selection_for_position(position),
+            TextSelectionGranularity::Line => TerminalTextSelection {
+                anchor: TerminalGridPosition {
+                    row: position.row,
+                    col: 0,
+                },
+                focus: TerminalGridPosition {
+                    row: position.row,
+                    col: self.cols,
+                },
+            },
+        }
+    }
+
+    /// 生成当前行的单词选区；点击空白或标点时保留空选区。
+    fn word_selection_for_position(&self, position: TerminalGridPosition) -> TerminalTextSelection {
+        let Some(line) = self.screen_lines().get(usize::from(position.row)).cloned() else {
+            return TerminalTextSelection {
+                anchor: position,
+                focus: position,
+            };
+        };
+        let cursor_byte = line
+            .byte_range_for_columns(position.col..position.col)
+            .start;
+        let cursor = char_column_for_byte_index(&line.text, cursor_byte);
+        let line_char_count = character_count(&line.text);
+        let range = word_range_at(&line.text, cursor.min(line_char_count))
+            .unwrap_or(cursor.min(line_char_count)..cursor.min(line_char_count));
+        let start_byte = byte_index_for_character(&line.text, range.start);
+        let end_byte = byte_index_for_character(&line.text, range.end);
+
+        TerminalTextSelection {
+            anchor: TerminalGridPosition {
+                row: position.row,
+                col: line.column_for_byte_boundary(start_byte),
+            },
+            focus: TerminalGridPosition {
+                row: position.row,
+                col: line.column_for_byte_boundary(end_byte),
+            },
+        }
+    }
+}
+
+/// 终端屏幕中的一个行列坐标，列允许等于 `cols` 以表示行尾边界。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TerminalGridPosition {
+    /// 0 基终端行号。
+    pub row: u16,
+    /// 0 基终端列号；作为选区终点时可等于终端列数。
+    pub col: u16,
+}
+
+/// 终端文本选区，由锚点和当前焦点行列组成。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalTextSelection {
+    /// 选区开始拖拽时的锚点。
+    pub anchor: TerminalGridPosition,
+    /// 选区当前焦点。
+    pub focus: TerminalGridPosition,
+}
+
+/// 鼠标拖拽中的终端选区上下文，用于双击拖拽时保持词级扩展。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TerminalSelectionDrag {
+    /// 开始拖拽时的选区范围。
+    anchor_range: TerminalTextSelection,
+    /// 当前拖拽的选择粒度。
+    granularity: TextSelectionGranularity,
+}
+
+impl TerminalTextSelection {
+    /// 返回从小到大排列后的选区端点。
+    pub fn normalized(&self) -> (TerminalGridPosition, TerminalGridPosition) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    /// 判断选区是否没有覆盖任何终端单元格。
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.focus
+    }
+}
+
+/// 根据鼠标点击次数返回终端文本选择粒度。
+fn terminal_selection_granularity_for_click_count(click_count: usize) -> TextSelectionGranularity {
+    match click_count {
+        0 | 1 => TextSelectionGranularity::Character,
+        2 => TextSelectionGranularity::Word,
+        _ => TextSelectionGranularity::Line,
+    }
+}
+
+/// 合并两个终端选区范围，确保拖拽时完整覆盖起始词/行和当前词/行。
+fn merge_terminal_text_selections(
+    anchor_range: &TerminalTextSelection,
+    focus_range: &TerminalTextSelection,
+) -> TerminalTextSelection {
+    let (anchor_start, anchor_end) = anchor_range.normalized();
+    let (focus_start, focus_end) = focus_range.normalized();
+    TerminalTextSelection {
+        anchor: anchor_start.min(focus_start),
+        focus: anchor_end.max(focus_end),
+    }
+}
+
+/// 终端屏幕单行文本及列边界到 UTF-8 字节偏移的映射。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalScreenLine {
+    /// 按终端单元格补齐到当前列数的显示文本。
+    pub text: String,
+    /// 终端列边界到 `text` 字节下标的映射，长度为 `cols + 1`。
+    column_byte_indices: Vec<usize>,
+}
+
+impl TerminalScreenLine {
+    /// 返回终端列范围在当前行文本中的 UTF-8 字节范围。
+    pub fn byte_range_for_columns(&self, range: Range<u16>) -> Range<usize> {
+        let last_index = self.column_byte_indices.len().saturating_sub(1);
+        let start_col = usize::from(range.start).min(last_index);
+        let end_col = usize::from(range.end).min(last_index).max(start_col);
+        let start = self
+            .column_byte_indices
+            .get(start_col)
+            .copied()
+            .unwrap_or(self.text.len())
+            .min(self.text.len());
+        let end = self
+            .column_byte_indices
+            .get(end_col)
+            .copied()
+            .unwrap_or(self.text.len())
+            .min(self.text.len())
+            .max(start);
+        start..end
+    }
+
+    /// 返回指定 UTF-8 字节边界对应的终端列；宽字符会映射到占用列的末端边界。
+    pub fn column_for_byte_boundary(&self, byte_index: usize) -> u16 {
+        let byte_index = byte_index.min(self.text.len());
+        self.column_byte_indices
+            .iter()
+            .rposition(|index| *index <= byte_index)
+            .unwrap_or_default() as u16
     }
 }
 
@@ -258,6 +548,10 @@ pub struct TerminalScreenSnapshot {
     pub scrollback_offset: usize,
     /// 可回看的最大 scrollback 偏移。
     pub max_scrollback_offset: usize,
+    /// 当前可见终端行文本。
+    pub lines: Vec<TerminalScreenLine>,
+    /// 当前终端文本选区。
+    pub selection: Option<TerminalTextSelection>,
     /// 需要绘制的连续单元格片段。
     pub runs: Vec<TerminalCellRun>,
 }
@@ -363,6 +657,50 @@ fn append_terminal_run(
 fn flush_terminal_run(active_run: &mut Option<TerminalCellRun>, runs: &mut Vec<TerminalCellRun>) {
     if let Some(run) = active_run.take() {
         runs.push(run);
+    }
+}
+
+/// 将 vt100 屏幕的一行单元格转换为可渲染文本，并记录终端列到字节位置的映射。
+fn terminal_screen_line(screen: &vt100::Screen, row: u16, cols: u16) -> TerminalScreenLine {
+    let mut text = String::new();
+    let mut column_byte_indices = vec![0; usize::from(cols) + 1];
+    let mut col = 0;
+
+    while col < cols {
+        let start_byte = text.len();
+        column_byte_indices[usize::from(col)] = start_byte;
+
+        let Some(cell) = screen.cell(row, col) else {
+            text.push(' ');
+            col += 1;
+            column_byte_indices[usize::from(col)] = text.len();
+            continue;
+        };
+
+        if cell.is_wide_continuation() {
+            // 宽字符的续列已经由前一个单元格文本承担视觉宽度，这里只补齐列边界映射。
+            col += 1;
+            column_byte_indices[usize::from(col)] = text.len();
+            continue;
+        }
+
+        if cell.has_contents() {
+            text.push_str(cell.contents());
+        } else {
+            text.push(' ');
+        }
+
+        let cell_cols = if cell.is_wide() { 2 } else { 1 };
+        let end_col = col.saturating_add(cell_cols).min(cols);
+        for boundary_col in col + 1..=end_col {
+            column_byte_indices[usize::from(boundary_col)] = text.len();
+        }
+        col = end_col;
+    }
+
+    TerminalScreenLine {
+        text,
+        column_byte_indices,
     }
 }
 
@@ -748,6 +1086,9 @@ mod tests {
             max_scrollback_offset: 0,
             scrollback_line_remainder: 0.0,
             scrollbar_drag_cursor_offset: None,
+            viewport_scroll: ScrollHandle::new(),
+            selection: None,
+            selection_drag: None,
             message: None,
         }
     }
@@ -867,6 +1208,73 @@ mod tests {
         assert!(session.finish_scrollbar_drag());
         assert_eq!(session.scrollbar_drag_cursor_offset(), None);
         assert!(!session.finish_scrollbar_drag());
+    }
+
+    /// 验证终端快照会提供按列补齐的可见行文本，供元素化渲染保持等宽布局。
+    #[test]
+    fn screen_snapshot_contains_padded_lines() {
+        let mut session = terminal_session_for_test(2, 6);
+        session.process_output(b"ab");
+
+        let snapshot = session.screen_snapshot();
+        assert_eq!(snapshot.lines[0].text, "ab    ");
+        assert_eq!(snapshot.lines[0].byte_range_for_columns(1..3), 1..3);
+    }
+
+    /// 验证终端文本选区可以按行列提取要复制的内容。
+    #[test]
+    fn terminal_selection_returns_selected_text() {
+        let mut session = terminal_session_for_test(2, 8);
+        session.process_output(b"hello");
+
+        session.begin_selection(TerminalGridPosition { row: 0, col: 1 });
+        assert!(session.update_selection(TerminalGridPosition { row: 0, col: 4 }));
+        assert_eq!(session.selected_text().as_deref(), Some("ell"));
+        assert!(session.finish_selection());
+        assert!(session.selection.is_some());
+    }
+
+    /// 验证双击终端正文会选中当前单词。
+    #[test]
+    fn double_click_selects_terminal_word() {
+        let mut session = terminal_session_for_test(2, 24);
+        session.process_output(b"deploy app_server-01");
+
+        session.begin_selection_with_click_count(TerminalGridPosition { row: 0, col: 8 }, 2);
+
+        assert_eq!(session.selected_text().as_deref(), Some("app_server-01"));
+    }
+
+    /// 验证三击终端正文会选中整行内容。
+    #[test]
+    fn triple_click_selects_terminal_line() {
+        let mut session = terminal_session_for_test(2, 24);
+        session.process_output(b"deploy app_server-01");
+
+        session.begin_selection_with_click_count(TerminalGridPosition { row: 0, col: 8 }, 3);
+
+        assert_eq!(
+            session.selected_text().as_deref(),
+            Some("deploy app_server-01")
+        );
+    }
+
+    /// 验证平台全选入口会选中当前可见终端屏幕。
+    #[test]
+    fn select_visible_screen_marks_full_terminal_view() {
+        let mut session = terminal_session_for_test(2, 8);
+        session.process_output(b"hello\r\nworld");
+
+        assert!(session.select_visible_screen());
+        let selection = session.selection.expect("应产生终端选区");
+        assert_eq!(selection.anchor, TerminalGridPosition { row: 0, col: 0 });
+        assert_eq!(selection.focus, TerminalGridPosition { row: 1, col: 8 });
+        assert!(
+            session
+                .selected_text()
+                .expect("全选后应能复制文本")
+                .contains("hello")
+        );
     }
 
     /// 验证未知主机确认前收到的 resize 会用于后续远程 PTY 申请。

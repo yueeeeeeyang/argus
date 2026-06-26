@@ -20,7 +20,7 @@ pub fn render(app: &ArgusApp, id: &'static str, cx: &mut Context<ArgusApp>) -> i
         .id(id)
         .absolute()
         .top_0()
-        .left(px(app.source_panel_width - 3.0))
+        .left(px(app.current_source_panel_width() - 3.0))
         .w(px(6.0))
         .h_full()
         .flex()

@@ -20,7 +20,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
 
     div()
         .id("argus-source-panel")
-        .w(px(app.source_panel_width))
+        .w(px(app.current_source_panel_width()))
         .h_full()
         .flex()
         .flex_none()

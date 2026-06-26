@@ -102,7 +102,7 @@ struct LogVisibleText {
 /// - `cx`：应用上下文，用于内容区工具按钮和日志选择事件。
 ///
 /// 返回值：GPUI 元素树；真实来源会按读取状态展示加载、失败或逐行日志。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
 
     div()
@@ -119,7 +119,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .child(render_content_body(app, &theme, cx)),
+                .child(render_content_body(app, &theme, window, cx)),
         )
         .when(app.should_show_log_search_results(), |this| {
             this.child(render_search_results_panel(app, &theme, cx))
@@ -127,7 +127,12 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
 }
 
 /// 根据当前内容状态渲染主体区域。
-fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusApp>) -> AnyElement {
+fn render_content_body(
+    app: &ArgusApp,
+    theme: &AppTheme,
+    window: &mut Window,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
     match app.active_tab_kind() {
         TabKind::Settings => settings_page::render(app, cx).into_any_element(),
         TabKind::JstackAnalysis { analysis_id } => {
@@ -137,7 +142,7 @@ fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusA
             runtime_analysis_view::render(app, analysis_id, cx).into_any_element()
         }
         TabKind::SshTerminal { session_id } => {
-            terminal_view::render(app, session_id, cx).into_any_element()
+            terminal_view::render(app, session_id, window, cx).into_any_element()
         }
         TabKind::LogSource { source_id, path } => {
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();

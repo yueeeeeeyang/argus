@@ -1876,8 +1876,10 @@ pub struct ArgusApp {
     pub tab_menu_scroll: UniformListScrollHandle,
     /// 来源侧栏是否折叠。
     pub is_source_panel_collapsed: bool,
-    /// 来源侧栏当前宽度，标题栏左段与内容区侧栏共用。
+    /// 日志来源侧栏当前宽度，标题栏左段与内容区侧栏共用。
     pub source_panel_width: f32,
+    /// 链接工作区侧栏当前宽度；与日志来源侧栏独立，默认使用最小可用宽度。
+    pub connection_source_panel_width: f32,
     /// 是否正在拖拽来源侧栏分割线。
     pub is_source_panel_resizing: bool,
     /// 鼠标是否悬停在来源侧栏分割线命中区。
@@ -2054,6 +2056,7 @@ impl ArgusApp {
             tab_menu_scroll: UniformListScrollHandle::new(),
             is_source_panel_collapsed: false,
             source_panel_width: SOURCE_PANEL_DEFAULT_WIDTH,
+            connection_source_panel_width: SOURCE_PANEL_MIN_WIDTH,
             is_source_panel_resizing: false,
             is_source_resizer_hovered: false,
             source_resize_start_x: 0.0,
@@ -2143,6 +2146,7 @@ impl ArgusApp {
         }
 
         self.workspace = workspace;
+        self.sync_source_panel_animation_to_current_width();
         if workspace == Workspace::Connections && self.is_source_panel_collapsed {
             self.toggle_source_panel();
         }
@@ -2411,20 +2415,17 @@ impl ArgusApp {
     /// 切换来源侧栏折叠状态。
     pub fn toggle_source_panel(&mut self) {
         let was_collapsed = self.is_source_panel_collapsed;
+        let current_width = self.current_source_panel_width();
         self.is_source_panel_collapsed = !self.is_source_panel_collapsed;
         self.is_source_panel_resizing = false;
         self.is_source_resizer_hovered = false;
         self.source_panel_animation_generation =
             self.source_panel_animation_generation.wrapping_add(1);
-        self.source_panel_animation_from_width = if was_collapsed {
-            0.0
-        } else {
-            self.source_panel_width
-        };
+        self.source_panel_animation_from_width = if was_collapsed { 0.0 } else { current_width };
         self.source_panel_animation_to_width = if self.is_source_panel_collapsed {
             0.0
         } else {
-            self.source_panel_width
+            current_width
         };
         self.placeholder_notice = if self.is_source_panel_collapsed {
             "已折叠来源侧栏".to_string()
@@ -2433,12 +2434,39 @@ impl ArgusApp {
         };
     }
 
+    /// 返回当前工作区对应的侧栏宽度，日志与链接互不影响。
+    pub fn current_source_panel_width(&self) -> f32 {
+        match self.workspace {
+            Workspace::Connections => self.connection_source_panel_width,
+            Workspace::LogAnalysis | Workspace::Settings => self.source_panel_width,
+        }
+    }
+
+    /// 更新当前工作区对应的侧栏宽度。
+    fn set_current_source_panel_width(&mut self, width: f32) {
+        match self.workspace {
+            Workspace::Connections => self.connection_source_panel_width = width,
+            Workspace::LogAnalysis | Workspace::Settings => self.source_panel_width = width,
+        }
+    }
+
+    /// 同步侧栏动画端点，避免切换工作区时沿用另一个功能的宽度。
+    fn sync_source_panel_animation_to_current_width(&mut self) {
+        let current_width = if self.is_source_panel_collapsed {
+            0.0
+        } else {
+            self.current_source_panel_width()
+        };
+        self.source_panel_animation_from_width = current_width;
+        self.source_panel_animation_to_width = current_width;
+    }
+
     /// 开始拖拽来源侧栏分割线，记录初始鼠标位置和宽度。
     pub fn begin_source_panel_resize(&mut self, pointer_x: f32) {
         self.is_source_panel_resizing = true;
         self.is_source_resizer_hovered = true;
         self.source_resize_start_x = pointer_x;
-        self.source_resize_start_width = self.source_panel_width;
+        self.source_resize_start_width = self.current_source_panel_width();
     }
 
     /// 更新来源侧栏分割线悬停状态。
@@ -2460,11 +2488,11 @@ impl ArgusApp {
         let delta = pointer_x - self.source_resize_start_x;
         let next_width = (self.source_resize_start_width + delta)
             .clamp(SOURCE_PANEL_MIN_WIDTH, SOURCE_PANEL_MAX_WIDTH);
-        if (next_width - self.source_panel_width).abs() < 0.5 {
+        if (next_width - self.current_source_panel_width()).abs() < 0.5 {
             return false;
         }
 
-        self.source_panel_width = next_width;
+        self.set_current_source_panel_width(next_width);
         self.source_panel_animation_from_width = next_width;
         self.source_panel_animation_to_width = next_width;
         true
@@ -2477,7 +2505,10 @@ impl ArgusApp {
         }
 
         self.is_source_panel_resizing = false;
-        self.placeholder_notice = format!("来源侧栏宽度已调整为 {:.0}px", self.source_panel_width);
+        self.placeholder_notice = format!(
+            "来源侧栏宽度已调整为 {:.0}px",
+            self.current_source_panel_width()
+        );
         true
     }
 
@@ -6045,6 +6076,28 @@ mod tests {
             log_viewer_display_text("\tlevel\tmessage").as_ref(),
             "    level    message"
         );
+    }
+
+    /// 验证链接工作区侧栏默认使用最小宽度，且拖拽不会污染日志来源侧栏宽度。
+    #[test]
+    fn connection_source_panel_width_is_independent_from_log_width() {
+        let mut app = test_app();
+
+        assert_eq!(app.current_source_panel_width(), SOURCE_PANEL_DEFAULT_WIDTH);
+
+        app.workspace = Workspace::Connections;
+        assert_eq!(app.current_source_panel_width(), SOURCE_PANEL_MIN_WIDTH);
+
+        app.begin_source_panel_resize(0.0);
+        assert!(app.resize_source_panel(100.0));
+        assert_eq!(
+            app.connection_source_panel_width,
+            SOURCE_PANEL_MIN_WIDTH + 100.0
+        );
+        assert_eq!(app.source_panel_width, SOURCE_PANEL_DEFAULT_WIDTH);
+
+        app.workspace = Workspace::LogAnalysis;
+        assert_eq!(app.current_source_panel_width(), SOURCE_PANEL_DEFAULT_WIDTH);
     }
 
     /// 构造带样例来源树的应用状态，避免单元测试依赖正式启动空态。

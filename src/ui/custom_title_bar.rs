@@ -62,7 +62,7 @@ fn render_split_title_bar(
         }))
         .child(
             div()
-                .w(px(app.source_panel_width))
+                .w(px(app.current_source_panel_width()))
                 .h_full()
                 .flex()
                 .flex_none()

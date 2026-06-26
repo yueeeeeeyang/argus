@@ -4,14 +4,16 @@
 //! 作者：Argus 开发团队
 //! 主要功能：把链接树中的 SSH 链接接入右侧终端面板，并负责关闭标签时释放后台会话。
 
-use gpui::{Context, Keystroke};
+use std::borrow::Borrow;
+
+use gpui::{ClipboardItem, Context, Keystroke};
 
 use crate::app::{ArgusApp, ArgusTab, TabKind, Workspace};
 use crate::connections::ConnectionNodeId;
 use crate::terminal::{
     DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS, PendingHostKey, TerminalCommand, TerminalEvent,
-    TerminalSessionState, TerminalStatus, TerminalWorkerRequest, spawn_ssh_worker,
-    terminal_input_bytes,
+    TerminalGridPosition, TerminalSessionState, TerminalStatus, TerminalWorkerRequest,
+    spawn_ssh_worker, terminal_input_bytes,
 };
 
 impl ArgusApp {
@@ -25,10 +27,26 @@ impl ArgusApp {
     }
 
     /// 处理终端面板按键，将可发送的按键转换为远程 shell 字节。
-    pub fn handle_terminal_key(&mut self, keystroke: &Keystroke) {
+    pub fn handle_terminal_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let TabKind::SshTerminal { session_id } = self.active_tab_kind() else {
             return;
         };
+        if keystroke.modifiers.platform {
+            match keystroke.key.as_str() {
+                "c" => {
+                    self.copy_terminal_selection(session_id, cx);
+                    return;
+                }
+                "a" => {
+                    self.select_all_terminal(session_id);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if keystroke.key == "escape" && self.clear_terminal_selection(session_id) {
+            return;
+        }
         let Some(bytes) = terminal_input_bytes(
             keystroke.key.as_str(),
             keystroke.key_char.as_deref(),
@@ -50,9 +68,79 @@ impl ArgusApp {
             self.placeholder_notice = "SSH 尚未连接，暂不能输入命令".to_string();
             return;
         }
+        session.clear_selection();
         session.reset_scrollback();
         if let Some(sender) = &session.command_sender {
             let _ = sender.send(TerminalCommand::Input(bytes));
+        }
+    }
+
+    /// 从指定行列开始终端文本选择。
+    pub fn begin_terminal_selection(
+        &mut self,
+        session_id: usize,
+        position: TerminalGridPosition,
+        click_count: usize,
+    ) {
+        if let Some(session) = self.terminal_sessions.get_mut(&session_id) {
+            session.begin_selection_with_click_count(position, click_count);
+        }
+    }
+
+    /// 拖拽更新终端文本选区。
+    pub fn update_terminal_selection(
+        &mut self,
+        session_id: usize,
+        position: TerminalGridPosition,
+    ) -> bool {
+        self.terminal_sessions
+            .get_mut(&session_id)
+            .is_some_and(|session| session.update_selection(position))
+    }
+
+    /// 结束终端文本选择。
+    pub fn finish_terminal_selection(&mut self, session_id: usize) -> bool {
+        self.terminal_sessions
+            .get_mut(&session_id)
+            .is_some_and(TerminalSessionState::finish_selection)
+    }
+
+    /// 返回指定终端是否正在拖拽文本选区。
+    pub fn is_terminal_selection_drag_active(&self, session_id: usize) -> bool {
+        self.terminal_sessions
+            .get(&session_id)
+            .is_some_and(TerminalSessionState::is_selection_drag_active)
+    }
+
+    /// 清除指定终端文本选区。
+    pub fn clear_terminal_selection(&mut self, session_id: usize) -> bool {
+        self.terminal_sessions
+            .get_mut(&session_id)
+            .is_some_and(TerminalSessionState::clear_selection)
+    }
+
+    /// 平台复制快捷键：把当前终端选区写入剪贴板。
+    pub fn copy_terminal_selection(&mut self, session_id: usize, cx: &mut Context<Self>) {
+        let Some(selected_text) = self
+            .terminal_sessions
+            .get(&session_id)
+            .and_then(TerminalSessionState::selected_text)
+        else {
+            self.placeholder_notice = "终端没有可复制的选区".to_string();
+            return;
+        };
+
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
+        self.placeholder_notice = "已复制终端选区".to_string();
+    }
+
+    /// 平台全选快捷键：选择当前可见终端屏幕。
+    pub fn select_all_terminal(&mut self, session_id: usize) {
+        if let Some(session) = self.terminal_sessions.get_mut(&session_id)
+            && session.select_visible_screen()
+        {
+            self.placeholder_notice = "已选中当前终端屏幕".to_string();
         }
     }
 

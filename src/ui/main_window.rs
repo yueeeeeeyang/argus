@@ -96,7 +96,7 @@ pub fn render(
                 .overflow_hidden()
                 .bg(rgb(theme.side_bar))
                 .child(animated_source_panel(app, cx))
-                .child(log_content_view::render(app, cx)),
+                .child(log_content_view::render(app, window, cx)),
         )
         .when(!app.is_source_panel_collapsed, |this| {
             this.child(source_resizer::render(app, "source-resizer", cx))
@@ -128,7 +128,7 @@ fn animated_source_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyEleme
 
     if app.is_source_panel_resizing {
         return panel
-            .w(px(app.source_panel_width.max(0.0)))
+            .w(px(app.current_source_panel_width().max(0.0)))
             .opacity(1.0)
             .into_any_element();
     }
