@@ -7,6 +7,7 @@
 pub mod app;
 pub mod assets;
 pub mod config;
+pub mod connections;
 pub mod fonts;
 pub mod highlight;
 pub mod jstack_analysis;
@@ -15,6 +16,7 @@ pub mod platform;
 pub mod reader;
 pub mod runtime_analysis;
 pub mod search;
+pub mod terminal;
 pub mod text_selection;
 pub mod theme;
 pub mod ui;

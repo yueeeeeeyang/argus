@@ -28,6 +28,10 @@ pub enum ArgusIcon {
     Filter,
     /// 连接入口。
     Connection,
+    /// 链接节点。
+    Link,
+    /// 终端面板。
+    Terminal,
     /// 新增来源或增大数值。
     Plus,
     /// 减少数值。
@@ -101,6 +105,8 @@ impl ArgusIcon {
             Self::QuickSearch,
             Self::Filter,
             Self::Connection,
+            Self::Link,
+            Self::Terminal,
             Self::Plus,
             Self::Minus,
             Self::Close,
@@ -150,6 +156,8 @@ impl ArgusIcon {
             Self::QuickSearch => "icons/quick-search.svg",
             Self::Filter => "icons/filter.svg",
             Self::Connection => "icons/connection.svg",
+            Self::Link => "icons/link.svg",
+            Self::Terminal => "icons/terminal.svg",
             Self::Plus => "icons/plus.svg",
             Self::Minus => "icons/minus.svg",
             Self::Close => "icons/close.svg",
@@ -216,6 +224,8 @@ impl ArgusIcon {
             Self::QuickSearch => icondata::LuZap,
             Self::Filter => icondata::LuListFilter,
             Self::Connection => icondata::LuPlug,
+            Self::Link => icondata::LuLink,
+            Self::Terminal => icondata::LuTerminal,
             Self::Plus => icondata::LuPlus,
             Self::Minus => icondata::LuMinus,
             Self::Close => icondata::LuX,

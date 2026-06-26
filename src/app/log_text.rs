@@ -104,6 +104,7 @@ impl ArgusApp {
                 TabKind::Empty
                 | TabKind::JstackAnalysis { .. }
                 | TabKind::RuntimeAnalysis { .. }
+                | TabKind::SshTerminal { .. }
                 | TabKind::Settings => None,
             }
         })?;

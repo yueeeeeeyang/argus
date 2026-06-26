@@ -6,6 +6,8 @@
 
 pub mod activity_bar;
 pub mod components;
+pub mod connection_dialog;
+pub mod connection_tree_panel;
 pub mod custom_title_bar;
 pub mod dir_tree_panel;
 pub mod input_native;
@@ -23,5 +25,6 @@ pub mod source_picker;
 pub mod source_resizer;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod terminal_view;
 pub mod toolbar;
 pub mod upgrade_dialog;

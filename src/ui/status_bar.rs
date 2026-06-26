@@ -31,6 +31,11 @@ pub fn render(app: &ArgusApp) -> impl IntoElement {
             .runtime_analysis_state(analysis_id)
             .map(|state| state.title.clone())
             .unwrap_or_else(|| "Runtime分析".to_string()),
+        TabKind::SshTerminal { session_id } => app
+            .terminal_sessions
+            .get(&session_id)
+            .map(|state| state.address.clone())
+            .unwrap_or_else(|| "SSH终端".to_string()),
         TabKind::Settings => "设置".to_string(),
     };
 

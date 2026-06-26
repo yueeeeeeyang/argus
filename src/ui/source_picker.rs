@@ -366,6 +366,7 @@ fn render_header(
                 selection_range: snapshot.source_picker.path_input_selection_range(),
                 marked_range: snapshot.source_picker.path_input_marked_range.clone(),
                 is_pointer_selecting: snapshot.source_picker.path_input_selection_drag.is_some(),
+                is_secret: false,
                 size: InputSize::Compact,
                 leading_accessory: Some(InputAccessory {
                     id: "source-picker-path-leading",

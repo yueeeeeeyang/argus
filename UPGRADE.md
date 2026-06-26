@@ -1,7 +1,7 @@
 <!--
 文件职责：说明 Argus 自动升级功能的客户端配置、服务器文件布局和发布清单格式。
 创建日期：2026-06-16
-修改日期：2026-06-16
+修改日期：2026-06-26
 作者：Argus 开发团队
 主要功能：为客户端接入、升级服务器部署、manifest 编写、签名和本地验证提供操作说明。
 -->
@@ -248,7 +248,56 @@ public_key_base64 = "填入脚本输出的 ARGUS_UPDATE_PUBLIC_KEY_BASE64"
 
 启动旧版 Argus 后，在设置页“升级”中确认服务器地址和验签公钥，再在“关于”中点击“检查更新”。若签名、公钥、版本号、平台、哈希和大小均正确，客户端会弹出新版本提示。
 
-## 8. 发布检查清单
+## 8. 一键生成升级包
+
+仓库提供发布脚本：
+
+```bash
+export ARGUS_UPDATE_SIGNING_KEY_BASE64="32 字节 Ed25519 seed 的 Base64"
+export ARGUS_UPDATE_PUBLIC_KEY_BASE64="固定客户端验签公钥 Base64，可选但推荐设置"
+
+scripts/generate_upgrade_package.sh \
+  --server-url "https://updates.example.com/argus/" \
+  --notes-file RELEASE_NOTES.md \
+  --upload "deploy@updates.example.com:/var/www/argus/"
+```
+
+脚本会自动完成当前平台的 release 构建、升级资产生成、SHA-256 和大小计算、`manifest-v1.json` 写入、`manifest-v1.json.sig` 签名，并在结束时显示升级信息和客户端配置。
+
+输出目录默认是：
+
+```text
+dist/updates/<version>/
+├── manifest-v1.json
+├── manifest-v1.json.sig
+└── <os>-<arch>/
+    └── <升级资产>
+```
+
+固定验签公钥说明：
+
+- `ARGUS_UPDATE_SIGNING_KEY_BASE64` 是发布私钥 seed，必须安全保存，不要提交到仓库。
+- `ARGUS_UPDATE_PUBLIC_KEY_BASE64` 是客户端设置页“升级”中填写的验签公钥；设置后脚本会校验它必须与发布私钥匹配，避免误用新密钥签出客户端无法验证的升级包。
+- 若需要查看发布私钥对应的公钥，可以运行：
+
+```bash
+ARGUS_UPDATE_SIGNING_KEY_BASE64="..." \
+  cargo run --quiet --bin argus_update_manifest_tool -- pub-key
+```
+
+使用已有资产而不重新构建：
+
+```bash
+scripts/generate_upgrade_package.sh \
+  --server-url "https://updates.example.com/argus/" \
+  --asset dist/macos/Argus.app.zip \
+  --os macos \
+  --arch aarch64
+```
+
+`--upload` 使用 `rsync -av` 上传生成目录内容，不会自动删除服务器上的其它文件。服务器只需要能静态托管脚本输出目录中的 `manifest-v1.json`、`manifest-v1.json.sig` 和平台资产即可。
+
+## 9. 发布检查清单
 
 发布前按以下顺序检查：
 
@@ -260,7 +309,7 @@ public_key_base64 = "填入脚本输出的 ARGUS_UPDATE_PUBLIC_KEY_BASE64"
 6. 设置页或配置文件中的 `public_key_base64` 与发布私钥匹配。
 7. 使用本地或预发服务器完成一次旧版到新版升级验证。
 
-## 9. 常见问题
+## 10. 常见问题
 
 ### macOS 为什么下载 zip，而不是直接下载 `.app`？
 

@@ -130,6 +130,8 @@ pub struct Input {
     pub marked_range: Option<Range<usize>>,
     /// 当前输入框是否正在进行鼠标拖拽选择。
     pub is_pointer_selecting: bool,
+    /// 是否以密码掩码显示真实值；业务状态仍保存真实文本。
+    pub is_secret: bool,
     /// 输入框尺寸规格。
     pub size: InputSize,
     /// 前置图标附件。
@@ -228,8 +230,11 @@ pub fn render_input(
     } else {
         horizontal_padding
     };
+    let masked_value = mask_secret_value(&input.value);
     let display_text = if input.value.is_empty() {
         input.placeholder.to_string()
+    } else if input.is_secret {
+        masked_value.clone()
     } else {
         input.value.clone()
     };
@@ -253,12 +258,19 @@ pub fn render_input(
         .clone()
         .filter(|range| range.start < range.end);
     let on_pointer_select = Rc::new(on_pointer_select);
-    let pointer_value = input.value.clone();
+    let pointer_value = if input.is_secret && !input.value.is_empty() {
+        masked_value
+    } else {
+        input.value.clone()
+    };
     let native_input = input.native_input.clone();
     let native_input_for_focus = native_input.clone();
     let native_input_for_click = native_input.clone();
     let native_input_for_pointer = native_input.clone();
     let native_input_for_key = native_input.clone();
+    let runtime_focus_handle_for_text = native_input
+        .as_ref()
+        .map(|native_input| native_input.focus_handle.clone());
 
     div()
         .id(input.id)
@@ -323,6 +335,7 @@ pub fn render_input(
                     selection_range,
                     marked_range,
                     input.is_focused,
+                    runtime_focus_handle_for_text,
                     text_color,
                     selection_background,
                     cursor_color,
@@ -413,6 +426,10 @@ pub fn render_textarea(
     let native_input_for_click = native_input.clone();
     let native_input_for_pointer = native_input.clone();
     let native_input_for_key = native_input.clone();
+    let runtime_focus_handle_for_text = native_input
+        .as_ref()
+        .map(|native_input| native_input.focus_handle.clone());
+    let runtime_focus_handle_for_scroll_sync = runtime_focus_handle_for_text.clone();
     let content_lines = textarea_text_lines(if textarea.value.is_empty() {
         &display_text
     } else {
@@ -503,6 +520,7 @@ pub fn render_textarea(
                                             line_height,
                                             cursor_index,
                                             textarea.is_focused,
+                                            runtime_focus_handle_for_scroll_sync,
                                             scroll_handle,
                                             scroll_state_for_sync,
                                         ))
@@ -516,6 +534,7 @@ pub fn render_textarea(
                                             selection_range,
                                             marked_range,
                                             textarea.is_focused,
+                                            runtime_focus_handle_for_text,
                                             text_color,
                                             theme.selection,
                                             theme.foreground,
@@ -572,6 +591,20 @@ fn is_plain_text_key(event: &KeyDownEvent) -> bool {
     })
 }
 
+/// 根据真实密码长度生成等长掩码文本，避免 UI 展示敏感字段。
+fn mask_secret_value(value: &str) -> String {
+    "•".repeat(character_count(value))
+}
+
+/// 判断业务焦点和 GPUI 真实焦点是否同时有效，避免输入法焦点已丢失时仍绘制闪烁光标。
+fn effective_input_focus(
+    is_focused: bool,
+    runtime_focus_handle: Option<&FocusHandle>,
+    window: &Window,
+) -> bool {
+    is_focused && runtime_focus_handle.map_or(true, |focus_handle| focus_handle.is_focused(window))
+}
+
 /// 渲染输入框文本、选区和光标；光标通过循环动画实现静止闪烁。
 fn render_editable_text(
     input_id: &'static str,
@@ -582,16 +615,27 @@ fn render_editable_text(
     selection_range: Option<Range<usize>>,
     marked_range: Option<Range<usize>>,
     is_focused: bool,
+    runtime_focus_handle: Option<FocusHandle>,
     text_color: u32,
     selection_background: u32,
     cursor_color: u32,
 ) -> impl IntoElement {
     let value = value.to_string();
     let display_text = display_text.to_string();
-    let value_for_canvas = value.clone();
+    let visual_value_for_canvas = if value.is_empty() {
+        value.clone()
+    } else {
+        display_text.clone()
+    };
     let display_text_for_canvas = display_text.clone();
     let selection_range_for_canvas = selection_range.clone();
     let marked_range_for_canvas = marked_range.clone();
+    let visual_value_for_caret = if value.is_empty() {
+        value.clone()
+    } else {
+        display_text.clone()
+    };
+    let runtime_focus_handle_for_canvas = runtime_focus_handle.clone();
 
     div()
         .relative()
@@ -603,12 +647,13 @@ fn render_editable_text(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, cx| {
-                    let is_placeholder = value_for_canvas.is_empty();
-                    let painted_text = if is_placeholder {
-                        display_text_for_canvas.as_str()
-                    } else {
-                        value_for_canvas.as_str()
-                    };
+                    let is_effectively_focused = effective_input_focus(
+                        is_focused,
+                        runtime_focus_handle_for_canvas.as_ref(),
+                        window,
+                    );
+                    let is_placeholder = visual_value_for_canvas.is_empty();
+                    let painted_text = display_text_for_canvas.as_str();
                     if painted_text.is_empty() {
                         return;
                     }
@@ -626,16 +671,19 @@ fn render_editable_text(
                         px(0.0)
                     } else {
                         input_scroll_x_for_shaped_line(
-                            &value_for_canvas,
+                            &visual_value_for_canvas,
                             cursor_index,
                             &shaped_line,
                             bounds.size.width,
                         )
                     };
 
-                    if !is_placeholder && let Some(range) = selection_range_for_canvas.as_ref() {
+                    if !is_placeholder
+                        && is_effectively_focused
+                        && let Some(range) = selection_range_for_canvas.as_ref()
+                    {
                         paint_input_selection(
-                            &value_for_canvas,
+                            &visual_value_for_canvas,
                             range.clone(),
                             &shaped_line,
                             bounds,
@@ -654,9 +702,10 @@ fn render_editable_text(
         .when(is_focused, |this| {
             this.child(render_caret(
                 input_id,
-                value.clone(),
-                cursor_index.min(character_count(&value)),
+                visual_value_for_caret.clone(),
+                cursor_index.min(character_count(&visual_value_for_caret)),
                 font_size,
+                runtime_focus_handle,
                 cursor_color,
             ))
         })
@@ -668,6 +717,7 @@ fn render_caret(
     value: String,
     cursor_index: usize,
     font_size: f32,
+    runtime_focus_handle: Option<FocusHandle>,
     cursor_color: u32,
 ) -> impl IntoElement {
     div()
@@ -681,6 +731,9 @@ fn render_caret(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, _| {
+                    if !effective_input_focus(true, runtime_focus_handle.as_ref(), window) {
+                        return;
+                    }
                     let (caret_x, scroll_x) = caret_x_and_scroll_for_character_index(
                         &value,
                         cursor_index,
@@ -1028,6 +1081,7 @@ fn render_textarea_scroll_sync(
     line_height: f32,
     cursor_index: usize,
     is_focused: bool,
+    runtime_focus_handle: Option<FocusHandle>,
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
 ) -> impl IntoElement {
@@ -1042,7 +1096,7 @@ fn render_textarea_scroll_sync(
             canvas(
                 |_, _, _| (),
                 move |_, _, window: &mut Window, _| {
-                    if !is_focused
+                    if !effective_input_focus(is_focused, runtime_focus_handle.as_ref(), window)
                         || value.is_empty()
                         || scroll_state.scrollbar_drag.borrow().is_some()
                     {
@@ -1391,6 +1445,7 @@ fn render_textarea_text(
     selection_range: Option<Range<usize>>,
     marked_range: Option<Range<usize>>,
     is_focused: bool,
+    runtime_focus_handle: Option<FocusHandle>,
     text_color: u32,
     selection_background: u32,
     cursor_color: u32,
@@ -1410,6 +1465,7 @@ fn render_textarea_text(
     let painted_text_for_canvas = painted_text.clone();
     let selection_range_for_canvas = selection_range.clone();
     let marked_range_for_canvas = marked_range.clone();
+    let runtime_focus_handle_for_canvas = runtime_focus_handle.clone();
 
     div()
         .relative()
@@ -1418,6 +1474,11 @@ fn render_textarea_text(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, cx| {
+                    let is_effectively_focused = effective_input_focus(
+                        is_focused,
+                        runtime_focus_handle_for_canvas.as_ref(),
+                        window,
+                    );
                     if painted_text_for_canvas.is_empty() {
                         return;
                     }
@@ -1444,6 +1505,7 @@ fn render_textarea_text(
                         );
 
                         if !is_placeholder
+                            && is_effectively_focused
                             && let Some(local_range) = textarea_local_range(
                                 line,
                                 selection_range_for_canvas.clone(),
@@ -1476,6 +1538,7 @@ fn render_textarea_text(
                 cursor_index,
                 font_size,
                 line_height,
+                runtime_focus_handle,
                 cursor_color,
             ))
         })
@@ -1488,6 +1551,7 @@ fn render_textarea_caret(
     cursor_index: usize,
     font_size: f32,
     line_height: f32,
+    runtime_focus_handle: Option<FocusHandle>,
     cursor_color: u32,
 ) -> impl IntoElement {
     div()
@@ -1501,6 +1565,9 @@ fn render_textarea_caret(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, _| {
+                    if !effective_input_focus(true, runtime_focus_handle.as_ref(), window) {
+                        return;
+                    }
                     let (line_index, column) =
                         textarea_cursor_line_and_column(&lines, cursor_index);
                     let line_text = lines

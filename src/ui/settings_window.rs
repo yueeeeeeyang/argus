@@ -933,6 +933,7 @@ fn quick_keywords_input_control(
             selection_range: settings_input_selection_range(&input_state),
             marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
+            is_secret: false,
             size: InputSize::Regular,
             leading_accessory: Some(InputAccessory {
                 id: "settings-quick-keywords-leading",
@@ -1011,6 +1012,7 @@ fn jstack_thread_name_filter_input_control(
             selection_range: settings_input_selection_range(&input_state),
             marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
+            is_secret: false,
             size: InputSize::Regular,
             leading_accessory: Some(InputAccessory {
                 id: "settings-jstack-thread-name-filter-leading",
@@ -1153,6 +1155,7 @@ fn upgrade_server_input_control(
             selection_range: settings_input_selection_range(&input_state),
             marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
+            is_secret: false,
             size: InputSize::Regular,
             leading_accessory: Some(InputAccessory {
                 id: "settings-upgrade-server-leading",
@@ -1231,6 +1234,7 @@ fn upgrade_public_key_input_control(
             selection_range: settings_input_selection_range(&input_state),
             marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
+            is_secret: false,
             size: InputSize::Regular,
             leading_accessory: Some(InputAccessory {
                 id: "settings-upgrade-public-key-leading",

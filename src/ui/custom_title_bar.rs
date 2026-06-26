@@ -30,8 +30,10 @@ const TITLE_BUTTON_INACTIVE_Y_OFFSET: f32 = 1.0;
 /// 返回值：GPUI 元素树；当前不执行真实搜索或打开文件逻辑。
 pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
-    let show_source_boundary =
-        app.workspace == Workspace::LogAnalysis && !app.is_source_panel_collapsed;
+    let show_source_boundary = matches!(
+        app.workspace,
+        Workspace::LogAnalysis | Workspace::Connections
+    ) && !app.is_source_panel_collapsed;
 
     if show_source_boundary {
         render_split_title_bar(app, window, &theme, cx).into_any_element()
@@ -167,8 +169,8 @@ fn title_control_group(
         .child(title_action_button(
             "title-connection",
             ArgusIcon::Connection,
-            "连接",
-            false,
+            "链接",
+            app.workspace == Workspace::Connections,
             theme,
             cx,
         ))
@@ -231,7 +233,7 @@ fn title_action_button(
                 cx.listener(move |app, _, _, cx| {
                     match action_name {
                         "日志分析" => app.switch_workspace(Workspace::LogAnalysis, cx),
-                        "连接" => app.mark_placeholder_action("连接"),
+                        "链接" => app.switch_workspace(Workspace::Connections, cx),
                         "收起左侧菜单" | "展开左侧菜单" => app.toggle_source_panel(),
                         _ => app.mark_placeholder_action(action_name),
                     }

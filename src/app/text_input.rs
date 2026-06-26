@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use crate::app::{
-    AppTextInputTarget, ArgusApp, InputTextSelectionDrag, LogSearchInputKind,
-    RuntimeFilterInputKind,
+    AppTextInputTarget, ArgusApp, ConnectionDialogState, InputTextSelectionDrag,
+    LogSearchInputKind, RuntimeFilterInputKind,
 };
 use crate::text_selection::{NativeTextEdit, character_count, replace_character_range};
 
@@ -36,6 +36,8 @@ impl ArgusApp {
         self.source_tree_search_selection_anchor = None;
         self.source_tree_search_marked_range = None;
         self.source_tree_search_selection_drag = None;
+
+        self.clear_connection_text_input_focuses();
 
         self.source_picker.is_path_input_focused = false;
         self.source_picker.path_input_selection_anchor = None;
@@ -100,6 +102,17 @@ impl ArgusApp {
                         self.filtered_source_ids.len()
                     )
                 };
+            }
+            AppTextInputTarget::ConnectionTreeSearch
+            | AppTextInputTarget::ConnectionDirectoryName
+            | AppTextInputTarget::ConnectionLinkName
+            | AppTextInputTarget::ConnectionLinkHost
+            | AppTextInputTarget::ConnectionLinkPort
+            | AppTextInputTarget::ConnectionLinkUsername
+            | AppTextInputTarget::ConnectionLinkPassword
+            | AppTextInputTarget::ConnectionLinkPrivateKeyPath
+            | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
+                apply_native_connection_edit(self, target, &edit);
             }
             AppTextInputTarget::SourcePickerPath => {
                 apply_native_edit_to_parts(
@@ -246,6 +259,17 @@ impl ArgusApp {
             AppTextInputTarget::SourceTreeSearch => {
                 self.is_source_tree_search_focused = true;
             }
+            AppTextInputTarget::ConnectionTreeSearch
+            | AppTextInputTarget::ConnectionDirectoryName
+            | AppTextInputTarget::ConnectionLinkName
+            | AppTextInputTarget::ConnectionLinkHost
+            | AppTextInputTarget::ConnectionLinkPort
+            | AppTextInputTarget::ConnectionLinkUsername
+            | AppTextInputTarget::ConnectionLinkPassword
+            | AppTextInputTarget::ConnectionLinkPrivateKeyPath
+            | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
+                self.focus_connection_text_input_target(target);
+            }
             AppTextInputTarget::SourcePickerPath => {
                 self.source_picker.is_path_input_focused = true;
             }
@@ -356,6 +380,50 @@ fn apply_native_log_search_edit(
     }
 }
 
+/// 应用链接工作区输入框的原生编辑；过滤框会同步更新提示文案。
+fn apply_native_connection_edit(
+    app: &mut ArgusApp,
+    target: AppTextInputTarget,
+    edit: &NativeTextEdit,
+) {
+    app.focus_connection_text_input_target(target);
+    let Some(value) = ({
+        let Some(input) = app.connection_text_input_mut(target) else {
+            return;
+        };
+        apply_native_edit_to_parts(
+            NativeInputParts {
+                value: &mut input.value,
+                cursor: &mut input.cursor,
+                selection_anchor: &mut input.selection_anchor,
+                marked_range: &mut input.marked_range,
+                selection_drag: &mut input.selection_drag,
+            },
+            edit,
+        );
+        Some(input.value.clone())
+    }) else {
+        return;
+    };
+    if target == AppTextInputTarget::ConnectionTreeSearch {
+        app.placeholder_notice = if value.is_empty() {
+            "链接过滤为空，显示完整目录树".to_string()
+        } else {
+            format!(
+                "链接过滤「{}」命中 {} 个节点",
+                value,
+                app.visible_connection_rows().len()
+            )
+        };
+    } else if !matches!(
+        app.connection_dialog,
+        Some(ConnectionDialogState::ConfirmHostKey(_))
+            | Some(ConnectionDialogState::ConfirmDelete(_))
+    ) {
+        clear_connection_dialog_error(app);
+    }
+}
+
 /// 应用 Runtime 过滤输入框的原生编辑，并刷新当前分析页过滤结果。
 fn apply_native_runtime_filter_edit(
     app: &mut ArgusApp,
@@ -378,6 +446,17 @@ fn apply_native_runtime_filter_edit(
     );
     if edit.marked_range.is_none() {
         app.after_runtime_filter_changed(analysis_id);
+    }
+}
+
+/// 清理连接表单错误，让用户修改字段后可以重新提交。
+fn clear_connection_dialog_error(app: &mut ArgusApp) {
+    if let Some(dialog) = app.connection_dialog.as_mut() {
+        match dialog {
+            ConnectionDialogState::NewDirectory(form) => form.error_message = None,
+            ConnectionDialogState::NewSshLink(form) => form.error_message = None,
+            ConnectionDialogState::ConfirmHostKey(_) | ConnectionDialogState::ConfirmDelete(_) => {}
+        }
     }
 }
 

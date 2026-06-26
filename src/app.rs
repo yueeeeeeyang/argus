@@ -4,12 +4,14 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、Jstack 分析、升级状态、未读取内容提示和保留的日志样例数据。
 
+mod connection_actions;
 mod log_search;
 mod log_text;
 mod placeholder_data;
 mod settings_window;
 mod source_picker;
 mod source_search;
+mod terminal_actions;
 mod text_input;
 
 use std::borrow::{Borrow, Cow};
@@ -20,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::config::{AppConfig, ConfigManager};
+use crate::connections::ConnectionNodeId;
 use crate::highlight::HighlightCache;
 use crate::jstack_analysis::{
     JstackAnalysisResult, JstackAnalysisTarget, JstackFrequencyRow, JstackThreadDetail,
@@ -42,12 +45,14 @@ use crate::runtime_analysis::{
 };
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
+use crate::terminal::TerminalSessionState;
 use crate::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range, slice_character_range,
     word_range_at,
 };
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
+use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
 use crate::ui::log_search_window::LogSearchWindow;
@@ -145,11 +150,13 @@ pub fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// 当前界面工作区，仅保留日志分析和设置两个入口。
+/// 当前界面工作区，驱动标题栏入口和左侧侧栏内容。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Workspace {
     /// 日志分析工作区，用于展示来源侧栏和日志内容占位界面。
     LogAnalysis,
+    /// 链接工作区，用于展示 SSH 链接目录树和终端标签页。
+    Connections,
     /// 设置工作区，用于展示主题、编码、缓存、快捷键等占位配置。
     Settings,
 }
@@ -204,6 +211,11 @@ pub enum TabKind {
     RuntimeAnalysis {
         /// 分析状态 ID，用于从应用状态表中读取结果。
         analysis_id: usize,
+    },
+    /// SSH 终端标签页。
+    SshTerminal {
+        /// 终端会话 ID，用于从应用状态表中读取终端输出和连接状态。
+        session_id: usize,
     },
     /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
     Settings,
@@ -353,6 +365,24 @@ pub enum RuntimeDateTimeQuickAction {
 pub enum AppTextInputTarget {
     /// 来源树过滤输入框。
     SourceTreeSearch,
+    /// 链接树过滤输入框。
+    ConnectionTreeSearch,
+    /// 新增目录表单中的目录名称输入框。
+    ConnectionDirectoryName,
+    /// 新增 SSH 链接表单中的链接名称输入框。
+    ConnectionLinkName,
+    /// 新增 SSH 链接表单中的主机输入框。
+    ConnectionLinkHost,
+    /// 新增 SSH 链接表单中的端口输入框。
+    ConnectionLinkPort,
+    /// 新增 SSH 链接表单中的用户名输入框。
+    ConnectionLinkUsername,
+    /// 新增 SSH 链接表单中的密码输入框。
+    ConnectionLinkPassword,
+    /// 新增 SSH 链接表单中的私钥路径输入框。
+    ConnectionLinkPrivateKeyPath,
+    /// 新增 SSH 链接表单中的私钥口令输入框。
+    ConnectionLinkPrivateKeyPassphrase,
     /// 来源选择器路径输入框。
     SourcePickerPath,
     /// 独立日志搜索窗口输入框。
@@ -446,6 +476,26 @@ pub struct AppInputFocusHandles {
     pub root: FocusHandle,
     /// 来源树过滤输入框焦点。
     pub source_tree_search: FocusHandle,
+    /// 链接树过滤输入框焦点。
+    pub connection_tree_search: FocusHandle,
+    /// 新增目录名称输入框焦点。
+    pub connection_directory_name: FocusHandle,
+    /// 新增 SSH 链接名称输入框焦点。
+    pub connection_link_name: FocusHandle,
+    /// 新增 SSH 链接主机输入框焦点。
+    pub connection_link_host: FocusHandle,
+    /// 新增 SSH 链接端口输入框焦点。
+    pub connection_link_port: FocusHandle,
+    /// 新增 SSH 链接用户名输入框焦点。
+    pub connection_link_username: FocusHandle,
+    /// 新增 SSH 链接密码输入框焦点。
+    pub connection_link_password: FocusHandle,
+    /// 新增 SSH 链接私钥路径输入框焦点。
+    pub connection_link_private_key_path: FocusHandle,
+    /// 新增 SSH 链接私钥口令输入框焦点。
+    pub connection_link_private_key_passphrase: FocusHandle,
+    /// 右侧终端面板焦点。
+    pub terminal: FocusHandle,
     /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。
     pub jstack_analysis: FocusHandle,
     /// Runtime 分析页焦点，用于表格单元格拖选后稳定接收复制快捷键。
@@ -465,6 +515,79 @@ impl Default for SettingsTextInputState {
     fn default() -> Self {
         Self::from_value(String::new())
     }
+}
+
+/// 链接工作区当前打开的弹窗。
+#[derive(Clone, Debug)]
+pub enum ConnectionDialogState {
+    /// 新增目录表单。
+    NewDirectory(ConnectionDirectoryFormState),
+    /// 新增 SSH 链接表单。
+    NewSshLink(ConnectionLinkFormState),
+    /// SSH 首次连接未知主机时的指纹确认弹窗。
+    ConfirmHostKey(ConnectionHostKeyPromptState),
+    /// 删除链接目录或 SSH 链接前的二次确认弹窗。
+    ConfirmDelete(ConnectionDeletePromptState),
+}
+
+/// 新增目录表单状态。
+#[derive(Clone, Debug)]
+pub struct ConnectionDirectoryFormState {
+    /// 新目录的父目录 ID；为空表示创建在根层级。
+    pub parent_id: Option<ConnectionNodeId>,
+    /// 目录名称输入框。
+    pub name_input: SettingsTextInputState,
+    /// 最近一次校验错误。
+    pub error_message: Option<String>,
+}
+
+/// 新增 SSH 链接表单状态。
+#[derive(Clone, Debug)]
+pub struct ConnectionLinkFormState {
+    /// 新链接的父目录 ID；为空表示创建在根层级。
+    pub parent_id: Option<ConnectionNodeId>,
+    /// 链接名称输入框。
+    pub name_input: SettingsTextInputState,
+    /// SSH 主机输入框。
+    pub host_input: SettingsTextInputState,
+    /// SSH 端口输入框。
+    pub port_input: SettingsTextInputState,
+    /// SSH 用户名输入框。
+    pub username_input: SettingsTextInputState,
+    /// SSH 密码输入框。
+    pub password_input: SettingsTextInputState,
+    /// SSH 私钥路径输入框。
+    pub private_key_path_input: SettingsTextInputState,
+    /// SSH 私钥口令输入框。
+    pub private_key_passphrase_input: SettingsTextInputState,
+    /// 最近一次校验错误。
+    pub error_message: Option<String>,
+}
+
+/// SSH 主机指纹确认弹窗状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionHostKeyPromptState {
+    /// 等待确认的终端会话 ID。
+    pub session_id: usize,
+    /// 关联链接节点 ID。
+    pub link_id: ConnectionNodeId,
+    /// 远程主机。
+    pub host: String,
+    /// 远程端口。
+    pub port: u16,
+    /// 待确认的 SHA256 指纹。
+    pub fingerprint: String,
+}
+
+/// 删除链接节点二次确认弹窗状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionDeletePromptState {
+    /// 待删除的连接节点 ID。
+    pub node_id: ConnectionNodeId,
+    /// 待删除节点展示名称。
+    pub label: String,
+    /// 是否为目录；目录删除前会额外要求为空。
+    pub is_directory: bool,
 }
 
 /// 升级弹窗状态，覆盖发现版本、安装进度和失败提示三类用户可见流程。
@@ -1669,6 +1792,24 @@ pub struct ArgusApp {
     pub source_tree_search_animation_generation: usize,
     /// 来源树过滤后的可见节点 ID，包含命中日志和必要祖先目录。
     pub filtered_source_ids: Vec<SourceId>,
+    /// 链接树虚拟列表滚动句柄。
+    pub connection_tree_scroll: UniformListScrollHandle,
+    /// 当前选中的链接目录或 SSH 链接节点。
+    pub selected_connection_node_id: Option<ConnectionNodeId>,
+    /// 链接树搜索工具栏是否处于输入模式。
+    pub is_connection_tree_search_open: bool,
+    /// 链接树过滤输入框状态。
+    pub connection_tree_search_input: SettingsTextInputState,
+    /// 当前打开的链接工作区弹窗。
+    pub connection_dialog: Option<ConnectionDialogState>,
+    /// 新增链接目录独立窗口是否处于打开状态。
+    pub is_connection_directory_window_open: bool,
+    /// 新增链接目录独立窗口句柄，用于重复点击时置前已有窗口。
+    pub connection_directory_window_handle: Option<WindowHandle<ConnectionDirectoryWindow>>,
+    /// 新增 SSH 链接独立窗口是否处于打开状态。
+    pub is_connection_link_window_open: bool,
+    /// 新增 SSH 链接独立窗口句柄，用于重复点击时置前已有窗口。
+    pub connection_link_window_handle: Option<WindowHandle<ConnectionLinkWindow>>,
     /// 来源树子级懒加载 generation，用于丢弃过期后台结果。
     pub source_child_load_generations: HashMap<SourceId, usize>,
     /// 等待后台探测的压缩包节点队列。
@@ -1711,6 +1852,10 @@ pub struct ArgusApp {
     pub runtime_analyses: HashMap<usize, RuntimeAnalysisState>,
     /// 下一个 Runtime 分析 ID。
     pub next_runtime_analysis_id: usize,
+    /// SSH 终端会话状态表。
+    pub terminal_sessions: HashMap<usize, TerminalSessionState>,
+    /// 下一个 SSH 终端会话 ID。
+    pub next_terminal_session_id: usize,
     /// 当前 Jstack 频率方块的内部悬浮气泡数据。
     pub jstack_cell_hover_preview: Option<JstackCellHoverPreview>,
     /// 来源树中用于“选中文件搜索”的多选日志节点。
@@ -1862,6 +2007,15 @@ impl ArgusApp {
             is_source_tree_search_focused: false,
             source_tree_search_animation_generation: 0,
             filtered_source_ids: Vec::new(),
+            connection_tree_scroll: UniformListScrollHandle::new(),
+            selected_connection_node_id: None,
+            is_connection_tree_search_open: false,
+            connection_tree_search_input: SettingsTextInputState::default(),
+            connection_dialog: None,
+            is_connection_directory_window_open: false,
+            connection_directory_window_handle: None,
+            is_connection_link_window_open: false,
+            connection_link_window_handle: None,
             source_child_load_generations: HashMap::new(),
             source_archive_probe_queue: VecDeque::new(),
             source_archive_probe_queued_ids: BTreeSet::new(),
@@ -1883,6 +2037,8 @@ impl ArgusApp {
             next_jstack_analysis_id: 1,
             runtime_analyses: HashMap::new(),
             next_runtime_analysis_id: 1,
+            terminal_sessions: HashMap::new(),
+            next_terminal_session_id: 1,
             jstack_cell_hover_preview: None,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,
@@ -1955,6 +2111,16 @@ impl ArgusApp {
             self.input_focus_handles = Some(AppInputFocusHandles {
                 root: cx.focus_handle(),
                 source_tree_search: cx.focus_handle(),
+                connection_tree_search: cx.focus_handle(),
+                connection_directory_name: cx.focus_handle(),
+                connection_link_name: cx.focus_handle(),
+                connection_link_host: cx.focus_handle(),
+                connection_link_port: cx.focus_handle(),
+                connection_link_username: cx.focus_handle(),
+                connection_link_password: cx.focus_handle(),
+                connection_link_private_key_path: cx.focus_handle(),
+                connection_link_private_key_passphrase: cx.focus_handle(),
+                terminal: cx.focus_handle(),
                 jstack_analysis: cx.focus_handle(),
                 runtime_analysis: cx.focus_handle(),
                 runtime_filter_keyword: cx.focus_handle(),
@@ -1977,8 +2143,12 @@ impl ArgusApp {
         }
 
         self.workspace = workspace;
+        if workspace == Workspace::Connections && self.is_source_panel_collapsed {
+            self.toggle_source_panel();
+        }
         self.placeholder_notice = match workspace {
             Workspace::LogAnalysis => "已切换到日志分析占位工作区".to_string(),
+            Workspace::Connections => "已切换到链接工作区".to_string(),
             Workspace::Settings => "已切换到设置占位工作区".to_string(),
         };
     }
@@ -2502,6 +2672,9 @@ impl ArgusApp {
             TabKind::RuntimeAnalysis { analysis_id } => {
                 self.runtime_analyses.remove(analysis_id);
             }
+            TabKind::SshTerminal { session_id } => {
+                self.disconnect_terminal_session(*session_id);
+            }
             TabKind::Empty | TabKind::Settings => {}
         }
     }
@@ -2529,6 +2702,7 @@ impl ArgusApp {
             }
             TabKind::Empty
             | TabKind::LogSource { .. }
+            | TabKind::SshTerminal { .. }
             | TabKind::RuntimeAnalysis { .. }
             | TabKind::Settings => {
                 self.jstack_analyses.clear();
@@ -2546,9 +2720,31 @@ impl ArgusApp {
             TabKind::Empty
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
+            | TabKind::SshTerminal { .. }
             | TabKind::Settings => {
                 self.runtime_analyses.clear();
             }
+        }
+    }
+
+    /// 只保留指定 SSH 终端 tab 的会话；非终端 tab 会断开全部终端。
+    fn retain_terminal_session_for_tab_kind(&mut self, kept_kind: &TabKind) {
+        let kept_session_id = match kept_kind {
+            TabKind::SshTerminal { session_id } => Some(*session_id),
+            TabKind::Empty
+            | TabKind::LogSource { .. }
+            | TabKind::JstackAnalysis { .. }
+            | TabKind::RuntimeAnalysis { .. }
+            | TabKind::Settings => None,
+        };
+        let sessions_to_disconnect = self
+            .terminal_sessions
+            .keys()
+            .copied()
+            .filter(|session_id| Some(*session_id) != kept_session_id)
+            .collect::<Vec<_>>();
+        for session_id in sessions_to_disconnect {
+            self.disconnect_terminal_session(session_id);
         }
     }
 
@@ -2677,6 +2873,27 @@ impl ArgusApp {
         });
     }
 
+    /// 在链接树指定窗口坐标打开目录或 SSH 链接右键菜单。
+    pub fn open_connection_tree_context_menu(
+        &mut self,
+        node_id: ConnectionNodeId,
+        anchor: Point<Pixels>,
+    ) {
+        if !self.config.connections.is_directory(node_id)
+            && !self.config.connections.is_link(node_id)
+        {
+            self.placeholder_notice = "未找到可操作的连接节点".to_string();
+            return;
+        }
+
+        self.selected_connection_node_id = Some(node_id);
+        self.tab_menu_scroll = UniformListScrollHandle::new();
+        self.active_menu = Some(ActiveMenu {
+            kind: ActiveMenuKind::ConnectionTree { node_id },
+            anchor,
+        });
+    }
+
     /// 关闭当前活动菜单。
     pub fn close_active_menu(&mut self) {
         self.active_menu = None;
@@ -2725,6 +2942,18 @@ impl ArgusApp {
                 }
                 entries
             }
+            ActiveMenuKind::ConnectionTree { node_id } => {
+                let (edit_label, delete_label) = if self.config.connections.is_directory(node_id) {
+                    ("编辑目录", "删除目录")
+                } else {
+                    ("编辑链接", "删除链接")
+                };
+                vec![
+                    MenuEntry::new(edit_label, MenuAction::EditConnectionNode { node_id }),
+                    MenuEntry::new(delete_label, MenuAction::DeleteConnectionNode { node_id })
+                        .danger(),
+                ]
+            }
         }
     }
 
@@ -2742,6 +2971,12 @@ impl ArgusApp {
             }
             MenuAction::OpenRuntimeAnalysis { .. } => {
                 self.placeholder_notice = "Runtime 分析需要从界面菜单触发".to_string();
+            }
+            MenuAction::EditConnectionNode { .. } => {
+                self.placeholder_notice = "连接编辑需要从界面菜单触发".to_string();
+            }
+            MenuAction::DeleteConnectionNode { node_id } => {
+                self.request_delete_connection_node(node_id);
             }
         }
 
@@ -2773,6 +3008,14 @@ impl ArgusApp {
             }
             MenuAction::OpenRuntimeAnalysis { source_id } => {
                 self.open_runtime_analysis_tab(source_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::EditConnectionNode { node_id } => {
+                self.open_edit_connection_node_window(node_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::DeleteConnectionNode { node_id } => {
+                self.request_delete_connection_node(node_id);
                 self.close_active_menu();
             }
             other => self.handle_menu_action(other),
@@ -4716,6 +4959,7 @@ impl ArgusApp {
             self.next_jstack_analysis_id = 1;
             self.runtime_analyses.clear();
             self.next_runtime_analysis_id = 1;
+            self.disconnect_all_terminal_sessions();
             self.ensure_log_tab_view_state(self.active_tab_id);
             self.reset_log_text_selection();
             self.log_scrollbar_drag = None;
@@ -4779,6 +5023,7 @@ impl ArgusApp {
         self.retain_reader_for_source(kept_source_id);
         self.retain_jstack_analysis_for_tab_kind(&kept_kind);
         self.retain_runtime_analysis_for_tab_kind(&kept_kind);
+        self.retain_terminal_session_for_tab_kind(&kept_kind);
         self.active_tab_id = tab_id;
         self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
@@ -4812,6 +5057,7 @@ impl ArgusApp {
         self.next_jstack_analysis_id = 1;
         self.runtime_analyses.clear();
         self.next_runtime_analysis_id = 1;
+        self.disconnect_all_terminal_sessions();
         self.ensure_log_tab_view_state(empty_tab_id);
         self.active_tab_id = empty_tab_id;
         self.hovered_tab_id = None;
@@ -5456,6 +5702,11 @@ impl ArgusApp {
                 .get(&analysis_id)
                 .map(|state| format!("Argus / {}", state.title))
                 .unwrap_or_else(|| "Argus / Runtime分析".to_string()),
+            TabKind::SshTerminal { session_id } => self
+                .terminal_sessions
+                .get(&session_id)
+                .map(|state| format!("SSH / {}", state.address))
+                .unwrap_or_else(|| "SSH / 终端".to_string()),
             TabKind::Settings => "Argus / 设置".to_string(),
             TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
             TabKind::Empty => "未选择来源".to_string(),
@@ -5692,6 +5943,7 @@ fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
         TabKind::Empty
         | TabKind::JstackAnalysis { .. }
         | TabKind::RuntimeAnalysis { .. }
+        | TabKind::SshTerminal { .. }
         | TabKind::Settings => None,
     }
 }

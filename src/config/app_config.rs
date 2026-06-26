@@ -2,8 +2,9 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
-//! 主要功能：提供外观、日志加载、日志搜索、编码、缓存和升级设置的默认值、校验和 TOML 序列化结构。
+//! 主要功能：提供外观、日志加载、日志搜索、链接、编码、缓存和升级设置的默认值、校验和 TOML 序列化结构。
 
+use crate::connections::ConnectionConfig;
 use serde::{Deserialize, Serialize};
 
 /// 默认 Jstack 线程名过滤规则，隐藏常见编译线程和 JVM 附加监听线程。
@@ -73,6 +74,9 @@ pub struct AppConfig {
     /// 日志显示配置，保存阅读区和线程分析展示偏好。
     #[serde(default)]
     pub log_display: LogDisplayConfig,
+    /// 链接工作区配置，保存目录树、SSH 链接和受信主机指纹。
+    #[serde(default)]
+    pub connections: ConnectionConfig,
     /// 编码配置，后续日志读取模块会据此选择默认解码策略。
     #[serde(default)]
     pub encoding: EncodingConfig,
@@ -110,6 +114,7 @@ impl AppConfig {
             normalized_inline_text(self.log_display.jstack_thread_name_filters);
         self.log_display.jstack_stack_segment_filters =
             normalized_stack_segment_filter_text(self.log_display.jstack_stack_segment_filters);
+        self.connections = self.connections.normalized();
         self.cache.limit_mb = self.cache.limit_mb.clamp(128, 2048);
         if self.encoding.selected.trim().is_empty() {
             self.encoding.selected = EncodingConfig::default().selected;
@@ -130,6 +135,7 @@ impl Default for AppConfig {
             loader: LoaderConfig::default(),
             log_search: LogSearchConfig::default(),
             log_display: LogDisplayConfig::default(),
+            connections: ConnectionConfig::default(),
             encoding: EncodingConfig::default(),
             cache: CacheConfig::default(),
             upgrade: UpgradeConfig::default(),
@@ -338,6 +344,7 @@ mod tests {
                 jstack_thread_name_filters: " main, Attach Listener ".to_string(),
                 jstack_stack_segment_filters: " java.net.SocketInputStream||read ".to_string(),
             },
+            connections: ConnectionConfig::default(),
             encoding: EncodingConfig {
                 selected: String::new(),
             },

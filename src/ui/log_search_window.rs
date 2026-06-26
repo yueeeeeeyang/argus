@@ -443,6 +443,7 @@ fn render_search_input(
                 selection_range: selection_range_for_input(&input_state),
                 marked_range: input_state.marked_range.clone(),
                 is_pointer_selecting: input_state.selection_drag.is_some(),
+                is_secret: false,
                 size: InputSize::Regular,
                 leading_accessory: Some(InputAccessory {
                     id: "log-search-leading",

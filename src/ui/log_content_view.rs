@@ -29,6 +29,7 @@ use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::jstack_analysis_view;
 use crate::ui::runtime_analysis_view;
 use crate::ui::settings_page;
+use crate::ui::terminal_view;
 use gpui::{
     AnyElement, Context, HighlightStyle, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, SharedString,
@@ -135,9 +136,20 @@ fn render_content_body(app: &ArgusApp, theme: &AppTheme, cx: &mut Context<ArgusA
         TabKind::RuntimeAnalysis { analysis_id } => {
             runtime_analysis_view::render(app, analysis_id, cx).into_any_element()
         }
+        TabKind::SshTerminal { session_id } => {
+            terminal_view::render(app, session_id, cx).into_any_element()
+        }
         TabKind::LogSource { source_id, path } => {
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();
             render_log_source_content(app, theme, tab_id, source_id, &path, cx)
+        }
+        TabKind::Empty if app.workspace == crate::app::Workspace::Connections => {
+            render_empty_state(
+                "请选择 SSH 链接",
+                "左侧链接目录树中选择 SSH 链接后会在此处打开终端。",
+                app,
+                theme,
+            )
         }
         TabKind::Empty => render_empty_state(
             "请选择日志来源",

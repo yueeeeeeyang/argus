@@ -7,6 +7,7 @@
 use std::ops::Range;
 
 use crate::app::ArgusApp;
+use crate::connections::ConnectionNodeId;
 use crate::loader::SourceId;
 use crate::theme::AppTheme;
 use gpui::{
@@ -22,6 +23,8 @@ const TAB_OVERFLOW_MENU_WIDTH: f32 = 220.0;
 const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
 /// 来源树右键菜单宽度，容纳 Jstack 和 Runtime 分析中文动作。
 const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
+/// 链接树右键菜单宽度，容纳编辑和删除动作。
+const CONNECTION_TREE_CONTEXT_MENU_WIDTH: f32 = 132.0;
 /// 菜单项固定行高，供 `uniform_list` 稳定计算滚动范围。
 const MENU_ROW_HEIGHT: f32 = 34.0;
 /// 菜单项水平内边距，和标签页右键菜单保持一致的舒展感。
@@ -47,6 +50,11 @@ pub enum ActiveMenuKind {
     SourceTree {
         /// 被右键点击的来源节点 ID。
         source_id: SourceId,
+    },
+    /// 链接树右键菜单，动作作用于被点击的目录或 SSH 链接。
+    ConnectionTree {
+        /// 被右键点击的连接节点 ID。
+        node_id: ConnectionNodeId,
     },
 }
 
@@ -93,6 +101,16 @@ pub enum MenuAction {
         /// 右键触发分析的来源节点 ID。
         source_id: SourceId,
     },
+    /// 编辑链接目录或 SSH 链接。
+    EditConnectionNode {
+        /// 右键触发编辑的连接节点 ID。
+        node_id: ConnectionNodeId,
+    },
+    /// 删除链接目录或 SSH 链接。
+    DeleteConnectionNode {
+        /// 右键触发删除的连接节点 ID。
+        node_id: ConnectionNodeId,
+    },
 }
 
 impl MenuAction {
@@ -110,6 +128,10 @@ impl MenuAction {
             }
             Self::OpenRuntimeAnalysis { source_id } => {
                 format!("open-runtime-analysis-{source_id}")
+            }
+            Self::EditConnectionNode { node_id } => format!("edit-connection-node-{node_id}"),
+            Self::DeleteConnectionNode { node_id } => {
+                format!("delete-connection-node-{node_id}")
             }
         }
     }
@@ -170,6 +192,7 @@ pub fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl In
         ActiveMenuKind::TabOverflow => TAB_OVERFLOW_MENU_WIDTH,
         ActiveMenuKind::SearchResultsPanel => SEARCH_RESULTS_MENU_WIDTH,
         ActiveMenuKind::SourceTree { .. } => SOURCE_TREE_CONTEXT_MENU_WIDTH,
+        ActiveMenuKind::ConnectionTree { .. } => CONNECTION_TREE_CONTEXT_MENU_WIDTH,
     };
     let menu_height = (entry_count as f32 * MENU_ROW_HEIGHT)
         .min(MENU_MAX_HEIGHT)

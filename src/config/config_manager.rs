@@ -132,6 +132,10 @@ mod tests {
         AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogDisplayConfig,
         LogSearchConfig, UpgradeConfig,
     };
+    use crate::connections::{
+        ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SshLinkConfig,
+        TrustedHostKeyConfig,
+    };
 
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
     fn test_settings_path(name: &str) -> PathBuf {
@@ -203,6 +207,33 @@ mod tests {
                 jstack_thread_name_filters: "Attach Listener,Signal Dispatcher".to_string(),
                 jstack_stack_segment_filters: "Unsafe.park\n\nSocketInputStream\\nread".to_string(),
             },
+            connections: ConnectionConfig {
+                next_id: 3,
+                directories: vec![ConnectionDirectoryConfig {
+                    id: 1,
+                    parent_id: None,
+                    name: "生产环境".to_string(),
+                    expanded: true,
+                }],
+                links: vec![ConnectionLinkConfig {
+                    id: 2,
+                    parent_id: Some(1),
+                    name: "app-01".to_string(),
+                    ssh: SshLinkConfig {
+                        host: "10.0.0.1".to_string(),
+                        port: 22,
+                        username: "deploy".to_string(),
+                        password: "secret".to_string(),
+                        private_key_path: Some("/Users/yueyang/.ssh/id_ed25519".to_string()),
+                        private_key_passphrase: Some("phrase".to_string()),
+                    },
+                }],
+                trusted_hosts: vec![TrustedHostKeyConfig {
+                    host: "10.0.0.1".to_string(),
+                    port: 22,
+                    fingerprint: "SHA256:test".to_string(),
+                }],
+            },
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
             },
@@ -235,6 +266,19 @@ mod tests {
         assert_eq!(
             loaded.log_display.jstack_stack_segment_filters,
             "Unsafe.park\n\nSocketInputStream\\nread"
+        );
+        assert_eq!(loaded.connections.directories[0].name, "生产环境");
+        assert_eq!(loaded.connections.links[0].ssh.password, "secret");
+        assert_eq!(
+            loaded.connections.links[0]
+                .ssh
+                .private_key_passphrase
+                .as_deref(),
+            Some("phrase")
+        );
+        assert_eq!(
+            loaded.connections.trusted_hosts[0].fingerprint,
+            "SHA256:test"
         );
         assert_eq!(loaded.encoding.selected, "GBK");
         assert!(!loaded.cache.enabled);

@@ -849,6 +849,7 @@ fn render_runtime_filter_input(
             selection_range: runtime_filter_input_selection_range(input_state),
             marked_range: input_state.marked_range.clone(),
             is_pointer_selecting: input_state.selection_drag.is_some(),
+            is_secret: false,
             size: InputSize::Compact,
             leading_accessory: Some(InputAccessory {
                 id: runtime_filter_leading_id(input_kind),

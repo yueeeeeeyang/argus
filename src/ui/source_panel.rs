@@ -4,8 +4,8 @@
 //! 作者：Argus 开发团队
 //! 主要功能：展示局部工具区和来源目录树，不访问真实文件系统。
 
-use crate::app::ArgusApp;
-use crate::ui::{dir_tree_panel, toolbar};
+use crate::app::{ArgusApp, Workspace};
+use crate::ui::{connection_tree_panel, dir_tree_panel, toolbar};
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 
 /// 渲染来源侧栏。
@@ -37,7 +37,15 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .px_3()
-                .child(toolbar::render_source_toolbar(app, cx)),
+                .child(if app.workspace == Workspace::Connections {
+                    toolbar::render_connection_toolbar(app, cx)
+                } else {
+                    toolbar::render_source_toolbar(app, cx)
+                }),
         )
-        .child(dir_tree_panel::render(app, cx))
+        .child(if app.workspace == Workspace::Connections {
+            connection_tree_panel::render(app, cx).into_any_element()
+        } else {
+            dir_tree_panel::render(app, cx).into_any_element()
+        })
 }
