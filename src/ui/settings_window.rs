@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-12
 //! 修改日期：2026-06-25
 //! 作者：Argus 开发团队
-//! 主要功能：以无系统标题栏窗口展示关于、外观、日志显示、日志搜索、升级和日志加载设置，并提供 Jstack 线程段过滤大编辑器。
+//! 主要功能：以无系统标题栏窗口展示关于、外观、日志显示、日志搜索和日志加载设置，并提供 Jstack 线程段过滤大编辑器。
 
 use std::sync::Arc;
 
@@ -43,6 +43,8 @@ const SETTINGS_THEME_DROPDOWN_ROW_HEIGHT: f32 = 30.0;
 const SETTINGS_THEME_DROPDOWN_MAX_HEIGHT: f32 = 220.0;
 /// 设置行最小高度，主题菜单使用它在外观分组内部定位。
 const SETTINGS_ROW_MIN_HEIGHT: f32 = 44.0;
+/// 是否在设置窗口展示升级相关入口；当前按产品要求隐藏，底层升级能力保留。
+const SHOW_UPGRADE_SETTINGS_ENTRIES: bool = false;
 /// 主题下拉按钮高度，需和通用下拉框保持一致。
 const SETTINGS_THEME_DROPDOWN_BUTTON_HEIGHT: f32 = 30.0;
 /// 主题下拉菜单与按钮之间的视觉间距。
@@ -423,17 +425,19 @@ fn render_settings_window(
                             ),
                             &theme,
                         ))
-                        .child(settings_section(
-                            "升级",
-                            ArgusIcon::Refresh,
-                            render_upgrade_section(
-                                snapshot,
-                                app_handle,
-                                input_focus_handles,
+                        .when(SHOW_UPGRADE_SETTINGS_ENTRIES, |this| {
+                            this.child(settings_section(
+                                "升级",
+                                ArgusIcon::Refresh,
+                                render_upgrade_section(
+                                    snapshot,
+                                    app_handle,
+                                    input_focus_handles,
+                                    &theme,
+                                ),
                                 &theme,
-                            ),
-                            &theme,
-                        ))
+                            ))
+                        })
                         .child(settings_section(
                             "日志加载",
                             ArgusIcon::FolderPlus,
@@ -727,7 +731,7 @@ fn settings_section(
         .child(content)
 }
 
-/// 渲染关于设置区；版本、平台和手动检查入口放在一起，便于用户确认当前安装状态。
+/// 渲染关于设置区；升级入口当前隐藏，仅保留版本和平台信息。
 fn render_about_section(
     snapshot: &SettingsWindowSnapshot,
     app_handle: &Entity<ArgusApp>,
@@ -749,11 +753,13 @@ fn render_about_section(
             text_value(&snapshot.upgrade_platform_label, theme),
             theme,
         ))
-        .child(setting_row(
-            "检查更新",
-            upgrade_check_control(snapshot, app_handle, &message, theme),
-            theme,
-        ))
+        .when(SHOW_UPGRADE_SETTINGS_ENTRIES, |this| {
+            this.child(setting_row(
+                "检查更新",
+                upgrade_check_control(snapshot, app_handle, &message, theme),
+                theme,
+            ))
+        })
 }
 
 /// 渲染外观设置区。
