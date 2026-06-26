@@ -43,7 +43,8 @@ use crate::runtime_analysis::{
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
 use crate::text_selection::{
-    TextSelectionGranularity, character_count, slice_character_range, word_range_at,
+    TextSelectionGranularity, character_count, replace_character_range, slice_character_range,
+    word_range_at,
 };
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
@@ -56,11 +57,12 @@ use crate::updater::{
     AvailableUpgrade, UpgradeCheckOutcome, UpgradeService, current_platform_arch,
     current_platform_os,
 };
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use gpui::{
     AppContext, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point,
     Render, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
-use gpui::{ListAlignment, ListState, ScrollHandle, ScrollStrategy, UniformListScrollHandle};
+use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 #[cfg(test)]
@@ -303,6 +305,49 @@ pub enum LogSearchInputKind {
     Directory,
 }
 
+/// Runtime 分析页过滤输入框类型。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeFilterInputKind {
+    /// 表格任意关键字过滤。
+    Keyword,
+    /// 用户名模糊过滤。
+    Username,
+    /// 请求开始时间过滤。
+    StartTime,
+    /// 请求结束时间过滤。
+    EndTime,
+}
+
+/// Runtime 日期时间选择器可调整的时间部分。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeDateTimePart {
+    /// 年。
+    Year,
+    /// 月。
+    Month,
+    /// 日。
+    Day,
+    /// 时。
+    Hour,
+    /// 分。
+    Minute,
+    /// 秒。
+    Second,
+}
+
+/// Runtime 日期时间选择器快捷动作。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeDateTimeQuickAction {
+    /// 设置为今天 00:00:00。
+    TodayStart,
+    /// 设置为当前本地时间。
+    Now,
+    /// 设置为今天 23:59:59。
+    TodayEnd,
+    /// 清空当前时间过滤条件。
+    Clear,
+}
+
 /// 应用内所有自绘单行输入框的原生文本输入目标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppTextInputTarget {
@@ -312,6 +357,13 @@ pub enum AppTextInputTarget {
     SourcePickerPath,
     /// 独立日志搜索窗口输入框。
     LogSearch(LogSearchInputKind),
+    /// Runtime 分析页过滤输入框。
+    RuntimeFilter {
+        /// Runtime 分析页 ID。
+        analysis_id: usize,
+        /// 过滤输入框类型。
+        input_kind: RuntimeFilterInputKind,
+    },
     /// 设置窗口快搜关键字输入框。
     SettingsQuickKeywords,
     /// 设置窗口 Jstack 线程名过滤输入框。
@@ -396,6 +448,16 @@ pub struct AppInputFocusHandles {
     pub source_tree_search: FocusHandle,
     /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。
     pub jstack_analysis: FocusHandle,
+    /// Runtime 分析页焦点，用于表格单元格拖选后稳定接收复制快捷键。
+    pub runtime_analysis: FocusHandle,
+    /// Runtime 关键字过滤输入框焦点。
+    pub runtime_filter_keyword: FocusHandle,
+    /// Runtime 用户名过滤输入框焦点。
+    pub runtime_filter_username: FocusHandle,
+    /// Runtime 开始时间过滤输入框焦点。
+    pub runtime_filter_start_time: FocusHandle,
+    /// Runtime 结束时间过滤输入框焦点。
+    pub runtime_filter_end_time: FocusHandle,
 }
 
 impl Default for SettingsTextInputState {
@@ -774,6 +836,32 @@ pub enum RuntimeSortDirection {
     Descending,
 }
 
+/// Runtime SQL 明细收起态固定行高。
+///
+/// 说明：Runtime SQL 表格已固定为单行展示，长 SQL 由单元格内部横向滚动承载；
+/// UI 层的 SQL 行高必须与这里保持一致，才能让虚拟列表滚动条稳定计算范围。
+pub const RUNTIME_SQL_COLLAPSED_ROW_HEIGHT: f32 = 36.0;
+
+/// Runtime 表格滚动条所属表格。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeScrollbarTable {
+    /// 总览表。
+    Summary,
+    /// 请求详情表。
+    Request,
+    /// SQL 明细表。
+    Sql,
+}
+
+/// Runtime 表格滚动条拖拽状态。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeScrollbarDrag {
+    /// 当前被拖拽的表格。
+    pub table: RuntimeScrollbarTable,
+    /// 鼠标按下位置相对滑块顶部的偏移。
+    pub cursor_offset: Pixels,
+}
+
 impl RuntimeSortDirection {
     /// 返回切换后的排序方向。
     pub fn toggled(self) -> Self {
@@ -860,18 +948,139 @@ pub struct RuntimeAnalysisState {
     pub sql_sort_key: RuntimeSqlSortKey,
     /// SQL 明细表排序方向。
     pub sql_sort_direction: RuntimeSortDirection,
-    /// 已展开完整 SQL 文本的稳定行 key。
-    pub expanded_sql_rows: BTreeSet<String>,
+    /// 任意关键字过滤输入框状态。
+    pub filter_keyword_input: SettingsTextInputState,
+    /// 用户名过滤输入框状态。
+    pub filter_username_input: SettingsTextInputState,
+    /// 请求开始时间过滤输入框状态。
+    pub filter_start_time_input: SettingsTextInputState,
+    /// 请求结束时间过滤输入框状态。
+    pub filter_end_time_input: SettingsTextInputState,
+    /// 当前展开的时间选择器输入框；为空表示没有打开时间面板。
+    pub open_time_picker: Option<RuntimeFilterInputKind>,
+    /// 当前 Runtime 表格单元格中的文本选区。
+    pub cell_selection: Option<RuntimeTableCellSelection>,
+    /// 当前 Runtime 表格单元格拖拽状态。
+    pub cell_selection_drag: Option<RuntimeTableCellSelectionDrag>,
+    /// 当前悬浮的 Runtime SQL 文本单元格；用于只在该单元格末尾展示更多入口。
+    pub hovered_sql_cell: Option<RuntimeSqlCellKey>,
+    /// 当前打开的 Runtime SQL 完整文本弹窗。
+    pub sql_text_dialog: Option<RuntimeSqlTextDialog>,
     /// 总览表滚动句柄。
     pub summary_scroll: UniformListScrollHandle,
     /// 请求明细表滚动句柄。
     pub request_scroll: UniformListScrollHandle,
     /// SQL 明细表滚动句柄。
     pub sql_scroll: UniformListScrollHandle,
-    /// SQL 明细表可变行高列表状态；展开 SQL 后需要重新测量对应行高。
-    pub sql_list: ListState,
+    /// 当前 Runtime 表格滚动条拖拽状态。
+    pub scrollbar_drag: Option<RuntimeScrollbarDrag>,
     /// 当前任务状态。
     pub task_state: RuntimeAnalysisTaskState,
+}
+
+/// Runtime SQL 文本单元格身份。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeSqlCellKey {
+    /// 请求记录在分析结果中的稳定索引。
+    pub request_index: usize,
+    /// SQL 记录在当前请求中的稳定索引。
+    pub sql_index: usize,
+}
+
+/// Runtime SQL 完整文本弹窗状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSqlTextDialog {
+    /// 请求地址。
+    pub request_path: String,
+    /// 请求时间展示文本。
+    pub request_time_label: String,
+    /// 用户名展示文本。
+    pub username: String,
+    /// SQL 原文，保留解析结果中的换行和缩进。
+    pub sql_text: String,
+    /// 当前 SQL 弹窗正文选区。
+    pub selection: Option<RuntimeSqlTextSelection>,
+    /// 当前 SQL 弹窗正文拖拽状态。
+    pub selection_drag: Option<RuntimeSqlTextSelectionDrag>,
+}
+
+/// Runtime SQL 弹窗正文中的文本位置，使用行号和字符列表达。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeSqlTextPosition {
+    /// 0 基 SQL 行号。
+    pub line_index: usize,
+    /// 行内字符列，按 Unicode 标量值计数。
+    pub column: usize,
+}
+
+/// Runtime SQL 弹窗正文选区，支持跨行复制。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSqlTextSelection {
+    /// 鼠标按下时的选区锚点。
+    pub anchor: RuntimeSqlTextPosition,
+    /// 当前拖拽到的焦点位置。
+    pub focus: RuntimeSqlTextPosition,
+}
+
+impl RuntimeSqlTextSelection {
+    /// 返回选区是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.focus
+    }
+
+    /// 返回按文档顺序排列后的起止位置。
+    pub fn normalized(&self) -> (RuntimeSqlTextPosition, RuntimeSqlTextPosition) {
+        if runtime_sql_text_position_le(self.anchor, self.focus) {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+}
+
+/// Runtime SQL 弹窗正文拖拽选择状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSqlTextSelectionDrag {
+    /// 鼠标按下时形成的基础选区。
+    pub anchor_range: RuntimeSqlTextSelection,
+    /// 当前拖拽粒度，决定后续移动时按字符、词或整行扩展。
+    pub granularity: TextSelectionGranularity,
+}
+
+/// Runtime 表格单元格的单行文本选区。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTableCellSelection {
+    /// 单元格稳定 key，包含当前分析页内的层级、行和列身份。
+    pub cell_key: String,
+    /// 当前单元格完整文本；复制时从该文本中截取选区。
+    pub text: String,
+    /// 选区锚点字符列。
+    pub anchor: usize,
+    /// 选区焦点字符列。
+    pub focus: usize,
+}
+
+impl RuntimeTableCellSelection {
+    /// 返回按字符顺序归一化后的非空选区。
+    pub fn normalized_range(&self) -> Option<Range<usize>> {
+        let text_length = character_count(&self.text);
+        let start = self.anchor.min(self.focus).min(text_length);
+        let end = self.anchor.max(self.focus).min(text_length);
+        (start < end).then_some(start..end)
+    }
+}
+
+/// Runtime 表格单元格拖拽选择状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTableCellSelectionDrag {
+    /// 本次拖拽起始的单元格 key。
+    pub cell_key: String,
+    /// 本次拖拽起始的单元格完整文本。
+    pub text: String,
+    /// 鼠标按下时按点击次数扩展后的基础字符范围。
+    pub anchor_range: Range<usize>,
+    /// 当前选择粒度，单击按字符，双击及以上按整格内容。
+    pub granularity: TextSelectionGranularity,
 }
 
 /// Jstack 分析矩阵左侧线程名的单行文本选区。
@@ -1093,6 +1302,282 @@ fn jstack_thread_name_range_for_granularity(
             word_range_at(thread_name, cursor).unwrap_or(cursor..cursor)
         }
         TextSelectionGranularity::Line => 0..text_length,
+    }
+}
+
+/// 根据点击次数返回 Runtime 表格单元格文本的字符选区。
+///
+/// 参数说明：
+/// - `text`：当前单元格完整文本。
+/// - `character_index`：命中的字符列。
+/// - `granularity`：选择粒度；Runtime 表格要求双击选中整格内容。
+///
+/// 返回值：按字符索引表示的选区范围。
+fn runtime_cell_range_for_granularity(
+    text: &str,
+    character_index: usize,
+    granularity: TextSelectionGranularity,
+) -> Range<usize> {
+    let text_length = character_count(text);
+    let cursor = character_index.min(text_length);
+    match granularity {
+        TextSelectionGranularity::Character => cursor..cursor,
+        TextSelectionGranularity::Word | TextSelectionGranularity::Line => 0..text_length,
+    }
+}
+
+/// 判断 Runtime SQL 弹窗文本位置是否按文档顺序不晚于另一个位置。
+fn runtime_sql_text_position_le(
+    left: RuntimeSqlTextPosition,
+    right: RuntimeSqlTextPosition,
+) -> bool {
+    left.line_index < right.line_index
+        || (left.line_index == right.line_index && left.column <= right.column)
+}
+
+/// 按点击粒度生成 Runtime SQL 弹窗正文选区。
+fn runtime_sql_text_range_for_granularity(
+    line_index: usize,
+    line: &str,
+    character_index: usize,
+    granularity: TextSelectionGranularity,
+) -> RuntimeSqlTextSelection {
+    let line_length = character_count(line);
+    let cursor = character_index.min(line_length);
+    let range = match granularity {
+        TextSelectionGranularity::Character => cursor..cursor,
+        TextSelectionGranularity::Word => word_range_at(line, cursor).unwrap_or(cursor..cursor),
+        TextSelectionGranularity::Line => 0..line_length,
+    };
+
+    RuntimeSqlTextSelection {
+        anchor: RuntimeSqlTextPosition {
+            line_index,
+            column: range.start,
+        },
+        focus: RuntimeSqlTextPosition {
+            line_index,
+            column: range.end,
+        },
+    }
+}
+
+/// 将 SQL 原文按弹窗展示规则拆成行，保留空行和缩进。
+fn runtime_sql_text_lines(sql_text: &str) -> Vec<String> {
+    sql_text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// 从 Runtime SQL 弹窗行集合中提取当前选区文本，保留跨行换行符。
+fn selected_runtime_sql_text_from_lines(
+    lines: &[String],
+    selection: &RuntimeSqlTextSelection,
+) -> Option<String> {
+    if selection.is_empty() || lines.is_empty() {
+        return None;
+    }
+
+    let (start, end) = selection.normalized();
+    if start.line_index >= lines.len() {
+        return None;
+    }
+
+    let end_line = end.line_index.min(lines.len().saturating_sub(1));
+    let mut selected = String::new();
+    for line_index in start.line_index..=end_line {
+        if line_index > start.line_index {
+            selected.push('\n');
+        }
+        let line = &lines[line_index];
+        let line_character_count = character_count(line);
+        let start_column = if line_index == start.line_index {
+            start.column.min(line_character_count)
+        } else {
+            0
+        };
+        let end_column = if line_index == end.line_index {
+            end.column.min(line_character_count)
+        } else {
+            line_character_count
+        };
+        if start_column < end_column {
+            selected.push_str(&slice_character_range(line, start_column..end_column));
+        }
+    }
+
+    (!selected.is_empty()).then_some(selected)
+}
+
+/// 清理 Runtime 分析页所有过滤输入框焦点态。
+fn clear_runtime_filter_inputs_focus(state: &mut RuntimeAnalysisState) {
+    clear_runtime_filter_input_focus(&mut state.filter_keyword_input);
+    clear_runtime_filter_input_focus(&mut state.filter_username_input);
+    clear_runtime_filter_input_focus(&mut state.filter_start_time_input);
+    clear_runtime_filter_input_focus(&mut state.filter_end_time_input);
+    state.open_time_picker = None;
+}
+
+/// 清理单个 Runtime 过滤输入框焦点态，保留文本和光标位置。
+fn clear_runtime_filter_input_focus(input: &mut SettingsTextInputState) {
+    input.is_focused = false;
+    input.selection_anchor = None;
+    input.marked_range = None;
+    input.selection_drag = None;
+}
+
+/// 返回 Runtime 过滤输入框规范化后的非空选区。
+fn normalized_runtime_filter_input_selection_range(
+    input: &SettingsTextInputState,
+) -> Option<Range<usize>> {
+    let anchor = input.selection_anchor?;
+    if anchor == input.cursor {
+        return None;
+    }
+    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+}
+
+/// 根据鼠标选择粒度返回 Runtime 过滤输入框目标字符范围。
+fn runtime_filter_input_range_for_granularity(
+    input: &SettingsTextInputState,
+    character_index: usize,
+    granularity: TextSelectionGranularity,
+) -> Range<usize> {
+    let text_length = character_count(&input.value);
+    let cursor = character_index.min(text_length);
+    match granularity {
+        TextSelectionGranularity::Character => cursor..cursor,
+        TextSelectionGranularity::Word => {
+            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
+        }
+        TextSelectionGranularity::Line => 0..text_length,
+    }
+}
+
+/// 解析 Runtime 时间过滤输入，支持毫秒时间戳和常见本地日期时间格式。
+fn parse_runtime_filter_datetime_value(raw: &str, is_end: bool) -> Option<chrono::DateTime<Local>> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(timestamp_ms) = value.parse::<i64>() {
+        return Local.timestamp_millis_opt(timestamp_ms).single();
+    }
+
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.3f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format)
+            && let Some(local_datetime) = Local.from_local_datetime(&datetime).single()
+        {
+            return Some(local_datetime);
+        }
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let datetime = if is_end {
+            date.and_hms_milli_opt(23, 59, 59, 999)
+        } else {
+            date.and_hms_milli_opt(0, 0, 0, 0)
+        }?;
+        return Local.from_local_datetime(&datetime).single();
+    }
+
+    None
+}
+
+/// 把 Runtime 时间过滤值格式化为用户可读且可再次解析的本地时间。
+fn format_runtime_filter_datetime_value(datetime: chrono::DateTime<Local>) -> String {
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 返回指定年月的最大日期，用于调整年月时夹住当前日。
+fn runtime_days_in_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let Some(next_month_start) = NaiveDate::from_ymd_opt(next_year, next_month, 1) else {
+        return 28;
+    };
+    next_month_start
+        .pred_opt()
+        .map(|date| date.day())
+        .unwrap_or(28)
+}
+
+/// 按年月调整 Runtime 时间，保留当前时分秒并处理月末越界。
+fn adjust_runtime_datetime_year_month(
+    datetime: chrono::DateTime<Local>,
+    part: RuntimeDateTimePart,
+    delta: i32,
+) -> chrono::DateTime<Local> {
+    let mut year = datetime.year();
+    let mut month = datetime.month() as i32;
+    match part {
+        RuntimeDateTimePart::Year => year += delta,
+        RuntimeDateTimePart::Month => {
+            let month_index = year * 12 + (month - 1) + delta;
+            year = month_index.div_euclid(12);
+            month = month_index.rem_euclid(12) + 1;
+        }
+        RuntimeDateTimePart::Day
+        | RuntimeDateTimePart::Hour
+        | RuntimeDateTimePart::Minute
+        | RuntimeDateTimePart::Second => return datetime,
+    }
+
+    let month = month.clamp(1, 12) as u32;
+    let day = datetime.day().min(runtime_days_in_month(year, month));
+    let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+        return datetime;
+    };
+    let Some(naive) = date.and_hms_opt(datetime.hour(), datetime.minute(), datetime.second())
+    else {
+        return datetime;
+    };
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .unwrap_or(datetime)
+}
+
+/// 按指定部分调整 Runtime 时间过滤值。
+fn adjust_runtime_datetime_part(
+    datetime: chrono::DateTime<Local>,
+    part: RuntimeDateTimePart,
+    delta: i32,
+) -> chrono::DateTime<Local> {
+    match part {
+        RuntimeDateTimePart::Year | RuntimeDateTimePart::Month => {
+            adjust_runtime_datetime_year_month(datetime, part, delta)
+        }
+        RuntimeDateTimePart::Day => datetime + chrono::Duration::days(delta as i64),
+        RuntimeDateTimePart::Hour => datetime + chrono::Duration::hours(delta as i64),
+        RuntimeDateTimePart::Minute => datetime + chrono::Duration::minutes(delta as i64),
+        RuntimeDateTimePart::Second => datetime + chrono::Duration::seconds(delta as i64),
+    }
+}
+
+/// 返回 Runtime 时间过滤输入框在空值时使用的默认时间。
+fn default_runtime_filter_datetime(is_end: bool) -> chrono::DateTime<Local> {
+    let now = Local::now();
+    if is_end {
+        let Some(naive) = now.date_naive().and_hms_opt(23, 59, 59) else {
+            return now;
+        };
+        Local.from_local_datetime(&naive).single().unwrap_or(now)
+    } else {
+        let Some(naive) = now.date_naive().and_hms_opt(0, 0, 0) else {
+            return now;
+        };
+        Local.from_local_datetime(&naive).single().unwrap_or(now)
     }
 }
 
@@ -1471,6 +1956,11 @@ impl ArgusApp {
                 root: cx.focus_handle(),
                 source_tree_search: cx.focus_handle(),
                 jstack_analysis: cx.focus_handle(),
+                runtime_analysis: cx.focus_handle(),
+                runtime_filter_keyword: cx.focus_handle(),
+                runtime_filter_username: cx.focus_handle(),
+                runtime_filter_start_time: cx.focus_handle(),
+                runtime_filter_end_time: cx.focus_handle(),
             });
         }
         self.input_focus_handles
@@ -3030,11 +3520,19 @@ impl ArgusApp {
                 request_sort_direction: RuntimeSortDirection::Descending,
                 sql_sort_key: RuntimeSqlSortKey::ExecuteDuration,
                 sql_sort_direction: RuntimeSortDirection::Descending,
-                expanded_sql_rows: BTreeSet::new(),
+                filter_keyword_input: SettingsTextInputState::default(),
+                filter_username_input: SettingsTextInputState::default(),
+                filter_start_time_input: SettingsTextInputState::default(),
+                filter_end_time_input: SettingsTextInputState::default(),
+                open_time_picker: None,
+                cell_selection: None,
+                cell_selection_drag: None,
+                hovered_sql_cell: None,
+                sql_text_dialog: None,
                 summary_scroll: UniformListScrollHandle::new(),
                 request_scroll: UniformListScrollHandle::new(),
                 sql_scroll: UniformListScrollHandle::new(),
-                sql_list: ListState::new(0, ListAlignment::Top, px(240.0)),
+                scrollbar_drag: None,
                 task_state: RuntimeAnalysisTaskState::Loading {
                     message: "正在分析 Runtime 日志文件".to_string(),
                 },
@@ -3181,6 +3679,10 @@ impl ArgusApp {
             state.summary_sort_key = sort_key;
             state.summary_sort_direction = default_runtime_summary_sort_direction(sort_key);
         }
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
         state.summary_scroll = UniformListScrollHandle::new();
     }
 
@@ -3200,6 +3702,10 @@ impl ArgusApp {
             state.request_sort_key = sort_key;
             state.request_sort_direction = default_runtime_request_sort_direction(sort_key);
         }
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
         state.request_scroll = UniformListScrollHandle::new();
     }
 
@@ -3215,8 +3721,10 @@ impl ArgusApp {
             state.sql_sort_key = sort_key;
             state.sql_sort_direction = default_runtime_sql_sort_direction(sort_key);
         }
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
         state.sql_scroll = UniformListScrollHandle::new();
-        state.sql_list.reset(0);
     }
 
     /// 从 Runtime 总览进入指定请求地址的详情页。
@@ -3229,7 +3737,10 @@ impl ArgusApp {
             request_path: request_path.clone(),
         };
         state.request_scroll = UniformListScrollHandle::new();
-        state.expanded_sql_rows.clear();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
         self.placeholder_notice = format!("查看 Runtime 请求详情：{request_path}");
     }
 
@@ -3249,8 +3760,10 @@ impl ArgusApp {
             request_index,
         };
         state.sql_scroll = UniformListScrollHandle::new();
-        state.sql_list.reset(0);
-        state.expanded_sql_rows.clear();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
         self.placeholder_notice = "查看 Runtime SQL 列表".to_string();
     }
 
@@ -3262,7 +3775,10 @@ impl ArgusApp {
         };
         state.view = RuntimeAnalysisView::Summary;
         state.summary_scroll = UniformListScrollHandle::new();
-        state.expanded_sql_rows.clear();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
     }
 
     /// 从 Runtime SQL 列表返回请求详情页。
@@ -3273,26 +3789,903 @@ impl ArgusApp {
         };
         state.view = RuntimeAnalysisView::RequestDetails { request_path };
         state.request_scroll = UniformListScrollHandle::new();
-        state.expanded_sql_rows.clear();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
     }
 
-    /// 展开或收起 Runtime SQL 文本完整内容。
-    pub fn toggle_runtime_sql_row_expanded(
+    /// 更新 Runtime SQL 文本单元格悬浮状态。
+    ///
+    /// 返回值：状态是否发生变化，需要触发界面刷新。
+    pub fn set_runtime_sql_cell_hovered(
         &mut self,
         analysis_id: usize,
         request_index: usize,
         sql_index: usize,
+        is_hovered: bool,
+    ) -> bool {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return false;
+        };
+        let cell_key = RuntimeSqlCellKey {
+            request_index,
+            sql_index,
+        };
+        if is_hovered {
+            if state.hovered_sql_cell == Some(cell_key) {
+                return false;
+            }
+            state.hovered_sql_cell = Some(cell_key);
+            return true;
+        }
+        if state.hovered_sql_cell == Some(cell_key) {
+            state.hovered_sql_cell = None;
+            return true;
+        }
+        false
+    }
+
+    /// 打开 Runtime SQL 完整文本弹窗，弹窗内容保留 SQL 原始换行和缩进。
+    pub fn open_runtime_sql_text_dialog(
+        &mut self,
+        analysis_id: usize,
+        mut dialog: RuntimeSqlTextDialog,
     ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
         };
-        let key = runtime_sql_row_key(request_index, sql_index);
-        if !state.expanded_sql_rows.insert(key.clone()) {
-            state.expanded_sql_rows.remove(&key);
+        dialog.selection = None;
+        dialog.selection_drag = None;
+        state.sql_text_dialog = Some(dialog);
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+    }
+
+    /// 关闭 Runtime SQL 完整文本弹窗。
+    pub fn close_runtime_sql_text_dialog(&mut self, analysis_id: usize) -> bool {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return false;
+        };
+        state.sql_text_dialog.take().is_some()
+    }
+
+    /// 清理 Runtime SQL 完整文本弹窗中的正文选区。
+    pub fn clear_runtime_sql_text_selection(&mut self, analysis_id: usize) -> bool {
+        let Some(dialog) = self
+            .runtime_analyses
+            .get_mut(&analysis_id)
+            .and_then(|state| state.sql_text_dialog.as_mut())
+        else {
+            return false;
+        };
+        let had_selection = dialog.selection.take().is_some();
+        let had_drag = dialog.selection_drag.take().is_some();
+        had_selection || had_drag
+    }
+
+    /// 开始在 Runtime SQL 完整文本弹窗中选择文本。
+    pub fn begin_runtime_sql_text_selection(
+        &mut self,
+        analysis_id: usize,
+        line_index: usize,
+        line: String,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        let Some(dialog) = self
+            .runtime_analyses
+            .get_mut(&analysis_id)
+            .and_then(|state| state.sql_text_dialog.as_mut())
+        else {
+            return;
+        };
+
+        let anchor_range =
+            runtime_sql_text_range_for_granularity(line_index, &line, character_index, granularity);
+        dialog.selection = Some(anchor_range.clone());
+        dialog.selection_drag = Some(RuntimeSqlTextSelectionDrag {
+            anchor_range,
+            granularity,
+        });
+    }
+
+    /// 拖拽更新 Runtime SQL 完整文本弹窗中的文本选区。
+    pub fn update_runtime_sql_text_selection(
+        &mut self,
+        analysis_id: usize,
+        line_index: usize,
+        line: String,
+        character_index: usize,
+    ) -> bool {
+        let Some(dialog) = self
+            .runtime_analyses
+            .get_mut(&analysis_id)
+            .and_then(|state| state.sql_text_dialog.as_mut())
+        else {
+            return false;
+        };
+        let Some(drag) = dialog.selection_drag.clone() else {
+            return false;
+        };
+
+        let focus_range = runtime_sql_text_range_for_granularity(
+            line_index,
+            &line,
+            character_index,
+            drag.granularity,
+        );
+        let anchor_start = drag.anchor_range.anchor;
+        let anchor_end = drag.anchor_range.focus;
+        let focus_start = focus_range.anchor;
+        let focus_end = focus_range.focus;
+        dialog.selection = Some(RuntimeSqlTextSelection {
+            anchor: if runtime_sql_text_position_le(anchor_start, focus_start) {
+                anchor_start
+            } else {
+                focus_start
+            },
+            focus: if runtime_sql_text_position_le(anchor_end, focus_end) {
+                focus_end
+            } else {
+                anchor_end
+            },
+        });
+        true
+    }
+
+    /// 结束 Runtime SQL 完整文本弹窗文本选择；空选区会被清理。
+    pub fn finish_runtime_sql_text_selection(&mut self, analysis_id: usize) -> bool {
+        let Some(dialog) = self
+            .runtime_analyses
+            .get_mut(&analysis_id)
+            .and_then(|state| state.sql_text_dialog.as_mut())
+        else {
+            return false;
+        };
+        let had_drag = dialog.selection_drag.take().is_some();
+        if dialog
+            .selection
+            .as_ref()
+            .map_or(true, RuntimeSqlTextSelection::is_empty)
+        {
+            dialog.selection = None;
         }
-        let item_count = state.sql_list.item_count();
-        state.sql_list.reset(item_count);
+        had_drag
+    }
+
+    /// 复制 Runtime SQL 完整文本弹窗中的当前选区。
+    ///
+    /// 返回值：是否存在可复制的 SQL 弹窗选区。
+    pub fn copy_runtime_sql_text_selection(
+        &mut self,
+        analysis_id: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(selected_text) = self
+            .runtime_analyses
+            .get(&analysis_id)
+            .and_then(|state| state.sql_text_dialog.as_ref())
+            .and_then(|dialog| {
+                let selection = dialog.selection.as_ref()?;
+                let lines = runtime_sql_text_lines(&dialog.sql_text);
+                selected_runtime_sql_text_from_lines(&lines, selection)
+            })
+        else {
+            return false;
+        };
+
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
+        self.placeholder_notice = format!("已复制 SQL 文本：{selected_text}");
+        true
+    }
+
+    /// 开始在 Runtime 表格单元格中选择文本。
+    ///
+    /// 参数说明：
+    /// - `analysis_id`：Runtime 分析页 ID。
+    /// - `cell_key`：单元格稳定 key。
+    /// - `text`：单元格完整文本。
+    /// - `character_index`：鼠标按下位置命中的字符列。
+    /// - `granularity`：按点击次数决定的选择粒度。
+    pub fn begin_runtime_cell_selection(
+        &mut self,
+        analysis_id: usize,
+        cell_key: String,
+        text: String,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+
+        let anchor_range = runtime_cell_range_for_granularity(&text, character_index, granularity);
+        state.cell_selection = Some(RuntimeTableCellSelection {
+            cell_key: cell_key.clone(),
+            text: text.clone(),
+            anchor: anchor_range.start,
+            focus: anchor_range.end,
+        });
+        state.cell_selection_drag = Some(RuntimeTableCellSelectionDrag {
+            cell_key,
+            text,
+            anchor_range,
+            granularity,
+        });
+    }
+
+    /// 拖拽更新 Runtime 表格单元格中的文本选区。
+    ///
+    /// 返回值：本次拖拽是否命中当前分析页和当前单元格。
+    pub fn update_runtime_cell_selection(
+        &mut self,
+        analysis_id: usize,
+        cell_key: &str,
+        character_index: usize,
+    ) -> bool {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return false;
+        };
+        let Some(drag) = state.cell_selection_drag.clone() else {
+            return false;
+        };
+        if drag.cell_key != cell_key {
+            return false;
+        }
+
+        let focus_range =
+            runtime_cell_range_for_granularity(&drag.text, character_index, drag.granularity);
+        state.cell_selection = Some(RuntimeTableCellSelection {
+            cell_key: drag.cell_key,
+            text: drag.text,
+            anchor: drag.anchor_range.start.min(focus_range.start),
+            focus: drag.anchor_range.end.max(focus_range.end),
+        });
+        true
+    }
+
+    /// 结束 Runtime 单元格文本选择；如果没有选中字符则清理空选区。
+    ///
+    /// 返回值：当前分析页是否存在需要结束的拖拽状态。
+    pub fn finish_runtime_cell_selection(&mut self, analysis_id: usize) -> bool {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return false;
+        };
+        let had_drag = state.cell_selection_drag.take().is_some();
+        if state
+            .cell_selection
+            .as_ref()
+            .and_then(RuntimeTableCellSelection::normalized_range)
+            .is_none()
+        {
+            state.cell_selection = None;
+        }
+        had_drag
+    }
+
+    /// 复制当前 Runtime 分析页表格单元格中拖选的文本。
+    pub fn copy_selected_runtime_cell(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+        let Some((cell_text, range)) = self
+            .runtime_analyses
+            .get(&analysis_id)
+            .and_then(|state| state.cell_selection.as_ref())
+            .and_then(|selection| {
+                selection
+                    .normalized_range()
+                    .map(|range| (selection.text.clone(), range))
+            })
+        else {
+            self.placeholder_notice = "请先拖选一个 Runtime 表格单元格内容".to_string();
+            return;
+        };
+
+        let selected_text = slice_character_range(&cell_text, range);
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
+        self.placeholder_notice = format!("已复制 Runtime 单元格内容：{selected_text}");
+    }
+
+    /// 清理全部 Runtime 分析页的表格单元格文本选区。
+    ///
+    /// 返回值：是否确实清理了已有选区或拖拽状态。
+    pub fn clear_runtime_cell_selection(&mut self) -> bool {
+        let mut changed = false;
+        for state in self.runtime_analyses.values_mut() {
+            if state.cell_selection.take().is_some() {
+                changed = true;
+            }
+            if state.cell_selection_drag.take().is_some() {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// 打开 Runtime 时间选择器，并关闭其它 Runtime 页签中已展开的时间面板。
+    pub fn open_runtime_time_picker(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) {
+        if !matches!(
+            input_kind,
+            RuntimeFilterInputKind::StartTime | RuntimeFilterInputKind::EndTime
+        ) {
+            return;
+        }
+        for state in self.runtime_analyses.values_mut() {
+            state.open_time_picker = None;
+        }
+        if let Some(state) = self.runtime_analyses.get_mut(&analysis_id) {
+            state.open_time_picker = Some(input_kind);
+        }
+    }
+
+    /// 关闭指定 Runtime 分析页的时间选择器。
+    ///
+    /// 返回值：是否关闭了一个已打开的面板。
+    pub fn close_runtime_time_picker(&mut self, analysis_id: usize) -> bool {
+        self.runtime_analyses
+            .get_mut(&analysis_id)
+            .and_then(|state| state.open_time_picker.take())
+            .is_some()
+    }
+
+    /// 使用快捷动作设置 Runtime 时间过滤输入框。
+    pub fn apply_runtime_time_picker_quick_action(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        action: RuntimeDateTimeQuickAction,
+    ) {
+        let is_end = input_kind == RuntimeFilterInputKind::EndTime;
+        if action == RuntimeDateTimeQuickAction::Clear {
+            self.clear_runtime_filter_input(analysis_id, input_kind);
+            return;
+        }
+
+        let now = Local::now();
+        let datetime = match action {
+            RuntimeDateTimeQuickAction::TodayStart => now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .and_then(|datetime| Local.from_local_datetime(&datetime).single())
+                .unwrap_or(now),
+            RuntimeDateTimeQuickAction::Now => now,
+            RuntimeDateTimeQuickAction::TodayEnd => now
+                .date_naive()
+                .and_hms_opt(23, 59, 59)
+                .and_then(|datetime| Local.from_local_datetime(&datetime).single())
+                .unwrap_or(now),
+            RuntimeDateTimeQuickAction::Clear => now,
+        };
+        self.set_runtime_filter_time_value(analysis_id, input_kind, datetime, is_end);
+    }
+
+    /// 按日期时间组件的步进按钮调整 Runtime 时间过滤输入框。
+    pub fn adjust_runtime_filter_time(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        part: RuntimeDateTimePart,
+        delta: i32,
+    ) {
+        let is_end = input_kind == RuntimeFilterInputKind::EndTime;
+        let current = self
+            .runtime_filter_input(analysis_id, input_kind)
+            .and_then(|input| parse_runtime_filter_datetime_value(&input.value, is_end))
+            .unwrap_or_else(|| default_runtime_filter_datetime(is_end));
+        let adjusted = adjust_runtime_datetime_part(current, part, delta);
+        self.set_runtime_filter_time_value(analysis_id, input_kind, adjusted, is_end);
+    }
+
+    /// 设置 Runtime 时间过滤输入框的日期部分，并保留当前时分秒。
+    ///
+    /// 参数说明：
+    /// - `analysis_id`：Runtime 分析页 ID。
+    /// - `input_kind`：开始时间或结束时间输入框。
+    /// - `year`、`month`、`day`：日历面板中选中的本地日期。
+    ///
+    /// 说明：常见 Web 日期时间选择器在点选日期后仍保留时间选择能力；
+    /// 因此这里只更新日期，不关闭浮层，方便用户继续微调时分秒。
+    pub fn set_runtime_filter_date(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) {
+        if !matches!(
+            input_kind,
+            RuntimeFilterInputKind::StartTime | RuntimeFilterInputKind::EndTime
+        ) {
+            return;
+        }
+        let is_end = input_kind == RuntimeFilterInputKind::EndTime;
+        let current = self
+            .runtime_filter_input(analysis_id, input_kind)
+            .and_then(|input| parse_runtime_filter_datetime_value(&input.value, is_end))
+            .unwrap_or_else(|| default_runtime_filter_datetime(is_end));
+        let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+            return;
+        };
+        let Some(naive) = date.and_hms_opt(current.hour(), current.minute(), current.second())
+        else {
+            return;
+        };
+        let datetime = Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap_or(current);
+        self.set_runtime_filter_time_value(analysis_id, input_kind, datetime, is_end);
+    }
+
+    /// 写入 Runtime 时间过滤输入框，并触发过滤结果刷新。
+    fn set_runtime_filter_time_value(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        datetime: chrono::DateTime<Local>,
+        is_end: bool,
+    ) {
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        input.value = format_runtime_filter_datetime_value(datetime);
+        input.cursor = character_count(&input.value);
+        input.selection_anchor = None;
+        input.marked_range = None;
+        input.selection_drag = None;
+        input.is_focused = true;
+        if let Some(state) = self.runtime_analyses.get_mut(&analysis_id) {
+            state.open_time_picker = Some(if is_end {
+                RuntimeFilterInputKind::EndTime
+            } else {
+                RuntimeFilterInputKind::StartTime
+            });
+        }
+        self.after_runtime_filter_changed(analysis_id);
+    }
+
+    /// 聚焦 Runtime 过滤输入框，并清理其它 Runtime 过滤输入框的临时输入法状态。
+    pub fn focus_runtime_filter_input(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) {
+        for state in self.runtime_analyses.values_mut() {
+            clear_runtime_filter_inputs_focus(state);
+        }
+        if let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) {
+            input.is_focused = true;
+            input.marked_range = None;
+        }
+    }
+
+    /// 清空 Runtime 过滤输入框，并立即刷新当前分析页过滤结果。
+    pub fn clear_runtime_filter_input(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) {
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        input.value.clear();
+        input.cursor = 0;
+        input.selection_anchor = None;
+        input.marked_range = None;
+        input.selection_drag = None;
+        input.is_focused = true;
+        self.after_runtime_filter_changed(analysis_id);
+    }
+
+    /// 处理 Runtime 过滤输入框键盘事件。
+    pub fn handle_runtime_filter_input_key(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
+        let key = keystroke.key.to_lowercase();
+        if keystroke.modifiers.secondary() {
+            match key.as_str() {
+                "a" => self.select_all_runtime_filter_input(analysis_id, input_kind),
+                "c" => self.copy_runtime_filter_input_selection(analysis_id, input_kind, cx),
+                "x" => self.cut_runtime_filter_input_selection(analysis_id, input_kind, cx),
+                "v" => self.paste_runtime_filter_input_clipboard(analysis_id, input_kind, cx),
+                "left" | "arrowleft" => self.move_runtime_filter_input_cursor(
+                    analysis_id,
+                    input_kind,
+                    0,
+                    keystroke.modifiers.shift,
+                ),
+                "right" | "arrowright" => {
+                    let end = self
+                        .runtime_filter_input(analysis_id, input_kind)
+                        .map(|input| character_count(&input.value))
+                        .unwrap_or_default();
+                    self.move_runtime_filter_input_cursor(
+                        analysis_id,
+                        input_kind,
+                        end,
+                        keystroke.modifiers.shift,
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.as_str() {
+            "backspace" => self.delete_runtime_filter_input_backward(analysis_id, input_kind),
+            "delete" => self.delete_runtime_filter_input_forward(analysis_id, input_kind),
+            "left" | "arrowleft" => self.move_runtime_filter_input_left(
+                analysis_id,
+                input_kind,
+                keystroke.modifiers.shift,
+            ),
+            "right" | "arrowright" => self.move_runtime_filter_input_right(
+                analysis_id,
+                input_kind,
+                keystroke.modifiers.shift,
+            ),
+            "home" => self.move_runtime_filter_input_cursor(
+                analysis_id,
+                input_kind,
+                0,
+                keystroke.modifiers.shift,
+            ),
+            "end" => {
+                let end = self
+                    .runtime_filter_input(analysis_id, input_kind)
+                    .map(|input| character_count(&input.value))
+                    .unwrap_or_default();
+                self.move_runtime_filter_input_cursor(
+                    analysis_id,
+                    input_kind,
+                    end,
+                    keystroke.modifiers.shift,
+                );
+            }
+            "escape" => {
+                if let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) {
+                    input.is_focused = false;
+                    input.marked_range = None;
+                    input.selection_drag = None;
+                }
+            }
+            _ => {
+                if let Some(key_char) = keystroke.key_char.as_ref()
+                    && !keystroke.modifiers.control
+                    && !keystroke.modifiers.alt
+                    && !keystroke.modifiers.platform
+                    && !keystroke.modifiers.function
+                    && !key_char.chars().any(char::is_control)
+                {
+                    self.insert_runtime_filter_input_text(analysis_id, input_kind, key_char);
+                }
+            }
+        }
+    }
+
+    /// 开始 Runtime 过滤输入框鼠标选择。
+    pub fn begin_runtime_filter_input_pointer_selection(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        self.focus_runtime_filter_input(analysis_id, input_kind);
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        let range = runtime_filter_input_range_for_granularity(input, character_index, granularity);
+        input.cursor = range.end;
+        input.selection_anchor = Some(range.start);
+        input.marked_range = None;
+        input.selection_drag = Some(InputTextSelectionDrag {
+            anchor_range: range,
+            granularity,
+        });
+    }
+
+    /// 更新 Runtime 过滤输入框鼠标拖拽选区。
+    pub fn update_runtime_filter_input_pointer_selection(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        character_index: usize,
+    ) {
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        let Some(drag) = input.selection_drag.clone() else {
+            return;
+        };
+        let focus_range =
+            runtime_filter_input_range_for_granularity(input, character_index, drag.granularity);
+        input.selection_anchor = Some(drag.anchor_range.start.min(focus_range.start));
+        input.marked_range = None;
+        input.cursor = drag.anchor_range.end.max(focus_range.end);
+    }
+
+    /// 结束 Runtime 过滤输入框鼠标选择。
+    pub fn finish_runtime_filter_input_pointer_selection(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) {
+        if let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) {
+            input.selection_drag = None;
+        }
+    }
+
+    /// 返回指定 Runtime 过滤输入框的只读状态。
+    pub fn runtime_filter_input(
+        &self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) -> Option<&SettingsTextInputState> {
+        let state = self.runtime_analyses.get(&analysis_id)?;
+        Some(match input_kind {
+            RuntimeFilterInputKind::Keyword => &state.filter_keyword_input,
+            RuntimeFilterInputKind::Username => &state.filter_username_input,
+            RuntimeFilterInputKind::StartTime => &state.filter_start_time_input,
+            RuntimeFilterInputKind::EndTime => &state.filter_end_time_input,
+        })
+    }
+
+    /// 返回指定 Runtime 过滤输入框的可变状态。
+    pub fn runtime_filter_input_mut(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) -> Option<&mut SettingsTextInputState> {
+        let state = self.runtime_analyses.get_mut(&analysis_id)?;
+        Some(match input_kind {
+            RuntimeFilterInputKind::Keyword => &mut state.filter_keyword_input,
+            RuntimeFilterInputKind::Username => &mut state.filter_username_input,
+            RuntimeFilterInputKind::StartTime => &mut state.filter_start_time_input,
+            RuntimeFilterInputKind::EndTime => &mut state.filter_end_time_input,
+        })
+    }
+
+    /// Runtime 过滤条件变化后重置三层列表滚动和旧选区。
+    pub fn after_runtime_filter_changed(&mut self, analysis_id: usize) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        state.summary_scroll = UniformListScrollHandle::new();
+        state.request_scroll = UniformListScrollHandle::new();
+        state.sql_scroll = UniformListScrollHandle::new();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.scrollbar_drag = None;
+        self.placeholder_notice = "Runtime 过滤条件已更新".to_string();
+    }
+
+    /// 全选 Runtime 过滤输入框内容。
+    fn select_all_runtime_filter_input(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) {
+        if let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) {
+            input.selection_anchor = Some(0);
+            input.cursor = character_count(&input.value);
+            input.marked_range = None;
+            input.selection_drag = None;
+        }
+    }
+
+    /// 复制 Runtime 过滤输入框当前选区。
+    fn copy_runtime_filter_input_selection(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected_text) = self.selected_runtime_filter_input_text(analysis_id, input_kind)
+        else {
+            return;
+        };
+        let app_context: &gpui::App = (&*cx).borrow();
+        app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
+    }
+
+    /// 剪切 Runtime 过滤输入框当前选区。
+    fn cut_runtime_filter_input_selection(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_runtime_filter_input_selection(analysis_id, input_kind, cx);
+        if self.delete_runtime_filter_input_selection(analysis_id, input_kind) {
+            self.after_runtime_filter_changed(analysis_id);
+        }
+    }
+
+    /// 粘贴剪贴板内容到 Runtime 过滤输入框。
+    fn paste_runtime_filter_input_clipboard(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        cx: &mut Context<Self>,
+    ) {
+        let app_context: &gpui::App = (&*cx).borrow();
+        let Some(item) = app_context.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text() {
+            self.insert_runtime_filter_input_text(
+                analysis_id,
+                input_kind,
+                &text.replace(['\n', '\r'], " "),
+            );
+        }
+    }
+
+    /// 返回 Runtime 过滤输入框当前选中文本。
+    fn selected_runtime_filter_input_text(
+        &self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) -> Option<String> {
+        let input = self.runtime_filter_input(analysis_id, input_kind)?;
+        let range = normalized_runtime_filter_input_selection_range(input)?;
+        Some(slice_character_range(&input.value, range))
+    }
+
+    /// 删除 Runtime 过滤输入框当前选区。
+    fn delete_runtime_filter_input_selection(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) -> bool {
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return false;
+        };
+        let Some(range) = normalized_runtime_filter_input_selection_range(input) else {
+            return false;
+        };
+        input.value = replace_character_range(&input.value, range.clone(), "");
+        input.cursor = range.start;
+        input.selection_anchor = None;
+        input.marked_range = None;
+        input.selection_drag = None;
+        true
+    }
+
+    /// 向 Runtime 过滤输入框插入文本。
+    fn insert_runtime_filter_input_text(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        text: &str,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let _ = self.delete_runtime_filter_input_selection(analysis_id, input_kind);
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        let cursor = input.cursor.min(character_count(&input.value));
+        input.value = replace_character_range(&input.value, cursor..cursor, text);
+        input.cursor = cursor + character_count(text);
+        input.selection_anchor = None;
+        input.marked_range = None;
+        input.selection_drag = None;
+        self.after_runtime_filter_changed(analysis_id);
+    }
+
+    /// 删除 Runtime 过滤输入框光标前一个字符。
+    fn delete_runtime_filter_input_backward(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) {
+        if self.delete_runtime_filter_input_selection(analysis_id, input_kind) {
+            self.after_runtime_filter_changed(analysis_id);
+            return;
+        }
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        if input.cursor == 0 {
+            return;
+        }
+        let cursor = input.cursor.min(character_count(&input.value));
+        input.value = replace_character_range(&input.value, cursor - 1..cursor, "");
+        input.cursor = cursor - 1;
+        input.marked_range = None;
+        input.selection_drag = None;
+        self.after_runtime_filter_changed(analysis_id);
+    }
+
+    /// 删除 Runtime 过滤输入框光标后一个字符。
+    fn delete_runtime_filter_input_forward(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+    ) {
+        if self.delete_runtime_filter_input_selection(analysis_id, input_kind) {
+            self.after_runtime_filter_changed(analysis_id);
+            return;
+        }
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        let text_length = character_count(&input.value);
+        let cursor = input.cursor.min(text_length);
+        if cursor >= text_length {
+            return;
+        }
+        input.value = replace_character_range(&input.value, cursor..cursor + 1, "");
+        input.cursor = cursor;
+        input.marked_range = None;
+        input.selection_drag = None;
+        self.after_runtime_filter_changed(analysis_id);
+    }
+
+    /// Runtime 过滤输入框光标左移。
+    fn move_runtime_filter_input_left(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        extend_selection: bool,
+    ) {
+        let cursor = self
+            .runtime_filter_input(analysis_id, input_kind)
+            .map(|input| input.cursor.saturating_sub(1))
+            .unwrap_or_default();
+        self.move_runtime_filter_input_cursor(analysis_id, input_kind, cursor, extend_selection);
+    }
+
+    /// Runtime 过滤输入框光标右移。
+    fn move_runtime_filter_input_right(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        extend_selection: bool,
+    ) {
+        let cursor = self
+            .runtime_filter_input(analysis_id, input_kind)
+            .map(|input| (input.cursor + 1).min(character_count(&input.value)))
+            .unwrap_or_default();
+        self.move_runtime_filter_input_cursor(analysis_id, input_kind, cursor, extend_selection);
+    }
+
+    /// 移动 Runtime 过滤输入框光标，并按需扩展选区。
+    fn move_runtime_filter_input_cursor(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        cursor: usize,
+        extend_selection: bool,
+    ) {
+        let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
+            return;
+        };
+        let text_length = character_count(&input.value);
+        let cursor = cursor.min(text_length);
+        if extend_selection {
+            input.selection_anchor.get_or_insert(input.cursor);
+        } else {
+            input.selection_anchor = None;
+        }
+        input.cursor = cursor;
+        input.marked_range = None;
+        input.selection_drag = None;
     }
 
     /// 更新鼠标悬停标签，仅影响标题栏标签视觉状态。
@@ -4833,6 +6226,239 @@ mod tests {
             RuntimeAnalysisTaskState::Loading { .. }
         ));
         assert_eq!(app.active_tab_title(), "Runtime分析(2)");
+    }
+
+    /// 验证 Runtime 时间选择器点选日期时保留原时分秒，并保持浮层打开以便继续调时间。
+    #[test]
+    fn runtime_time_picker_date_selection_preserves_time() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+        app.runtime_analysis_state_mut(analysis_id)
+            .expect("应存在 Runtime 分析状态")
+            .filter_start_time_input
+            .value = "2026-06-25 14:25:03".to_string();
+
+        app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::StartTime);
+        app.set_runtime_filter_date(analysis_id, RuntimeFilterInputKind::StartTime, 2026, 7, 2);
+
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        assert_eq!(state.filter_start_time_input.value, "2026-07-02 14:25:03");
+        assert_eq!(
+            state.open_time_picker,
+            Some(RuntimeFilterInputKind::StartTime)
+        );
+    }
+
+    /// 验证 Runtime 时间选择器可以通过页面主体点击对应的状态方法关闭。
+    #[test]
+    fn closing_runtime_time_picker_clears_open_panel() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::EndTime);
+
+        assert!(app.close_runtime_time_picker(analysis_id));
+        assert_eq!(
+            app.runtime_analysis_state(analysis_id)
+                .expect("应存在 Runtime 分析状态")
+                .open_time_picker,
+            None
+        );
+    }
+
+    /// 验证 Runtime SQL 完整文本弹窗可以正常打开和关闭。
+    #[test]
+    fn runtime_sql_text_dialog_opens_and_closes() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        app.open_runtime_sql_text_dialog(
+            analysis_id,
+            RuntimeSqlTextDialog {
+                request_path: "/api/test".to_string(),
+                request_time_label: "2026-06-25 14:25:03".to_string(),
+                username: "tester".to_string(),
+                sql_text: "select *\nfrom test_table".to_string(),
+                selection: None,
+                selection_drag: None,
+            },
+        );
+
+        assert_eq!(
+            app.runtime_analysis_state(analysis_id)
+                .expect("应存在 Runtime 分析状态")
+                .sql_text_dialog
+                .as_ref()
+                .map(|dialog| dialog.sql_text.as_str()),
+            Some("select *\nfrom test_table")
+        );
+        assert!(app.close_runtime_sql_text_dialog(analysis_id));
+        assert!(
+            app.runtime_analysis_state(analysis_id)
+                .expect("应存在 Runtime 分析状态")
+                .sql_text_dialog
+                .is_none()
+        );
+    }
+
+    /// 验证 Runtime SQL 弹窗正文选区跨行提取时保留换行和缩进。
+    #[test]
+    fn runtime_sql_text_selection_extracts_multiline_text() {
+        let lines = runtime_sql_text_lines("select *\n  from test_table\nwhere id = 1");
+        let selection = RuntimeSqlTextSelection {
+            anchor: RuntimeSqlTextPosition {
+                line_index: 0,
+                column: 7,
+            },
+            focus: RuntimeSqlTextPosition {
+                line_index: 2,
+                column: 5,
+            },
+        };
+
+        let selected = selected_runtime_sql_text_from_lines(&lines, &selection)
+            .expect("应能提取跨行 SQL 选区");
+
+        assert_eq!(selected, "*\n  from test_table\nwhere");
+    }
+
+    /// 验证点击 SQL 弹窗其他位置时只清理正文选区，不关闭弹窗。
+    #[test]
+    fn clearing_runtime_sql_text_selection_keeps_dialog_open() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        app.open_runtime_sql_text_dialog(
+            analysis_id,
+            RuntimeSqlTextDialog {
+                request_path: "/api/test".to_string(),
+                request_time_label: "2026-06-25 14:25:03".to_string(),
+                username: "tester".to_string(),
+                sql_text: "select *\nfrom test_table".to_string(),
+                selection: None,
+                selection_drag: None,
+            },
+        );
+        app.begin_runtime_sql_text_selection(
+            analysis_id,
+            0,
+            "select *".to_string(),
+            0,
+            TextSelectionGranularity::Character,
+        );
+        assert!(app.update_runtime_sql_text_selection(analysis_id, 0, "select *".to_string(), 6));
+        assert!(app.finish_runtime_sql_text_selection(analysis_id));
+
+        assert!(app.clear_runtime_sql_text_selection(analysis_id));
+        let dialog = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态")
+            .sql_text_dialog
+            .as_ref()
+            .expect("清理选区不应关闭 SQL 弹窗");
+        assert!(dialog.selection.is_none());
+        assert!(dialog.selection_drag.is_none());
+    }
+
+    /// 验证 Runtime 表格单元格拖拽只保留用户选择的局部文本范围。
+    #[test]
+    fn runtime_cell_selection_keeps_character_range() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        app.begin_runtime_cell_selection(
+            analysis_id,
+            "summary:0:path".to_string(),
+            "/api/runtime/example".to_string(),
+            5,
+            TextSelectionGranularity::Character,
+        );
+        assert!(app.update_runtime_cell_selection(analysis_id, "summary:0:path", 12));
+        assert!(app.finish_runtime_cell_selection(analysis_id));
+
+        let selection = app
+            .runtime_analysis_state(analysis_id)
+            .and_then(|state| state.cell_selection.as_ref())
+            .expect("应存在 Runtime 单元格选区");
+        let range = selection.normalized_range().expect("应存在非空选区");
+        assert_eq!(slice_character_range(&selection.text, range), "runtime");
+    }
+
+    /// 验证 Runtime 表格单元格双击会选中整个单元格内容。
+    #[test]
+    fn runtime_cell_double_click_selects_whole_cell() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        app.begin_runtime_cell_selection(
+            analysis_id,
+            "request:1:username".to_string(),
+            "youyj".to_string(),
+            2,
+            TextSelectionGranularity::Line,
+        );
+        assert!(app.finish_runtime_cell_selection(analysis_id));
+
+        let selection = app
+            .runtime_analysis_state(analysis_id)
+            .and_then(|state| state.cell_selection.as_ref())
+            .expect("应存在 Runtime 单元格选区");
+        let range = selection.normalized_range().expect("应存在非空选区");
+        assert_eq!(slice_character_range(&selection.text, range), "youyj");
+    }
+
+    /// 验证点击 Runtime 单元格以外区域时可以清理已有单元格选区。
+    #[test]
+    fn clearing_runtime_cell_selection_removes_active_selection() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        app.begin_runtime_cell_selection(
+            analysis_id,
+            "summary:0:path".to_string(),
+            "/api/runtime/example".to_string(),
+            0,
+            TextSelectionGranularity::Line,
+        );
+        assert!(app.finish_runtime_cell_selection(analysis_id));
+
+        assert!(app.clear_runtime_cell_selection());
+        assert!(
+            app.runtime_analysis_state(analysis_id)
+                .and_then(|state| state.cell_selection.as_ref())
+                .is_none()
+        );
+        assert!(!app.clear_runtime_cell_selection());
     }
 
     /// 验证关闭 Runtime 分析 tab 会清理对应分析状态。

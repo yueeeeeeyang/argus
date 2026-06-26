@@ -2505,23 +2505,6 @@ fn search_target_from_registry(
 
 /// 估算搜索结果行宽度；只影响横向滚动范围，不影响真实结果内容和定位。
 fn estimated_search_result_row_width(result: &SearchResult) -> f32 {
-    let keyword_badges_width = result
-        .matched_keywords
-        .iter()
-        .map(|keyword| {
-            keyword
-                .chars()
-                .map(|character| {
-                    if character.is_ascii() {
-                        SEARCH_RESULT_ASCII_CHAR_WIDTH_ESTIMATE
-                    } else {
-                        SEARCH_RESULT_WIDE_CHAR_WIDTH_ESTIMATE
-                    }
-                })
-                .sum::<f32>()
-                + 18.0
-        })
-        .sum::<f32>();
     let preview_width = result
         .line_text
         .chars()
@@ -2535,7 +2518,7 @@ fn estimated_search_result_row_width(result: &SearchResult) -> f32 {
         })
         .sum::<f32>();
     let metadata_width = 112.0;
-    (metadata_width + keyword_badges_width + preview_width + 64.0).max(SEARCH_RESULT_LIST_MIN_WIDTH)
+    (metadata_width + preview_width + 64.0).max(SEARCH_RESULT_LIST_MIN_WIDTH)
 }
 
 /// 将“第 N 次出现”映射为对应结果行和单个命中范围。

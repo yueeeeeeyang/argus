@@ -4,6 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：按行虚拟渲染日志正文和 Jstack 分析页，大日志只读取当前可见页，避免整份日志进入 UI 文本节点。
 
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::app::{
@@ -1414,6 +1415,11 @@ fn render_search_results_panel(
     } else {
         format!("共 {result_count} 条结果")
     };
+    let keyword_summary = search_result_keyword_summary(app);
+    let header_status_text = match keyword_summary {
+        Some(summary) => format!("{status_text}，{summary}"),
+        None => status_text,
+    };
 
     div()
         .id("log-search-results-panel")
@@ -1467,7 +1473,7 @@ fn render_search_results_panel(
                         .flex_1()
                         .truncate()
                         .text_color(rgb(theme.foreground_muted))
-                        .child(status_text),
+                        .child(header_status_text),
                 )
                 .child(render_icon_button(
                     "log-search-results-close",
@@ -1530,6 +1536,39 @@ fn render_search_results_panel(
                     .children(render_search_results_scrollbars(app, theme, cx)),
             )
         })
+}
+
+/// 汇总搜索结果命中的关键字，统一显示在结果面板标题栏，避免每一行重复渲染同一组徽标。
+fn search_result_keyword_summary(app: &ArgusApp) -> Option<String> {
+    let mut keywords = BTreeSet::new();
+    for result in &app.log_search.results {
+        for keyword in &result.matched_keywords {
+            if !keyword.trim().is_empty() {
+                keywords.insert(keyword.clone());
+            }
+        }
+    }
+
+    if keywords.is_empty() {
+        let keyword = app.log_search.keyword_input.value.trim();
+        if keyword.is_empty() {
+            return None;
+        }
+        return Some(format!("关键字：{keyword}"));
+    }
+
+    let keyword_count = keywords.len();
+    let visible_keywords = keywords.into_iter().take(6).collect::<Vec<_>>();
+    let overflow_text = keyword_count
+        .checked_sub(visible_keywords.len())
+        .filter(|count| *count > 0)
+        .map(|count| format!(" 等 {count} 个"))
+        .unwrap_or_default();
+    Some(format!(
+        "关键字：{}{}",
+        visible_keywords.join("、"),
+        overflow_text
+    ))
 }
 
 /// 渲染搜索结果面板顶部拖拽条，用于调整底部面板高度。
@@ -1727,13 +1766,10 @@ fn render_search_result_row(
     let match_ranges =
         search_ranges_for_display(&preview_text, &display_text, &preview_match_ranges);
     let text_width = estimated_search_result_text_width(&display_text);
-    let keyword_badges_width = search_result_keyword_badges_width(result);
     let row_width = search_result_row_width(
         app,
         SEARCH_RESULT_ROW_HORIZONTAL_PADDING
             + SEARCH_RESULT_LINE_LABEL_WIDTH
-            + SEARCH_RESULT_ROW_GAP_WIDTH
-            + keyword_badges_width
             + SEARCH_RESULT_ROW_GAP_WIDTH
             + text_width,
     );
@@ -1775,7 +1811,6 @@ fn render_search_result_row(
                 .text_color(rgb(theme.foreground_muted))
                 .child(format!("第 {} 行", result.line_number + 1)),
         )
-        .child(render_search_result_keyword_badges(result, theme))
         .child(
             div()
                 .flex_none()
@@ -1797,62 +1832,6 @@ fn render_search_result_row(
                 cx.notify();
             }),
         )
-}
-
-/// 渲染搜索结果行前的命中关键字徽标。
-fn render_search_result_keyword_badges(
-    result: &crate::search::search_engine::SearchResult,
-    theme: &AppTheme,
-) -> impl IntoElement {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_1()
-        .children(result.matched_keywords.iter().take(4).map(|keyword| {
-            div()
-                .h(px(18.0))
-                .px_1()
-                .flex()
-                .items_center()
-                .rounded_sm()
-                .bg(rgb(theme.selection))
-                .text_size(px(11.0))
-                .line_height(px(18.0))
-                .text_color(rgb(theme.foreground))
-                .child(keyword.clone())
-        }))
-        .when(result.matched_keywords.len() > 4, |this| {
-            this.child(
-                div()
-                    .h(px(18.0))
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .rounded_sm()
-                    .bg(rgb(theme.current_line))
-                    .text_size(px(11.0))
-                    .line_height(px(18.0))
-                    .text_color(rgb(theme.foreground_muted))
-                    .child(format!("+{}", result.matched_keywords.len() - 4)),
-            )
-        })
-}
-
-/// 估算搜索结果关键字徽标宽度，用于横向滚动范围。
-fn search_result_keyword_badges_width(result: &crate::search::search_engine::SearchResult) -> f32 {
-    let visible_keywords_width = result
-        .matched_keywords
-        .iter()
-        .take(4)
-        .map(|keyword| estimated_search_result_text_width(keyword) + 14.0)
-        .sum::<f32>();
-    let overflow_width = if result.matched_keywords.len() > 4 {
-        28.0
-    } else {
-        0.0
-    };
-    visible_keywords_width + overflow_width
 }
 
 /// 返回搜索结果行实际渲染宽度：至少撑满当前视口，内容更宽时交给横向滚动条。

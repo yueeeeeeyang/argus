@@ -6,7 +6,10 @@
 
 use std::ops::Range;
 
-use crate::app::{AppTextInputTarget, ArgusApp, InputTextSelectionDrag, LogSearchInputKind};
+use crate::app::{
+    AppTextInputTarget, ArgusApp, InputTextSelectionDrag, LogSearchInputKind,
+    RuntimeFilterInputKind,
+};
 use crate::text_selection::{NativeTextEdit, character_count, replace_character_range};
 
 /// 可被原生输入法编辑的单行输入框字段引用。
@@ -53,6 +56,14 @@ impl ArgusApp {
         self.log_search.directory_input.selection_anchor = None;
         self.log_search.directory_input.marked_range = None;
         self.log_search.directory_input.selection_drag = None;
+
+        for state in self.runtime_analyses.values_mut() {
+            clear_settings_input_focus(&mut state.filter_keyword_input);
+            clear_settings_input_focus(&mut state.filter_username_input);
+            clear_settings_input_focus(&mut state.filter_start_time_input);
+            clear_settings_input_focus(&mut state.filter_end_time_input);
+            state.open_time_picker = None;
+        }
     }
 
     /// 应用系统原生文本输入编辑结果。
@@ -105,6 +116,12 @@ impl ArgusApp {
             }
             AppTextInputTarget::LogSearch(input_kind) => {
                 apply_native_log_search_edit(self, input_kind, &edit);
+            }
+            AppTextInputTarget::RuntimeFilter {
+                analysis_id,
+                input_kind,
+            } => {
+                apply_native_runtime_filter_edit(self, analysis_id, input_kind, &edit);
             }
             AppTextInputTarget::SettingsQuickKeywords => {
                 apply_native_edit_to_parts(
@@ -244,6 +261,12 @@ impl ArgusApp {
                     self.log_search.directory_input.marked_range = None;
                 }
             }
+            AppTextInputTarget::RuntimeFilter {
+                analysis_id,
+                input_kind,
+            } => {
+                self.focus_runtime_filter_input(analysis_id, input_kind);
+            }
             AppTextInputTarget::SettingsQuickKeywords => {
                 self.is_theme_dropdown_open = false;
                 self.settings_quick_keywords_input.is_focused = true;
@@ -330,6 +353,31 @@ fn apply_native_log_search_edit(
     );
     if input_kind == LogSearchInputKind::Keyword {
         app.clear_quick_log_search_state();
+    }
+}
+
+/// 应用 Runtime 过滤输入框的原生编辑，并刷新当前分析页过滤结果。
+fn apply_native_runtime_filter_edit(
+    app: &mut ArgusApp,
+    analysis_id: usize,
+    input_kind: RuntimeFilterInputKind,
+    edit: &NativeTextEdit,
+) {
+    let Some(input) = app.runtime_filter_input_mut(analysis_id, input_kind) else {
+        return;
+    };
+    apply_native_edit_to_parts(
+        NativeInputParts {
+            value: &mut input.value,
+            cursor: &mut input.cursor,
+            selection_anchor: &mut input.selection_anchor,
+            marked_range: &mut input.marked_range,
+            selection_drag: &mut input.selection_drag,
+        },
+        edit,
+    );
+    if edit.marked_range.is_none() {
+        app.after_runtime_filter_changed(analysis_id);
     }
 }
 

@@ -254,6 +254,24 @@ where
         ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
     let mut buffer = [0_u8; 64 * 1024];
 
+    // ZIP 中央目录支持按名称直接定位条目；大量 Runtime 日志逐个读取时可避免每次线性扫描全部条目。
+    if let Ok(mut file) = archive.by_name(&normalized_entry_path) {
+        if file.is_dir() {
+            bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
+        }
+
+        loop {
+            let read_count = file.read(&mut buffer).with_context(|| {
+                format!("无法读取 ZIP 条目内容 {normalized_entry_path}：{source_label}")
+            })?;
+            if read_count == 0 {
+                return Ok(());
+            }
+            consumer(&buffer[..read_count])?;
+        }
+    }
+
+    // 部分异常压缩包可能使用反斜杠或不规范路径名；保留旧的归一化扫描作为兼容回退。
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)

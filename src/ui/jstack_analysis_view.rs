@@ -187,7 +187,7 @@ fn render_missing_state(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
         .into_any_element()
 }
 
-/// 渲染标题、统计和状态图例。
+/// 渲染统计和状态图例。
 fn render_header(
     app: &ArgusApp,
     state: &JstackAnalysisState,
@@ -228,28 +228,14 @@ fn render_header(
         .border_color(rgb(theme.border))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_size(px(13.0))
-                        .line_height(px(18.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(render_icon(ArgusIcon::Logs, theme.foreground_muted, 14.0))
-                        .child(state.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(rgb(theme.foreground_muted))
-                        .child(format!(
-                            "{file_count} 个文件，{snapshot_count} 个快照，{thread_count} 个线程{filter_summary}，跳过 {skipped_count} 个文件"
-                        )),
-                ),
+                .min_w(px(0.0))
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .text_color(rgb(theme.foreground))
+                .truncate()
+                .child(format!(
+                    "{file_count} 个文件，{snapshot_count} 个快照，{thread_count} 个线程{filter_summary}，跳过 {skipped_count} 个文件"
+                )),
         )
         .child(
             div()

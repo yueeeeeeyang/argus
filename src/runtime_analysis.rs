@@ -4,23 +4,31 @@
 //! 作者：Argus 开发团队
 //! 主要功能：解析运行期请求耗时日志，按请求地址合并统计并保留请求 SQL 明细。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{Local, TimeZone};
 
 use crate::config::LoaderConfig;
+use crate::loader::archive::ArchiveFormat;
 use crate::loader::{
     LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceLocation, SourceTreeNode,
 };
-use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
+use crate::reader::backend::ReadBackend;
+use crate::reader::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
+use crate::utils::path::normalize_archive_entry_path;
+use zip::ZipArchive;
 
 /// Runtime 请求日志慢 SQL 判断比例；SQL 累积耗时超过请求总耗时 90% 即认为该请求慢。
 const SLOW_SQL_REQUEST_PERCENT: u64 = 90;
-/// Runtime 日志内容解析时每批读取的行数，避免大文件一次性进入内存。
-const READ_BATCH_LINES: usize = 4096;
+/// Runtime 日志并行解析任务上限，避免大量文件时把磁盘和压缩包读取线程打满。
+const MAX_RUNTIME_PARSE_WORKERS: usize = 8;
+/// ZIP 条目数量达到该阈值后才拆分为多 worker，避免少量条目重复打开 ZIP。
+const MIN_PARALLEL_ZIP_TARGETS: usize = 64;
 
 /// 分析任务输入目标类型。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -186,18 +194,16 @@ pub fn analyze_runtime_targets(
     }
 
     let total_files = file_targets.len();
+    let parsed_files =
+        read_runtime_requests_parallel(file_targets, &default_encoding, &loader_config);
     let mut requests = Vec::new();
-    for target in file_targets {
-        match read_runtime_request(target.clone(), &default_encoding, &loader_config) {
+    for parsed_file in parsed_files {
+        match parsed_file {
             Ok(mut request) => {
                 request.index = requests.len();
                 requests.push(request);
             }
-            Err(error) => skipped_files.push(RuntimeSkippedFile {
-                source_id: target.source_id,
-                label: target.label,
-                reason: error.to_string(),
-            }),
+            Err(skipped_file) => skipped_files.push(skipped_file),
         }
     }
 
@@ -419,30 +425,461 @@ fn has_log_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 读取一个 Runtime 文件并解析为请求记录。
-fn read_runtime_request(
-    target: RuntimeAnalysisTarget,
+/// Runtime 单文件解析结果；失败时直接转换为 UI 可展示的跳过记录。
+type RuntimeParseOutcome = std::result::Result<RuntimeRequestRecord, RuntimeSkippedFile>;
+
+/// 已完成文件名和真实读取位置解析的 Runtime 文件目标。
+#[derive(Clone, Debug)]
+struct PreparedRuntimeTarget {
+    /// 目标在来源树展开结果中的原始顺序。
+    order: usize,
+    /// 来源树节点 ID。
+    source_id: SourceId,
+    /// 文件展示名称。
+    label: String,
+    /// 文件路径或虚拟路径。
+    path: String,
+    /// 已解析出的请求元信息。
+    metadata: RuntimeFileMetadata,
+    /// 实际读取位置；单文件压缩包会在准备阶段解析为内部日志条目。
+    location: SourceLocation,
+}
+
+/// 并行读取并解析 Runtime 文件，返回顺序仍保持来源树展开后的文件顺序。
+fn read_runtime_requests_parallel(
+    file_targets: Vec<RuntimeAnalysisTarget>,
     default_encoding: &str,
     loader_config: &LoaderConfig,
-) -> Result<RuntimeRequestRecord> {
-    let metadata = parse_runtime_file_name(&target.label)?;
-    let location = resolve_runtime_target_location(&target, loader_config)?;
-    let handle = LogFileReader::open(OpenLogRequest {
-        source_id: target.source_id,
-        location,
-        label: target.label.clone(),
-        default_encoding: default_encoding.to_string(),
+) -> Vec<RuntimeParseOutcome> {
+    let total_targets = file_targets.len();
+    if total_targets == 0 {
+        return Vec::new();
+    }
+
+    let mut outcomes = std::iter::repeat_with(|| None)
+        .take(total_targets)
+        .collect::<Vec<Option<RuntimeParseOutcome>>>();
+    let mut prepared_targets = Vec::new();
+    for (order, target) in file_targets.into_iter().enumerate() {
+        match prepare_runtime_target(order, target, loader_config) {
+            Ok(prepared) => prepared_targets.push(prepared),
+            Err(skipped_file) => outcomes[order] = Some(Err(skipped_file)),
+        }
+    }
+
+    let mut top_level_zip_groups = HashMap::<PathBuf, Vec<PreparedRuntimeTarget>>::new();
+    let mut generic_targets = Vec::new();
+    for prepared in prepared_targets {
+        if let Some(archive_path) = top_level_zip_archive_path(&prepared.location) {
+            top_level_zip_groups
+                .entry(archive_path)
+                .or_default()
+                .push(prepared);
+        } else {
+            generic_targets.push(prepared);
+        }
+    }
+
+    for (archive_path, targets) in top_level_zip_groups {
+        for (order, outcome) in
+            read_top_level_zip_runtime_requests(&archive_path, targets, default_encoding)
+        {
+            outcomes[order] = Some(outcome);
+        }
+    }
+
+    for (order, outcome) in
+        read_prepared_runtime_requests_parallel(generic_targets, default_encoding)
+    {
+        outcomes[order] = Some(outcome);
+    }
+
+    outcomes.into_iter().filter_map(|outcome| outcome).collect()
+}
+
+/// 解析 Runtime 目标的文件名和真实读取位置；失败时生成可展示跳过记录。
+fn prepare_runtime_target(
+    order: usize,
+    target: RuntimeAnalysisTarget,
+    loader_config: &LoaderConfig,
+) -> std::result::Result<PreparedRuntimeTarget, RuntimeSkippedFile> {
+    let source_id = target.source_id;
+    let label = target.label.clone();
+    let metadata = parse_runtime_file_name(&target.label).map_err(|error| RuntimeSkippedFile {
+        source_id,
+        label: label.clone(),
+        reason: error.to_string(),
     })?;
-    let sql_records = parse_runtime_sql_document(handle.document())?;
+    let location = resolve_runtime_target_location(&target, loader_config).map_err(|error| {
+        RuntimeSkippedFile {
+            source_id,
+            label: label.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+
+    Ok(PreparedRuntimeTarget {
+        order,
+        source_id,
+        label: target.label,
+        path: target.path,
+        metadata,
+        location,
+    })
+}
+
+/// 返回可批量读取的顶层 ZIP 路径；嵌套压缩包暂回退到通用读取路径。
+fn top_level_zip_archive_path(location: &SourceLocation) -> Option<PathBuf> {
+    let SourceLocation::ArchiveEntry {
+        archive_path,
+        root_format,
+        container_entries,
+        ..
+    } = location
+    else {
+        return None;
+    };
+    (*root_format == ArchiveFormat::Zip && container_entries.is_empty())
+        .then(|| archive_path.clone())
+}
+
+/// 并行读取非顶层 ZIP 批量路径的 Runtime 文件。
+fn read_prepared_runtime_requests_parallel(
+    prepared_targets: Vec<PreparedRuntimeTarget>,
+    default_encoding: &str,
+) -> Vec<(usize, RuntimeParseOutcome)> {
+    if prepared_targets.is_empty() {
+        return Vec::new();
+    }
+
+    let worker_count = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MAX_RUNTIME_PARSE_WORKERS)
+        .min(prepared_targets.len())
+        .max(1);
+    if worker_count == 1 {
+        let mut encoding_hint = None;
+        return prepared_targets
+            .into_iter()
+            .map(|target| {
+                let order = target.order;
+                (
+                    order,
+                    read_prepared_runtime_request_outcome(
+                        target,
+                        default_encoding,
+                        &mut encoding_hint,
+                    ),
+                )
+            })
+            .collect();
+    }
+
+    let chunk_size = prepared_targets.len().div_ceil(worker_count).max(1);
+    let mut ordered_results = Vec::with_capacity(prepared_targets.len());
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in prepared_targets.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                let mut encoding_hint = None;
+                chunk
+                    .iter()
+                    .cloned()
+                    .map(|target| {
+                        let order = target.order;
+                        (
+                            order,
+                            read_prepared_runtime_request_outcome(
+                                target,
+                                default_encoding,
+                                &mut encoding_hint,
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+
+        for handle in handles {
+            let mut worker_results = handle.join().expect("Runtime 解析工作线程不应 panic");
+            ordered_results.append(&mut worker_results);
+        }
+    });
+    ordered_results.sort_by_key(|(order, _)| *order);
+    ordered_results
+}
+
+/// 读取已准备好的 Runtime 文件，并把错误包装为跳过记录，便于并行结果统一合并。
+fn read_prepared_runtime_request_outcome(
+    target: PreparedRuntimeTarget,
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+) -> RuntimeParseOutcome {
+    let source_id = target.source_id;
+    let label = target.label.clone();
+    read_prepared_runtime_request(target, default_encoding, encoding_hint).map_err(|error| {
+        RuntimeSkippedFile {
+            source_id,
+            label,
+            reason: error.to_string(),
+        }
+    })
+}
+
+/// 批量读取同一个顶层 ZIP 中的 Runtime 日志，避免每个条目重复打开压缩包。
+fn read_top_level_zip_runtime_requests(
+    archive_path: &Path,
+    targets: Vec<PreparedRuntimeTarget>,
+    default_encoding: &str,
+) -> Vec<(usize, RuntimeParseOutcome)> {
+    if targets.len() >= MIN_PARALLEL_ZIP_TARGETS {
+        let worker_count = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(MAX_RUNTIME_PARSE_WORKERS)
+            .min(targets.len())
+            .max(1);
+        if worker_count > 1 {
+            let chunk_size = targets.len().div_ceil(worker_count).max(1);
+            let mut ordered_results = Vec::with_capacity(targets.len());
+            thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for chunk in targets.chunks(chunk_size) {
+                    handles.push(scope.spawn(move || {
+                        read_top_level_zip_runtime_requests_sequential(
+                            archive_path,
+                            chunk.to_vec(),
+                            default_encoding,
+                        )
+                    }));
+                }
+
+                for handle in handles {
+                    let mut worker_results =
+                        handle.join().expect("Runtime ZIP 解析工作线程不应 panic");
+                    ordered_results.append(&mut worker_results);
+                }
+            });
+            ordered_results.sort_by_key(|(order, _)| *order);
+            return ordered_results;
+        }
+    }
+
+    read_top_level_zip_runtime_requests_sequential(archive_path, targets, default_encoding)
+}
+
+/// 在当前线程内批量读取同一个顶层 ZIP 的一组 Runtime 日志。
+fn read_top_level_zip_runtime_requests_sequential(
+    archive_path: &Path,
+    targets: Vec<PreparedRuntimeTarget>,
+    default_encoding: &str,
+) -> Vec<(usize, RuntimeParseOutcome)> {
+    let file = match fs::File::open(archive_path)
+        .with_context(|| format!("无法打开 ZIP 压缩包：{}", archive_path.display()))
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return targets
+                .into_iter()
+                .map(|target| {
+                    (
+                        target.order,
+                        Err(RuntimeSkippedFile {
+                            source_id: target.source_id,
+                            label: target.label,
+                            reason: error.to_string(),
+                        }),
+                    )
+                })
+                .collect();
+        }
+    };
+    let mut archive = match ZipArchive::new(file)
+        .with_context(|| format!("无法解析 ZIP 压缩包：{}", archive_path.display()))
+    {
+        Ok(archive) => archive,
+        Err(error) => {
+            return targets
+                .into_iter()
+                .map(|target| {
+                    (
+                        target.order,
+                        Err(RuntimeSkippedFile {
+                            source_id: target.source_id,
+                            label: target.label,
+                            reason: error.to_string(),
+                        }),
+                    )
+                })
+                .collect();
+        }
+    };
+
+    let mut encoding_hint = None;
+    targets
+        .into_iter()
+        .map(|target| {
+            let order = target.order;
+            let outcome = read_prepared_runtime_request_from_zip(
+                &mut archive,
+                target,
+                default_encoding,
+                &mut encoding_hint,
+            );
+            (order, outcome)
+        })
+        .collect()
+}
+
+/// 从已打开的 ZIP 压缩包中读取单条 Runtime 日志并解析。
+fn read_prepared_runtime_request_from_zip<R>(
+    archive: &mut ZipArchive<R>,
+    target: PreparedRuntimeTarget,
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+) -> RuntimeParseOutcome
+where
+    R: Read + Seek,
+{
+    let source_id = target.source_id;
+    let label = target.label.clone();
+    read_prepared_runtime_request_from_zip_inner(archive, target, default_encoding, encoding_hint)
+        .map_err(|error| RuntimeSkippedFile {
+            source_id,
+            label,
+            reason: error.to_string(),
+        })
+}
+
+/// 执行已打开 ZIP 中单个 Runtime 条目的读取和解析。
+fn read_prepared_runtime_request_from_zip_inner<R>(
+    archive: &mut ZipArchive<R>,
+    target: PreparedRuntimeTarget,
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+) -> Result<RuntimeRequestRecord>
+where
+    R: Read + Seek,
+{
+    let SourceLocation::ArchiveEntry { entry_path, .. } = &target.location else {
+        bail!("Runtime ZIP 批量读取收到非压缩条目：{}", target.path);
+    };
+    let bytes = read_zip_entry_bytes_from_open_archive(
+        archive,
+        entry_path,
+        &target.location.display_path(),
+    )?;
+    let sql_records = parse_runtime_sql_records_from_bytes(&bytes, default_encoding, encoding_hint);
 
     Ok(build_request_record(
         0,
         target.source_id,
         target.label,
         target.path,
-        metadata,
+        target.metadata,
         sql_records,
     ))
+}
+
+/// 从已打开的 ZIP 中读取条目字节，优先按中央目录名称直接定位，失败后再归一化扫描兼容异常路径。
+fn read_zip_entry_bytes_from_open_archive<R>(
+    archive: &mut ZipArchive<R>,
+    entry_path: &str,
+    source_label: &str,
+) -> Result<Vec<u8>>
+where
+    R: Read + Seek,
+{
+    let normalized_entry_path = normalize_archive_entry_path(entry_path);
+    if let Ok(mut file) = archive.by_name(&normalized_entry_path) {
+        if file.is_dir() {
+            bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
+        }
+        let mut bytes = Vec::with_capacity(file.size() as usize);
+        file.read_to_end(&mut bytes).with_context(|| {
+            format!("无法读取 ZIP 条目内容 {normalized_entry_path}：{source_label}")
+        })?;
+        return Ok(bytes);
+    }
+
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .with_context(|| format!("无法读取 ZIP 第 {index} 个条目：{source_label}"))?;
+        let current_path = normalize_archive_entry_path(file.name());
+        if current_path != normalized_entry_path {
+            continue;
+        }
+        if file.is_dir() {
+            bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
+        }
+
+        let mut bytes = Vec::with_capacity(file.size() as usize);
+        file.read_to_end(&mut bytes).with_context(|| {
+            format!("无法读取 ZIP 条目内容 {normalized_entry_path}：{source_label}")
+        })?;
+        return Ok(bytes);
+    }
+
+    bail!("无法读取 ZIP 条目 {normalized_entry_path}：{source_label}")
+}
+
+/// 读取一个已准备好的 Runtime 文件并解析为请求记录。
+fn read_prepared_runtime_request(
+    target: PreparedRuntimeTarget,
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+) -> Result<RuntimeRequestRecord> {
+    let sql_records =
+        read_runtime_sql_records_from_location(&target.location, default_encoding, encoding_hint)
+            .with_context(|| format!("读取 Runtime 日志失败：{}", target.location.display_path()))?;
+
+    Ok(build_request_record(
+        0,
+        target.source_id,
+        target.label,
+        target.path,
+        target.metadata,
+        sql_records,
+    ))
+}
+
+/// 直接读取 Runtime 日志原始字节并解析 SQL，避免构建通用日志展示文档的额外开销。
+fn read_runtime_sql_records_from_location(
+    location: &SourceLocation,
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+) -> Result<Vec<RuntimeSqlRecord>> {
+    let bytes = match location {
+        SourceLocation::LocalPath(path) => fs::read(path)
+            .with_context(|| format!("无法读取 Runtime 日志文件：{}", path.display()))?,
+        SourceLocation::ArchiveEntry { .. } => {
+            ReadBackend::for_location(location).read_to_bytes(location)?
+        }
+    };
+    Ok(parse_runtime_sql_records_from_bytes(
+        &bytes,
+        default_encoding,
+        encoding_hint,
+    ))
+}
+
+/// 使用批次内的编码提示解码 Runtime 日志，并在成功后更新提示以加速同批后续文件。
+fn parse_runtime_sql_records_from_bytes(
+    bytes: &[u8],
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+) -> Vec<RuntimeSqlRecord> {
+    let decoded = if let Some(encoding_label) = encoding_hint.as_deref() {
+        decode_log_bytes_with_known_encoding(bytes, encoding_label, default_encoding)
+    } else {
+        decode_log_bytes(bytes, default_encoding)
+    };
+    if !decoded.encoding_label.eq_ignore_ascii_case("UTF-8-lossy") {
+        *encoding_hint = Some(decoded.encoding_label.clone());
+    }
+    parse_runtime_sql_records(&decoded.text)
 }
 
 /// 解析 Runtime 输入目标的真实读取位置；待探测压缩包会独立判断是否为单文件日志。
@@ -465,26 +902,6 @@ fn resolve_runtime_target_location(
         .ok_or_else(|| anyhow!("压缩包根层不是单文件日志，请展开后选择具体日志条目"))?;
 
     Ok(probe_result.location)
-}
-
-/// 按批次读取日志文档并解析 SQL 明细。
-fn parse_runtime_sql_document(document: &LogDocument) -> Result<Vec<RuntimeSqlRecord>> {
-    let mut parser = RuntimeSqlParser::default();
-    let line_count = document.line_count();
-    let mut start_line = 0_usize;
-
-    while start_line < line_count {
-        let lines = document.lines(start_line, READ_BATCH_LINES)?;
-        if lines.is_empty() {
-            break;
-        }
-        for line in &lines {
-            parser.push_line(&line.text);
-        }
-        start_line += lines.len();
-    }
-
-    Ok(parser.finish())
 }
 
 /// 从文件名中解析请求元信息。
@@ -653,13 +1070,14 @@ fn parse_runtime_sql_start_line(line: &str) -> Option<RuntimeSqlRecord> {
     })
 }
 
-/// 解析形如 `12ms` 的耗时 token，并返回剩余字符串。
+/// 解析形如 `12ms` 或裸数字 `12` 的毫秒耗时 token，并返回剩余字符串。
 fn parse_duration_token(text: &str) -> Option<(u64, &str)> {
     let token_end = text
         .find(|character: char| character.is_ascii_whitespace())
         .unwrap_or(text.len());
     let token = &text[..token_end];
-    let millis = token.strip_suffix("ms")?.parse::<u64>().ok()?;
+    let millis_text = token.strip_suffix("ms").unwrap_or(token);
+    let millis = millis_text.parse::<u64>().ok()?;
     Some((millis, &text[token_end..]))
 }
 
@@ -680,6 +1098,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::loader::SourceLocation;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     use super::*;
 
@@ -903,6 +1323,162 @@ mod tests {
 
         assert_eq!(result.requests.len(), 1);
         assert!(result.requests[0].sql_records[0].sql_text.contains("中文"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 验证并行解析不会改变来源树展开后的请求顺序。
+    #[test]
+    fn parallel_runtime_analysis_keeps_source_order() {
+        let dir = runtime_test_dir("parallel-order");
+        let first = dir.join("100&u&_api_first&1782368843095&0&0.log");
+        let second = dir.join("200&u&_api_second&1782368843096&0&0.log");
+        fs::write(&first, "1ms 0ms 0ms 0ms 0ms select first").expect("应能写入第一条日志");
+        fs::write(&second, "1ms 0ms 0ms 0ms 0ms select second").expect("应能写入第二条日志");
+
+        let result = analyze_runtime_targets(
+            vec![
+                RuntimeAnalysisTarget {
+                    source_id: SourceId(1),
+                    location: SourceLocation::LocalPath(second.clone()),
+                    archive_probe_node: None,
+                    label: second.file_name().unwrap().to_string_lossy().to_string(),
+                    path: second.display().to_string(),
+                    kind: RuntimeAnalysisTargetKind::File,
+                },
+                RuntimeAnalysisTarget {
+                    source_id: SourceId(2),
+                    location: SourceLocation::LocalPath(first.clone()),
+                    archive_probe_node: None,
+                    label: first.file_name().unwrap().to_string_lossy().to_string(),
+                    path: first.display().to_string(),
+                    kind: RuntimeAnalysisTargetKind::File,
+                },
+            ],
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+        );
+
+        assert_eq!(result.requests.len(), 2);
+        assert_eq!(result.requests[0].request_path, "/api/second");
+        assert_eq!(result.requests[0].index, 0);
+        assert_eq!(result.requests[1].request_path, "/api/first");
+        assert_eq!(result.requests[1].index, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 验证同一个顶层 ZIP 中的 Runtime 条目会走批量读取路径并保持输入顺序。
+    #[test]
+    fn batches_top_level_zip_runtime_entries() {
+        let dir = runtime_test_dir("zip-batch");
+        let zip_path = dir.join("runtime.zip");
+        let first_entry = "runtime/100&u&_api_zip_first&1782368843095&0&0.log";
+        let second_entry = "runtime/200&u&_api_zip_second&1782368843096&0&0.log";
+        let file = fs::File::create(&zip_path).expect("应能创建 ZIP 测试文件");
+        let mut writer = ZipWriter::new(file);
+        writer
+            .start_file(first_entry, SimpleFileOptions::default())
+            .expect("应能写入第一条 ZIP 日志");
+        writer
+            .write_all(b"1ms 0ms 0ms 0ms 0ms select first")
+            .expect("应能写入第一条 ZIP 内容");
+        writer
+            .start_file(second_entry, SimpleFileOptions::default())
+            .expect("应能写入第二条 ZIP 日志");
+        writer
+            .write_all(b"2ms 0ms 0ms 0ms 0ms select second")
+            .expect("应能写入第二条 ZIP 内容");
+        writer.finish().expect("应能完成 ZIP 测试文件");
+
+        let targets = [second_entry, first_entry]
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry_path)| RuntimeAnalysisTarget {
+                source_id: SourceId(index),
+                location: SourceLocation::ArchiveEntry {
+                    archive_path: zip_path.clone(),
+                    root_format: ArchiveFormat::Zip,
+                    container_entries: Vec::new(),
+                    entry_path: entry_path.to_string(),
+                    format: ArchiveFormat::Zip,
+                    archive_depth: 0,
+                },
+                archive_probe_node: None,
+                label: Path::new(entry_path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                path: format!("{}!/{entry_path}", zip_path.display()),
+                kind: RuntimeAnalysisTargetKind::File,
+            })
+            .collect::<Vec<_>>();
+
+        let result = analyze_runtime_targets(targets, "UTF-8".to_string(), LoaderConfig::default());
+
+        assert_eq!(result.requests.len(), 2);
+        assert_eq!(result.requests[0].request_path, "/api/zip/second");
+        assert_eq!(result.requests[0].sql_records[0].sql_text, "select second");
+        assert_eq!(result.requests[1].request_path, "/api/zip/first");
+        assert_eq!(result.requests[1].sql_records[0].sql_text, "select first");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 验证大量顶层 ZIP Runtime 条目会保持顺序并完整解析。
+    #[test]
+    fn batches_many_top_level_zip_runtime_entries() {
+        let dir = runtime_test_dir("zip-many-batch");
+        let zip_path = dir.join("runtime_many.zip");
+        let file = fs::File::create(&zip_path).expect("应能创建 ZIP 测试文件");
+        let mut writer = ZipWriter::new(file);
+        let mut entries = Vec::new();
+        for index in 0..70 {
+            let entry = format!(
+                "runtime/{}&u&_api_zip_many_{index}&1782368843{:03}&0&0.log",
+                100 + index,
+                index
+            );
+            writer
+                .start_file(&entry, SimpleFileOptions::default())
+                .expect("应能写入 ZIP Runtime 日志");
+            writer
+                .write_all(format!("{}ms 0ms 0ms 0ms 0ms select {index}", index + 1).as_bytes())
+                .expect("应能写入 ZIP Runtime 内容");
+            entries.push(entry);
+        }
+        writer.finish().expect("应能完成 ZIP 测试文件");
+
+        let targets = entries
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(index, entry_path)| RuntimeAnalysisTarget {
+                source_id: SourceId(index),
+                location: SourceLocation::ArchiveEntry {
+                    archive_path: zip_path.clone(),
+                    root_format: ArchiveFormat::Zip,
+                    container_entries: Vec::new(),
+                    entry_path: entry_path.clone(),
+                    format: ArchiveFormat::Zip,
+                    archive_depth: 0,
+                },
+                archive_probe_node: None,
+                label: Path::new(entry_path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                path: format!("{}!/{entry_path}", zip_path.display()),
+                kind: RuntimeAnalysisTargetKind::File,
+            })
+            .collect::<Vec<_>>();
+
+        let result = analyze_runtime_targets(targets, "UTF-8".to_string(), LoaderConfig::default());
+
+        assert_eq!(result.requests.len(), 70);
+        assert_eq!(result.requests[0].request_path, "/api/zip/many/69");
+        assert_eq!(result.requests[0].sql_records[0].sql_text, "select 69");
+        assert_eq!(result.requests[69].request_path, "/api/zip/many/0");
+        assert_eq!(result.requests[69].sql_records[0].sql_text, "select 0");
         let _ = fs::remove_dir_all(&dir);
     }
 }

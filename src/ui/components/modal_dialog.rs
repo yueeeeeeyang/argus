@@ -47,6 +47,7 @@ where
         .left_0()
         .size_full()
         .bg(rgba(theme.modal_overlay))
+        .occlude()
         .on_click(cx.listener(|_, _, _, cx| {
             cx.stop_propagation();
         }))
@@ -60,6 +61,7 @@ where
                 .items_center()
                 .justify_center()
                 .id(SharedString::from(dialog.container_id))
+                .occlude()
                 .child(
                     div()
                         .w(px(dialog.width))
@@ -68,12 +70,14 @@ where
                         .rounded_lg()
                         .bg(rgb(theme.content))
                         .shadow_lg()
+                        .occlude()
                         .child(
                             div()
                                 .size_full()
                                 .flex()
                                 .overflow_hidden()
                                 .rounded_lg()
+                                .occlude()
                                 .child(dialog.content),
                         ),
                 ),

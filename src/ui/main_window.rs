@@ -12,7 +12,7 @@ use crate::ui::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
-    MouseButton, MouseMoveEvent, MouseUpEvent, Window, div, prelude::*, px, rgb,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window, div, prelude::*, px, rgb,
 };
 use std::time::Duration;
 
@@ -51,6 +51,14 @@ pub fn render(
             app.clear_all_text_input_focus();
             cx.notify();
         }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, _: &MouseDownEvent, _, cx| {
+                if app.clear_runtime_cell_selection() {
+                    cx.notify();
+                }
+            }),
+        )
         .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _window, cx| {
             let pointer_x = event.position.x / px(1.0);
             if app.is_source_panel_resizing && app.resize_source_panel(pointer_x) {

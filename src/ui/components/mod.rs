@@ -5,6 +5,7 @@
 //! 主要功能：为虚拟列表、树形控件、弹窗、搜索框、下拉框、上下文菜单和分割面板保留扩展入口。
 
 pub mod context_menu;
+pub mod datetime_picker;
 pub mod dropdown;
 pub mod icon;
 pub mod icon_button;
