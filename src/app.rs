@@ -16,6 +16,7 @@ mod terminal_actions;
 mod text_input;
 
 use std::borrow::{Borrow, Cow};
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 #[cfg(test)]
@@ -42,6 +43,7 @@ use crate::reader::log_file_reader::{
 use crate::reader::read_mode::ReadMode;
 use crate::runtime_analysis::{
     RuntimeAnalysisResult, RuntimeAnalysisTarget, RuntimeAnalysisTargetKind,
+    RuntimeSlowSqlAnalysisRow, RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
     analyze_runtime_targets,
 };
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
@@ -1022,6 +1024,59 @@ pub enum RuntimeAnalysisView {
     },
 }
 
+/// Runtime 分析结果类型。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeAnalysisResultType {
+    /// 当前请求统计总览和下钻表格。
+    Statistics,
+    /// 按 SQL 结构聚合后的执行频率分析。
+    SqlFrequency,
+    /// 按单次执行耗时排序的慢 SQL 分析。
+    SlowSql,
+}
+
+/// Runtime SQL 分析缓存对应的过滤输入快照。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSqlAnalysisFilterSnapshot {
+    /// 任意关键字过滤输入原文。
+    pub keyword: String,
+    /// 用户名过滤输入原文。
+    pub username: String,
+    /// 开始时间过滤输入原文。
+    pub start_time: String,
+    /// 结束时间过滤输入原文。
+    pub end_time: String,
+}
+
+/// Runtime SQL 频率分析缓存。
+#[derive(Clone, Debug)]
+pub struct RuntimeSqlFrequencyRowsCache {
+    /// 生成缓存时使用的过滤输入快照。
+    pub filter: RuntimeSqlAnalysisFilterSnapshot,
+    /// 已过滤和排序的 SQL 频率行。
+    pub rows: Arc<Vec<RuntimeSqlFrequencyAnalysisRow>>,
+}
+
+/// Runtime SQL 频率详情缓存。
+#[derive(Clone, Debug)]
+pub struct RuntimeSqlFrequencyDetailRowsCache {
+    /// 生成缓存时使用的过滤输入快照。
+    pub filter: RuntimeSqlAnalysisFilterSnapshot,
+    /// 当前详情页对应的 SQL 结构文本。
+    pub normalized_sql: String,
+    /// 已过滤和排序的 SQL 执行详情行。
+    pub rows: Arc<Vec<RuntimeSqlFrequencyDetailRow>>,
+}
+
+/// Runtime 慢 SQL 分析缓存。
+#[derive(Clone, Debug)]
+pub struct RuntimeSlowSqlRowsCache {
+    /// 生成缓存时使用的过滤输入快照。
+    pub filter: RuntimeSqlAnalysisFilterSnapshot,
+    /// 已过滤和排序的慢 SQL 行。
+    pub rows: Arc<Vec<RuntimeSlowSqlAnalysisRow>>,
+}
+
 /// Runtime 表格排序方向。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeSortDirection {
@@ -1046,6 +1101,12 @@ pub enum RuntimeScrollbarTable {
     Request,
     /// SQL 明细表。
     Sql,
+    /// SQL 频率分析表。
+    SqlFrequency,
+    /// SQL 频率详情表。
+    SqlFrequencyDetail,
+    /// 慢 SQL 分析表。
+    SlowSql,
 }
 
 /// Runtime 表格滚动条拖拽状态。
@@ -1131,6 +1192,8 @@ pub struct RuntimeAnalysisState {
     pub generation: usize,
     /// 当前三层 drill-down 视图。
     pub view: RuntimeAnalysisView,
+    /// 当前展示的 Runtime 分析结果类型。
+    pub result_type: RuntimeAnalysisResultType,
     /// 总览表排序字段。
     pub summary_sort_key: RuntimeSummarySortKey,
     /// 总览表排序方向。
@@ -1167,6 +1230,20 @@ pub struct RuntimeAnalysisState {
     pub request_scroll: UniformListScrollHandle,
     /// SQL 明细表滚动句柄。
     pub sql_scroll: UniformListScrollHandle,
+    /// SQL 频率分析表滚动句柄。
+    pub sql_frequency_scroll: UniformListScrollHandle,
+    /// SQL 频率详情表滚动句柄。
+    pub sql_frequency_detail_scroll: UniformListScrollHandle,
+    /// 慢 SQL 分析表滚动句柄。
+    pub slow_sql_scroll: UniformListScrollHandle,
+    /// SQL 频率分析当前打开的详情 SQL；为空时展示频率列表。
+    pub sql_frequency_detail_sql: Option<String>,
+    /// SQL 频率分析过滤结果缓存，避免滚动重绘时重复全量聚合。
+    pub sql_frequency_rows_cache: RefCell<Option<RuntimeSqlFrequencyRowsCache>>,
+    /// SQL 频率详情过滤结果缓存，避免详情滚动重绘时重复全量扫描。
+    pub sql_frequency_detail_rows_cache: RefCell<Option<RuntimeSqlFrequencyDetailRowsCache>>,
+    /// 慢 SQL 分析过滤结果缓存，避免滚动重绘时重复全量排序。
+    pub slow_sql_rows_cache: RefCell<Option<RuntimeSlowSqlRowsCache>>,
     /// 当前 Runtime 表格滚动条拖拽状态。
     pub scrollbar_drag: Option<RuntimeScrollbarDrag>,
     /// 当前任务状态。
@@ -3940,6 +4017,7 @@ impl ArgusApp {
                 targets,
                 generation,
                 view: RuntimeAnalysisView::Summary,
+                result_type: RuntimeAnalysisResultType::Statistics,
                 summary_sort_key: RuntimeSummarySortKey::RequestCount,
                 summary_sort_direction: RuntimeSortDirection::Descending,
                 request_sort_key: RuntimeRequestSortKey::RequestTime,
@@ -3958,6 +4036,13 @@ impl ArgusApp {
                 summary_scroll: UniformListScrollHandle::new(),
                 request_scroll: UniformListScrollHandle::new(),
                 sql_scroll: UniformListScrollHandle::new(),
+                sql_frequency_scroll: UniformListScrollHandle::new(),
+                sql_frequency_detail_scroll: UniformListScrollHandle::new(),
+                slow_sql_scroll: UniformListScrollHandle::new(),
+                sql_frequency_detail_sql: None,
+                sql_frequency_rows_cache: RefCell::new(None),
+                sql_frequency_detail_rows_cache: RefCell::new(None),
+                slow_sql_rows_cache: RefCell::new(None),
                 scrollbar_drag: None,
                 task_state: RuntimeAnalysisTaskState::Loading {
                     message: "正在分析 Runtime 日志文件".to_string(),
@@ -4089,6 +4174,95 @@ impl ArgusApp {
         );
     }
 
+    /// 切换 Runtime 分析结果类型，并清理旧表格残留的交互状态。
+    pub fn set_runtime_result_type(
+        &mut self,
+        analysis_id: usize,
+        result_type: RuntimeAnalysisResultType,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        if state.result_type == result_type {
+            return;
+        }
+
+        state.result_type = result_type;
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
+        state.scrollbar_drag = None;
+        if result_type == RuntimeAnalysisResultType::Statistics {
+            state.sql_frequency_detail_sql = None;
+            state.sql_frequency_rows_cache.borrow_mut().take();
+            state.sql_frequency_detail_rows_cache.borrow_mut().take();
+            state.slow_sql_rows_cache.borrow_mut().take();
+        }
+        match result_type {
+            RuntimeAnalysisResultType::Statistics => match state.view {
+                RuntimeAnalysisView::Summary => {
+                    state.summary_scroll = UniformListScrollHandle::new()
+                }
+                RuntimeAnalysisView::RequestDetails { .. } => {
+                    state.request_scroll = UniformListScrollHandle::new()
+                }
+                RuntimeAnalysisView::SqlList { .. } => {
+                    state.sql_scroll = UniformListScrollHandle::new()
+                }
+            },
+            RuntimeAnalysisResultType::SqlFrequency => {
+                state.sql_frequency_detail_sql = None;
+                state.sql_frequency_scroll = UniformListScrollHandle::new();
+                state.sql_frequency_detail_scroll = UniformListScrollHandle::new();
+                state.sql_frequency_detail_rows_cache.borrow_mut().take();
+            }
+            RuntimeAnalysisResultType::SlowSql => {
+                state.sql_frequency_detail_sql = None;
+                state.slow_sql_scroll = UniformListScrollHandle::new()
+            }
+        }
+    }
+
+    /// 打开 SQL 频率分析中指定 SQL 结构的执行详情页。
+    pub fn open_runtime_sql_frequency_detail(
+        &mut self,
+        analysis_id: usize,
+        normalized_sql: String,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.result_type = RuntimeAnalysisResultType::SqlFrequency;
+        state.sql_frequency_detail_sql = Some(normalized_sql);
+        state.sql_frequency_detail_scroll = UniformListScrollHandle::new();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
+        state.scrollbar_drag = None;
+        state.sql_frequency_detail_rows_cache.borrow_mut().take();
+        self.placeholder_notice = "查看 SQL 频率详情".to_string();
+    }
+
+    /// 从 SQL 频率详情页返回 SQL 频率列表。
+    pub fn show_runtime_sql_frequency_summary(&mut self, analysis_id: usize) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.result_type = RuntimeAnalysisResultType::SqlFrequency;
+        state.sql_frequency_detail_sql = None;
+        state.sql_frequency_scroll = UniformListScrollHandle::new();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
+        state.scrollbar_drag = None;
+    }
+
     /// 切换 Runtime 分析总览表排序字段。
     pub fn set_runtime_summary_sort(
         &mut self,
@@ -4162,6 +4336,7 @@ impl ArgusApp {
         state.view = RuntimeAnalysisView::RequestDetails {
             request_path: request_path.clone(),
         };
+        state.result_type = RuntimeAnalysisResultType::Statistics;
         state.request_scroll = UniformListScrollHandle::new();
         state.cell_selection = None;
         state.cell_selection_drag = None;
@@ -4185,6 +4360,7 @@ impl ArgusApp {
             request_path,
             request_index,
         };
+        state.result_type = RuntimeAnalysisResultType::Statistics;
         state.sql_scroll = UniformListScrollHandle::new();
         state.cell_selection = None;
         state.cell_selection_drag = None;
@@ -4200,6 +4376,7 @@ impl ArgusApp {
             return;
         };
         state.view = RuntimeAnalysisView::Summary;
+        state.result_type = RuntimeAnalysisResultType::Statistics;
         state.summary_scroll = UniformListScrollHandle::new();
         state.cell_selection = None;
         state.cell_selection_drag = None;
@@ -4214,6 +4391,7 @@ impl ArgusApp {
             return;
         };
         state.view = RuntimeAnalysisView::RequestDetails { request_path };
+        state.result_type = RuntimeAnalysisResultType::Statistics;
         state.request_scroll = UniformListScrollHandle::new();
         state.cell_selection = None;
         state.cell_selection_drag = None;
@@ -4892,8 +5070,16 @@ impl ArgusApp {
         state.summary_scroll = UniformListScrollHandle::new();
         state.request_scroll = UniformListScrollHandle::new();
         state.sql_scroll = UniformListScrollHandle::new();
+        state.sql_frequency_scroll = UniformListScrollHandle::new();
+        state.sql_frequency_detail_scroll = UniformListScrollHandle::new();
+        state.slow_sql_scroll = UniformListScrollHandle::new();
         state.cell_selection = None;
         state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
+        state.sql_frequency_rows_cache.borrow_mut().take();
+        state.sql_frequency_detail_rows_cache.borrow_mut().take();
+        state.slow_sql_rows_cache.borrow_mut().take();
         state.scrollbar_drag = None;
         self.placeholder_notice = "Runtime 过滤条件已更新".to_string();
     }
@@ -6959,6 +7145,7 @@ mod tests {
             .runtime_analysis_state(analysis_id)
             .expect("应保存 Runtime 分析状态");
         assert_eq!(state.targets.len(), 2);
+        assert_eq!(state.result_type, RuntimeAnalysisResultType::Statistics);
         assert_eq!(state.summary_sort_key, RuntimeSummarySortKey::RequestCount);
         assert_eq!(
             state.summary_sort_direction,
@@ -6969,6 +7156,101 @@ mod tests {
             RuntimeAnalysisTaskState::Loading { .. }
         ));
         assert_eq!(app.active_tab_title(), "Runtime分析(2)");
+    }
+
+    /// 验证切换 Runtime 结果类型会清理旧表格交互态，统计下钻会回到统计分析。
+    #[test]
+    fn switching_runtime_result_type_clears_transient_state() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+        {
+            let state = app
+                .runtime_analysis_state_mut(analysis_id)
+                .expect("应存在 Runtime 分析状态");
+            state.cell_selection = Some(RuntimeTableCellSelection {
+                cell_key: "summary:0:path".to_string(),
+                text: "/api/test".to_string(),
+                anchor: 0,
+                focus: 4,
+            });
+            state.cell_selection_drag = Some(RuntimeTableCellSelectionDrag {
+                cell_key: "summary:0:path".to_string(),
+                text: "/api/test".to_string(),
+                anchor_range: 0..4,
+                granularity: TextSelectionGranularity::Character,
+            });
+            state.hovered_sql_cell = Some(RuntimeSqlCellKey {
+                request_index: 0,
+                sql_index: 0,
+            });
+            state.sql_text_dialog = Some(RuntimeSqlTextDialog {
+                request_path: "/api/test".to_string(),
+                request_time_label: "2026-06-25 14:25:03".to_string(),
+                username: "tester".to_string(),
+                sql_text: "select 1".to_string(),
+                selection: None,
+                selection_drag: None,
+            });
+        }
+
+        app.set_runtime_result_type(analysis_id, RuntimeAnalysisResultType::SqlFrequency);
+
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        assert_eq!(state.result_type, RuntimeAnalysisResultType::SqlFrequency);
+        assert!(state.cell_selection.is_none());
+        assert!(state.cell_selection_drag.is_none());
+        assert!(state.hovered_sql_cell.is_none());
+        assert!(state.sql_text_dialog.is_none());
+
+        app.open_runtime_request_details(analysis_id, "/api/test".to_string());
+
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        assert_eq!(state.result_type, RuntimeAnalysisResultType::Statistics);
+        assert!(matches!(
+            state.view,
+            RuntimeAnalysisView::RequestDetails { .. }
+        ));
+    }
+
+    /// 验证 SQL 频率详情动作会进入详情页，并可返回频率列表。
+    #[test]
+    fn runtime_sql_frequency_detail_open_and_back_updates_state() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+
+        app.open_runtime_sql_frequency_detail(
+            analysis_id,
+            "select * from users where id = ?".to_string(),
+        );
+
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        assert_eq!(state.result_type, RuntimeAnalysisResultType::SqlFrequency);
+        assert_eq!(
+            state.sql_frequency_detail_sql.as_deref(),
+            Some("select * from users where id = ?")
+        );
+
+        app.show_runtime_sql_frequency_summary(analysis_id);
+
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        assert_eq!(state.result_type, RuntimeAnalysisResultType::SqlFrequency);
+        assert!(state.sql_frequency_detail_sql.is_none());
     }
 
     /// 验证 Runtime 时间选择器点选日期时保留原时分秒，并保持浮层打开以便继续调时间。

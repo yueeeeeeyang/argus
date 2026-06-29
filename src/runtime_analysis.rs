@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -71,6 +72,52 @@ pub struct RuntimeSqlRecord {
     pub parse_result_ms: u64,
     /// SQL 原文，可能包含换行。
     pub sql_text: String,
+    /// SQL 结构归一化文本，用于频率分析时避免重复解析 SQL 原文。
+    pub normalized_sql: String,
+}
+
+/// SQL 频率分析行。
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeSqlFrequencyAnalysisRow {
+    /// 归一化后的 SQL 结构文本。
+    pub normalized_sql: String,
+    /// 当前结构下所有 SQL 的执行总耗时。
+    pub total_execute_ms: u64,
+    /// 当前结构命中的 SQL 执行次数。
+    pub execute_count: usize,
+}
+
+impl RuntimeSqlFrequencyAnalysisRow {
+    /// 返回当前 SQL 结构的平均执行耗时。
+    pub fn average_execute_ms(&self) -> f64 {
+        if self.execute_count == 0 {
+            0.0
+        } else {
+            self.total_execute_ms as f64 / self.execute_count as f64
+        }
+    }
+}
+
+/// 慢 SQL 分析行。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSlowSqlAnalysisRow {
+    /// 请求记录在结果集中的稳定索引。
+    pub request_index: usize,
+    /// SQL 记录在当前请求中的稳定索引。
+    pub sql_index: usize,
+    /// SQL 单次执行耗时。
+    pub execute_ms: u64,
+}
+
+/// SQL 频率详情行，表示某个 SQL 结构的一次具体执行。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSqlFrequencyDetailRow {
+    /// 请求记录在结果集中的稳定索引。
+    pub request_index: usize,
+    /// SQL 记录在当前请求中的稳定索引。
+    pub sql_index: usize,
+    /// SQL 单次执行耗时。
+    pub execute_ms: u64,
 }
 
 /// 单个请求日志文件解析后的记录。
@@ -147,6 +194,10 @@ pub struct RuntimeAnalysisResult {
     pub total_files: usize,
     /// SQL 明细总数。
     pub total_sql_records: usize,
+    /// 无过滤条件下的 SQL 频率分析结果，后台分析阶段预先计算以避免 UI 点击卡顿。
+    pub sql_frequency_rows: Arc<Vec<RuntimeSqlFrequencyAnalysisRow>>,
+    /// 无过滤条件下的慢 SQL 分析结果，后台分析阶段预先计算以避免 UI 点击卡顿。
+    pub slow_sql_rows: Arc<Vec<RuntimeSlowSqlAnalysisRow>>,
 }
 
 impl RuntimeAnalysisResult {
@@ -302,12 +353,289 @@ pub fn build_runtime_analysis_result(
     });
 
     RuntimeAnalysisResult {
+        sql_frequency_rows: Arc::new(build_runtime_sql_frequency_rows(&requests)),
+        slow_sql_rows: Arc::new(build_runtime_slow_sql_rows(&requests)),
         requests,
         summaries,
         skipped_files,
         total_files,
         total_sql_records,
     }
+}
+
+/// 构建无过滤条件下的 SQL 频率分析结果。
+fn build_runtime_sql_frequency_rows(
+    requests: &[RuntimeRequestRecord],
+) -> Vec<RuntimeSqlFrequencyAnalysisRow> {
+    let mut grouped = BTreeMap::<String, RuntimeSqlFrequencyAnalysisRow>::new();
+    for request in requests {
+        for sql in &request.sql_records {
+            let row = grouped
+                .entry(sql.normalized_sql.clone())
+                .or_insert_with(|| RuntimeSqlFrequencyAnalysisRow {
+                    normalized_sql: sql.normalized_sql.clone(),
+                    total_execute_ms: 0,
+                    execute_count: 0,
+                });
+            row.total_execute_ms = row.total_execute_ms.saturating_add(sql.execute_ms);
+            row.execute_count = row.execute_count.saturating_add(1);
+        }
+    }
+
+    let mut rows = grouped.into_values().collect::<Vec<_>>();
+    sort_runtime_sql_frequency_rows(&mut rows);
+    rows
+}
+
+/// 构建无过滤条件下的慢 SQL 分析结果。
+fn build_runtime_slow_sql_rows(
+    requests: &[RuntimeRequestRecord],
+) -> Vec<RuntimeSlowSqlAnalysisRow> {
+    let mut rows = Vec::new();
+    for request in requests {
+        for (sql_index, sql) in request.sql_records.iter().enumerate() {
+            rows.push(RuntimeSlowSqlAnalysisRow {
+                request_index: request.index,
+                sql_index,
+                execute_ms: sql.execute_ms,
+            });
+        }
+    }
+    sort_runtime_slow_sql_rows(&mut rows);
+    rows
+}
+
+/// 按执行次数、平均耗时和 SQL 文本稳定排序 SQL 频率分析结果。
+pub fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRow]) {
+    rows.sort_by(|left, right| {
+        right
+            .execute_count
+            .cmp(&left.execute_count)
+            .then_with(|| {
+                right
+                    .average_execute_ms()
+                    .partial_cmp(&left.average_execute_ms())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.normalized_sql.cmp(&right.normalized_sql))
+    });
+}
+
+/// 按执行耗时和原始位置稳定排序慢 SQL 分析结果。
+pub fn sort_runtime_slow_sql_rows(rows: &mut [RuntimeSlowSqlAnalysisRow]) {
+    rows.sort_by(|left, right| {
+        right
+            .execute_ms
+            .cmp(&left.execute_ms)
+            .then_with(|| left.request_index.cmp(&right.request_index))
+            .then_with(|| left.sql_index.cmp(&right.sql_index))
+    });
+}
+
+/// 按执行耗时和原始位置稳定排序 SQL 频率详情结果。
+pub fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDetailRow]) {
+    rows.sort_by(|left, right| {
+        right
+            .execute_ms
+            .cmp(&left.execute_ms)
+            .then_with(|| left.request_index.cmp(&right.request_index))
+            .then_with(|| left.sql_index.cmp(&right.sql_index))
+    });
+}
+
+/// 将 SQL 归一化为结构模板，用于频率分析时消除常见参数值差异。
+///
+/// 参数说明：
+/// - `sql`：Runtime 日志中记录的 SQL 原文。
+///
+/// 返回值：大小写和空白稳定、常见字面量替换为 `?` 的 SQL 结构文本。
+pub fn normalize_runtime_sql_structure(sql: &str) -> String {
+    let mut tokens = Vec::new();
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        if ch == '\'' || ch == '"' {
+            skip_quoted_runtime_sql_literal(&mut chars, ch);
+            tokens.push("?".to_string());
+            continue;
+        }
+
+        if runtime_sql_number_literal_starts(&mut chars) {
+            skip_runtime_sql_number_literal(&mut chars);
+            tokens.push("?".to_string());
+            continue;
+        }
+
+        if runtime_sql_identifier_starts(ch) {
+            let mut word = String::new();
+            while let Some(next) = chars.peek().copied() {
+                if runtime_sql_identifier_continues(next) {
+                    word.push(next.to_ascii_lowercase());
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if matches!(word.as_str(), "true" | "false" | "null") {
+                tokens.push("?".to_string());
+            } else {
+                tokens.push(word);
+            }
+            continue;
+        }
+
+        tokens.push(ch.to_string());
+        chars.next();
+    }
+
+    format_runtime_sql_tokens(&collapse_runtime_sql_in_lists(tokens))
+}
+
+/// 跳过单引号或双引号包裹的 SQL 字面量，兼容 SQL 双写引号和反斜杠转义。
+fn skip_quoted_runtime_sql_literal(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    quote: char,
+) {
+    chars.next();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let _ = chars.next();
+            continue;
+        }
+        if ch == quote {
+            if chars.peek().is_some_and(|next| *next == quote) {
+                chars.next();
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+/// 判断当前位置是否可能是数字字面量开头，避免把标识符中的数字误归一化。
+fn runtime_sql_number_literal_starts(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut cloned = chars.clone();
+    match cloned.next() {
+        Some(first) if first.is_ascii_digit() => true,
+        Some('-' | '+') => cloned.next().is_some_and(|next| next.is_ascii_digit()),
+        Some('.') => cloned.next().is_some_and(|next| next.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+/// 跳过整数、小数、科学计数法等常见数字字面量。
+fn skip_runtime_sql_number_literal(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    if chars.peek().is_some_and(|ch| matches!(ch, '-' | '+')) {
+        chars.next();
+    }
+    while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+        chars.next();
+    }
+    if chars.peek().is_some_and(|ch| *ch == '.') {
+        chars.next();
+        while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+            chars.next();
+        }
+    }
+    if chars.peek().is_some_and(|ch| matches!(ch, 'e' | 'E')) {
+        let mut cloned = chars.clone();
+        cloned.next();
+        if cloned.peek().is_some_and(|ch| matches!(ch, '-' | '+')) {
+            cloned.next();
+        }
+        if cloned.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+            chars.next();
+            if chars.peek().is_some_and(|ch| matches!(ch, '-' | '+')) {
+                chars.next();
+            }
+            while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+                chars.next();
+            }
+        }
+    }
+}
+
+/// 判断字符是否可以作为 SQL 标识符开头。
+fn runtime_sql_identifier_starts(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+/// 判断字符是否可以继续组成 SQL 标识符。
+fn runtime_sql_identifier_continues(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
+/// 将 `in (?, ?, ?)` 一类参数列表折叠成 `in (?)`，避免列表长度影响频率聚合。
+fn collapse_runtime_sql_in_lists(tokens: Vec<String>) -> Vec<String> {
+    let mut collapsed = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index] == "in"
+            && tokens.get(index + 1).is_some_and(|token| token == "(")
+            && tokens.get(index + 2).is_some_and(|token| token == "?")
+        {
+            let mut cursor = index + 3;
+            let mut is_parameter_list = true;
+            while tokens.get(cursor).is_some_and(|token| token == ",") {
+                if tokens.get(cursor + 1).is_some_and(|token| token == "?") {
+                    cursor += 2;
+                } else {
+                    is_parameter_list = false;
+                    break;
+                }
+            }
+            if is_parameter_list && tokens.get(cursor).is_some_and(|token| token == ")") {
+                collapsed.extend([
+                    "in".to_string(),
+                    "(".to_string(),
+                    "?".to_string(),
+                    ")".to_string(),
+                ]);
+                index = cursor + 1;
+                continue;
+            }
+        }
+        collapsed.push(tokens[index].clone());
+        index += 1;
+    }
+    collapsed
+}
+
+/// 将归一化 token 格式化为稳定单行文本。
+fn format_runtime_sql_tokens(tokens: &[String]) -> String {
+    let mut output = String::new();
+    let mut previous: Option<&str> = None;
+    for token in tokens {
+        let token = token.as_str();
+        if token == "," || token == ")" || token == ";" {
+            while output.ends_with(' ') {
+                output.pop();
+            }
+            output.push_str(token);
+            if token == "," {
+                output.push(' ');
+            }
+        } else if token == "(" {
+            if !output.is_empty()
+                && !output.ends_with(' ')
+                && previous.is_some_and(|previous| previous != "(")
+            {
+                output.push(' ');
+            }
+            output.push('(');
+        } else {
+            if !output.is_empty() && !output.ends_with(' ') && previous != Some("(") {
+                output.push(' ');
+            }
+            output.push_str(token);
+        }
+        previous = Some(token);
+    }
+    output.trim().to_string()
 }
 
 /// 展开分析目标；目录会递归转换成多个文件目标。
@@ -1046,7 +1374,8 @@ impl RuntimeSqlParser {
 
     /// 把当前 SQL 明细写入结果。
     fn flush_current(&mut self) {
-        if let Some(record) = self.current.take() {
+        if let Some(mut record) = self.current.take() {
+            record.normalized_sql = normalize_runtime_sql_structure(&record.sql_text);
             self.records.push(record);
         }
     }
@@ -1067,6 +1396,7 @@ fn parse_runtime_sql_start_line(line: &str) -> Option<RuntimeSqlRecord> {
         release_connection_ms,
         parse_result_ms,
         sql_text: rest.trim_start().to_string(),
+        normalized_sql: String::new(),
     })
 }
 
@@ -1179,6 +1509,10 @@ mod tests {
         assert_eq!(request.sql_records.len(), 2);
         assert_eq!(request.sql_records[0].execute_ms, 1);
         assert_eq!(request.sql_records[0].sql_text, "select *\nfrom table_a");
+        assert_eq!(
+            request.sql_records[0].normalized_sql,
+            "select * from table_a"
+        );
         assert_eq!(request.sql_records[1].sql_text, "update table_b");
     }
 
@@ -1246,6 +1580,34 @@ mod tests {
         assert_eq!(result.summaries[0].average_duration_ms, 200.0);
         assert_eq!(result.summaries[0].slow_request_count, 1);
         assert_eq!(result.summaries[0].slow_sql_ratio, 0.5);
+        assert_eq!(result.sql_frequency_rows.len(), 2);
+        assert_eq!(result.slow_sql_rows.len(), 2);
+        assert_eq!(result.slow_sql_rows[0].execute_ms, 91);
+    }
+
+    /// 验证 SQL 归一化会消除常见参数差异，并保留可读的结构文本。
+    #[test]
+    fn normalizes_runtime_sql_literals_to_structure() {
+        let first =
+            normalize_runtime_sql_structure("SELECT * FROM user WHERE id = 1 AND name = 'Alice'");
+        let second =
+            normalize_runtime_sql_structure("select  *  from user where id = 2 and name = 'Bob'");
+
+        assert_eq!(first, "select * from user where id = ? and name = ?");
+        assert_eq!(first, second);
+    }
+
+    /// 验证布尔、空值、科学计数法和 IN 参数列表不会干扰 SQL 频率聚合。
+    #[test]
+    fn normalizes_runtime_sql_common_parameter_shapes() {
+        let normalized = normalize_runtime_sql_structure(
+            "select * from orders where enabled = true and deleted_at is null and price > -1.5e3 and id in (1, 2, 3)",
+        );
+
+        assert_eq!(
+            normalized,
+            "select * from orders where enabled = ? and deleted_at is ? and price > ? and id in (?)"
+        );
     }
 
     /// 验证本地目录递归会收集子目录中的 `.log` 文件，并跳过其他扩展名。

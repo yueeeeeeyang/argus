@@ -5,21 +5,27 @@
 //! 主要功能：展示 Runtime 请求总览、请求详情和 SQL 明细三层可排序表格。
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 
 use crate::app::{
-    AppTextInputTarget, ArgusApp, RUNTIME_SQL_COLLAPSED_ROW_HEIGHT, RuntimeAnalysisState,
-    RuntimeAnalysisTaskState, RuntimeAnalysisView, RuntimeFilterInputKind, RuntimeRequestSortKey,
-    RuntimeScrollbarDrag, RuntimeScrollbarTable, RuntimeSortDirection, RuntimeSqlCellKey,
-    RuntimeSqlSortKey, RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummarySortKey,
+    AppTextInputTarget, ArgusApp, RUNTIME_SQL_COLLAPSED_ROW_HEIGHT, RuntimeAnalysisResultType,
+    RuntimeAnalysisState, RuntimeAnalysisTaskState, RuntimeAnalysisView, RuntimeFilterInputKind,
+    RuntimeRequestSortKey, RuntimeScrollbarDrag, RuntimeScrollbarTable, RuntimeSlowSqlRowsCache,
+    RuntimeSortDirection, RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey,
+    RuntimeSqlFrequencyDetailRowsCache, RuntimeSqlFrequencyRowsCache, RuntimeSqlSortKey,
+    RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummarySortKey,
     RuntimeTableCellSelection, SettingsTextInputState,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::runtime_analysis::{
-    RuntimeAnalysisResult, RuntimeRequestRecord, RuntimeRequestSummary, RuntimeSqlRecord,
+    RuntimeAnalysisResult, RuntimeRequestRecord, RuntimeRequestSummary, RuntimeSlowSqlAnalysisRow,
+    RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord,
+    sort_runtime_slow_sql_rows, sort_runtime_sql_frequency_detail_rows,
+    sort_runtime_sql_frequency_rows,
 };
 use crate::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index, character_count,
@@ -72,6 +78,22 @@ const REQUEST_DURATION_COLUMN_WIDTH: f32 = 110.0;
 const REQUEST_ACTION_COLUMN_WIDTH: f32 = 94.0;
 /// SQL 明细表固定列宽：耗时类字段。
 const SQL_DURATION_COLUMN_WIDTH: f32 = 112.0;
+/// SQL 频率分析表固定列宽：平均耗时。
+const SQL_FREQUENCY_AVERAGE_COLUMN_WIDTH: f32 = 128.0;
+/// SQL 频率分析表固定列宽：执行次数。
+const SQL_FREQUENCY_COUNT_COLUMN_WIDTH: f32 = 104.0;
+/// SQL 频率分析表固定列宽：操作。
+const SQL_FREQUENCY_ACTION_COLUMN_WIDTH: f32 = 86.0;
+/// 慢 SQL 分析表固定列宽：执行耗时。
+const SLOW_SQL_DURATION_COLUMN_WIDTH: f32 = 112.0;
+/// SQL 频率详情表固定列宽：SQL 具体耗时。
+const SQL_FREQUENCY_DETAIL_DURATION_COLUMN_WIDTH: f32 = 112.0;
+/// SQL 频率详情表固定列宽：来源请求。
+const SQL_FREQUENCY_DETAIL_REQUEST_COLUMN_WIDTH: f32 = 260.0;
+/// SQL 频率详情表固定列宽：发起时间。
+const SQL_FREQUENCY_DETAIL_TIME_COLUMN_WIDTH: f32 = 172.0;
+/// SQL 分析表文本列和指标列之间的固定间隔，避免长 SQL 与耗时数字贴在一起。
+const SQL_ANALYSIS_COLUMN_GAP: f32 = 28.0;
 /// Runtime 过滤栏高度。
 const RUNTIME_FILTER_BAR_HEIGHT: f32 = 44.0;
 /// Runtime 过滤栏控件间距，需与 `gap_2` 保持一致。
@@ -255,37 +277,64 @@ fn render_ready_view(
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
     let sql_dialog_focus_handle = analysis_focus_handle.clone();
-    let content = match &state.view {
-        RuntimeAnalysisView::Summary => {
-            render_summary_table(analysis_id, state, result, analysis_focus_handle, theme, cx)
-                .into_any_element()
-        }
-        RuntimeAnalysisView::RequestDetails { request_path } => render_request_details_table(
-            analysis_id,
-            state,
-            result,
-            request_path,
-            analysis_focus_handle,
-            theme,
-            cx,
-        ),
-        RuntimeAnalysisView::SqlList {
-            request_path,
-            request_index,
-        } => {
-            let Some(request) = result.requests.get(*request_index) else {
-                return render_empty_message("未找到当前 Runtime 请求记录。", theme);
-            };
-            render_sql_table(
+    let content = match state.result_type {
+        RuntimeAnalysisResultType::Statistics => match &state.view {
+            RuntimeAnalysisView::Summary => {
+                render_summary_table(analysis_id, state, result, analysis_focus_handle, theme, cx)
+                    .into_any_element()
+            }
+            RuntimeAnalysisView::RequestDetails { request_path } => render_request_details_table(
                 analysis_id,
                 state,
+                result,
                 request_path,
-                request,
+                analysis_focus_handle,
+                theme,
+                cx,
+            ),
+            RuntimeAnalysisView::SqlList {
+                request_path,
+                request_index,
+            } => {
+                let Some(request) = result.requests.get(*request_index) else {
+                    return render_empty_message("未找到当前 Runtime 请求记录。", theme);
+                };
+                render_sql_table(
+                    analysis_id,
+                    state,
+                    request_path,
+                    request,
+                    analysis_focus_handle,
+                    theme,
+                    cx,
+                )
+                .into_any_element()
+            }
+        },
+        RuntimeAnalysisResultType::SqlFrequency => match state.sql_frequency_detail_sql.as_ref() {
+            Some(normalized_sql) => render_sql_frequency_detail_table(
+                analysis_id,
+                state,
+                result,
+                normalized_sql,
                 analysis_focus_handle,
                 theme,
                 cx,
             )
-            .into_any_element()
+            .into_any_element(),
+            None => render_sql_frequency_table(
+                analysis_id,
+                state,
+                result,
+                analysis_focus_handle,
+                theme,
+                cx,
+            )
+            .into_any_element(),
+        },
+        RuntimeAnalysisResultType::SlowSql => {
+            render_slow_sql_table(analysis_id, state, result, analysis_focus_handle, theme, cx)
+                .into_any_element()
         }
     };
 
@@ -303,6 +352,7 @@ fn render_ready_view(
                 }
             }),
         )
+        .child(render_result_type_selector(analysis_id, state, theme, cx))
         .child(render_filter_bar(app, analysis_id, state, theme, cx))
         .child(content)
         .when_some(state.open_time_picker, |this, input_kind| {
@@ -324,6 +374,90 @@ fn render_ready_view(
             ))
         })
         .into_any_element()
+}
+
+/// 渲染 Runtime 结果类型切换控件。
+fn render_result_type_selector(
+    analysis_id: usize,
+    state: &RuntimeAnalysisState,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    div()
+        .px(px(RUNTIME_VIEW_PADDING))
+        .py(px(8.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .child(render_result_type_button(
+            analysis_id,
+            state.result_type,
+            RuntimeAnalysisResultType::Statistics,
+            "统计分析",
+            theme,
+            cx,
+        ))
+        .child(render_result_type_button(
+            analysis_id,
+            state.result_type,
+            RuntimeAnalysisResultType::SqlFrequency,
+            "SQL频率分析",
+            theme,
+            cx,
+        ))
+        .child(render_result_type_button(
+            analysis_id,
+            state.result_type,
+            RuntimeAnalysisResultType::SlowSql,
+            "慢SQL分析",
+            theme,
+            cx,
+        ))
+}
+
+/// 渲染单个 Runtime 结果类型按钮。
+fn render_result_type_button(
+    analysis_id: usize,
+    current_type: RuntimeAnalysisResultType,
+    target_type: RuntimeAnalysisResultType,
+    label: &'static str,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let is_active = current_type == target_type;
+    let id = match target_type {
+        RuntimeAnalysisResultType::Statistics => "runtime-result-type-statistics",
+        RuntimeAnalysisResultType::SqlFrequency => "runtime-result-type-sql-frequency",
+        RuntimeAnalysisResultType::SlowSql => "runtime-result-type-slow-sql",
+    };
+    div()
+        .id(id)
+        .h(px(26.0))
+        .px_3()
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .text_color(rgb(if is_active {
+            theme.foreground
+        } else {
+            theme.foreground_muted
+        }))
+        .bg(rgb(if is_active {
+            theme.current_line
+        } else {
+            theme.content
+        }))
+        .hover(|this| this.bg(rgb(theme.current_line)))
+        .child(label)
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.set_runtime_result_type(analysis_id, target_type);
+            cx.notify();
+        }))
 }
 
 /// 渲染 Runtime SQL 完整文本弹窗。
@@ -1176,6 +1310,569 @@ fn render_sql_table(
         })
 }
 
+/// 渲染 SQL 频率分析表格。
+fn render_sql_frequency_table(
+    analysis_id: usize,
+    state: &RuntimeAnalysisState,
+    result: &RuntimeAnalysisResult,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let rows = sql_frequency_rows(result, state);
+    let row_count = rows.len();
+    let scroll_handle = state.sql_frequency_scroll.clone();
+
+    div()
+        .id("runtime-sql-frequency-table")
+        .flex_1()
+        .min_h(px(0.0))
+        .relative()
+        .overflow_hidden()
+        .child(render_sql_frequency_header(theme))
+        .child(
+            uniform_list(
+                "runtime-sql-frequency-list",
+                row_count,
+                cx.processor(move |app, range: Range<usize>, _window, row_cx| {
+                    let theme = app.theme.clone();
+                    let Some(state) = app.runtime_analysis_state(analysis_id) else {
+                        return Vec::new();
+                    };
+                    let Some(rows) = rows.as_slice().get(range.clone()) else {
+                        return Vec::new();
+                    };
+
+                    rows.iter()
+                        .enumerate()
+                        .map(|(offset, row)| {
+                            render_sql_frequency_row(
+                                analysis_id,
+                                range.start + offset,
+                                row,
+                                state.cell_selection.as_ref(),
+                                analysis_focus_handle.clone(),
+                                &theme,
+                                row_cx,
+                            )
+                            .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .absolute()
+            .top(px(TABLE_HEADER_HEIGHT))
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .block_mouse_except_scroll()
+            .track_scroll(scroll_handle.clone()),
+        )
+        .when(row_count == 0, |this| {
+            this.child(render_table_empty_overlay(
+                "当前过滤条件下没有 SQL 频率数据。",
+                theme,
+            ))
+        })
+        .children(render_table_scrollbars(
+            analysis_id,
+            RuntimeScrollbarTable::SqlFrequency,
+            &scroll_handle,
+            row_count,
+            SQL_ROW_HEIGHT,
+            theme,
+            cx,
+        ))
+}
+
+/// 渲染 SQL 频率详情表格。
+fn render_sql_frequency_detail_table(
+    analysis_id: usize,
+    state: &RuntimeAnalysisState,
+    result: &RuntimeAnalysisResult,
+    normalized_sql: &str,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let rows = sql_frequency_detail_rows(result, state, normalized_sql);
+    let row_count = rows.len();
+    let scroll_handle = state.sql_frequency_detail_scroll.clone();
+
+    div()
+        .id("runtime-sql-frequency-detail")
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .child(render_sql_frequency_detail_topbar(
+            analysis_id,
+            normalized_sql,
+            row_count,
+            theme,
+            cx,
+        ))
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_hidden()
+                .child(render_sql_frequency_detail_header(theme))
+                .child(
+                    uniform_list(
+                        "runtime-sql-frequency-detail-list",
+                        row_count,
+                        cx.processor(move |app, range: Range<usize>, _window, row_cx| {
+                            let theme = app.theme.clone();
+                            let Some(state) = app.runtime_analysis_state(analysis_id) else {
+                                return Vec::new();
+                            };
+                            let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+                                return Vec::new();
+                            };
+                            let Some(rows) = rows.as_slice().get(range.clone()) else {
+                                return Vec::new();
+                            };
+
+                            rows.iter()
+                                .map(|row| {
+                                    render_sql_frequency_detail_row(
+                                        analysis_id,
+                                        result,
+                                        row,
+                                        state.cell_selection.as_ref(),
+                                        analysis_focus_handle.clone(),
+                                        &theme,
+                                        row_cx,
+                                    )
+                                    .into_any_element()
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .absolute()
+                    .top(px(TABLE_HEADER_HEIGHT))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .block_mouse_except_scroll()
+                    .track_scroll(scroll_handle.clone()),
+                )
+                .when(row_count == 0, |this| {
+                    this.child(render_table_empty_overlay(
+                        "当前过滤条件下没有该 SQL 的执行详情。",
+                        theme,
+                    ))
+                })
+                .children(render_table_scrollbars(
+                    analysis_id,
+                    RuntimeScrollbarTable::SqlFrequencyDetail,
+                    &scroll_handle,
+                    row_count,
+                    SQL_ROW_HEIGHT,
+                    theme,
+                    cx,
+                )),
+        )
+}
+
+/// 渲染慢 SQL 分析表格。
+fn render_slow_sql_table(
+    analysis_id: usize,
+    state: &RuntimeAnalysisState,
+    result: &RuntimeAnalysisResult,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let rows = slow_sql_rows(result, state);
+    let row_count = rows.len();
+    let scroll_handle = state.slow_sql_scroll.clone();
+
+    div()
+        .id("runtime-slow-sql-table")
+        .flex_1()
+        .min_h(px(0.0))
+        .relative()
+        .overflow_hidden()
+        .child(render_slow_sql_header(theme))
+        .child(
+            uniform_list(
+                "runtime-slow-sql-list",
+                row_count,
+                cx.processor(move |app, range: Range<usize>, _window, row_cx| {
+                    let theme = app.theme.clone();
+                    let Some(state) = app.runtime_analysis_state(analysis_id) else {
+                        return Vec::new();
+                    };
+                    let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+                        return Vec::new();
+                    };
+                    let Some(rows) = rows.as_slice().get(range.clone()) else {
+                        return Vec::new();
+                    };
+
+                    rows.iter()
+                        .map(|row| {
+                            render_slow_sql_row(
+                                analysis_id,
+                                result,
+                                row,
+                                state.cell_selection.as_ref(),
+                                analysis_focus_handle.clone(),
+                                &theme,
+                                row_cx,
+                            )
+                            .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .absolute()
+            .top(px(TABLE_HEADER_HEIGHT))
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .block_mouse_except_scroll()
+            .track_scroll(scroll_handle.clone()),
+        )
+        .when(row_count == 0, |this| {
+            this.child(render_table_empty_overlay(
+                "当前过滤条件下没有慢 SQL 数据。",
+                theme,
+            ))
+        })
+        .children(render_table_scrollbars(
+            analysis_id,
+            RuntimeScrollbarTable::SlowSql,
+            &scroll_handle,
+            row_count,
+            SQL_ROW_HEIGHT,
+            theme,
+            cx,
+        ))
+}
+
+/// 渲染 SQL 频率分析表头。
+fn render_sql_frequency_header(theme: &AppTheme) -> impl IntoElement + use<> {
+    render_table_header(theme)
+        .child(render_static_flex_header_cell("SQL文本", theme))
+        .child(render_sql_analysis_column_gap())
+        .child(render_static_header_cell(
+            "平均执行时间",
+            SQL_FREQUENCY_AVERAGE_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "执行次数",
+            SQL_FREQUENCY_COUNT_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "操作",
+            SQL_FREQUENCY_ACTION_COLUMN_WIDTH,
+            theme,
+        ))
+}
+
+/// 渲染单条 SQL 频率分析行。
+fn render_sql_frequency_row(
+    analysis_id: usize,
+    row_index: usize,
+    row: &RuntimeSqlFrequencyAnalysisRow,
+    selection: Option<&RuntimeTableCellSelection>,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    render_table_row(SQL_ROW_HEIGHT, theme)
+        .child(render_selectable_scroll_cell_with_font(
+            analysis_id,
+            format!("runtime-sql-frequency-text-{row_index}"),
+            runtime_cell_key("sql-frequency", row_index, "text"),
+            row.normalized_sql.clone(),
+            SQL_ROW_HEIGHT,
+            ARGUS_LOG_FONT_FAMILY,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_sql_analysis_column_gap())
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_cell_key("sql-frequency", row_index, "average"),
+            format_average_duration(row.average_execute_ms()),
+            SQL_FREQUENCY_AVERAGE_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_cell_key("sql-frequency", row_index, "count"),
+            row.execute_count.to_string(),
+            SQL_FREQUENCY_COUNT_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(
+            div()
+                .w(px(SQL_FREQUENCY_ACTION_COLUMN_WIDTH))
+                .flex_none()
+                .child(render_action_button(
+                    format!("runtime-sql-frequency-detail-{row_index}"),
+                    "详情",
+                    theme,
+                    {
+                        let normalized_sql = row.normalized_sql.clone();
+                        cx.listener(move |app, _, _, cx| {
+                            app.open_runtime_sql_frequency_detail(
+                                analysis_id,
+                                normalized_sql.clone(),
+                            );
+                            cx.notify();
+                        })
+                    },
+                )),
+        )
+}
+
+/// 渲染 SQL 频率详情顶部信息。
+fn render_sql_frequency_detail_topbar(
+    analysis_id: usize,
+    normalized_sql: &str,
+    row_count: usize,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    div()
+        .px(px(RUNTIME_VIEW_PADDING))
+        .py_2()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.0))
+                .child(render_back_button(
+                    "runtime-sql-frequency-detail-back",
+                    "频率分析",
+                    theme,
+                    cx.listener(move |app, _, _, cx| {
+                        app.show_runtime_sql_frequency_summary(analysis_id);
+                        cx.notify();
+                    }),
+                ))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate()
+                                .child(normalized_sql.to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.foreground))
+                                .child(format!("{row_count} 次执行")),
+                        ),
+                ),
+        )
+}
+
+/// 渲染 SQL 频率详情表头。
+fn render_sql_frequency_detail_header(theme: &AppTheme) -> impl IntoElement + use<> {
+    render_table_header(theme)
+        .child(render_static_flex_header_cell("SQL文本", theme))
+        .child(render_sql_analysis_column_gap())
+        .child(render_static_header_cell(
+            "SQL具体耗时",
+            SQL_FREQUENCY_DETAIL_DURATION_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "来源请求",
+            SQL_FREQUENCY_DETAIL_REQUEST_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "发起时间",
+            SQL_FREQUENCY_DETAIL_TIME_COLUMN_WIDTH,
+            theme,
+        ))
+}
+
+/// 渲染单条 SQL 频率详情行。
+fn render_sql_frequency_detail_row(
+    analysis_id: usize,
+    result: &RuntimeAnalysisResult,
+    row: &RuntimeSqlFrequencyDetailRow,
+    selection: Option<&RuntimeTableCellSelection>,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let request = result.requests.get(row.request_index);
+    let sql = request.and_then(|request| request.sql_records.get(row.sql_index));
+    let sql_text = sql
+        .map(|sql| sql.sql_text.clone())
+        .unwrap_or_else(|| "SQL 明细已不可用".to_string());
+    let request_path = request
+        .map(|request| request.request_path.clone())
+        .unwrap_or_else(|| "未知请求".to_string());
+    let request_time_label = request
+        .map(|request| request.request_time_label.clone())
+        .unwrap_or_else(|| "-".to_string());
+
+    render_table_row(SQL_ROW_HEIGHT, theme)
+        .child(render_selectable_scroll_cell_with_font(
+            analysis_id,
+            format!(
+                "runtime-sql-frequency-detail-text-{}-{}",
+                row.request_index, row.sql_index
+            ),
+            runtime_sql_cell_key(row.request_index, row.sql_index, "frequency-detail-text"),
+            sql_text,
+            SQL_ROW_HEIGHT,
+            ARGUS_LOG_FONT_FAMILY,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_sql_analysis_column_gap())
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_sql_cell_key(
+                row.request_index,
+                row.sql_index,
+                "frequency-detail-duration",
+            ),
+            format_duration(row.execute_ms),
+            SQL_FREQUENCY_DETAIL_DURATION_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_sql_cell_key(row.request_index, row.sql_index, "frequency-detail-request"),
+            request_path,
+            SQL_FREQUENCY_DETAIL_REQUEST_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_sql_cell_key(row.request_index, row.sql_index, "frequency-detail-time"),
+            request_time_label,
+            SQL_FREQUENCY_DETAIL_TIME_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle,
+            theme,
+            cx,
+        ))
+}
+
+/// 渲染慢 SQL 分析表头。
+fn render_slow_sql_header(theme: &AppTheme) -> impl IntoElement + use<> {
+    render_table_header(theme)
+        .child(render_static_flex_header_cell("SQL文本", theme))
+        .child(render_sql_analysis_column_gap())
+        .child(render_static_header_cell(
+            "执行时间",
+            SLOW_SQL_DURATION_COLUMN_WIDTH,
+            theme,
+        ))
+}
+
+/// 渲染单条慢 SQL 分析行。
+fn render_slow_sql_row(
+    analysis_id: usize,
+    result: &RuntimeAnalysisResult,
+    row: &RuntimeSlowSqlAnalysisRow,
+    selection: Option<&RuntimeTableCellSelection>,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let sql_text = result
+        .requests
+        .get(row.request_index)
+        .and_then(|request| request.sql_records.get(row.sql_index))
+        .map(|sql| sql.sql_text.clone())
+        .unwrap_or_else(|| "SQL 明细已不可用".to_string());
+
+    render_table_row(SQL_ROW_HEIGHT, theme)
+        .child(render_selectable_scroll_cell_with_font(
+            analysis_id,
+            format!(
+                "runtime-slow-sql-text-{}-{}",
+                row.request_index, row.sql_index
+            ),
+            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-text"),
+            sql_text,
+            SQL_ROW_HEIGHT,
+            ARGUS_LOG_FONT_FAMILY,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_sql_analysis_column_gap())
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-duration"),
+            format_duration(row.execute_ms),
+            SLOW_SQL_DURATION_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle,
+            theme,
+            cx,
+        ))
+}
+
+/// 渲染 SQL 分析表的文本列和指标列之间的固定间隔。
+fn render_sql_analysis_column_gap() -> impl IntoElement {
+    div().w(px(SQL_ANALYSIS_COLUMN_GAP)).flex_none()
+}
+
+/// 渲染固定表格无数据时覆盖在表体区域的空态。
+fn render_table_empty_overlay(message: &'static str, theme: &AppTheme) -> impl IntoElement + use<> {
+    div()
+        .absolute()
+        .top(px(TABLE_HEADER_HEIGHT))
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(13.0))
+        .text_color(rgb(theme.foreground_muted))
+        .child(message)
+}
+
 /// 渲染总览表头。
 fn render_summary_header(
     analysis_id: usize,
@@ -1985,6 +2682,19 @@ fn render_static_header_cell(
         .child(label)
 }
 
+/// 渲染不可排序且吸收剩余宽度的表头单元格。
+fn render_static_flex_header_cell(label: &'static str, theme: &AppTheme) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w(px(0.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .px_2()
+        .text_color(rgb(theme.foreground))
+        .child(div().min_w(px(0.0)).truncate().child(label))
+}
+
 /// 渲染普通表格行；行宽固定为容器宽度，长字段由单元格内部滚动承载。
 fn render_table_row(height: f32, theme: &AppTheme) -> gpui::Div {
     div()
@@ -2536,6 +3246,173 @@ fn runtime_filter_criteria(state: &RuntimeAnalysisState) -> RuntimeFilterCriteri
         start_timestamp_ms: parse_runtime_filter_time(&state.filter_start_time_input.value, false),
         end_timestamp_ms: parse_runtime_filter_time(&state.filter_end_time_input.value, true),
     }
+}
+
+/// 从 Runtime 分析状态中提取 SQL 分析缓存用的原始过滤输入快照。
+fn runtime_sql_analysis_filter_snapshot(
+    state: &RuntimeAnalysisState,
+) -> RuntimeSqlAnalysisFilterSnapshot {
+    RuntimeSqlAnalysisFilterSnapshot {
+        keyword: state.filter_keyword_input.value.clone(),
+        username: state.filter_username_input.value.clone(),
+        start_time: state.filter_start_time_input.value.clone(),
+        end_time: state.filter_end_time_input.value.clone(),
+    }
+}
+
+/// 返回 SQL 频率分析过滤并排序后的行。
+fn sql_frequency_rows(
+    result: &RuntimeAnalysisResult,
+    state: &RuntimeAnalysisState,
+) -> Arc<Vec<RuntimeSqlFrequencyAnalysisRow>> {
+    let criteria = runtime_filter_criteria(state);
+    if !criteria.is_active() {
+        return result.sql_frequency_rows.clone();
+    }
+
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    if let Some(cache) = state.sql_frequency_rows_cache.borrow().as_ref()
+        && cache.filter == filter
+    {
+        return cache.rows.clone();
+    }
+
+    let mut grouped = BTreeMap::<String, RuntimeSqlFrequencyAnalysisRow>::new();
+    for request in &result.requests {
+        if !runtime_request_matches_cross_filters(request, &criteria) {
+            continue;
+        }
+
+        for sql in &request.sql_records {
+            if !criteria.keyword.is_empty()
+                && !runtime_sql_matches_keyword(request, sql, &criteria)
+                && !criteria.keyword_matches(&sql.normalized_sql)
+            {
+                continue;
+            }
+
+            let row = grouped
+                .entry(sql.normalized_sql.clone())
+                .or_insert_with(|| RuntimeSqlFrequencyAnalysisRow {
+                    normalized_sql: sql.normalized_sql.clone(),
+                    total_execute_ms: 0,
+                    execute_count: 0,
+                });
+            row.total_execute_ms = row.total_execute_ms.saturating_add(sql.execute_ms);
+            row.execute_count = row.execute_count.saturating_add(1);
+        }
+    }
+
+    let mut rows = grouped.into_values().collect::<Vec<_>>();
+    sort_runtime_sql_frequency_rows(&mut rows);
+    let rows = Arc::new(rows);
+    state
+        .sql_frequency_rows_cache
+        .borrow_mut()
+        .replace(RuntimeSqlFrequencyRowsCache {
+            filter,
+            rows: rows.clone(),
+        });
+    rows
+}
+
+/// 返回指定 SQL 结构的执行详情行，并按过滤条件缓存结果。
+fn sql_frequency_detail_rows(
+    result: &RuntimeAnalysisResult,
+    state: &RuntimeAnalysisState,
+    normalized_sql: &str,
+) -> Arc<Vec<RuntimeSqlFrequencyDetailRow>> {
+    let criteria = runtime_filter_criteria(state);
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    if let Some(cache) = state.sql_frequency_detail_rows_cache.borrow().as_ref()
+        && cache.filter == filter
+        && cache.normalized_sql == normalized_sql
+    {
+        return cache.rows.clone();
+    }
+
+    let mut rows = Vec::new();
+    for request in &result.requests {
+        if !runtime_request_matches_cross_filters(request, &criteria) {
+            continue;
+        }
+
+        for (sql_index, sql) in request.sql_records.iter().enumerate() {
+            if sql.normalized_sql != normalized_sql {
+                continue;
+            }
+            if !runtime_sql_matches_keyword(request, sql, &criteria)
+                && !criteria.keyword_matches(&sql.normalized_sql)
+            {
+                continue;
+            }
+
+            rows.push(RuntimeSqlFrequencyDetailRow {
+                request_index: request.index,
+                sql_index,
+                execute_ms: sql.execute_ms,
+            });
+        }
+    }
+
+    sort_runtime_sql_frequency_detail_rows(&mut rows);
+    let rows = Arc::new(rows);
+    state.sql_frequency_detail_rows_cache.borrow_mut().replace(
+        RuntimeSqlFrequencyDetailRowsCache {
+            filter,
+            normalized_sql: normalized_sql.to_string(),
+            rows: rows.clone(),
+        },
+    );
+    rows
+}
+
+/// 返回慢 SQL 分析过滤并按执行耗时降序排列后的行。
+fn slow_sql_rows(
+    result: &RuntimeAnalysisResult,
+    state: &RuntimeAnalysisState,
+) -> Arc<Vec<RuntimeSlowSqlAnalysisRow>> {
+    let criteria = runtime_filter_criteria(state);
+    if !criteria.is_active() {
+        return result.slow_sql_rows.clone();
+    }
+
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    if let Some(cache) = state.slow_sql_rows_cache.borrow().as_ref()
+        && cache.filter == filter
+    {
+        return cache.rows.clone();
+    }
+
+    let mut rows = Vec::new();
+    for request in &result.requests {
+        if !runtime_request_matches_cross_filters(request, &criteria) {
+            continue;
+        }
+
+        for (sql_index, sql) in request.sql_records.iter().enumerate() {
+            if !runtime_sql_matches_keyword(request, sql, &criteria) {
+                continue;
+            }
+
+            rows.push(RuntimeSlowSqlAnalysisRow {
+                request_index: request.index,
+                sql_index,
+                execute_ms: sql.execute_ms,
+            });
+        }
+    }
+
+    sort_runtime_slow_sql_rows(&mut rows);
+    let rows = Arc::new(rows);
+    state
+        .slow_sql_rows_cache
+        .borrow_mut()
+        .replace(RuntimeSlowSqlRowsCache {
+            filter,
+            rows: rows.clone(),
+        });
+    rows
 }
 
 /// 解析用户名过滤输入，支持英文逗号和中文逗号分隔多个模糊匹配关键字。
@@ -3260,11 +4137,14 @@ fn render_runtime_scrollbar_thumb(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
     use gpui::UniformListScrollHandle;
 
     use crate::app::{
-        RuntimeAnalysisTaskState, RuntimeAnalysisView, RuntimeSortDirection, RuntimeSqlSortKey,
-        RuntimeSummarySortKey,
+        RuntimeAnalysisResultType, RuntimeAnalysisTaskState, RuntimeAnalysisView,
+        RuntimeSortDirection, RuntimeSqlSortKey, RuntimeSummarySortKey,
     };
     use crate::loader::SourceId;
     use crate::runtime_analysis::{build_runtime_analysis_result, parse_runtime_request_text};
@@ -3279,6 +4159,7 @@ mod tests {
             targets: Vec::new(),
             generation: 1,
             view: RuntimeAnalysisView::Summary,
+            result_type: RuntimeAnalysisResultType::Statistics,
             summary_sort_key: RuntimeSummarySortKey::RequestCount,
             summary_sort_direction: RuntimeSortDirection::Descending,
             request_sort_key: crate::app::RuntimeRequestSortKey::RequestTime,
@@ -3297,6 +4178,13 @@ mod tests {
             summary_scroll: UniformListScrollHandle::new(),
             request_scroll: UniformListScrollHandle::new(),
             sql_scroll: UniformListScrollHandle::new(),
+            sql_frequency_scroll: UniformListScrollHandle::new(),
+            sql_frequency_detail_scroll: UniformListScrollHandle::new(),
+            slow_sql_scroll: UniformListScrollHandle::new(),
+            sql_frequency_detail_sql: None,
+            sql_frequency_rows_cache: RefCell::new(None),
+            sql_frequency_detail_rows_cache: RefCell::new(None),
+            slow_sql_rows_cache: RefCell::new(None),
             scrollbar_drag: None,
             task_state: RuntimeAnalysisTaskState::Loading {
                 message: String::new(),
@@ -3328,6 +4216,37 @@ mod tests {
                 "30 0 0 0 0 select * from orders",
             )
             .expect("应能解析 Runtime 测试日志"),
+        ];
+        for (index, request) in requests.iter_mut().enumerate() {
+            request.index = index;
+        }
+        build_runtime_analysis_result(requests, Vec::new(), 3)
+    }
+
+    /// 构造 SQL 频率和慢 SQL 分析测试结果。
+    fn runtime_sql_analysis_test_result() -> RuntimeAnalysisResult {
+        let mut requests = vec![
+            parse_runtime_request_text(
+                SourceId(1),
+                "100&alice&_api_sql&1000&0&0.log",
+                "/tmp/sql-a.log",
+                "10 0 0 0 0 select * from users where id = 1",
+            )
+            .expect("应能解析第一条 SQL 测试日志"),
+            parse_runtime_request_text(
+                SourceId(2),
+                "100&alice&_api_sql&2000&0&0.log",
+                "/tmp/sql-b.log",
+                "30 0 0 0 0 select * from users where id = 2",
+            )
+            .expect("应能解析第二条 SQL 测试日志"),
+            parse_runtime_request_text(
+                SourceId(3),
+                "100&bob&_api_sql&3000&0&0.log",
+                "/tmp/sql-c.log",
+                "50 0 0 0 0 select * from orders where status = 'PAID'",
+            )
+            .expect("应能解析第三条 SQL 测试日志"),
         ];
         for (index, request) in requests.iter_mut().enumerate() {
             request.index = index;
@@ -3380,6 +4299,141 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].request_count, 2);
         assert_eq!(sql_indices, vec![0]);
+    }
+
+    /// 验证 SQL 频率分析会按归一化结构聚合，并按执行次数降序展示。
+    #[test]
+    fn runtime_sql_frequency_groups_by_normalized_sql() {
+        let result = runtime_sql_analysis_test_result();
+        let state = runtime_filter_test_state();
+
+        let rows = sql_frequency_rows(&result, &state);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].normalized_sql, "select * from users where id = ?");
+        assert_eq!(rows[0].execute_count, 2);
+        assert_eq!(rows[0].average_execute_ms(), 20.0);
+        assert_eq!(rows[1].execute_count, 1);
+    }
+
+    /// 验证慢 SQL 分析按单次 SQL 执行耗时从高到低展示。
+    #[test]
+    fn runtime_slow_sql_rows_sort_by_execute_duration_descending() {
+        let result = runtime_sql_analysis_test_result();
+        let state = runtime_filter_test_state();
+
+        let rows = slow_sql_rows(&result, &state);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].execute_ms, 50);
+        assert!(
+            result.requests[rows[0].request_index].sql_records[rows[0].sql_index]
+                .sql_text
+                .contains("orders")
+        );
+        assert_eq!(rows[1].execute_ms, 30);
+        assert_eq!(rows[2].execute_ms, 10);
+    }
+
+    /// 验证现有用户名和关键字过滤会同时作用于新增 SQL 分析结果。
+    #[test]
+    fn runtime_sql_analysis_rows_share_existing_filters() {
+        let result = runtime_sql_analysis_test_result();
+        let mut state = runtime_filter_test_state();
+        state.filter_username_input.value = "alice".to_string();
+
+        let frequency_rows = sql_frequency_rows(&result, &state);
+        let slow_rows = slow_sql_rows(&result, &state);
+
+        assert_eq!(frequency_rows.len(), 1);
+        assert_eq!(frequency_rows[0].execute_count, 2);
+        assert_eq!(slow_rows.len(), 2);
+
+        state.filter_keyword_input.value = "id = 2".to_string();
+        let frequency_rows = sql_frequency_rows(&result, &state);
+        let slow_rows = slow_sql_rows(&result, &state);
+
+        assert_eq!(frequency_rows.len(), 1);
+        assert_eq!(frequency_rows[0].execute_count, 1);
+        assert_eq!(slow_rows.len(), 1);
+        assert_eq!(slow_rows[0].execute_ms, 30);
+    }
+
+    /// 验证 SQL 频率详情会列出同一 SQL 结构下的每次执行记录。
+    #[test]
+    fn runtime_sql_frequency_detail_lists_each_execution() {
+        let result = runtime_sql_analysis_test_result();
+        let state = runtime_filter_test_state();
+
+        let rows = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].execute_ms, 30);
+        assert_eq!(rows[1].execute_ms, 10);
+        assert_eq!(
+            result.requests[rows[0].request_index].request_path,
+            "/api/sql"
+        );
+        assert!(
+            result.requests[rows[0].request_index].sql_records[rows[0].sql_index]
+                .sql_text
+                .contains("id = 2")
+        );
+    }
+
+    /// 验证 SQL 频率详情继续沿用 Runtime 过滤条件。
+    #[test]
+    fn runtime_sql_frequency_detail_shares_existing_filters() {
+        let result = runtime_sql_analysis_test_result();
+        let mut state = runtime_filter_test_state();
+        state.filter_keyword_input.value = "id = 2".to_string();
+
+        let rows = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].execute_ms, 30);
+    }
+
+    /// 验证 SQL 频率详情在过滤条件不变时复用缓存，避免详情滚动时重复扫描。
+    #[test]
+    fn runtime_sql_frequency_detail_reuses_filtered_cache() {
+        let result = runtime_sql_analysis_test_result();
+        let mut state = runtime_filter_test_state();
+        state.filter_keyword_input.value = "users".to_string();
+
+        let first = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
+        let second = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// 验证无过滤条件下 SQL 频率和慢 SQL 分析直接复用后台预聚合结果。
+    #[test]
+    fn runtime_sql_analysis_uses_precomputed_rows_without_filters() {
+        let result = runtime_sql_analysis_test_result();
+        let state = runtime_filter_test_state();
+
+        let frequency_rows = sql_frequency_rows(&result, &state);
+        let slow_rows = slow_sql_rows(&result, &state);
+
+        assert!(Arc::ptr_eq(&frequency_rows, &result.sql_frequency_rows));
+        assert!(Arc::ptr_eq(&slow_rows, &result.slow_sql_rows));
+    }
+
+    /// 验证过滤条件不变时 SQL 分析结果复用缓存，避免滚动重绘重复全量计算。
+    #[test]
+    fn runtime_sql_analysis_reuses_filtered_cache() {
+        let result = runtime_sql_analysis_test_result();
+        let mut state = runtime_filter_test_state();
+        state.filter_keyword_input.value = "users".to_string();
+
+        let first_frequency_rows = sql_frequency_rows(&result, &state);
+        let second_frequency_rows = sql_frequency_rows(&result, &state);
+        let first_slow_rows = slow_sql_rows(&result, &state);
+        let second_slow_rows = slow_sql_rows(&result, &state);
+
+        assert!(Arc::ptr_eq(&first_frequency_rows, &second_frequency_rows));
+        assert!(Arc::ptr_eq(&first_slow_rows, &second_slow_rows));
     }
 
     /// 验证多行 SQL 在表格单元格展示前会折叠为单行，避免 GPUI 单行文本布局 panic。
