@@ -6,11 +6,13 @@
 
 use std::ops::Range;
 
-use crate::app::ArgusApp;
+use crate::app::{ArgusApp, JstackAnalysisTaskState, RuntimeAnalysisTaskState, TabKind};
+use crate::reader::log_file_reader::LogOpenState;
 use crate::theme::AppTheme;
 use crate::ui::components::context_menu::ActiveMenuKind;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
+use crate::ui::components::loading_spinner::render_loading_spinner;
 use gpui::{
     ClickEvent, Context, IntoElement, MouseButton, MouseUpEvent, SharedString, Window,
     WindowControlArea, div, prelude::*, px, rgb, svg,
@@ -46,6 +48,8 @@ const TAB_CLOSE_SLOT_WIDTH: f32 = 18.0;
 const TAB_CLOSE_BUTTON_SIZE: f32 = 18.0;
 /// 标签关闭图标尺寸，匹配 12px 标题文本。
 const TAB_CLOSE_ICON_SIZE: f32 = 13.0;
+/// 标签标题前加载动画尺寸，需低于标签文字行高以避免撑高标题栏。
+const TAB_LOADING_SPINNER_SIZE: f32 = 12.0;
 /// 标题文本宽度估算后额外保留的内边距、关闭按钮槽和激活凹弧连接件宽度。
 const TAB_TITLE_CHROME_WIDTH: f32 = 56.0;
 /// ASCII 字符在 12px 标题字号下的平均宽度估算。
@@ -121,8 +125,17 @@ pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -
                     visible_tabs
                         .into_iter()
                         .map(|(tab, tab_width)| {
-                            render_tab(tab, tab_width, active_tab_id, hovered_tab_id, &theme, cx)
-                                .into_any_element()
+                            let is_loading = is_tab_loading(app, &tab.kind);
+                            render_tab(
+                                tab,
+                                tab_width,
+                                active_tab_id,
+                                hovered_tab_id,
+                                is_loading,
+                                &theme,
+                                cx,
+                            )
+                            .into_any_element()
                         })
                         .collect::<Vec<_>>(),
                 ),
@@ -214,6 +227,32 @@ fn ideal_tab_width(title: &str) -> f32 {
     (title_width + TAB_TITLE_CHROME_WIDTH).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
 }
 
+/// 判断指定标签是否处于后台加载或分析中，用于在标签标题前展示转动状态。
+fn is_tab_loading(app: &ArgusApp, kind: &TabKind) -> bool {
+    match kind {
+        TabKind::LogSource { source_id, .. } => {
+            matches!(
+                app.log_read_state(*source_id),
+                Some(LogOpenState::Loading { .. })
+            )
+        }
+        TabKind::JstackAnalysis { analysis_id } => app
+            .jstack_analysis_state(*analysis_id)
+            .is_some_and(|state| {
+                matches!(state.task_state, JstackAnalysisTaskState::Loading { .. })
+            }),
+        TabKind::RuntimeAnalysis { analysis_id } => app
+            .runtime_analysis_state(*analysis_id)
+            .is_some_and(|state| {
+                matches!(state.task_state, RuntimeAnalysisTaskState::Loading { .. })
+            }),
+        TabKind::Empty
+        | TabKind::Settings
+        | TabKind::SshTerminal { .. }
+        | TabKind::SftpFileManager { .. } => false,
+    }
+}
+
 /// 将一组理想标签宽度压缩到可用范围内，避免标题栏溢出。
 fn fit_tab_widths(ideal_widths: &[f32], available_width: f32) -> Vec<f32> {
     if ideal_widths.is_empty() {
@@ -236,6 +275,7 @@ fn render_tab(
     tab_width: f32,
     active_tab_id: usize,
     hovered_tab_id: Option<usize>,
+    is_loading: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -287,6 +327,13 @@ fn render_tab(
                 .rounded_t(px(8.0))
                 .bg(rgb(background))
                 .text_color(rgb(foreground))
+                .when(is_loading, |this| {
+                    this.child(render_loading_spinner(
+                        ("tab-loading-spinner", tab_id),
+                        foreground,
+                        TAB_LOADING_SPINNER_SIZE,
+                    ))
+                })
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -448,6 +495,8 @@ fn active_tab_connector(side: TabConnectorSide, theme: &AppTheme) -> impl IntoEl
 #[cfg(test)]
 mod tests {
     use crate::app::{ArgusTab, TabKind};
+    use crate::loader::SourceId;
+    use crate::reader::read_mode::ReadMode;
 
     use super::*;
 
@@ -510,5 +559,28 @@ mod tests {
         assert!(
             layout.tabs_width + TAB_OVERFLOW_BUTTON_WIDTH + TITLE_RIGHT_DRAG_MIN_WIDTH <= 320.0
         );
+    }
+
+    /// 验证日志读取中的标签会被识别为加载状态，便于标题前显示旋转动画。
+    #[test]
+    fn tab_loading_detects_log_reader_state() {
+        let mut app = ArgusApp::new();
+        let source_id = SourceId(7);
+        let log_tab = TabKind::LogSource {
+            source_id,
+            path: "/tmp/app.log".to_string(),
+        };
+
+        assert!(!is_tab_loading(&app, &log_tab));
+
+        app.log_read_states.insert(
+            source_id,
+            LogOpenState::Loading {
+                mode: ReadMode::MmapPaged,
+                message: "正在读取".to_string(),
+            },
+        );
+
+        assert!(is_tab_loading(&app, &log_tab));
     }
 }

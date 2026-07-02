@@ -178,7 +178,8 @@ fn render_node(
     let meta_text = source_meta_text(source, child_count);
     let tooltip_label = source.label.clone();
     let tooltip_theme = theme.clone();
-    let is_selected = source.selected || is_search_selected;
+    let is_active = source.selected;
+    let is_multi_selected = is_search_selected && !is_active;
 
     div()
         .id(SharedString::from(format!("source-node-{source_id}")))
@@ -208,12 +209,16 @@ fn render_node(
                 .pl(px(10.0 + source.depth as f32 * 16.0))
                 .pr_2()
                 .rounded(px(SOURCE_ROW_RADIUS))
-                .when(is_selected, |this| this.bg(rgb(theme.selection)))
-                .when(!is_selected, |this| {
+                .when(is_active, |this| this.bg(rgb(theme.selection)))
+                .when(is_multi_selected, |this| this.bg(rgb(theme.current_line)))
+                .when(!is_active && !is_multi_selected, |this| {
                     this.hover(|this| this.bg(rgb(theme.current_line)))
                 })
-                .when(is_selected, |this| {
+                .when(is_active, |this| {
                     this.hover(|this| this.bg(rgb(theme.selection)))
+                })
+                .when(is_multi_selected, |this| {
+                    this.hover(|this| this.bg(rgb(theme.current_line)))
                 })
                 .text_size(px(SOURCE_TREE_FONT_SIZE))
                 .font_weight(FontWeight::MEDIUM)

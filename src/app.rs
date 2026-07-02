@@ -2795,6 +2795,7 @@ impl ArgusApp {
             self.log_read_states
                 .entry(source_id)
                 .or_insert(LogOpenState::Idle);
+            self.sync_source_tree_selection_from_active_tab();
             self.placeholder_notice = format!("已切换到 {path}");
             return;
         }
@@ -2824,6 +2825,7 @@ impl ArgusApp {
         self.log_read_states
             .entry(source_id)
             .or_insert(LogOpenState::Idle);
+        self.sync_source_tree_selection_from_active_tab();
         self.placeholder_notice = format!("已打开 {path}，准备读取日志内容");
     }
 
@@ -3110,16 +3112,23 @@ impl ArgusApp {
         self.activate_tab(tab_id);
     }
 
-    /// 让来源树视觉选中跟随当前日志标签，不执行展开、过滤清理或多选清理等业务动作。
+    /// 让来源树视觉选中跟随当前日志标签，并确保当前文件所在目录可见。
     ///
-    /// 说明：这里是 UI 视图同步，不应触发日志读取、目录懒加载或来源树结构变更。
+    /// 说明：这里是 UI 视图同步，不触发日志读取或目录懒加载；普通 tab 切换不是主动多选。
+    /// 若用户已经主动多选多个搜索文件，仅更新强激活态，避免悄悄改写搜索范围。
     fn sync_source_tree_selection_from_active_tab(&mut self) {
         let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
             return;
         };
 
+        self.source_registry.expand_ancestors(source_id);
         let selected = self.source_registry.select(source_id).is_some();
         if selected {
+            if self.selected_search_source_ids.len() <= 1 {
+                self.selected_search_source_ids.clear();
+                self.selected_search_source_ids.insert(source_id);
+                self.last_source_selection_anchor = Some(source_id);
+            }
             self.scroll_source_into_view(source_id);
         }
     }
@@ -8565,9 +8574,9 @@ mod tests {
         assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     }
 
-    /// 验证激活日志标签页只同步来源树选中态，不触发展开或多选清理。
+    /// 验证激活日志标签页会展开来源树路径，并把非主动单选收束到当前文件。
     #[test]
-    fn activating_log_tab_only_updates_source_tree_selection() {
+    fn activating_log_tab_syncs_single_source_tree_selection() {
         let mut app = app_with_placeholder_sources();
         let logs_id = source_id_by_label(&app, "logs");
         let app_log_id = source_id_by_label(&app, "app.log");
@@ -8576,9 +8585,6 @@ mod tests {
         app.select_source(app_log_id);
         let app_tab_id = app.active_tab_id;
         app.select_source(error_log_id);
-        app.selected_search_source_ids.insert(error_log_id);
-        app.selected_search_source_ids
-            .insert(source_id_by_label(&app, "nested.log"));
         if app
             .source_registry
             .node(logs_id)
@@ -8606,16 +8612,40 @@ mod tests {
                 .unwrap_or(false)
         );
         assert!(
-            !app.source_registry
+            app.source_registry
                 .node(logs_id)
                 .map(|source| source.expanded)
-                .unwrap_or(true)
+                .unwrap_or(false)
         );
-        assert!(!app.visible_source_ids().contains(&app_log_id));
-        assert!(app.selected_search_source_ids.contains(&error_log_id));
+        assert!(app.visible_source_ids().contains(&app_log_id));
+        assert_eq!(app.selected_search_source_ids, BTreeSet::from([app_log_id]));
+    }
+
+    /// 验证激活日志标签页不会破坏用户主动多选的搜索文件范围。
+    #[test]
+    fn activating_log_tab_preserves_multi_source_search_selection() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let error_log_id = source_id_by_label(&app, "error.log");
+        let nested_log_id = source_id_by_label(&app, "nested.log");
+
+        app.select_source(app_log_id);
+        let app_tab_id = app.active_tab_id;
+        app.select_source(error_log_id);
+        app.selected_search_source_ids = BTreeSet::from([error_log_id, nested_log_id]);
+
+        app.activate_tab(app_tab_id);
+
+        assert_eq!(app.active_tab_id, app_tab_id);
         assert!(
-            app.selected_search_source_ids
-                .contains(&source_id_by_label(&app, "nested.log"))
+            app.source_registry
+                .node(app_log_id)
+                .map(|source| source.selected)
+                .unwrap_or(false)
+        );
+        assert_eq!(
+            app.selected_search_source_ids,
+            BTreeSet::from([error_log_id, nested_log_id])
         );
     }
 
