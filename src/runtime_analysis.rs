@@ -6,13 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::{Read, Seek};
+use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use chrono::{Local, TimeZone};
+use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::ArchiveFormat;
@@ -98,15 +98,26 @@ impl RuntimeSqlFrequencyAnalysisRow {
     }
 }
 
-/// 慢 SQL 分析行。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSlowSqlAnalysisRow {
-    /// 请求记录在结果集中的稳定索引。
-    pub request_index: usize,
-    /// SQL 记录在当前请求中的稳定索引。
-    pub sql_index: usize,
-    /// SQL 单次执行耗时。
-    pub execute_ms: u64,
+/// 慢 SQL 归一化聚合行。
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeSlowSqlSummaryRow {
+    /// 归一化后的 SQL 结构文本。
+    pub normalized_sql: String,
+    /// 当前结构下所有 SQL 的执行总耗时。
+    pub total_execute_ms: u64,
+    /// 当前结构命中的 SQL 执行次数。
+    pub execute_count: usize,
+}
+
+impl RuntimeSlowSqlSummaryRow {
+    /// 返回当前 SQL 结构的平均执行耗时。
+    pub fn average_execute_ms(&self) -> f64 {
+        if self.execute_count == 0 {
+            0.0
+        } else {
+            self.total_execute_ms as f64 / self.execute_count as f64
+        }
+    }
 }
 
 /// SQL 频率详情行，表示某个 SQL 结构的一次具体执行。
@@ -133,6 +144,8 @@ pub struct RuntimeRequestRecord {
     pub path: String,
     /// 用户名；文件名中为空时保存为空字符串。
     pub username: String,
+    /// 用户名小写副本，用于用户名过滤时避免重复分配字符串。
+    pub username_lowercase: String,
     /// 请求地址，已把 `_` 转为 `/`。
     pub request_path: String,
     /// 请求总耗时，单位毫秒。
@@ -194,10 +207,63 @@ pub struct RuntimeAnalysisResult {
     pub total_files: usize,
     /// SQL 明细总数。
     pub total_sql_records: usize,
-    /// 无过滤条件下的 SQL 频率分析结果，后台分析阶段预先计算以避免 UI 点击卡顿。
-    pub sql_frequency_rows: Arc<Vec<RuntimeSqlFrequencyAnalysisRow>>,
-    /// 无过滤条件下的慢 SQL 分析结果，后台分析阶段预先计算以避免 UI 点击卡顿。
-    pub slow_sql_rows: Arc<Vec<RuntimeSlowSqlAnalysisRow>>,
+}
+
+/// Runtime 分析过滤输入快照，保存用户在过滤栏中输入的原始文本。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeAnalysisFilterSnapshot {
+    /// 任意关键字过滤输入原文。
+    pub keyword: String,
+    /// 用户名过滤输入原文。
+    pub username: String,
+    /// 开始时间过滤输入原文。
+    pub start_time: String,
+    /// 结束时间过滤输入原文。
+    pub end_time: String,
+}
+
+/// Runtime 分析过滤条件，解析一次后供后台缓存和 UI 回退路径复用。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeAnalysisFilterCriteria {
+    /// 关键字小写文本，空字符串表示不启用。
+    pub keyword: String,
+    /// 用户名过滤关键字列表，空列表表示不启用。
+    pub usernames: Vec<String>,
+    /// 开始时间戳，单位毫秒。
+    pub start_timestamp_ms: Option<i64>,
+    /// 结束时间戳，单位毫秒。
+    pub end_timestamp_ms: Option<i64>,
+}
+
+impl RuntimeAnalysisFilterCriteria {
+    /// 返回是否配置了任意有效过滤条件。
+    pub fn is_active(&self) -> bool {
+        !self.keyword.is_empty()
+            || !self.usernames.is_empty()
+            || self.start_timestamp_ms.is_some()
+            || self.end_timestamp_ms.is_some()
+    }
+
+    /// 判断关键字是否为空或命中已经小写化的文本。
+    pub fn keyword_matches_lowercase(&self, lowercase_text: &str) -> bool {
+        self.keyword.is_empty() || lowercase_text.contains(&self.keyword)
+    }
+
+    /// 判断关键字是否为空或命中普通文本；只用于少量汇总字段的回退匹配。
+    pub fn keyword_matches_text(&self, text: &str) -> bool {
+        self.keyword.is_empty() || text.to_lowercase().contains(&self.keyword)
+    }
+}
+
+/// Runtime 过滤后的统一行缓存，供统计、SQL 频率和慢 SQL 三种结果类型共享。
+#[derive(Clone, Debug)]
+pub struct RuntimeAnalysisFilterRows {
+    /// 生成缓存时使用的过滤输入快照。
+    pub filter: RuntimeAnalysisFilterSnapshot,
+    /// 当前过滤条件下的统计总览行。
+    pub summaries: Arc<Vec<RuntimeRequestSummary>>,
+    /// 当前过滤条件下每个请求可见的 SQL 索引列表。
+    pub sql_indices_by_request: Arc<HashMap<usize, Vec<usize>>>,
 }
 
 impl RuntimeAnalysisResult {
@@ -353,8 +419,6 @@ pub fn build_runtime_analysis_result(
     });
 
     RuntimeAnalysisResult {
-        sql_frequency_rows: Arc::new(build_runtime_sql_frequency_rows(&requests)),
-        slow_sql_rows: Arc::new(build_runtime_slow_sql_rows(&requests)),
         requests,
         summaries,
         skipped_files,
@@ -364,7 +428,7 @@ pub fn build_runtime_analysis_result(
 }
 
 /// 构建无过滤条件下的 SQL 频率分析结果。
-fn build_runtime_sql_frequency_rows(
+pub fn build_runtime_sql_frequency_rows(
     requests: &[RuntimeRequestRecord],
 ) -> Vec<RuntimeSqlFrequencyAnalysisRow> {
     let mut grouped = BTreeMap::<String, RuntimeSqlFrequencyAnalysisRow>::new();
@@ -388,21 +452,201 @@ fn build_runtime_sql_frequency_rows(
 }
 
 /// 构建无过滤条件下的慢 SQL 分析结果。
-fn build_runtime_slow_sql_rows(
+pub fn build_runtime_slow_sql_rows(
     requests: &[RuntimeRequestRecord],
-) -> Vec<RuntimeSlowSqlAnalysisRow> {
-    let mut rows = Vec::new();
+) -> Vec<RuntimeSlowSqlSummaryRow> {
+    let mut grouped = BTreeMap::<String, RuntimeSlowSqlSummaryRow>::new();
     for request in requests {
-        for (sql_index, sql) in request.sql_records.iter().enumerate() {
-            rows.push(RuntimeSlowSqlAnalysisRow {
-                request_index: request.index,
-                sql_index,
-                execute_ms: sql.execute_ms,
-            });
+        for sql in &request.sql_records {
+            let row = grouped
+                .entry(sql.normalized_sql.clone())
+                .or_insert_with(|| RuntimeSlowSqlSummaryRow {
+                    normalized_sql: sql.normalized_sql.clone(),
+                    total_execute_ms: 0,
+                    execute_count: 0,
+                });
+            row.total_execute_ms = row.total_execute_ms.saturating_add(sql.execute_ms);
+            row.execute_count = row.execute_count.saturating_add(1);
         }
     }
-    sort_runtime_slow_sql_rows(&mut rows);
+    let mut rows = grouped.into_values().collect::<Vec<_>>();
+    sort_runtime_slow_sql_summary_rows(&mut rows);
     rows
+}
+
+/// 按过滤条件构建 SQL 频率分析结果；用于进入 SQL 频率页时后台懒计算。
+pub fn build_runtime_sql_frequency_rows_for_filter(
+    result: &RuntimeAnalysisResult,
+    filter: &RuntimeAnalysisFilterSnapshot,
+) -> Vec<RuntimeSqlFrequencyAnalysisRow> {
+    let criteria = parse_runtime_analysis_filter_criteria(filter);
+    if !criteria.is_active() {
+        return build_runtime_sql_frequency_rows(&result.requests);
+    }
+
+    let mut grouped = BTreeMap::<String, RuntimeSqlFrequencyAnalysisRow>::new();
+    for request in &result.requests {
+        if !runtime_request_matches_cross_filters(request, &criteria) {
+            continue;
+        }
+
+        for sql in &request.sql_records {
+            if !runtime_sql_matches_keyword(request, sql, &criteria) {
+                continue;
+            }
+
+            let row = grouped
+                .entry(sql.normalized_sql.clone())
+                .or_insert_with(|| RuntimeSqlFrequencyAnalysisRow {
+                    normalized_sql: sql.normalized_sql.clone(),
+                    total_execute_ms: 0,
+                    execute_count: 0,
+                });
+            row.total_execute_ms = row.total_execute_ms.saturating_add(sql.execute_ms);
+            row.execute_count = row.execute_count.saturating_add(1);
+        }
+    }
+
+    let mut rows = grouped.into_values().collect::<Vec<_>>();
+    sort_runtime_sql_frequency_rows(&mut rows);
+    rows
+}
+
+/// 按过滤条件构建慢 SQL 分析结果；用于进入慢 SQL 页时后台懒计算。
+pub fn build_runtime_slow_sql_rows_for_filter(
+    result: &RuntimeAnalysisResult,
+    filter: &RuntimeAnalysisFilterSnapshot,
+) -> Vec<RuntimeSlowSqlSummaryRow> {
+    let criteria = parse_runtime_analysis_filter_criteria(filter);
+    if !criteria.is_active() {
+        return build_runtime_slow_sql_rows(&result.requests);
+    }
+
+    let mut grouped = BTreeMap::<String, RuntimeSlowSqlSummaryRow>::new();
+    for request in &result.requests {
+        if !runtime_request_matches_cross_filters(request, &criteria) {
+            continue;
+        }
+
+        for sql in &request.sql_records {
+            if !runtime_sql_matches_keyword(request, sql, &criteria) {
+                continue;
+            }
+
+            let row = grouped
+                .entry(sql.normalized_sql.clone())
+                .or_insert_with(|| RuntimeSlowSqlSummaryRow {
+                    normalized_sql: sql.normalized_sql.clone(),
+                    total_execute_ms: 0,
+                    execute_count: 0,
+                });
+            row.total_execute_ms = row.total_execute_ms.saturating_add(sql.execute_ms);
+            row.execute_count = row.execute_count.saturating_add(1);
+        }
+    }
+    let mut rows = grouped.into_values().collect::<Vec<_>>();
+    sort_runtime_slow_sql_summary_rows(&mut rows);
+    rows
+}
+
+/// 根据原始过滤输入构造可执行的 Runtime 过滤条件。
+pub fn parse_runtime_analysis_filter_criteria(
+    filter: &RuntimeAnalysisFilterSnapshot,
+) -> RuntimeAnalysisFilterCriteria {
+    RuntimeAnalysisFilterCriteria {
+        keyword: filter.keyword.trim().to_lowercase(),
+        usernames: parse_runtime_username_filters(&filter.username),
+        start_timestamp_ms: parse_runtime_filter_time_value(&filter.start_time, false),
+        end_timestamp_ms: parse_runtime_filter_time_value(&filter.end_time, true),
+    }
+}
+
+/// 解析用户名过滤输入，支持英文逗号和中文逗号分隔多个模糊匹配关键字。
+pub fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
+    raw.split([',', '，'])
+        .map(|part| part.trim().to_lowercase())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// 解析 Runtime 时间过滤输入；支持毫秒时间戳和常见本地时间格式。
+pub fn parse_runtime_filter_time_value(raw: &str, is_end: bool) -> Option<i64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(timestamp_ms) = value.parse::<i64>() {
+        return Some(timestamp_ms);
+    }
+
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.3f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format)
+            && let Some(local_datetime) = Local.from_local_datetime(&datetime).single()
+        {
+            return Some(local_datetime.timestamp_millis());
+        }
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let datetime = if is_end {
+            date.and_hms_milli_opt(23, 59, 59, 999)
+        } else {
+            date.and_hms_milli_opt(0, 0, 0, 0)
+        }?;
+        return Local
+            .from_local_datetime(&datetime)
+            .single()
+            .map(|datetime| datetime.timestamp_millis());
+    }
+
+    None
+}
+
+/// 在后台构建 Runtime 三类结果共享的过滤行缓存。
+pub fn build_runtime_analysis_filter_rows(
+    result: &RuntimeAnalysisResult,
+    filter: RuntimeAnalysisFilterSnapshot,
+) -> RuntimeAnalysisFilterRows {
+    let criteria = parse_runtime_analysis_filter_criteria(&filter);
+    let mut summaries = Vec::new();
+    let mut sql_indices_by_request = HashMap::<usize, Vec<usize>>::new();
+
+    for summary in &result.summaries {
+        if let Some(filtered_summary) =
+            filtered_runtime_summary_from_indices(result, summary, &criteria, true)
+        {
+            summaries.push(filtered_summary);
+        }
+    }
+
+    for request in &result.requests {
+        if !runtime_request_matches_cross_filters(request, &criteria) {
+            continue;
+        }
+
+        let mut visible_sql_indices = Vec::new();
+        for (sql_index, sql) in request.sql_records.iter().enumerate() {
+            if !runtime_sql_matches_keyword(request, sql, &criteria) {
+                continue;
+            }
+
+            visible_sql_indices.push(sql_index);
+        }
+
+        if !visible_sql_indices.is_empty() {
+            sql_indices_by_request.insert(request.index, visible_sql_indices);
+        }
+    }
+
+    RuntimeAnalysisFilterRows {
+        filter,
+        summaries: Arc::new(summaries),
+        sql_indices_by_request: Arc::new(sql_indices_by_request),
+    }
 }
 
 /// 按执行次数、平均耗时和 SQL 文本稳定排序 SQL 频率分析结果。
@@ -421,14 +665,15 @@ pub fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRo
     });
 }
 
-/// 按执行耗时和原始位置稳定排序慢 SQL 分析结果。
-pub fn sort_runtime_slow_sql_rows(rows: &mut [RuntimeSlowSqlAnalysisRow]) {
+/// 按平均执行耗时、执行次数和 SQL 文本稳定排序慢 SQL 聚合结果。
+pub fn sort_runtime_slow_sql_summary_rows(rows: &mut [RuntimeSlowSqlSummaryRow]) {
     rows.sort_by(|left, right| {
         right
-            .execute_ms
-            .cmp(&left.execute_ms)
-            .then_with(|| left.request_index.cmp(&right.request_index))
-            .then_with(|| left.sql_index.cmp(&right.sql_index))
+            .average_execute_ms()
+            .partial_cmp(&left.average_execute_ms())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.execute_count.cmp(&left.execute_count))
+            .then_with(|| left.normalized_sql.cmp(&right.normalized_sql))
     });
 }
 
@@ -441,6 +686,202 @@ pub fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDet
             .then_with(|| left.request_index.cmp(&right.request_index))
             .then_with(|| left.sql_index.cmp(&right.sql_index))
     });
+}
+
+/// 判断请求是否命中用户名和时间区间过滤。
+pub fn runtime_request_matches_cross_filters(
+    request: &RuntimeRequestRecord,
+    criteria: &RuntimeAnalysisFilterCriteria,
+) -> bool {
+    if !criteria.usernames.is_empty()
+        && !criteria
+            .usernames
+            .iter()
+            .any(|username| request.username_lowercase.contains(username))
+    {
+        return false;
+    }
+    if let Some(start_timestamp_ms) = criteria.start_timestamp_ms
+        && request.request_timestamp_ms < start_timestamp_ms
+    {
+        return false;
+    }
+    if let Some(end_timestamp_ms) = criteria.end_timestamp_ms
+        && request.request_timestamp_ms > end_timestamp_ms
+    {
+        return false;
+    }
+    true
+}
+
+/// 判断请求明细行是否命中关键字；SQL 命中时所属请求也视为命中。
+pub fn runtime_request_matches_keyword(
+    request: &RuntimeRequestRecord,
+    criteria: &RuntimeAnalysisFilterCriteria,
+) -> bool {
+    if criteria.keyword.is_empty() {
+        return true;
+    }
+
+    runtime_request_fields_match_keyword(request, criteria)
+        || request
+            .sql_records
+            .iter()
+            .any(|sql| runtime_sql_matches_keyword(request, sql, criteria))
+}
+
+/// 判断 SQL 明细行是否命中关键字；同时纳入所属请求元信息，便于跨层检索。
+pub fn runtime_sql_matches_keyword(
+    request: &RuntimeRequestRecord,
+    sql: &RuntimeSqlRecord,
+    criteria: &RuntimeAnalysisFilterCriteria,
+) -> bool {
+    if criteria.keyword.is_empty() {
+        return true;
+    }
+
+    runtime_request_fields_match_keyword(request, criteria)
+        || runtime_sql_fields_match_keyword(sql, criteria)
+}
+
+/// 判断请求字段是否命中关键字；仅在实际过滤时临时拼接，避免解析阶段预计算。
+fn runtime_request_fields_match_keyword(
+    request: &RuntimeRequestRecord,
+    criteria: &RuntimeAnalysisFilterCriteria,
+) -> bool {
+    let request_text = format!(
+        "{} {} {} {} {} {} {} {}",
+        request.request_time_label,
+        request.username,
+        format_duration_for_search(request.request_duration_ms),
+        request.request_path,
+        request.label,
+        request.path,
+        format_duration_for_search(request.socket_duration_ms),
+        format_duration_for_search(request.security_check_ms)
+    );
+    criteria.keyword_matches_text(&request_text)
+}
+
+/// 判断 SQL 字段是否命中关键字；仅在实际过滤时临时拼接，减少初次解析成本。
+fn runtime_sql_fields_match_keyword(
+    sql: &RuntimeSqlRecord,
+    criteria: &RuntimeAnalysisFilterCriteria,
+) -> bool {
+    let sql_text = format!(
+        "{} {} {} {} {} {} {}",
+        format_duration_for_search(sql.execute_ms),
+        format_duration_for_search(sql.acquire_connection_ms),
+        format_duration_for_search(sql.commit_ms),
+        format_duration_for_search(sql.release_connection_ms),
+        format_duration_for_search(sql.parse_result_ms),
+        sql.sql_text,
+        sql.normalized_sql
+    );
+    criteria.keyword_matches_text(&sql_text)
+}
+
+/// 从原始 summary 的请求索引中应用过滤并重新计算聚合统计。
+pub fn filtered_runtime_summary_from_indices(
+    result: &RuntimeAnalysisResult,
+    summary: &RuntimeRequestSummary,
+    criteria: &RuntimeAnalysisFilterCriteria,
+    apply_keyword: bool,
+) -> Option<RuntimeRequestSummary> {
+    let mut request_indices = summary
+        .request_indices
+        .iter()
+        .copied()
+        .filter(|index| {
+            result
+                .requests
+                .get(*index)
+                .is_some_and(|request| runtime_request_matches_cross_filters(request, criteria))
+        })
+        .collect::<Vec<_>>();
+
+    // 关键字过滤会影响聚合统计本身，而不是只决定总览行是否显示。
+    if apply_keyword && !criteria.keyword.is_empty() {
+        let cross_filtered_summary = build_runtime_summary_from_indices(
+            result,
+            &summary.request_path,
+            request_indices.clone(),
+        )?;
+        if !runtime_summary_fields_match_keyword(&cross_filtered_summary, criteria) {
+            request_indices.retain(|index| {
+                result
+                    .requests
+                    .get(*index)
+                    .is_some_and(|request| runtime_request_matches_keyword(request, criteria))
+            });
+        }
+    }
+
+    build_runtime_summary_from_indices(result, &summary.request_path, request_indices)
+}
+
+/// 根据请求索引重新计算 Runtime 聚合行统计。
+fn build_runtime_summary_from_indices(
+    result: &RuntimeAnalysisResult,
+    request_path: &str,
+    request_indices: Vec<usize>,
+) -> Option<RuntimeRequestSummary> {
+    if request_indices.is_empty() {
+        return None;
+    }
+
+    let request_count = request_indices.len();
+    let total_duration = request_indices
+        .iter()
+        .filter_map(|index| result.requests.get(*index))
+        .map(|request| request.request_duration_ms)
+        .sum::<u64>();
+    let slow_request_count = request_indices
+        .iter()
+        .filter_map(|index| result.requests.get(*index))
+        .filter(|request| request.is_slow_sql_request)
+        .count();
+    let average_duration_ms = total_duration as f64 / request_count as f64;
+    let slow_sql_ratio = slow_request_count as f64 / request_count as f64;
+
+    Some(RuntimeRequestSummary {
+        request_path: request_path.to_string(),
+        request_count,
+        average_duration_ms,
+        slow_request_count,
+        slow_sql_ratio,
+        request_indices,
+    })
+}
+
+/// 判断总览行自身可见字段是否命中关键字。
+fn runtime_summary_fields_match_keyword(
+    summary: &RuntimeRequestSummary,
+    criteria: &RuntimeAnalysisFilterCriteria,
+) -> bool {
+    let summary_text = format!(
+        "{} {} {} {}",
+        summary.request_count,
+        summary.request_path,
+        format_average_duration_for_search(summary.average_duration_ms),
+        format_ratio_for_search(summary.slow_sql_ratio)
+    );
+    criteria.keyword_matches_text(&summary_text)
+}
+
+/// 格式化整数毫秒耗时，供过滤搜索文本保持与 UI 展示一致。
+fn format_duration_for_search(duration_ms: u64) -> String {
+    format!("{duration_ms} ms")
+}
+
+/// 格式化平均耗时，供过滤搜索文本保持与 UI 展示一致。
+fn format_average_duration_for_search(duration_ms: f64) -> String {
+    format!("{duration_ms:.1} ms")
+}
+
+/// 格式化比例，供过滤搜索文本保持与 UI 展示一致。
+fn format_ratio_for_search(ratio: f64) -> String {
+    format!("{:.1}%", ratio * 100.0)
 }
 
 /// 将 SQL 归一化为结构模板，用于频率分析时消除常见参数值差异。
@@ -1044,6 +1485,7 @@ fn read_top_level_zip_runtime_requests_sequential(
         }
     };
 
+    let entry_index = build_zip_entry_index(&mut archive);
     let mut encoding_hint = None;
     targets
         .into_iter()
@@ -1051,6 +1493,7 @@ fn read_top_level_zip_runtime_requests_sequential(
             let order = target.order;
             let outcome = read_prepared_runtime_request_from_zip(
                 &mut archive,
+                &entry_index,
                 target,
                 default_encoding,
                 &mut encoding_hint,
@@ -1063,6 +1506,7 @@ fn read_top_level_zip_runtime_requests_sequential(
 /// 从已打开的 ZIP 压缩包中读取单条 Runtime 日志并解析。
 fn read_prepared_runtime_request_from_zip<R>(
     archive: &mut ZipArchive<R>,
+    entry_index: &HashMap<String, usize>,
     target: PreparedRuntimeTarget,
     default_encoding: &str,
     encoding_hint: &mut Option<String>,
@@ -1072,17 +1516,24 @@ where
 {
     let source_id = target.source_id;
     let label = target.label.clone();
-    read_prepared_runtime_request_from_zip_inner(archive, target, default_encoding, encoding_hint)
-        .map_err(|error| RuntimeSkippedFile {
-            source_id,
-            label,
-            reason: error.to_string(),
-        })
+    read_prepared_runtime_request_from_zip_inner(
+        archive,
+        entry_index,
+        target,
+        default_encoding,
+        encoding_hint,
+    )
+    .map_err(|error| RuntimeSkippedFile {
+        source_id,
+        label,
+        reason: error.to_string(),
+    })
 }
 
 /// 执行已打开 ZIP 中单个 Runtime 条目的读取和解析。
 fn read_prepared_runtime_request_from_zip_inner<R>(
     archive: &mut ZipArchive<R>,
+    entry_index: &HashMap<String, usize>,
     target: PreparedRuntimeTarget,
     default_encoding: &str,
     encoding_hint: &mut Option<String>,
@@ -1095,6 +1546,7 @@ where
     };
     let bytes = read_zip_entry_bytes_from_open_archive(
         archive,
+        entry_index,
         entry_path,
         &target.location.display_path(),
     )?;
@@ -1110,9 +1562,26 @@ where
     ))
 }
 
+/// 为当前打开的 ZIP 建立归一化条目路径索引，避免每个 Runtime 条目读取时重复线性扫描。
+fn build_zip_entry_index<R>(archive: &mut ZipArchive<R>) -> HashMap<String, usize>
+where
+    R: Read + Seek,
+{
+    let mut index = HashMap::with_capacity(archive.len());
+    for entry_index in 0..archive.len() {
+        if let Ok(file) = archive.by_index(entry_index) {
+            index
+                .entry(normalize_archive_entry_path(file.name()))
+                .or_insert(entry_index);
+        }
+    }
+    index
+}
+
 /// 从已打开的 ZIP 中读取条目字节，优先按中央目录名称直接定位，失败后再归一化扫描兼容异常路径。
 fn read_zip_entry_bytes_from_open_archive<R>(
     archive: &mut ZipArchive<R>,
+    entry_index: &HashMap<String, usize>,
     entry_path: &str,
     source_label: &str,
 ) -> Result<Vec<u8>>
@@ -1131,14 +1600,10 @@ where
         return Ok(bytes);
     }
 
-    for index in 0..archive.len() {
+    if let Some(index) = entry_index.get(&normalized_entry_path).copied() {
         let mut file = archive
             .by_index(index)
             .with_context(|| format!("无法读取 ZIP 第 {index} 个条目：{source_label}"))?;
-        let current_path = normalize_archive_entry_path(file.name());
-        if current_path != normalized_entry_path {
-            continue;
-        }
         if file.is_dir() {
             bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
         }
@@ -1180,8 +1645,16 @@ fn read_runtime_sql_records_from_location(
     encoding_hint: &mut Option<String>,
 ) -> Result<Vec<RuntimeSqlRecord>> {
     let bytes = match location {
-        SourceLocation::LocalPath(path) => fs::read(path)
-            .with_context(|| format!("无法读取 Runtime 日志文件：{}", path.display()))?,
+        SourceLocation::LocalPath(path) => {
+            if should_stream_runtime_utf8_file(default_encoding, encoding_hint)
+                && let Ok(records) = read_runtime_sql_records_from_utf8_file(path)
+            {
+                *encoding_hint = Some("UTF-8".to_string());
+                return Ok(records);
+            }
+            fs::read(path)
+                .with_context(|| format!("无法读取 Runtime 日志文件：{}", path.display()))?
+        }
         SourceLocation::ArchiveEntry { .. } => {
             ReadBackend::for_location(location).read_to_bytes(location)?
         }
@@ -1191,6 +1664,45 @@ fn read_runtime_sql_records_from_location(
         default_encoding,
         encoding_hint,
     ))
+}
+
+/// 判断当前批次是否可以尝试 UTF-8 流式解析，失败后仍会回退到完整解码。
+fn should_stream_runtime_utf8_file(default_encoding: &str, encoding_hint: &Option<String>) -> bool {
+    encoding_hint
+        .as_deref()
+        .map(|encoding| encoding.eq_ignore_ascii_case("UTF-8"))
+        .unwrap_or_else(|| default_encoding.eq_ignore_ascii_case("UTF-8"))
+}
+
+/// 使用 UTF-8 流式读取本地 Runtime 日志，避免为大量小文件构造完整正文字符串。
+fn read_runtime_sql_records_from_utf8_file(path: &Path) -> Result<Vec<RuntimeSqlRecord>> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("无法打开 Runtime 日志文件：{}", path.display()))?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut parser = RuntimeSqlParser::default();
+    let mut line = String::new();
+    let mut is_first_line = true;
+
+    loop {
+        line.clear();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .with_context(|| format!("无法按 UTF-8 读取 Runtime 日志：{}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        let content = if is_first_line {
+            is_first_line = false;
+            trimmed.strip_prefix('\u{FEFF}').unwrap_or(trimmed)
+        } else {
+            trimmed
+        };
+        parser.push_line(content);
+    }
+
+    Ok(parser.finish())
 }
 
 /// 使用批次内的编码提示解码 Runtime 日志，并在成功后更新提示以加速同批后续文件。
@@ -1311,17 +1823,22 @@ fn build_request_record(
             > metadata
                 .request_duration_ms
                 .saturating_mul(SLOW_SQL_REQUEST_PERCENT);
+    let username = metadata.username;
+    let username_lowercase = username.to_lowercase();
+    let request_path = metadata.request_path;
+    let request_time_label = format_request_time_millis(metadata.request_timestamp_ms);
 
     RuntimeRequestRecord {
         index,
         source_id,
         label,
         path,
-        username: metadata.username,
-        request_path: metadata.request_path,
+        username,
+        username_lowercase,
+        request_path,
         request_duration_ms: metadata.request_duration_ms,
         request_timestamp_ms: metadata.request_timestamp_ms,
-        request_time_label: format_request_time_millis(metadata.request_timestamp_ms),
+        request_time_label,
         socket_duration_ms: metadata.socket_duration_ms,
         security_check_ms: metadata.security_check_ms,
         sql_records,
@@ -1580,9 +2097,15 @@ mod tests {
         assert_eq!(result.summaries[0].average_duration_ms, 200.0);
         assert_eq!(result.summaries[0].slow_request_count, 1);
         assert_eq!(result.summaries[0].slow_sql_ratio, 0.5);
-        assert_eq!(result.sql_frequency_rows.len(), 2);
-        assert_eq!(result.slow_sql_rows.len(), 2);
-        assert_eq!(result.slow_sql_rows[0].execute_ms, 91);
+        assert_eq!(result.total_sql_records, 2);
+        assert_eq!(
+            build_runtime_slow_sql_rows_for_filter(
+                &result,
+                &RuntimeAnalysisFilterSnapshot::default()
+            )[0]
+            .average_execute_ms(),
+            91.0
+        );
     }
 
     /// 验证 SQL 归一化会消除常见参数差异，并保留可读的结构文本。
@@ -1608,6 +2131,120 @@ mod tests {
             normalized,
             "select * from orders where enabled = ? and deleted_at is ? and price > ? and id in (?)"
         );
+    }
+
+    /// 验证 Runtime 关键字匹配按需构造搜索文本，不依赖解析阶段预计算字段。
+    #[test]
+    fn runtime_filter_keyword_matches_without_parse_time_search_text() {
+        let request = parse_runtime_request_text(
+            SourceId(1),
+            "120&ALICE&_api_demo&1782368843095&3&4.log",
+            "/tmp/runtime.log",
+            "15ms 1ms 2ms 3ms 4ms SELECT * FROM users WHERE id = 42",
+        )
+        .expect("应能解析 Runtime 日志");
+
+        assert!(request.username_lowercase.contains("alice"));
+        let criteria = parse_runtime_analysis_filter_criteria(&RuntimeAnalysisFilterSnapshot {
+            keyword: "id = ?".to_string(),
+            username: String::new(),
+            start_time: String::new(),
+            end_time: String::new(),
+        });
+        assert!(runtime_sql_matches_keyword(
+            &request,
+            &request.sql_records[0],
+            &criteria
+        ));
+    }
+
+    /// 验证统一过滤缓存只产出统计和可见 SQL 索引，SQL 分析结果改为按需构建。
+    #[test]
+    fn builds_shared_runtime_filter_rows_without_sql_analysis_rows() {
+        let mut first = parse_runtime_request_text(
+            SourceId(1),
+            "100&alice&_api_sql&1000&0&0.log",
+            "/tmp/sql-a.log",
+            "10 0 0 0 0 select * from users where id = 1",
+        )
+        .expect("应能解析第一条 SQL 测试日志");
+        let mut second = parse_runtime_request_text(
+            SourceId(2),
+            "100&alice&_api_sql&2000&0&0.log",
+            "/tmp/sql-b.log",
+            "30 0 0 0 0 select * from users where id = 2",
+        )
+        .expect("应能解析第二条 SQL 测试日志");
+        let mut third = parse_runtime_request_text(
+            SourceId(3),
+            "100&bob&_api_sql&3000&0&0.log",
+            "/tmp/sql-c.log",
+            "50 0 0 0 0 select * from orders where status = 'PAID'",
+        )
+        .expect("应能解析第三条 SQL 测试日志");
+        first.index = 0;
+        second.index = 1;
+        third.index = 2;
+        let result = build_runtime_analysis_result(vec![first, second, third], Vec::new(), 3);
+
+        let rows = build_runtime_analysis_filter_rows(
+            &result,
+            RuntimeAnalysisFilterSnapshot {
+                keyword: "id = 2".to_string(),
+                username: "alice".to_string(),
+                start_time: String::new(),
+                end_time: String::new(),
+            },
+        );
+
+        assert_eq!(rows.summaries.len(), 1);
+        assert_eq!(rows.summaries[0].request_count, 1);
+        assert_eq!(
+            rows.sql_indices_by_request
+                .get(&1)
+                .cloned()
+                .unwrap_or_default(),
+            vec![0]
+        );
+        let filter = RuntimeAnalysisFilterSnapshot {
+            keyword: "id = 2".to_string(),
+            username: "alice".to_string(),
+            start_time: String::new(),
+            end_time: String::new(),
+        };
+        assert_eq!(
+            build_runtime_sql_frequency_rows_for_filter(&result, &filter)[0].execute_count,
+            1
+        );
+        assert_eq!(
+            build_runtime_slow_sql_rows_for_filter(&result, &filter)[0].average_execute_ms(),
+            30.0
+        );
+    }
+
+    /// 验证本地 UTF-8 Runtime 文件可以走流式逐行解析快路径。
+    #[test]
+    fn streams_utf8_runtime_file_lines() {
+        let dir = runtime_test_dir("stream_utf8");
+        let path = dir.join("100&u&_api_stream&1782368843095&0&0.log");
+        fs::write(
+            &path,
+            "\u{FEFF}1ms 0ms 0ms 0ms 0ms select *\nfrom table_a\n2ms 0ms 0ms 0ms 0ms select 2",
+        )
+        .expect("应能写入 UTF-8 Runtime 日志");
+        let mut encoding_hint = None;
+
+        let records = read_runtime_sql_records_from_location(
+            &SourceLocation::LocalPath(path),
+            "UTF-8",
+            &mut encoding_hint,
+        )
+        .expect("应能流式读取 Runtime 日志");
+
+        assert_eq!(encoding_hint.as_deref(), Some("UTF-8"));
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].sql_text, "select *\nfrom table_a");
+        assert_eq!(records[1].sql_text, "select 2");
     }
 
     /// 验证本地目录递归会收集子目录中的 `.log` 文件，并跳过其他扩展名。

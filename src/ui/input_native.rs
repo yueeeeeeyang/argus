@@ -27,7 +27,7 @@ pub fn app_native_input(
         focus_handle,
         move |edit: NativeTextEdit, _window: &mut Window, cx: &mut App| {
             app_handle.update(cx, |app, app_cx| {
-                app.apply_native_text_input_edit(target, edit);
+                app.apply_native_text_input_edit_with_context(target, edit, app_cx);
                 app_cx.notify();
             });
         },

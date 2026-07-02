@@ -5,27 +5,29 @@
 //! 主要功能：展示 Runtime 请求总览、请求详情和 SQL 明细三层可排序表格。
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use chrono::{Datelike, Local, TimeZone, Timelike};
 
 use crate::app::{
     AppTextInputTarget, ArgusApp, RUNTIME_SQL_COLLAPSED_ROW_HEIGHT, RuntimeAnalysisResultType,
     RuntimeAnalysisState, RuntimeAnalysisTaskState, RuntimeAnalysisView, RuntimeFilterInputKind,
-    RuntimeRequestSortKey, RuntimeScrollbarDrag, RuntimeScrollbarTable, RuntimeSlowSqlRowsCache,
-    RuntimeSortDirection, RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey,
-    RuntimeSqlFrequencyDetailRowsCache, RuntimeSqlFrequencyRowsCache, RuntimeSqlSortKey,
-    RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummarySortKey,
+    RuntimeRequestSortKey, RuntimeScrollbarDrag, RuntimeScrollbarTable, RuntimeSortDirection,
+    RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey, RuntimeSqlFrequencyDetailRowsCache,
+    RuntimeSqlSortKey, RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummarySortKey,
     RuntimeTableCellSelection, SettingsTextInputState,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::runtime_analysis::{
-    RuntimeAnalysisResult, RuntimeRequestRecord, RuntimeRequestSummary, RuntimeSlowSqlAnalysisRow,
-    RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord,
-    sort_runtime_slow_sql_rows, sort_runtime_sql_frequency_detail_rows,
-    sort_runtime_sql_frequency_rows,
+    RuntimeAnalysisFilterCriteria, RuntimeAnalysisResult, RuntimeRequestRecord,
+    RuntimeRequestSummary, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
+    RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord, filtered_runtime_summary_from_indices,
+    parse_runtime_analysis_filter_criteria, parse_runtime_filter_time_value,
+    runtime_request_matches_cross_filters as domain_runtime_request_matches_cross_filters,
+    runtime_request_matches_keyword as domain_runtime_request_matches_keyword,
+    runtime_sql_matches_keyword as domain_runtime_sql_matches_keyword,
+    sort_runtime_sql_frequency_detail_rows,
 };
 use crate::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index, character_count,
@@ -84,8 +86,6 @@ const SQL_FREQUENCY_AVERAGE_COLUMN_WIDTH: f32 = 128.0;
 const SQL_FREQUENCY_COUNT_COLUMN_WIDTH: f32 = 104.0;
 /// SQL 频率分析表固定列宽：操作。
 const SQL_FREQUENCY_ACTION_COLUMN_WIDTH: f32 = 86.0;
-/// 慢 SQL 分析表固定列宽：执行耗时。
-const SLOW_SQL_DURATION_COLUMN_WIDTH: f32 = 112.0;
 /// SQL 频率详情表固定列宽：SQL 具体耗时。
 const SQL_FREQUENCY_DETAIL_DURATION_COLUMN_WIDTH: f32 = 112.0;
 /// SQL 频率详情表固定列宽：来源请求。
@@ -332,10 +332,22 @@ fn render_ready_view(
             )
             .into_any_element(),
         },
-        RuntimeAnalysisResultType::SlowSql => {
-            render_slow_sql_table(analysis_id, state, result, analysis_focus_handle, theme, cx)
-                .into_any_element()
-        }
+        RuntimeAnalysisResultType::SlowSql => match state.slow_sql_detail_sql.as_ref() {
+            Some(normalized_sql) => render_slow_sql_detail_table(
+                analysis_id,
+                state,
+                result,
+                normalized_sql,
+                analysis_focus_handle,
+                theme,
+                cx,
+            )
+            .into_any_element(),
+            None => {
+                render_slow_sql_table(analysis_id, state, result, analysis_focus_handle, theme, cx)
+                    .into_any_element()
+            }
+        },
     };
 
     div()
@@ -455,7 +467,7 @@ fn render_result_type_button(
         .hover(|this| this.bg(rgb(theme.current_line)))
         .child(label)
         .on_click(cx.listener(move |app, _, _, cx| {
-            app.set_runtime_result_type(analysis_id, target_type);
+            app.set_runtime_result_type(analysis_id, target_type, Some(cx));
             cx.notify();
         }))
 }
@@ -1036,7 +1048,7 @@ fn render_runtime_filter_input(
         }),
         cx.listener(move |app, _, _, cx| {
             cx.stop_propagation();
-            app.clear_runtime_filter_input(analysis_id, input_kind);
+            app.clear_runtime_filter_input(analysis_id, input_kind, Some(cx));
             cx.notify();
         }),
     )
@@ -1322,6 +1334,11 @@ fn render_sql_frequency_table(
     let rows = sql_frequency_rows(result, state);
     let row_count = rows.len();
     let scroll_handle = state.sql_frequency_scroll.clone();
+    let empty_message = if state.is_sql_frequency_rows_computing {
+        "正在计算 SQL 频率分析..."
+    } else {
+        "当前过滤条件下没有 SQL 频率数据。"
+    };
 
     div()
         .id("runtime-sql-frequency-table")
@@ -1369,10 +1386,7 @@ fn render_sql_frequency_table(
             .track_scroll(scroll_handle.clone()),
         )
         .when(row_count == 0, |this| {
-            this.child(render_table_empty_overlay(
-                "当前过滤条件下没有 SQL 频率数据。",
-                theme,
-            ))
+            this.child(render_table_empty_overlay(empty_message, theme))
         })
         .children(render_table_scrollbars(
             analysis_id,
@@ -1490,6 +1504,11 @@ fn render_slow_sql_table(
     let rows = slow_sql_rows(result, state);
     let row_count = rows.len();
     let scroll_handle = state.slow_sql_scroll.clone();
+    let empty_message = if state.is_slow_sql_rows_computing {
+        "正在计算慢 SQL 分析..."
+    } else {
+        "当前过滤条件下没有慢 SQL 数据。"
+    };
 
     div()
         .id("runtime-slow-sql-table")
@@ -1507,18 +1526,16 @@ fn render_slow_sql_table(
                     let Some(state) = app.runtime_analysis_state(analysis_id) else {
                         return Vec::new();
                     };
-                    let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
-                        return Vec::new();
-                    };
                     let Some(rows) = rows.as_slice().get(range.clone()) else {
                         return Vec::new();
                     };
 
                     rows.iter()
-                        .map(|row| {
+                        .enumerate()
+                        .map(|(offset, row)| {
                             render_slow_sql_row(
                                 analysis_id,
-                                result,
+                                range.start + offset,
                                 row,
                                 state.cell_selection.as_ref(),
                                 analysis_focus_handle.clone(),
@@ -1539,10 +1556,7 @@ fn render_slow_sql_table(
             .track_scroll(scroll_handle.clone()),
         )
         .when(row_count == 0, |this| {
-            this.child(render_table_empty_overlay(
-                "当前过滤条件下没有慢 SQL 数据。",
-                theme,
-            ))
+            this.child(render_table_empty_overlay(empty_message, theme))
         })
         .children(render_table_scrollbars(
             analysis_id,
@@ -1553,6 +1567,99 @@ fn render_slow_sql_table(
             theme,
             cx,
         ))
+}
+
+/// 渲染慢 SQL 详情表格。
+fn render_slow_sql_detail_table(
+    analysis_id: usize,
+    state: &RuntimeAnalysisState,
+    result: &RuntimeAnalysisResult,
+    normalized_sql: &str,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let rows = sql_frequency_detail_rows(result, state, normalized_sql);
+    let row_count = rows.len();
+    let scroll_handle = state.slow_sql_scroll.clone();
+
+    div()
+        .id("runtime-slow-sql-detail")
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .child(render_slow_sql_detail_topbar(
+            analysis_id,
+            normalized_sql,
+            row_count,
+            theme,
+            cx,
+        ))
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_hidden()
+                .child(render_slow_sql_detail_header(theme))
+                .child(
+                    uniform_list(
+                        "runtime-slow-sql-detail-list",
+                        row_count,
+                        cx.processor(move |app, range: Range<usize>, _window, row_cx| {
+                            let theme = app.theme.clone();
+                            let Some(state) = app.runtime_analysis_state(analysis_id) else {
+                                return Vec::new();
+                            };
+                            let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+                                return Vec::new();
+                            };
+                            let Some(rows) = rows.as_slice().get(range.clone()) else {
+                                return Vec::new();
+                            };
+
+                            rows.iter()
+                                .map(|row| {
+                                    render_slow_sql_detail_row(
+                                        analysis_id,
+                                        result,
+                                        row,
+                                        state.cell_selection.as_ref(),
+                                        analysis_focus_handle.clone(),
+                                        &theme,
+                                        row_cx,
+                                    )
+                                    .into_any_element()
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .absolute()
+                    .top(px(TABLE_HEADER_HEIGHT))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .block_mouse_except_scroll()
+                    .track_scroll(scroll_handle.clone()),
+                )
+                .when(row_count == 0, |this| {
+                    this.child(render_table_empty_overlay(
+                        "当前过滤条件下没有该慢 SQL 的执行详情。",
+                        theme,
+                    ))
+                })
+                .children(render_table_scrollbars(
+                    analysis_id,
+                    RuntimeScrollbarTable::SlowSql,
+                    &scroll_handle,
+                    row_count,
+                    SQL_ROW_HEIGHT,
+                    theme,
+                    cx,
+                )),
+        )
 }
 
 /// 渲染 SQL 频率分析表头。
@@ -1800,37 +1907,189 @@ fn render_slow_sql_header(theme: &AppTheme) -> impl IntoElement + use<> {
         .child(render_static_flex_header_cell("SQL文本", theme))
         .child(render_sql_analysis_column_gap())
         .child(render_static_header_cell(
-            "执行时间",
-            SLOW_SQL_DURATION_COLUMN_WIDTH,
+            "平均执行时间",
+            SQL_FREQUENCY_AVERAGE_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "执行次数",
+            SQL_FREQUENCY_COUNT_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "操作",
+            SQL_FREQUENCY_ACTION_COLUMN_WIDTH,
             theme,
         ))
 }
 
-/// 渲染单条慢 SQL 分析行。
+/// 渲染单条慢 SQL 聚合行。
 fn render_slow_sql_row(
     analysis_id: usize,
-    result: &RuntimeAnalysisResult,
-    row: &RuntimeSlowSqlAnalysisRow,
+    row_index: usize,
+    row: &RuntimeSlowSqlSummaryRow,
     selection: Option<&RuntimeTableCellSelection>,
     analysis_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
-    let sql_text = result
-        .requests
-        .get(row.request_index)
-        .and_then(|request| request.sql_records.get(row.sql_index))
+    render_table_row(SQL_ROW_HEIGHT, theme)
+        .child(render_selectable_scroll_cell_with_font(
+            analysis_id,
+            format!("runtime-slow-sql-text-{row_index}"),
+            runtime_cell_key("slow-sql", row_index, "text"),
+            row.normalized_sql.clone(),
+            SQL_ROW_HEIGHT,
+            ARGUS_LOG_FONT_FAMILY,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_sql_analysis_column_gap())
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_cell_key("slow-sql", row_index, "average"),
+            format_average_duration(row.average_execute_ms()),
+            SQL_FREQUENCY_AVERAGE_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_cell_key("slow-sql", row_index, "count"),
+            row.execute_count.to_string(),
+            SQL_FREQUENCY_COUNT_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(
+            div()
+                .w(px(SQL_FREQUENCY_ACTION_COLUMN_WIDTH))
+                .flex_none()
+                .child(render_action_button(
+                    format!("runtime-slow-sql-detail-{row_index}"),
+                    "详情",
+                    theme,
+                    {
+                        let normalized_sql = row.normalized_sql.clone();
+                        cx.listener(move |app, _, _, cx| {
+                            app.open_runtime_slow_sql_detail(analysis_id, normalized_sql.clone());
+                            cx.notify();
+                        })
+                    },
+                )),
+        )
+}
+
+/// 渲染慢 SQL 详情顶部信息。
+fn render_slow_sql_detail_topbar(
+    analysis_id: usize,
+    normalized_sql: &str,
+    row_count: usize,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    div()
+        .h(px(42.0))
+        .px(px(RUNTIME_VIEW_PADDING))
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(render_action_button(
+                    format!("runtime-slow-sql-detail-back-{analysis_id}"),
+                    "返回",
+                    theme,
+                    cx.listener(move |app, _, _, cx| {
+                        app.show_runtime_slow_sql_summary(analysis_id);
+                        cx.notify();
+                    }),
+                ))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate()
+                                .child(normalized_sql.to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.foreground))
+                                .child(format!("{row_count} 次执行")),
+                        ),
+                ),
+        )
+}
+
+/// 渲染慢 SQL 详情表头。
+fn render_slow_sql_detail_header(theme: &AppTheme) -> impl IntoElement + use<> {
+    render_table_header(theme)
+        .child(render_static_flex_header_cell("SQL文本", theme))
+        .child(render_sql_analysis_column_gap())
+        .child(render_static_header_cell(
+            "执行接口",
+            SQL_FREQUENCY_DETAIL_REQUEST_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "执行时间",
+            SQL_FREQUENCY_DETAIL_TIME_COLUMN_WIDTH,
+            theme,
+        ))
+        .child(render_static_header_cell(
+            "执行耗时",
+            SQL_FREQUENCY_DETAIL_DURATION_COLUMN_WIDTH,
+            theme,
+        ))
+}
+
+/// 渲染慢 SQL 详情中的单次执行行。
+fn render_slow_sql_detail_row(
+    analysis_id: usize,
+    result: &RuntimeAnalysisResult,
+    row: &RuntimeSqlFrequencyDetailRow,
+    selection: Option<&RuntimeTableCellSelection>,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let request = result.requests.get(row.request_index);
+    let sql = request.and_then(|request| request.sql_records.get(row.sql_index));
+    let sql_text = sql
         .map(|sql| sql.sql_text.clone())
         .unwrap_or_else(|| "SQL 明细已不可用".to_string());
+    let request_path = request
+        .map(|request| request.request_path.clone())
+        .unwrap_or_else(|| "未知请求".to_string());
+    let request_time_label = request
+        .map(|request| request.request_time_label.clone())
+        .unwrap_or_else(|| "-".to_string());
 
     render_table_row(SQL_ROW_HEIGHT, theme)
         .child(render_selectable_scroll_cell_with_font(
             analysis_id,
             format!(
-                "runtime-slow-sql-text-{}-{}",
+                "runtime-slow-sql-detail-text-{}-{}",
                 row.request_index, row.sql_index
             ),
-            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-text"),
+            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-detail-text"),
             sql_text,
             SQL_ROW_HEIGHT,
             ARGUS_LOG_FONT_FAMILY,
@@ -1842,9 +2101,29 @@ fn render_slow_sql_row(
         .child(render_sql_analysis_column_gap())
         .child(render_selectable_cell(
             analysis_id,
-            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-duration"),
+            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-detail-request"),
+            request_path,
+            SQL_FREQUENCY_DETAIL_REQUEST_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-detail-time"),
+            request_time_label,
+            SQL_FREQUENCY_DETAIL_TIME_COLUMN_WIDTH,
+            selection,
+            analysis_focus_handle.clone(),
+            theme,
+            cx,
+        ))
+        .child(render_selectable_cell(
+            analysis_id,
+            runtime_sql_cell_key(row.request_index, row.sql_index, "slow-detail-duration"),
             format_duration(row.execute_ms),
-            SLOW_SQL_DURATION_COLUMN_WIDTH,
+            SQL_FREQUENCY_DETAIL_DURATION_COLUMN_WIDTH,
             selection,
             analysis_focus_handle,
             theme,
@@ -3210,48 +3489,28 @@ fn render_empty_message(message: &str, theme: &AppTheme) -> AnyElement {
         .into_any_element()
 }
 
-/// Runtime 三层表格当前过滤条件，解析一次后供排序和行筛选复用。
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct RuntimeFilterCriteria {
-    /// 表格关键字，空字符串表示不启用。
-    keyword: String,
-    /// 用户名过滤关键字列表，空列表表示不启用。
-    usernames: Vec<String>,
-    /// 开始时间戳，单位毫秒。
-    start_timestamp_ms: Option<i64>,
-    /// 结束时间戳，单位毫秒。
-    end_timestamp_ms: Option<i64>,
-}
-
-impl RuntimeFilterCriteria {
-    /// 返回是否配置了任意过滤条件。
-    fn is_active(&self) -> bool {
-        !self.keyword.is_empty()
-            || !self.usernames.is_empty()
-            || self.start_timestamp_ms.is_some()
-            || self.end_timestamp_ms.is_some()
-    }
-
-    /// 判断关键字是否为空或命中文本。
-    fn keyword_matches(&self, text: &str) -> bool {
-        self.keyword.is_empty() || text.to_lowercase().contains(&self.keyword)
-    }
-}
+/// Runtime 三层表格当前过滤条件类型，具体解析逻辑复用领域层实现。
+type RuntimeFilterCriteria = RuntimeAnalysisFilterCriteria;
 
 /// 从 Runtime 分析状态中构造过滤条件。
 fn runtime_filter_criteria(state: &RuntimeAnalysisState) -> RuntimeFilterCriteria {
-    RuntimeFilterCriteria {
-        keyword: state.filter_keyword_input.value.trim().to_lowercase(),
-        usernames: parse_runtime_username_filters(&state.filter_username_input.value),
-        start_timestamp_ms: parse_runtime_filter_time(&state.filter_start_time_input.value, false),
-        end_timestamp_ms: parse_runtime_filter_time(&state.filter_end_time_input.value, true),
-    }
+    parse_runtime_analysis_filter_criteria(&runtime_sql_analysis_filter_snapshot(state))
 }
 
 /// 从 Runtime 分析状态中提取 SQL 分析缓存用的原始过滤输入快照。
 fn runtime_sql_analysis_filter_snapshot(
     state: &RuntimeAnalysisState,
 ) -> RuntimeSqlAnalysisFilterSnapshot {
+    RuntimeSqlAnalysisFilterSnapshot {
+        keyword: state.applied_filter_keyword.clone(),
+        username: state.applied_filter_username.clone(),
+        start_time: state.applied_filter_start_time.clone(),
+        end_time: state.applied_filter_end_time.clone(),
+    }
+}
+
+/// 从 Runtime 过滤输入框提取当前输入快照，供状态栏展示待应用状态。
+fn runtime_filter_input_snapshot(state: &RuntimeAnalysisState) -> RuntimeSqlAnalysisFilterSnapshot {
     RuntimeSqlAnalysisFilterSnapshot {
         keyword: state.filter_keyword_input.value.clone(),
         username: state.filter_username_input.value.clone(),
@@ -3262,58 +3521,16 @@ fn runtime_sql_analysis_filter_snapshot(
 
 /// 返回 SQL 频率分析过滤并排序后的行。
 fn sql_frequency_rows(
-    result: &RuntimeAnalysisResult,
+    _result: &RuntimeAnalysisResult,
     state: &RuntimeAnalysisState,
 ) -> Arc<Vec<RuntimeSqlFrequencyAnalysisRow>> {
-    let criteria = runtime_filter_criteria(state);
-    if !criteria.is_active() {
-        return result.sql_frequency_rows.clone();
-    }
-
     let filter = runtime_sql_analysis_filter_snapshot(state);
     if let Some(cache) = state.sql_frequency_rows_cache.borrow().as_ref()
         && cache.filter == filter
     {
         return cache.rows.clone();
     }
-
-    let mut grouped = BTreeMap::<String, RuntimeSqlFrequencyAnalysisRow>::new();
-    for request in &result.requests {
-        if !runtime_request_matches_cross_filters(request, &criteria) {
-            continue;
-        }
-
-        for sql in &request.sql_records {
-            if !criteria.keyword.is_empty()
-                && !runtime_sql_matches_keyword(request, sql, &criteria)
-                && !criteria.keyword_matches(&sql.normalized_sql)
-            {
-                continue;
-            }
-
-            let row = grouped
-                .entry(sql.normalized_sql.clone())
-                .or_insert_with(|| RuntimeSqlFrequencyAnalysisRow {
-                    normalized_sql: sql.normalized_sql.clone(),
-                    total_execute_ms: 0,
-                    execute_count: 0,
-                });
-            row.total_execute_ms = row.total_execute_ms.saturating_add(sql.execute_ms);
-            row.execute_count = row.execute_count.saturating_add(1);
-        }
-    }
-
-    let mut rows = grouped.into_values().collect::<Vec<_>>();
-    sort_runtime_sql_frequency_rows(&mut rows);
-    let rows = Arc::new(rows);
-    state
-        .sql_frequency_rows_cache
-        .borrow_mut()
-        .replace(RuntimeSqlFrequencyRowsCache {
-            filter,
-            rows: rows.clone(),
-        });
-    rows
+    Arc::new(Vec::new())
 }
 
 /// 返回指定 SQL 结构的执行详情行，并按过滤条件缓存结果。
@@ -3332,26 +3549,47 @@ fn sql_frequency_detail_rows(
     }
 
     let mut rows = Vec::new();
-    for request in &result.requests {
-        if !runtime_request_matches_cross_filters(request, &criteria) {
-            continue;
+    if let Some(cache) = state.runtime_filter_rows_cache.as_ref()
+        && cache.filter == filter
+    {
+        for (request_index, sql_indices) in cache.sql_indices_by_request.iter() {
+            let Some(request) = result.requests.get(*request_index) else {
+                continue;
+            };
+            for sql_index in sql_indices {
+                let Some(sql) = request.sql_records.get(*sql_index) else {
+                    continue;
+                };
+                if sql.normalized_sql != normalized_sql {
+                    continue;
+                }
+                rows.push(RuntimeSqlFrequencyDetailRow {
+                    request_index: request.index,
+                    sql_index: *sql_index,
+                    execute_ms: sql.execute_ms,
+                });
+            }
         }
-
-        for (sql_index, sql) in request.sql_records.iter().enumerate() {
-            if sql.normalized_sql != normalized_sql {
-                continue;
-            }
-            if !runtime_sql_matches_keyword(request, sql, &criteria)
-                && !criteria.keyword_matches(&sql.normalized_sql)
-            {
+    } else {
+        for request in &result.requests {
+            if !runtime_request_matches_cross_filters(request, &criteria) {
                 continue;
             }
 
-            rows.push(RuntimeSqlFrequencyDetailRow {
-                request_index: request.index,
-                sql_index,
-                execute_ms: sql.execute_ms,
-            });
+            for (sql_index, sql) in request.sql_records.iter().enumerate() {
+                if sql.normalized_sql != normalized_sql {
+                    continue;
+                }
+                if !runtime_sql_matches_keyword(request, sql, &criteria) {
+                    continue;
+                }
+
+                rows.push(RuntimeSqlFrequencyDetailRow {
+                    request_index: request.index,
+                    sql_index,
+                    execute_ms: sql.execute_ms,
+                });
+            }
         }
     }
 
@@ -3367,60 +3605,18 @@ fn sql_frequency_detail_rows(
     rows
 }
 
-/// 返回慢 SQL 分析过滤并按执行耗时降序排列后的行。
+/// 返回慢 SQL 分析过滤并按平均执行耗时降序排列后的聚合行。
 fn slow_sql_rows(
-    result: &RuntimeAnalysisResult,
+    _result: &RuntimeAnalysisResult,
     state: &RuntimeAnalysisState,
-) -> Arc<Vec<RuntimeSlowSqlAnalysisRow>> {
-    let criteria = runtime_filter_criteria(state);
-    if !criteria.is_active() {
-        return result.slow_sql_rows.clone();
-    }
-
+) -> Arc<Vec<RuntimeSlowSqlSummaryRow>> {
     let filter = runtime_sql_analysis_filter_snapshot(state);
     if let Some(cache) = state.slow_sql_rows_cache.borrow().as_ref()
         && cache.filter == filter
     {
         return cache.rows.clone();
     }
-
-    let mut rows = Vec::new();
-    for request in &result.requests {
-        if !runtime_request_matches_cross_filters(request, &criteria) {
-            continue;
-        }
-
-        for (sql_index, sql) in request.sql_records.iter().enumerate() {
-            if !runtime_sql_matches_keyword(request, sql, &criteria) {
-                continue;
-            }
-
-            rows.push(RuntimeSlowSqlAnalysisRow {
-                request_index: request.index,
-                sql_index,
-                execute_ms: sql.execute_ms,
-            });
-        }
-    }
-
-    sort_runtime_slow_sql_rows(&mut rows);
-    let rows = Arc::new(rows);
-    state
-        .slow_sql_rows_cache
-        .borrow_mut()
-        .replace(RuntimeSlowSqlRowsCache {
-            filter,
-            rows: rows.clone(),
-        });
-    rows
-}
-
-/// 解析用户名过滤输入，支持英文逗号和中文逗号分隔多个模糊匹配关键字。
-fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
-    raw.split([',', '，'])
-        .map(|part| part.trim().to_lowercase())
-        .filter(|part| !part.is_empty())
-        .collect()
+    Arc::new(Vec::new())
 }
 
 /// 返回总览表过滤并排序后的聚合行。
@@ -3429,11 +3625,25 @@ fn sorted_summary_rows(
     state: &RuntimeAnalysisState,
 ) -> Vec<RuntimeRequestSummary> {
     let criteria = runtime_filter_criteria(state);
-    let mut rows = result
-        .summaries
-        .iter()
-        .filter_map(|summary| filtered_summary_from_indices(result, summary, &criteria, true))
-        .collect::<Vec<_>>();
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    let mut rows = if criteria.is_active() {
+        state
+            .runtime_filter_rows_cache
+            .as_ref()
+            .filter(|cache| cache.filter == filter)
+            .map(|cache| cache.summaries.as_ref().clone())
+            .unwrap_or_else(|| {
+                result
+                    .summaries
+                    .iter()
+                    .filter_map(|summary| {
+                        filtered_summary_from_indices(result, summary, &criteria, true)
+                    })
+                    .collect::<Vec<_>>()
+            })
+    } else {
+        result.summaries.clone()
+    };
 
     rows.sort_by(|left, right| {
         let ordering = match state.summary_sort_key {
@@ -3459,6 +3669,17 @@ fn filtered_summary_for_request_path(
     state: &RuntimeAnalysisState,
 ) -> Option<RuntimeRequestSummary> {
     let criteria = runtime_filter_criteria(state);
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    if criteria.is_active()
+        && let Some(cache) = state.runtime_filter_rows_cache.as_ref()
+        && cache.filter == filter
+    {
+        return cache
+            .summaries
+            .iter()
+            .find(|summary| summary.request_path == request_path)
+            .cloned();
+    }
     result
         .summaries
         .iter()
@@ -3473,71 +3694,7 @@ fn filtered_summary_from_indices(
     criteria: &RuntimeFilterCriteria,
     apply_keyword: bool,
 ) -> Option<RuntimeRequestSummary> {
-    let mut request_indices = summary
-        .request_indices
-        .iter()
-        .copied()
-        .filter(|index| {
-            result
-                .requests
-                .get(*index)
-                .is_some_and(|request| runtime_request_matches_cross_filters(request, criteria))
-        })
-        .collect::<Vec<_>>();
-
-    // 关键字过滤会影响聚合统计本身，而不是只决定总览行是否显示。
-    // 这样命中 SQL 文本时，请求次数、平均耗时和慢 SQL 比例都与过滤后的明细保持一致。
-    if apply_keyword && !criteria.keyword.is_empty() {
-        let cross_filtered_summary = build_runtime_summary_from_indices(
-            result,
-            &summary.request_path,
-            request_indices.clone(),
-        )?;
-        if !runtime_summary_fields_match_keyword(&cross_filtered_summary, criteria) {
-            request_indices.retain(|index| {
-                result
-                    .requests
-                    .get(*index)
-                    .is_some_and(|request| runtime_request_matches_keyword(request, criteria))
-            });
-        }
-    }
-
-    build_runtime_summary_from_indices(result, &summary.request_path, request_indices)
-}
-
-/// 根据请求索引重新计算 Runtime 聚合行统计。
-fn build_runtime_summary_from_indices(
-    result: &RuntimeAnalysisResult,
-    request_path: &str,
-    request_indices: Vec<usize>,
-) -> Option<RuntimeRequestSummary> {
-    if request_indices.is_empty() {
-        return None;
-    }
-
-    let request_count = request_indices.len();
-    let total_duration = request_indices
-        .iter()
-        .filter_map(|index| result.requests.get(*index))
-        .map(|request| request.request_duration_ms)
-        .sum::<u64>();
-    let slow_request_count = request_indices
-        .iter()
-        .filter_map(|index| result.requests.get(*index))
-        .filter(|request| request.is_slow_sql_request)
-        .count();
-    let average_duration_ms = total_duration as f64 / request_count as f64;
-    let slow_sql_ratio = slow_request_count as f64 / request_count as f64;
-
-    Some(RuntimeRequestSummary {
-        request_path: request_path.to_string(),
-        request_count,
-        average_duration_ms,
-        slow_request_count,
-        slow_sql_ratio,
-        request_indices,
-    })
+    filtered_runtime_summary_from_indices(result, summary, criteria, apply_keyword)
 }
 
 /// 返回请求明细表排序后的请求索引。
@@ -3547,17 +3704,27 @@ fn sorted_request_indices(
     state: &RuntimeAnalysisState,
 ) -> Vec<usize> {
     let criteria = runtime_filter_criteria(state);
-    let mut indices = summary
-        .request_indices
-        .iter()
-        .copied()
-        .filter(|index| {
-            result.requests.get(*index).is_some_and(|request| {
-                runtime_request_matches_cross_filters(request, &criteria)
-                    && runtime_request_matches_keyword(request, &criteria)
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    let mut indices = if criteria.is_active()
+        && state
+            .runtime_filter_rows_cache
+            .as_ref()
+            .is_some_and(|cache| cache.filter == filter)
+    {
+        summary.request_indices.clone()
+    } else {
+        summary
+            .request_indices
+            .iter()
+            .copied()
+            .filter(|index| {
+                result.requests.get(*index).is_some_and(|request| {
+                    runtime_request_matches_cross_filters(request, &criteria)
+                        && runtime_request_matches_keyword(request, &criteria)
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    };
     indices.sort_by(|left_index, right_index| {
         let left = &result.requests[*left_index];
         let right = &result.requests[*right_index];
@@ -3585,14 +3752,26 @@ fn sorted_sql_indices(request: &RuntimeRequestRecord, state: &RuntimeAnalysisSta
         return Vec::new();
     }
 
-    let mut indices = (0..request.sql_records.len())
-        .filter(|sql_index| {
-            request
-                .sql_records
-                .get(*sql_index)
-                .is_some_and(|sql| runtime_sql_matches_keyword(request, sql, &criteria))
-        })
-        .collect::<Vec<_>>();
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    let mut indices = if criteria.is_active()
+        && let Some(cache) = state.runtime_filter_rows_cache.as_ref()
+        && cache.filter == filter
+    {
+        cache
+            .sql_indices_by_request
+            .get(&request.index)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        (0..request.sql_records.len())
+            .filter(|sql_index| {
+                request
+                    .sql_records
+                    .get(*sql_index)
+                    .is_some_and(|sql| runtime_sql_matches_keyword(request, sql, &criteria))
+            })
+            .collect::<Vec<_>>()
+    };
     indices.sort_by(|left_index, right_index| {
         let left = &request.sql_records[*left_index];
         let right = &request.sql_records[*right_index];
@@ -3621,40 +3800,7 @@ fn runtime_request_matches_cross_filters(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeFilterCriteria,
 ) -> bool {
-    if !criteria.usernames.is_empty()
-        && !criteria
-            .usernames
-            .iter()
-            .any(|username| request.username.to_lowercase().contains(username))
-    {
-        return false;
-    }
-    if let Some(start_timestamp_ms) = criteria.start_timestamp_ms
-        && request.request_timestamp_ms < start_timestamp_ms
-    {
-        return false;
-    }
-    if let Some(end_timestamp_ms) = criteria.end_timestamp_ms
-        && request.request_timestamp_ms > end_timestamp_ms
-    {
-        return false;
-    }
-    true
-}
-
-/// 判断总览行自身可见字段是否命中关键字。
-fn runtime_summary_fields_match_keyword(
-    summary: &RuntimeRequestSummary,
-    criteria: &RuntimeFilterCriteria,
-) -> bool {
-    let summary_text = format!(
-        "{} {} {} {}",
-        summary.request_count,
-        summary.request_path,
-        format_average_duration(summary.average_duration_ms),
-        format_ratio(summary.slow_sql_ratio)
-    );
-    criteria.keyword_matches(&summary_text)
+    domain_runtime_request_matches_cross_filters(request, criteria)
 }
 
 /// 判断请求明细行是否命中关键字。
@@ -3662,16 +3808,7 @@ fn runtime_request_matches_keyword(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeFilterCriteria,
 ) -> bool {
-    if criteria.keyword.is_empty() {
-        return true;
-    }
-
-    let request_text = runtime_request_search_text(request);
-    criteria.keyword_matches(&request_text)
-        || request
-            .sql_records
-            .iter()
-            .any(|sql| runtime_sql_matches_keyword(request, sql, criteria))
+    domain_runtime_request_matches_keyword(request, criteria)
 }
 
 /// 判断 SQL 明细行是否命中关键字；同时纳入所属请求元信息，便于跨层检索。
@@ -3680,73 +3817,7 @@ fn runtime_sql_matches_keyword(
     sql: &RuntimeSqlRecord,
     criteria: &RuntimeFilterCriteria,
 ) -> bool {
-    if criteria.keyword.is_empty() {
-        return true;
-    }
-
-    let sql_text = format!(
-        "{} {} {} {} {} {} {}",
-        runtime_request_search_text(request),
-        format_duration(sql.execute_ms),
-        format_duration(sql.acquire_connection_ms),
-        format_duration(sql.commit_ms),
-        format_duration(sql.release_connection_ms),
-        format_duration(sql.parse_result_ms),
-        sql.sql_text
-    );
-    criteria.keyword_matches(&sql_text)
-}
-
-/// 拼接请求记录可被关键字过滤命中的文本。
-fn runtime_request_search_text(request: &RuntimeRequestRecord) -> String {
-    format!(
-        "{} {} {} {} {} {} {} {}",
-        request.request_time_label,
-        request.username,
-        format_duration(request.request_duration_ms),
-        request.request_path,
-        request.label,
-        request.path,
-        format_duration(request.socket_duration_ms),
-        format_duration(request.security_check_ms)
-    )
-}
-
-/// 解析 Runtime 时间过滤输入；支持毫秒时间戳和常见本地时间格式。
-fn parse_runtime_filter_time(raw: &str, is_end: bool) -> Option<i64> {
-    let value = raw.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if let Ok(timestamp_ms) = value.parse::<i64>() {
-        return Some(timestamp_ms);
-    }
-
-    for format in [
-        "%Y-%m-%d %H:%M:%S%.3f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-    ] {
-        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format)
-            && let Some(local_datetime) = Local.from_local_datetime(&datetime).single()
-        {
-            return Some(local_datetime.timestamp_millis());
-        }
-    }
-
-    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        let datetime = if is_end {
-            date.and_hms_milli_opt(23, 59, 59, 999)
-        } else {
-            date.and_hms_milli_opt(0, 0, 0, 0)
-        }?;
-        return Local
-            .from_local_datetime(&datetime)
-            .single()
-            .map(|datetime| datetime.timestamp_millis());
-    }
-
-    None
+    domain_runtime_sql_matches_keyword(request, sql, criteria)
 }
 
 /// 返回日期时间选择器当前展示值；输入为空或非法时使用当天边界作为默认值。
@@ -3754,7 +3825,7 @@ fn runtime_datetime_picker_value(
     input: &SettingsTextInputState,
     is_end: bool,
 ) -> DateTimePickerValue {
-    let datetime = parse_runtime_filter_time(&input.value, is_end)
+    let datetime = parse_runtime_filter_time_value(&input.value, is_end)
         .and_then(|timestamp_ms| Local.timestamp_millis_opt(timestamp_ms).single())
         .unwrap_or_else(|| default_runtime_datetime_picker_datetime(is_end));
 
@@ -3783,6 +3854,15 @@ fn default_runtime_datetime_picker_datetime(is_end: bool) -> chrono::DateTime<Lo
 
 /// 返回 Runtime 过滤栏的状态提示。
 fn runtime_filter_status_label(state: &RuntimeAnalysisState) -> String {
+    let input_filter = runtime_filter_input_snapshot(state);
+    let applied_filter = runtime_sql_analysis_filter_snapshot(state);
+    if state.is_filter_computing {
+        return "正在应用过滤条件".to_string();
+    }
+    if state.is_filter_pending || input_filter != applied_filter {
+        return "过滤条件待应用".to_string();
+    }
+
     let criteria = runtime_filter_criteria(state);
     if !criteria.is_active() {
         return "未启用过滤".to_string();
@@ -3790,28 +3870,16 @@ fn runtime_filter_status_label(state: &RuntimeAnalysisState) -> String {
 
     let mut parts = Vec::new();
     if !criteria.keyword.is_empty() {
-        parts.push(format!(
-            "关键字：{}",
-            state.filter_keyword_input.value.trim()
-        ));
+        parts.push(format!("关键字：{}", state.applied_filter_keyword.trim()));
     }
     if !criteria.usernames.is_empty() {
-        parts.push(format!(
-            "用户：{}",
-            state.filter_username_input.value.trim()
-        ));
+        parts.push(format!("用户：{}", state.applied_filter_username.trim()));
     }
     if criteria.start_timestamp_ms.is_some() {
-        parts.push(format!(
-            "开始：{}",
-            state.filter_start_time_input.value.trim()
-        ));
+        parts.push(format!("开始：{}", state.applied_filter_start_time.trim()));
     }
     if criteria.end_timestamp_ms.is_some() {
-        parts.push(format!(
-            "结束：{}",
-            state.filter_end_time_input.value.trim()
-        ));
+        parts.push(format!("结束：{}", state.applied_filter_end_time.trim()));
     }
     parts.join("，")
 }
@@ -4144,10 +4212,14 @@ mod tests {
 
     use crate::app::{
         RuntimeAnalysisResultType, RuntimeAnalysisTaskState, RuntimeAnalysisView,
-        RuntimeSortDirection, RuntimeSqlSortKey, RuntimeSummarySortKey,
+        RuntimeSlowSqlRowsCache, RuntimeSortDirection, RuntimeSqlFrequencyRowsCache,
+        RuntimeSqlSortKey, RuntimeSummarySortKey,
     };
     use crate::loader::SourceId;
-    use crate::runtime_analysis::{build_runtime_analysis_result, parse_runtime_request_text};
+    use crate::runtime_analysis::{
+        build_runtime_analysis_result, build_runtime_slow_sql_rows_for_filter,
+        build_runtime_sql_frequency_rows_for_filter, parse_runtime_request_text,
+    };
 
     use super::*;
 
@@ -4170,6 +4242,14 @@ mod tests {
             filter_username_input: SettingsTextInputState::default(),
             filter_start_time_input: SettingsTextInputState::default(),
             filter_end_time_input: SettingsTextInputState::default(),
+            applied_filter_keyword: String::new(),
+            applied_filter_username: String::new(),
+            applied_filter_start_time: String::new(),
+            applied_filter_end_time: String::new(),
+            filter_input_generation: 0,
+            filter_task_generation: 0,
+            is_filter_pending: false,
+            is_filter_computing: false,
             open_time_picker: None,
             cell_selection: None,
             cell_selection_drag: None,
@@ -4182,6 +4262,14 @@ mod tests {
             sql_frequency_detail_scroll: UniformListScrollHandle::new(),
             slow_sql_scroll: UniformListScrollHandle::new(),
             sql_frequency_detail_sql: None,
+            slow_sql_detail_sql: None,
+            runtime_filter_rows_cache: None,
+            sql_frequency_rows_task_generation: 0,
+            slow_sql_rows_task_generation: 0,
+            is_sql_frequency_rows_computing: false,
+            is_slow_sql_rows_computing: false,
+            sql_frequency_rows_computing_filter: None,
+            slow_sql_rows_computing_filter: None,
             sql_frequency_rows_cache: RefCell::new(None),
             sql_frequency_detail_rows_cache: RefCell::new(None),
             slow_sql_rows_cache: RefCell::new(None),
@@ -4190,6 +4278,20 @@ mod tests {
                 message: String::new(),
             },
         }
+    }
+
+    /// 测试中模拟防抖和后台过滤已经完成，把输入框值同步到已应用过滤值。
+    fn apply_runtime_filter_inputs_for_test(state: &mut RuntimeAnalysisState) {
+        state.applied_filter_keyword = state.filter_keyword_input.value.clone();
+        state.applied_filter_username = state.filter_username_input.value.clone();
+        state.applied_filter_start_time = state.filter_start_time_input.value.clone();
+        state.applied_filter_end_time = state.filter_end_time_input.value.clone();
+        state.is_filter_pending = false;
+        state.is_filter_computing = false;
+        state.runtime_filter_rows_cache = None;
+        state.sql_frequency_rows_cache.borrow_mut().take();
+        state.sql_frequency_detail_rows_cache.borrow_mut().take();
+        state.slow_sql_rows_cache.borrow_mut().take();
     }
 
     /// 构造 Runtime 过滤测试结果，并补齐稳定请求索引。
@@ -4262,6 +4364,7 @@ mod tests {
         state.filter_username_input.value = "alice".to_string();
         state.filter_start_time_input.value = "1500".to_string();
         state.filter_end_time_input.value = "2500".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
 
         let rows = sorted_summary_rows(&result, &state);
 
@@ -4278,6 +4381,7 @@ mod tests {
         let result = runtime_filter_test_result();
         let mut state = runtime_filter_test_state();
         state.filter_username_input.value = " bob, carol ".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
 
         let rows = sorted_summary_rows(&result, &state);
 
@@ -4292,6 +4396,7 @@ mod tests {
         let result = runtime_filter_test_result();
         let mut state = runtime_filter_test_state();
         state.filter_keyword_input.value = "orders".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
 
         let rows = sorted_summary_rows(&result, &state);
         let sql_indices = sorted_sql_indices(&result.requests[1], &state);
@@ -4306,8 +4411,9 @@ mod tests {
     fn runtime_sql_frequency_groups_by_normalized_sql() {
         let result = runtime_sql_analysis_test_result();
         let state = runtime_filter_test_state();
+        let filter = runtime_sql_analysis_filter_snapshot(&state);
 
-        let rows = sql_frequency_rows(&result, &state);
+        let rows = build_runtime_sql_frequency_rows_for_filter(&result, &filter);
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].normalized_sql, "select * from users where id = ?");
@@ -4316,23 +4422,22 @@ mod tests {
         assert_eq!(rows[1].execute_count, 1);
     }
 
-    /// 验证慢 SQL 分析按单次 SQL 执行耗时从高到低展示。
+    /// 验证慢 SQL 分析按归一化 SQL 聚合，并按平均执行耗时从高到低展示。
     #[test]
-    fn runtime_slow_sql_rows_sort_by_execute_duration_descending() {
+    fn runtime_slow_sql_rows_group_by_normalized_sql_and_sort_by_average_duration() {
         let result = runtime_sql_analysis_test_result();
         let state = runtime_filter_test_state();
+        let filter = runtime_sql_analysis_filter_snapshot(&state);
 
-        let rows = slow_sql_rows(&result, &state);
+        let rows = build_runtime_slow_sql_rows_for_filter(&result, &filter);
 
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].execute_ms, 50);
-        assert!(
-            result.requests[rows[0].request_index].sql_records[rows[0].sql_index]
-                .sql_text
-                .contains("orders")
-        );
-        assert_eq!(rows[1].execute_ms, 30);
-        assert_eq!(rows[2].execute_ms, 10);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].normalized_sql.contains("orders"));
+        assert_eq!(rows[0].average_execute_ms(), 50.0);
+        assert_eq!(rows[0].execute_count, 1);
+        assert!(rows[1].normalized_sql.contains("users"));
+        assert_eq!(rows[1].average_execute_ms(), 20.0);
+        assert_eq!(rows[1].execute_count, 2);
     }
 
     /// 验证现有用户名和关键字过滤会同时作用于新增 SQL 分析结果。
@@ -4341,22 +4446,29 @@ mod tests {
         let result = runtime_sql_analysis_test_result();
         let mut state = runtime_filter_test_state();
         state.filter_username_input.value = "alice".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
+        let filter = runtime_sql_analysis_filter_snapshot(&state);
 
-        let frequency_rows = sql_frequency_rows(&result, &state);
-        let slow_rows = slow_sql_rows(&result, &state);
+        let frequency_rows = build_runtime_sql_frequency_rows_for_filter(&result, &filter);
+        let slow_rows = build_runtime_slow_sql_rows_for_filter(&result, &filter);
 
         assert_eq!(frequency_rows.len(), 1);
         assert_eq!(frequency_rows[0].execute_count, 2);
-        assert_eq!(slow_rows.len(), 2);
+        assert_eq!(slow_rows.len(), 1);
+        assert_eq!(slow_rows[0].execute_count, 2);
+        assert_eq!(slow_rows[0].average_execute_ms(), 20.0);
 
         state.filter_keyword_input.value = "id = 2".to_string();
-        let frequency_rows = sql_frequency_rows(&result, &state);
-        let slow_rows = slow_sql_rows(&result, &state);
+        apply_runtime_filter_inputs_for_test(&mut state);
+        let filter = runtime_sql_analysis_filter_snapshot(&state);
+        let frequency_rows = build_runtime_sql_frequency_rows_for_filter(&result, &filter);
+        let slow_rows = build_runtime_slow_sql_rows_for_filter(&result, &filter);
 
         assert_eq!(frequency_rows.len(), 1);
         assert_eq!(frequency_rows[0].execute_count, 1);
         assert_eq!(slow_rows.len(), 1);
-        assert_eq!(slow_rows[0].execute_ms, 30);
+        assert_eq!(slow_rows[0].execute_count, 1);
+        assert_eq!(slow_rows[0].average_execute_ms(), 30.0);
     }
 
     /// 验证 SQL 频率详情会列出同一 SQL 结构下的每次执行记录。
@@ -4387,6 +4499,7 @@ mod tests {
         let result = runtime_sql_analysis_test_result();
         let mut state = runtime_filter_test_state();
         state.filter_keyword_input.value = "id = 2".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
 
         let rows = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
 
@@ -4400,6 +4513,7 @@ mod tests {
         let result = runtime_sql_analysis_test_result();
         let mut state = runtime_filter_test_state();
         state.filter_keyword_input.value = "users".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
 
         let first = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
         let second = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
@@ -4407,17 +4521,17 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
     }
 
-    /// 验证无过滤条件下 SQL 频率和慢 SQL 分析直接复用后台预聚合结果。
+    /// 验证 SQL 频率和慢 SQL 分析在懒计算完成前不做同步全量计算。
     #[test]
-    fn runtime_sql_analysis_uses_precomputed_rows_without_filters() {
+    fn runtime_sql_analysis_waits_for_lazy_rows_cache() {
         let result = runtime_sql_analysis_test_result();
         let state = runtime_filter_test_state();
 
         let frequency_rows = sql_frequency_rows(&result, &state);
         let slow_rows = slow_sql_rows(&result, &state);
 
-        assert!(Arc::ptr_eq(&frequency_rows, &result.sql_frequency_rows));
-        assert!(Arc::ptr_eq(&slow_rows, &result.slow_sql_rows));
+        assert!(frequency_rows.is_empty());
+        assert!(slow_rows.is_empty());
     }
 
     /// 验证过滤条件不变时 SQL 分析结果复用缓存，避免滚动重绘重复全量计算。
@@ -4426,6 +4540,26 @@ mod tests {
         let result = runtime_sql_analysis_test_result();
         let mut state = runtime_filter_test_state();
         state.filter_keyword_input.value = "users".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
+        let filter = runtime_sql_analysis_filter_snapshot(&state);
+        let frequency_rows = Arc::new(build_runtime_sql_frequency_rows_for_filter(
+            &result, &filter,
+        ));
+        let slow_rows = Arc::new(build_runtime_slow_sql_rows_for_filter(&result, &filter));
+        state
+            .sql_frequency_rows_cache
+            .borrow_mut()
+            .replace(RuntimeSqlFrequencyRowsCache {
+                filter: filter.clone(),
+                rows: frequency_rows,
+            });
+        state
+            .slow_sql_rows_cache
+            .borrow_mut()
+            .replace(RuntimeSlowSqlRowsCache {
+                filter,
+                rows: slow_rows,
+            });
 
         let first_frequency_rows = sql_frequency_rows(&result, &state);
         let second_frequency_rows = sql_frequency_rows(&result, &state);

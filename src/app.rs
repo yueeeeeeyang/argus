@@ -22,6 +22,7 @@ use std::ops::Range;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Duration;
 
 use crate::config::{AppConfig, ConfigManager};
 use crate::connections::ConnectionNodeId;
@@ -42,9 +43,11 @@ use crate::reader::log_file_reader::{
 };
 use crate::reader::read_mode::ReadMode;
 use crate::runtime_analysis::{
-    RuntimeAnalysisResult, RuntimeAnalysisTarget, RuntimeAnalysisTargetKind,
-    RuntimeSlowSqlAnalysisRow, RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
-    analyze_runtime_targets,
+    RuntimeAnalysisFilterRows, RuntimeAnalysisFilterSnapshot, RuntimeAnalysisResult,
+    RuntimeAnalysisTarget, RuntimeAnalysisTargetKind, RuntimeSlowSqlSummaryRow,
+    RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow, analyze_runtime_targets,
+    build_runtime_analysis_filter_rows, build_runtime_slow_sql_rows_for_filter,
+    build_runtime_sql_frequency_rows_for_filter, parse_runtime_analysis_filter_criteria,
 };
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
@@ -69,7 +72,7 @@ use crate::updater::{
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use gpui::{
     AppContext, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point,
-    Render, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
+    Render, Timer, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -79,6 +82,9 @@ use placeholder_data::{placeholder_logs, placeholder_source_registry};
 pub use source_picker::{
     ExternalSourceTrigger, SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState,
 };
+
+/// 兼容 UI 层既有命名：Runtime SQL 分析缓存使用的过滤快照。
+pub use crate::runtime_analysis::RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot;
 
 /// 来源侧栏默认宽度；主窗口默认宽度同步增加，避免挤占右侧日志阅读区。
 pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 350.0;
@@ -124,6 +130,8 @@ pub const LOG_VIEWER_LINE_NUMBER_PADDING: f32 = 18.0;
 pub const LOG_VIEWER_TAB_DISPLAY_SPACES: &str = "    ";
 /// 后台压缩包探测每批最多处理 `并发数 * 该系数` 个节点，避免频繁重绘。
 const SOURCE_ARCHIVE_PROBE_BATCH_FACTOR: usize = 16;
+/// Runtime 过滤输入防抖时长，避免每个字符都触发大结果集重新过滤。
+const RUNTIME_FILTER_DEBOUNCE_MS: u64 = 260;
 
 /// 根据日志总行数计算行号栏宽度。
 ///
@@ -997,7 +1005,7 @@ pub enum RuntimeAnalysisTaskState {
         message: String,
     },
     /// 分析完成，可渲染三层统计表格。
-    Ready(RuntimeAnalysisResult),
+    Ready(Arc<RuntimeAnalysisResult>),
     /// 分析任务启动或后台执行失败。
     Failed {
         /// 用户可读失败原因。
@@ -1031,21 +1039,8 @@ pub enum RuntimeAnalysisResultType {
     Statistics,
     /// 按 SQL 结构聚合后的执行频率分析。
     SqlFrequency,
-    /// 按单次执行耗时排序的慢 SQL 分析。
+    /// 按 SQL 结构聚合后的平均执行耗时分析。
     SlowSql,
-}
-
-/// Runtime SQL 分析缓存对应的过滤输入快照。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlAnalysisFilterSnapshot {
-    /// 任意关键字过滤输入原文。
-    pub keyword: String,
-    /// 用户名过滤输入原文。
-    pub username: String,
-    /// 开始时间过滤输入原文。
-    pub start_time: String,
-    /// 结束时间过滤输入原文。
-    pub end_time: String,
 }
 
 /// Runtime SQL 频率分析缓存。
@@ -1073,8 +1068,8 @@ pub struct RuntimeSqlFrequencyDetailRowsCache {
 pub struct RuntimeSlowSqlRowsCache {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
-    /// 已过滤和排序的慢 SQL 行。
-    pub rows: Arc<Vec<RuntimeSlowSqlAnalysisRow>>,
+    /// 已过滤和排序的慢 SQL 聚合行。
+    pub rows: Arc<Vec<RuntimeSlowSqlSummaryRow>>,
 }
 
 /// Runtime 表格排序方向。
@@ -1214,6 +1209,22 @@ pub struct RuntimeAnalysisState {
     pub filter_start_time_input: SettingsTextInputState,
     /// 请求结束时间过滤输入框状态。
     pub filter_end_time_input: SettingsTextInputState,
+    /// 已应用到结果缓存的关键字过滤值，输入防抖完成前仍保持旧值。
+    pub applied_filter_keyword: String,
+    /// 已应用到结果缓存的用户名过滤值。
+    pub applied_filter_username: String,
+    /// 已应用到结果缓存的开始时间过滤值。
+    pub applied_filter_start_time: String,
+    /// 已应用到结果缓存的结束时间过滤值。
+    pub applied_filter_end_time: String,
+    /// 过滤输入 generation，用于丢弃过期防抖任务。
+    pub filter_input_generation: usize,
+    /// 过滤后台任务 generation，用于丢弃过期计算结果。
+    pub filter_task_generation: usize,
+    /// 是否存在等待防抖应用的过滤输入。
+    pub is_filter_pending: bool,
+    /// 是否正在后台构建过滤结果缓存。
+    pub is_filter_computing: bool,
     /// 当前展开的时间选择器输入框；为空表示没有打开时间面板。
     pub open_time_picker: Option<RuntimeFilterInputKind>,
     /// 当前 Runtime 表格单元格中的文本选区。
@@ -1238,6 +1249,22 @@ pub struct RuntimeAnalysisState {
     pub slow_sql_scroll: UniformListScrollHandle,
     /// SQL 频率分析当前打开的详情 SQL；为空时展示频率列表。
     pub sql_frequency_detail_sql: Option<String>,
+    /// 慢 SQL 分析当前打开的详情 SQL；为空时展示慢 SQL 聚合列表。
+    pub slow_sql_detail_sql: Option<String>,
+    /// Runtime 三类结果共享的过滤行缓存，避免切换页面和滚动时重复全量扫描。
+    pub runtime_filter_rows_cache: Option<RuntimeAnalysisFilterRows>,
+    /// SQL 频率分析后台计算 generation，用于丢弃过期结果。
+    pub sql_frequency_rows_task_generation: usize,
+    /// 慢 SQL 分析后台计算 generation，用于丢弃过期结果。
+    pub slow_sql_rows_task_generation: usize,
+    /// SQL 频率分析是否正在后台计算。
+    pub is_sql_frequency_rows_computing: bool,
+    /// 慢 SQL 分析是否正在后台计算。
+    pub is_slow_sql_rows_computing: bool,
+    /// 当前正在计算的 SQL 频率过滤快照。
+    pub sql_frequency_rows_computing_filter: Option<RuntimeSqlAnalysisFilterSnapshot>,
+    /// 当前正在计算的慢 SQL 过滤快照。
+    pub slow_sql_rows_computing_filter: Option<RuntimeSqlAnalysisFilterSnapshot>,
     /// SQL 频率分析过滤结果缓存，避免滚动重绘时重复全量聚合。
     pub sql_frequency_rows_cache: RefCell<Option<RuntimeSqlFrequencyRowsCache>>,
     /// SQL 频率详情过滤结果缓存，避免详情滚动重绘时重复全量扫描。
@@ -1691,6 +1718,66 @@ fn clear_runtime_filter_inputs_focus(state: &mut RuntimeAnalysisState) {
     clear_runtime_filter_input_focus(&mut state.filter_start_time_input);
     clear_runtime_filter_input_focus(&mut state.filter_end_time_input);
     state.open_time_picker = None;
+}
+
+/// 从 Runtime 过滤输入框状态生成原始输入快照。
+fn runtime_filter_input_snapshot_from_state(
+    state: &RuntimeAnalysisState,
+) -> RuntimeAnalysisFilterSnapshot {
+    RuntimeAnalysisFilterSnapshot {
+        keyword: state.filter_keyword_input.value.clone(),
+        username: state.filter_username_input.value.clone(),
+        start_time: state.filter_start_time_input.value.clone(),
+        end_time: state.filter_end_time_input.value.clone(),
+    }
+}
+
+/// 从 Runtime 已应用过滤值生成快照。
+fn runtime_filter_applied_snapshot_from_state(
+    state: &RuntimeAnalysisState,
+) -> RuntimeAnalysisFilterSnapshot {
+    RuntimeAnalysisFilterSnapshot {
+        keyword: state.applied_filter_keyword.clone(),
+        username: state.applied_filter_username.clone(),
+        start_time: state.applied_filter_start_time.clone(),
+        end_time: state.applied_filter_end_time.clone(),
+    }
+}
+
+/// 将过滤快照写入 Runtime 已应用状态。
+fn apply_runtime_filter_snapshot_to_state(
+    state: &mut RuntimeAnalysisState,
+    filter: &RuntimeAnalysisFilterSnapshot,
+) {
+    state.applied_filter_keyword = filter.keyword.clone();
+    state.applied_filter_username = filter.username.clone();
+    state.applied_filter_start_time = filter.start_time.clone();
+    state.applied_filter_end_time = filter.end_time.clone();
+}
+
+/// 过滤结果真正生效后清理表格滚动、选区和旧的局部缓存。
+fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysisState) {
+    state.summary_scroll = UniformListScrollHandle::new();
+    state.request_scroll = UniformListScrollHandle::new();
+    state.sql_scroll = UniformListScrollHandle::new();
+    state.sql_frequency_scroll = UniformListScrollHandle::new();
+    state.sql_frequency_detail_scroll = UniformListScrollHandle::new();
+    state.slow_sql_scroll = UniformListScrollHandle::new();
+    state.cell_selection = None;
+    state.cell_selection_drag = None;
+    state.hovered_sql_cell = None;
+    state.sql_text_dialog = None;
+    state.sql_frequency_rows_cache.borrow_mut().take();
+    state.sql_frequency_detail_rows_cache.borrow_mut().take();
+    state.slow_sql_rows_cache.borrow_mut().take();
+    state.sql_frequency_rows_task_generation =
+        state.sql_frequency_rows_task_generation.saturating_add(1);
+    state.slow_sql_rows_task_generation = state.slow_sql_rows_task_generation.saturating_add(1);
+    state.is_sql_frequency_rows_computing = false;
+    state.is_slow_sql_rows_computing = false;
+    state.sql_frequency_rows_computing_filter = None;
+    state.slow_sql_rows_computing_filter = None;
+    state.scrollbar_drag = None;
 }
 
 /// 清理单个 Runtime 过滤输入框焦点态，保留文本和光标位置。
@@ -3951,7 +4038,7 @@ impl ArgusApp {
                 .await;
 
             view.update(cx, |app, cx| {
-                app.apply_runtime_analysis_result(analysis_id, generation, result);
+                app.apply_runtime_analysis_result(analysis_id, generation, result, cx);
                 cx.notify();
             })
             .ok();
@@ -4028,6 +4115,14 @@ impl ArgusApp {
                 filter_username_input: SettingsTextInputState::default(),
                 filter_start_time_input: SettingsTextInputState::default(),
                 filter_end_time_input: SettingsTextInputState::default(),
+                applied_filter_keyword: String::new(),
+                applied_filter_username: String::new(),
+                applied_filter_start_time: String::new(),
+                applied_filter_end_time: String::new(),
+                filter_input_generation: 0,
+                filter_task_generation: 0,
+                is_filter_pending: false,
+                is_filter_computing: false,
                 open_time_picker: None,
                 cell_selection: None,
                 cell_selection_drag: None,
@@ -4040,6 +4135,14 @@ impl ArgusApp {
                 sql_frequency_detail_scroll: UniformListScrollHandle::new(),
                 slow_sql_scroll: UniformListScrollHandle::new(),
                 sql_frequency_detail_sql: None,
+                slow_sql_detail_sql: None,
+                runtime_filter_rows_cache: None,
+                sql_frequency_rows_task_generation: 0,
+                slow_sql_rows_task_generation: 0,
+                is_sql_frequency_rows_computing: false,
+                is_slow_sql_rows_computing: false,
+                sql_frequency_rows_computing_filter: None,
+                slow_sql_rows_computing_filter: None,
                 sql_frequency_rows_cache: RefCell::new(None),
                 sql_frequency_detail_rows_cache: RefCell::new(None),
                 slow_sql_rows_cache: RefCell::new(None),
@@ -4156,6 +4259,7 @@ impl ArgusApp {
         analysis_id: usize,
         generation: usize,
         result: RuntimeAnalysisResult,
+        cx: &mut Context<Self>,
     ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return;
@@ -4168,10 +4272,327 @@ impl ArgusApp {
         let request_count = result.request_count();
         let sql_count = result.total_sql_records;
         let skipped_count = result.skipped_count();
-        state.task_state = RuntimeAnalysisTaskState::Ready(result);
+        state.task_state = RuntimeAnalysisTaskState::Ready(Arc::new(result));
+        let pending_generation = state
+            .is_filter_pending
+            .then_some(state.filter_input_generation);
         self.placeholder_notice = format!(
             "Runtime 分析完成：{file_count} 个文件，{request_count} 个请求，{sql_count} 条 SQL，跳过 {skipped_count} 个文件"
         );
+        if let Some(input_generation) = pending_generation {
+            self.schedule_runtime_filter_apply(analysis_id, input_generation, cx);
+        } else {
+            self.ensure_runtime_sql_analysis_rows_for_current_type(analysis_id, cx);
+        }
+    }
+
+    /// 标记 Runtime 过滤输入发生变化，并通过防抖任务延后应用。
+    fn queue_runtime_filter_refresh(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+        self.trigger_runtime_filter_refresh(analysis_id, Some(cx));
+    }
+
+    /// 标记 Runtime 过滤输入变化；有 UI 上下文时同时安排防抖任务。
+    fn trigger_runtime_filter_refresh(
+        &mut self,
+        analysis_id: usize,
+        cx: Option<&mut Context<Self>>,
+    ) {
+        if let Some(input_generation) = self.after_runtime_filter_changed(analysis_id)
+            && let Some(cx) = cx
+        {
+            self.schedule_runtime_filter_apply(analysis_id, input_generation, cx);
+        }
+    }
+
+    /// 启动 Runtime 过滤防抖任务；过期 generation 会在真正计算前被丢弃。
+    fn schedule_runtime_filter_apply(
+        &mut self,
+        analysis_id: usize,
+        input_generation: usize,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |view, cx| {
+            Timer::after(Duration::from_millis(RUNTIME_FILTER_DEBOUNCE_MS)).await;
+            view.update(cx, |app, cx| {
+                app.start_runtime_filter_apply_if_current(analysis_id, input_generation, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 在防抖完成后启动真正的 Runtime 过滤后台计算。
+    fn start_runtime_filter_apply_if_current(
+        &mut self,
+        analysis_id: usize,
+        input_generation: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        if state.filter_input_generation != input_generation {
+            return;
+        }
+
+        let filter = runtime_filter_input_snapshot_from_state(state);
+        let criteria = parse_runtime_analysis_filter_criteria(&filter);
+        let current_filter = runtime_filter_applied_snapshot_from_state(state);
+        if current_filter == filter && !state.is_filter_pending {
+            return;
+        }
+
+        state.filter_task_generation = state.filter_task_generation.saturating_add(1);
+        let task_generation = state.filter_task_generation;
+        state.is_filter_pending = false;
+
+        if !criteria.is_active() {
+            apply_runtime_filter_snapshot_to_state(state, &filter);
+            state.runtime_filter_rows_cache = None;
+            state.is_filter_computing = false;
+            reset_runtime_filter_result_view_state(state);
+            self.placeholder_notice = "Runtime 过滤条件已更新".to_string();
+            self.ensure_runtime_sql_analysis_rows_for_current_type(analysis_id, cx);
+            return;
+        }
+
+        let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+            state.is_filter_pending = true;
+            state.is_filter_computing = false;
+            return;
+        };
+        let result = result.clone();
+        state.is_filter_computing = true;
+        self.placeholder_notice = "正在后台应用 Runtime 过滤条件".to_string();
+
+        cx.spawn(async move |view, cx| {
+            let rows = cx
+                .background_executor()
+                .spawn(async move { build_runtime_analysis_filter_rows(result.as_ref(), filter) })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_runtime_filter_rows(
+                    analysis_id,
+                    input_generation,
+                    task_generation,
+                    rows,
+                    cx,
+                );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 应用后台构建好的 Runtime 过滤行缓存。
+    fn apply_runtime_filter_rows(
+        &mut self,
+        analysis_id: usize,
+        input_generation: usize,
+        task_generation: usize,
+        rows: RuntimeAnalysisFilterRows,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        if state.filter_input_generation != input_generation
+            || state.filter_task_generation != task_generation
+        {
+            return;
+        }
+
+        apply_runtime_filter_snapshot_to_state(state, &rows.filter);
+        state.runtime_filter_rows_cache = Some(rows);
+        state.is_filter_pending = false;
+        state.is_filter_computing = false;
+        reset_runtime_filter_result_view_state(state);
+        self.placeholder_notice = "Runtime 过滤条件已更新".to_string();
+        self.ensure_runtime_sql_analysis_rows_for_current_type(analysis_id, cx);
+    }
+
+    /// 当前页签是 SQL 分析类结果时，确保对应行数据已经进入后台懒计算。
+    fn ensure_runtime_sql_analysis_rows_for_current_type(
+        &mut self,
+        analysis_id: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(result_type) = self
+            .runtime_analyses
+            .get(&analysis_id)
+            .map(|state| state.result_type)
+        else {
+            return;
+        };
+
+        match result_type {
+            RuntimeAnalysisResultType::SqlFrequency => {
+                self.ensure_runtime_sql_frequency_rows(analysis_id, cx)
+            }
+            RuntimeAnalysisResultType::SlowSql => {
+                self.ensure_runtime_slow_sql_rows(analysis_id, cx)
+            }
+            RuntimeAnalysisResultType::Statistics => {}
+        }
+    }
+
+    /// 启动 SQL 频率分析行数据的后台懒计算。
+    fn ensure_runtime_sql_frequency_rows(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        let filter = runtime_filter_applied_snapshot_from_state(state);
+        if state
+            .sql_frequency_rows_cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| cache.filter == filter)
+        {
+            return;
+        }
+        if state.is_sql_frequency_rows_computing
+            && state.sql_frequency_rows_computing_filter.as_ref() == Some(&filter)
+        {
+            return;
+        }
+        let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+            return;
+        };
+
+        let result = result.clone();
+        state.sql_frequency_rows_task_generation =
+            state.sql_frequency_rows_task_generation.saturating_add(1);
+        let task_generation = state.sql_frequency_rows_task_generation;
+        state.is_sql_frequency_rows_computing = true;
+        state.sql_frequency_rows_computing_filter = Some(filter.clone());
+        state.sql_frequency_detail_rows_cache.borrow_mut().take();
+        self.placeholder_notice = "正在计算 SQL 频率分析".to_string();
+
+        cx.spawn(async move |view, cx| {
+            let filter_for_task = filter.clone();
+            let rows = cx
+                .background_executor()
+                .spawn(async move {
+                    Arc::new(build_runtime_sql_frequency_rows_for_filter(
+                        result.as_ref(),
+                        &filter_for_task,
+                    ))
+                })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_runtime_sql_frequency_rows(analysis_id, task_generation, filter, rows);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 应用后台构建好的 SQL 频率分析行。
+    fn apply_runtime_sql_frequency_rows(
+        &mut self,
+        analysis_id: usize,
+        task_generation: usize,
+        filter: RuntimeSqlAnalysisFilterSnapshot,
+        rows: Arc<Vec<RuntimeSqlFrequencyAnalysisRow>>,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        if state.sql_frequency_rows_task_generation != task_generation
+            || runtime_filter_applied_snapshot_from_state(state) != filter
+        {
+            return;
+        }
+
+        state.is_sql_frequency_rows_computing = false;
+        state.sql_frequency_rows_computing_filter = None;
+        state
+            .sql_frequency_rows_cache
+            .borrow_mut()
+            .replace(RuntimeSqlFrequencyRowsCache { filter, rows });
+        self.placeholder_notice = "SQL 频率分析计算完成".to_string();
+    }
+
+    /// 启动慢 SQL 分析行数据的后台懒计算。
+    fn ensure_runtime_slow_sql_rows(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        let filter = runtime_filter_applied_snapshot_from_state(state);
+        if state
+            .slow_sql_rows_cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| cache.filter == filter)
+        {
+            return;
+        }
+        if state.is_slow_sql_rows_computing
+            && state.slow_sql_rows_computing_filter.as_ref() == Some(&filter)
+        {
+            return;
+        }
+        let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+            return;
+        };
+
+        let result = result.clone();
+        state.slow_sql_rows_task_generation = state.slow_sql_rows_task_generation.saturating_add(1);
+        let task_generation = state.slow_sql_rows_task_generation;
+        state.is_slow_sql_rows_computing = true;
+        state.slow_sql_rows_computing_filter = Some(filter.clone());
+        self.placeholder_notice = "正在计算慢 SQL 分析".to_string();
+
+        cx.spawn(async move |view, cx| {
+            let filter_for_task = filter.clone();
+            let rows = cx
+                .background_executor()
+                .spawn(async move {
+                    Arc::new(build_runtime_slow_sql_rows_for_filter(
+                        result.as_ref(),
+                        &filter_for_task,
+                    ))
+                })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.apply_runtime_slow_sql_rows(analysis_id, task_generation, filter, rows);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 应用后台构建好的慢 SQL 分析行。
+    fn apply_runtime_slow_sql_rows(
+        &mut self,
+        analysis_id: usize,
+        task_generation: usize,
+        filter: RuntimeSqlAnalysisFilterSnapshot,
+        rows: Arc<Vec<RuntimeSlowSqlSummaryRow>>,
+    ) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        if state.slow_sql_rows_task_generation != task_generation
+            || runtime_filter_applied_snapshot_from_state(state) != filter
+        {
+            return;
+        }
+
+        state.is_slow_sql_rows_computing = false;
+        state.slow_sql_rows_computing_filter = None;
+        state
+            .slow_sql_rows_cache
+            .borrow_mut()
+            .replace(RuntimeSlowSqlRowsCache { filter, rows });
+        self.placeholder_notice = "慢 SQL 分析计算完成".to_string();
     }
 
     /// 切换 Runtime 分析结果类型，并清理旧表格残留的交互状态。
@@ -4179,6 +4600,7 @@ impl ArgusApp {
         &mut self,
         analysis_id: usize,
         result_type: RuntimeAnalysisResultType,
+        cx: Option<&mut Context<Self>>,
     ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
@@ -4196,9 +4618,10 @@ impl ArgusApp {
         state.scrollbar_drag = None;
         if result_type == RuntimeAnalysisResultType::Statistics {
             state.sql_frequency_detail_sql = None;
-            state.sql_frequency_rows_cache.borrow_mut().take();
+            state.slow_sql_detail_sql = None;
+            // 切回统计分析只是页面切换，不代表 SQL 分析数据失效；
+            // 频率/慢 SQL 列表缓存要保留，避免用户返回 SQL 页时重复后台计算。
             state.sql_frequency_detail_rows_cache.borrow_mut().take();
-            state.slow_sql_rows_cache.borrow_mut().take();
         }
         match result_type {
             RuntimeAnalysisResultType::Statistics => match state.view {
@@ -4214,14 +4637,19 @@ impl ArgusApp {
             },
             RuntimeAnalysisResultType::SqlFrequency => {
                 state.sql_frequency_detail_sql = None;
+                state.slow_sql_detail_sql = None;
                 state.sql_frequency_scroll = UniformListScrollHandle::new();
                 state.sql_frequency_detail_scroll = UniformListScrollHandle::new();
                 state.sql_frequency_detail_rows_cache.borrow_mut().take();
             }
             RuntimeAnalysisResultType::SlowSql => {
                 state.sql_frequency_detail_sql = None;
+                state.slow_sql_detail_sql = None;
                 state.slow_sql_scroll = UniformListScrollHandle::new()
             }
+        }
+        if let Some(cx) = cx {
+            self.ensure_runtime_sql_analysis_rows_for_current_type(analysis_id, cx);
         }
     }
 
@@ -4256,6 +4684,40 @@ impl ArgusApp {
         state.result_type = RuntimeAnalysisResultType::SqlFrequency;
         state.sql_frequency_detail_sql = None;
         state.sql_frequency_scroll = UniformListScrollHandle::new();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
+        state.scrollbar_drag = None;
+    }
+
+    /// 打开慢 SQL 分析中指定 SQL 结构的执行详情页。
+    pub fn open_runtime_slow_sql_detail(&mut self, analysis_id: usize, normalized_sql: String) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.result_type = RuntimeAnalysisResultType::SlowSql;
+        state.slow_sql_detail_sql = Some(normalized_sql);
+        state.slow_sql_scroll = UniformListScrollHandle::new();
+        state.cell_selection = None;
+        state.cell_selection_drag = None;
+        state.hovered_sql_cell = None;
+        state.sql_text_dialog = None;
+        state.scrollbar_drag = None;
+        state.sql_frequency_detail_rows_cache.borrow_mut().take();
+        self.placeholder_notice = "查看慢 SQL 执行详情".to_string();
+    }
+
+    /// 从慢 SQL 详情页返回慢 SQL 聚合列表。
+    pub fn show_runtime_slow_sql_summary(&mut self, analysis_id: usize) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
+            return;
+        };
+        state.result_type = RuntimeAnalysisResultType::SlowSql;
+        state.slow_sql_detail_sql = None;
+        state.slow_sql_scroll = UniformListScrollHandle::new();
         state.cell_selection = None;
         state.cell_selection_drag = None;
         state.hovered_sql_cell = None;
@@ -4745,10 +5207,11 @@ impl ArgusApp {
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
         action: RuntimeDateTimeQuickAction,
+        cx: Option<&mut Context<Self>>,
     ) {
         let is_end = input_kind == RuntimeFilterInputKind::EndTime;
         if action == RuntimeDateTimeQuickAction::Clear {
-            self.clear_runtime_filter_input(analysis_id, input_kind);
+            self.clear_runtime_filter_input(analysis_id, input_kind, cx);
             return;
         }
 
@@ -4767,7 +5230,7 @@ impl ArgusApp {
                 .unwrap_or(now),
             RuntimeDateTimeQuickAction::Clear => now,
         };
-        self.set_runtime_filter_time_value(analysis_id, input_kind, datetime, is_end);
+        self.set_runtime_filter_time_value(analysis_id, input_kind, datetime, is_end, cx);
     }
 
     /// 按日期时间组件的步进按钮调整 Runtime 时间过滤输入框。
@@ -4777,6 +5240,7 @@ impl ArgusApp {
         input_kind: RuntimeFilterInputKind,
         part: RuntimeDateTimePart,
         delta: i32,
+        cx: Option<&mut Context<Self>>,
     ) {
         let is_end = input_kind == RuntimeFilterInputKind::EndTime;
         let current = self
@@ -4784,7 +5248,7 @@ impl ArgusApp {
             .and_then(|input| parse_runtime_filter_datetime_value(&input.value, is_end))
             .unwrap_or_else(|| default_runtime_filter_datetime(is_end));
         let adjusted = adjust_runtime_datetime_part(current, part, delta);
-        self.set_runtime_filter_time_value(analysis_id, input_kind, adjusted, is_end);
+        self.set_runtime_filter_time_value(analysis_id, input_kind, adjusted, is_end, cx);
     }
 
     /// 设置 Runtime 时间过滤输入框的日期部分，并保留当前时分秒。
@@ -4803,6 +5267,7 @@ impl ArgusApp {
         year: i32,
         month: u32,
         day: u32,
+        cx: Option<&mut Context<Self>>,
     ) {
         if !matches!(
             input_kind,
@@ -4826,7 +5291,7 @@ impl ArgusApp {
             .from_local_datetime(&naive)
             .single()
             .unwrap_or(current);
-        self.set_runtime_filter_time_value(analysis_id, input_kind, datetime, is_end);
+        self.set_runtime_filter_time_value(analysis_id, input_kind, datetime, is_end, cx);
     }
 
     /// 写入 Runtime 时间过滤输入框，并触发过滤结果刷新。
@@ -4836,6 +5301,7 @@ impl ArgusApp {
         input_kind: RuntimeFilterInputKind,
         datetime: chrono::DateTime<Local>,
         is_end: bool,
+        cx: Option<&mut Context<Self>>,
     ) {
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
             return;
@@ -4853,7 +5319,7 @@ impl ArgusApp {
                 RuntimeFilterInputKind::StartTime
             });
         }
-        self.after_runtime_filter_changed(analysis_id);
+        self.trigger_runtime_filter_refresh(analysis_id, cx);
     }
 
     /// 聚焦 Runtime 过滤输入框，并清理其它 Runtime 过滤输入框的临时输入法状态。
@@ -4876,6 +5342,7 @@ impl ArgusApp {
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
+        cx: Option<&mut Context<Self>>,
     ) {
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
             return;
@@ -4886,7 +5353,7 @@ impl ArgusApp {
         input.marked_range = None;
         input.selection_drag = None;
         input.is_focused = true;
-        self.after_runtime_filter_changed(analysis_id);
+        self.trigger_runtime_filter_refresh(analysis_id, cx);
     }
 
     /// 处理 Runtime 过滤输入框键盘事件。
@@ -4928,8 +5395,8 @@ impl ArgusApp {
         }
 
         match key.as_str() {
-            "backspace" => self.delete_runtime_filter_input_backward(analysis_id, input_kind),
-            "delete" => self.delete_runtime_filter_input_forward(analysis_id, input_kind),
+            "backspace" => self.delete_runtime_filter_input_backward(analysis_id, input_kind, cx),
+            "delete" => self.delete_runtime_filter_input_forward(analysis_id, input_kind, cx),
             "left" | "arrowleft" => self.move_runtime_filter_input_left(
                 analysis_id,
                 input_kind,
@@ -4973,7 +5440,7 @@ impl ArgusApp {
                     && !keystroke.modifiers.function
                     && !key_char.chars().any(char::is_control)
                 {
-                    self.insert_runtime_filter_input_text(analysis_id, input_kind, key_char);
+                    self.insert_runtime_filter_input_text(analysis_id, input_kind, key_char, cx);
                 }
             }
         }
@@ -5062,26 +5529,21 @@ impl ArgusApp {
         })
     }
 
-    /// Runtime 过滤条件变化后重置三层列表滚动和旧选区。
-    pub fn after_runtime_filter_changed(&mut self, analysis_id: usize) {
+    /// Runtime 过滤条件变化后标记待应用，真正过滤由防抖后台任务完成。
+    pub fn after_runtime_filter_changed(&mut self, analysis_id: usize) -> Option<usize> {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
-            return;
+            return None;
         };
-        state.summary_scroll = UniformListScrollHandle::new();
-        state.request_scroll = UniformListScrollHandle::new();
-        state.sql_scroll = UniformListScrollHandle::new();
-        state.sql_frequency_scroll = UniformListScrollHandle::new();
-        state.sql_frequency_detail_scroll = UniformListScrollHandle::new();
-        state.slow_sql_scroll = UniformListScrollHandle::new();
+        state.filter_input_generation = state.filter_input_generation.saturating_add(1);
+        state.is_filter_pending = true;
         state.cell_selection = None;
         state.cell_selection_drag = None;
         state.hovered_sql_cell = None;
         state.sql_text_dialog = None;
-        state.sql_frequency_rows_cache.borrow_mut().take();
         state.sql_frequency_detail_rows_cache.borrow_mut().take();
-        state.slow_sql_rows_cache.borrow_mut().take();
         state.scrollbar_drag = None;
-        self.placeholder_notice = "Runtime 过滤条件已更新".to_string();
+        self.placeholder_notice = "Runtime 过滤条件待应用".to_string();
+        Some(state.filter_input_generation)
     }
 
     /// 全选 Runtime 过滤输入框内容。
@@ -5122,7 +5584,7 @@ impl ArgusApp {
     ) {
         self.copy_runtime_filter_input_selection(analysis_id, input_kind, cx);
         if self.delete_runtime_filter_input_selection(analysis_id, input_kind) {
-            self.after_runtime_filter_changed(analysis_id);
+            self.queue_runtime_filter_refresh(analysis_id, cx);
         }
     }
 
@@ -5142,6 +5604,7 @@ impl ArgusApp {
                 analysis_id,
                 input_kind,
                 &text.replace(['\n', '\r'], " "),
+                cx,
             );
         }
     }
@@ -5183,6 +5646,7 @@ impl ArgusApp {
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
         text: &str,
+        cx: &mut Context<Self>,
     ) {
         if text.is_empty() {
             return;
@@ -5197,7 +5661,7 @@ impl ArgusApp {
         input.selection_anchor = None;
         input.marked_range = None;
         input.selection_drag = None;
-        self.after_runtime_filter_changed(analysis_id);
+        self.queue_runtime_filter_refresh(analysis_id, cx);
     }
 
     /// 删除 Runtime 过滤输入框光标前一个字符。
@@ -5205,9 +5669,10 @@ impl ArgusApp {
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
+        cx: &mut Context<Self>,
     ) {
         if self.delete_runtime_filter_input_selection(analysis_id, input_kind) {
-            self.after_runtime_filter_changed(analysis_id);
+            self.queue_runtime_filter_refresh(analysis_id, cx);
             return;
         }
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
@@ -5221,7 +5686,7 @@ impl ArgusApp {
         input.cursor = cursor - 1;
         input.marked_range = None;
         input.selection_drag = None;
-        self.after_runtime_filter_changed(analysis_id);
+        self.queue_runtime_filter_refresh(analysis_id, cx);
     }
 
     /// 删除 Runtime 过滤输入框光标后一个字符。
@@ -5229,9 +5694,10 @@ impl ArgusApp {
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
+        cx: &mut Context<Self>,
     ) {
         if self.delete_runtime_filter_input_selection(analysis_id, input_kind) {
-            self.after_runtime_filter_changed(analysis_id);
+            self.queue_runtime_filter_refresh(analysis_id, cx);
             return;
         }
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
@@ -5246,7 +5712,7 @@ impl ArgusApp {
         input.cursor = cursor;
         input.marked_range = None;
         input.selection_drag = None;
-        self.after_runtime_filter_changed(analysis_id);
+        self.queue_runtime_filter_refresh(analysis_id, cx);
     }
 
     /// Runtime 过滤输入框光标左移。
@@ -7197,7 +7663,7 @@ mod tests {
             });
         }
 
-        app.set_runtime_result_type(analysis_id, RuntimeAnalysisResultType::SqlFrequency);
+        app.set_runtime_result_type(analysis_id, RuntimeAnalysisResultType::SqlFrequency, None);
 
         let state = app
             .runtime_analysis_state(analysis_id)
@@ -7218,6 +7684,55 @@ mod tests {
             state.view,
             RuntimeAnalysisView::RequestDetails { .. }
         ));
+    }
+
+    /// 验证切回统计分析不会清空 SQL 频率和慢 SQL 的懒计算缓存。
+    #[test]
+    fn switching_runtime_statistics_preserves_sql_analysis_caches() {
+        let mut app = app_with_placeholder_sources();
+        let app_log_id = source_id_by_label(&app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+        let (analysis_id, _) = app
+            .create_runtime_analysis_tab_state(targets)
+            .expect("应能创建 Runtime 分析 tab");
+        let filter = RuntimeSqlAnalysisFilterSnapshot::default();
+        {
+            let state = app
+                .runtime_analysis_state_mut(analysis_id)
+                .expect("应存在 Runtime 分析状态");
+            state.result_type = RuntimeAnalysisResultType::SqlFrequency;
+            state
+                .sql_frequency_rows_cache
+                .borrow_mut()
+                .replace(RuntimeSqlFrequencyRowsCache {
+                    filter: filter.clone(),
+                    rows: Arc::new(vec![RuntimeSqlFrequencyAnalysisRow {
+                        normalized_sql: "select ?".to_string(),
+                        total_execute_ms: 12,
+                        execute_count: 1,
+                    }]),
+                });
+            state
+                .slow_sql_rows_cache
+                .borrow_mut()
+                .replace(RuntimeSlowSqlRowsCache {
+                    filter,
+                    rows: Arc::new(vec![RuntimeSlowSqlSummaryRow {
+                        normalized_sql: "select ?".to_string(),
+                        total_execute_ms: 12,
+                        execute_count: 1,
+                    }]),
+                });
+        }
+
+        app.set_runtime_result_type(analysis_id, RuntimeAnalysisResultType::Statistics, None);
+        app.set_runtime_result_type(analysis_id, RuntimeAnalysisResultType::SqlFrequency, None);
+
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        assert!(state.sql_frequency_rows_cache.borrow().is_some());
+        assert!(state.slow_sql_rows_cache.borrow().is_some());
     }
 
     /// 验证 SQL 频率详情动作会进入详情页，并可返回频率列表。
@@ -7268,7 +7783,14 @@ mod tests {
             .value = "2026-06-25 14:25:03".to_string();
 
         app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::StartTime);
-        app.set_runtime_filter_date(analysis_id, RuntimeFilterInputKind::StartTime, 2026, 7, 2);
+        app.set_runtime_filter_date(
+            analysis_id,
+            RuntimeFilterInputKind::StartTime,
+            2026,
+            7,
+            2,
+            None,
+        );
 
         let state = app
             .runtime_analysis_state(analysis_id)

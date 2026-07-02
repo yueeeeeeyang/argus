@@ -107,6 +107,7 @@ pub fn render_datetime_picker(
                             input_kind,
                             RuntimeDateTimePart::Month,
                             -1,
+                            Some(cx),
                         );
                         cx.notify();
                     }),
@@ -142,6 +143,7 @@ pub fn render_datetime_picker(
                             input_kind,
                             RuntimeDateTimePart::Month,
                             1,
+                            Some(cx),
                         );
                         cx.notify();
                     }),
@@ -368,7 +370,7 @@ fn render_calendar_day(
         .child(format!("{date_day}"))
         .on_click(cx.listener(move |app, _, _, cx| {
             cx.stop_propagation();
-            app.set_runtime_filter_date(analysis_id, input_kind, year, month, date_day);
+            app.set_runtime_filter_date(analysis_id, input_kind, year, month, date_day, Some(cx));
             cx.notify();
         }))
 }
@@ -418,7 +420,7 @@ fn render_time_part_control(
             theme,
             cx.listener(move |app, _, _, cx| {
                 cx.stop_propagation();
-                app.adjust_runtime_filter_time(analysis_id, input_kind, part, -1);
+                app.adjust_runtime_filter_time(analysis_id, input_kind, part, -1, Some(cx));
                 cx.notify();
             }),
         ))
@@ -447,7 +449,7 @@ fn render_time_part_control(
             theme,
             cx.listener(move |app, _, _, cx| {
                 cx.stop_propagation();
-                app.adjust_runtime_filter_time(analysis_id, input_kind, part, 1);
+                app.adjust_runtime_filter_time(analysis_id, input_kind, part, 1, Some(cx));
                 cx.notify();
             }),
         ))
@@ -510,7 +512,7 @@ fn render_datetime_quick_button(
         .child(label)
         .on_click(cx.listener(move |app, _, _, cx| {
             cx.stop_propagation();
-            app.apply_runtime_time_picker_quick_action(analysis_id, input_kind, action);
+            app.apply_runtime_time_picker_quick_action(analysis_id, input_kind, action, Some(cx));
             cx.notify();
         }))
 }

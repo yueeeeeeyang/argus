@@ -360,6 +360,37 @@ impl ArgusApp {
             }
         }
     }
+
+    /// 应用系统原生文本输入编辑结果，并在可用 UI 上下文中调度异步副作用。
+    ///
+    /// 说明：纯状态测试仍使用 `apply_native_text_input_edit`；真实 UI 输入会走这里，
+    /// Runtime 过滤输入提交完成后即可进入与键盘路径一致的防抖后台过滤流程。
+    pub fn apply_native_text_input_edit_with_context(
+        &mut self,
+        target: AppTextInputTarget,
+        edit: NativeTextEdit,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let runtime_filter_analysis_id = match target {
+            AppTextInputTarget::RuntimeFilter { analysis_id, .. }
+                if edit.marked_range.is_none() =>
+            {
+                Some(analysis_id)
+            }
+            _ => None,
+        };
+
+        self.apply_native_text_input_edit(target, edit);
+
+        if let Some(analysis_id) = runtime_filter_analysis_id
+            && let Some(input_generation) = self
+                .runtime_analyses
+                .get(&analysis_id)
+                .map(|state| state.filter_input_generation)
+        {
+            self.schedule_runtime_filter_apply(analysis_id, input_generation, cx);
+        }
+    }
 }
 
 /// 应用日志搜索窗口输入框的原生编辑，并维护关键字搜索缓存。
@@ -539,6 +570,8 @@ mod tests {
         let mut app = ArgusApp::new();
         app.settings_upgrade_server_input.value = "old".to_string();
         app.settings_upgrade_server_input.cursor = 3;
+        app.settings_upgrade_public_key_input.value.clear();
+        app.settings_upgrade_public_key_input.cursor = 0;
 
         app.apply_native_text_input_edit(
             AppTextInputTarget::SettingsUpgradeServer,
