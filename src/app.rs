@@ -167,7 +167,7 @@ pub fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
 pub enum Workspace {
     /// 日志分析工作区，用于展示来源侧栏和日志内容占位界面。
     LogAnalysis,
-    /// 链接工作区，用于展示 SSH 链接目录树和终端标签页。
+    /// 链接工作区，用于展示 SSH/SMB 链接目录树、终端和远程文件管理标签页。
     Connections,
     /// 设置工作区，用于展示主题、编码、缓存、快捷键等占位配置。
     Settings,
@@ -229,9 +229,9 @@ pub enum TabKind {
         /// 终端会话 ID，用于从应用状态表中读取终端输出和连接状态。
         session_id: usize,
     },
-    /// SFTP 文件管理标签页。
+    /// 远程文件管理标签页，可由 SSH SFTP 或 SMB 后端驱动。
     SftpFileManager {
-        /// SFTP 会话 ID，用于从应用状态表中读取远程文件列表和操作状态。
+        /// 远程文件会话 ID，用于从应用状态表中读取远程文件列表和操作状态。
         session_id: usize,
     },
     /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
@@ -386,26 +386,32 @@ pub enum AppTextInputTarget {
     ConnectionTreeSearch,
     /// 新增目录表单中的目录名称输入框。
     ConnectionDirectoryName,
-    /// 新增 SSH 链接表单中的链接名称输入框。
+    /// 新增连接链接表单中的链接名称输入框。
     ConnectionLinkName,
-    /// 新增 SSH 链接表单中的主机输入框。
+    /// 新增连接链接表单中的主机输入框。
     ConnectionLinkHost,
-    /// 新增 SSH 链接表单中的端口输入框。
+    /// 新增连接链接表单中的端口输入框。
     ConnectionLinkPort,
-    /// 新增 SSH 链接表单中的用户名输入框。
+    /// 新增连接链接表单中的用户名输入框。
     ConnectionLinkUsername,
-    /// 新增 SSH 链接表单中的密码输入框。
+    /// 新增连接链接表单中的密码输入框。
     ConnectionLinkPassword,
+    /// 新增 SMB 链接表单中的共享名称输入框。
+    ConnectionLinkShare,
+    /// 新增 SMB 链接表单中的初始目录输入框。
+    ConnectionLinkInitialDir,
+    /// 新增 SMB 链接表单中的域或工作组输入框。
+    ConnectionLinkDomain,
     /// 新增 SSH 链接表单中的私钥路径输入框。
     ConnectionLinkPrivateKeyPath,
     /// 新增 SSH 链接表单中的私钥口令输入框。
     ConnectionLinkPrivateKeyPassphrase,
-    /// SFTP 文件管理地址栏输入框。
+    /// 远程文件管理地址栏输入框。
     SftpAddress {
-        /// SFTP 会话 ID。
+        /// 远程文件管理会话 ID。
         session_id: usize,
     },
-    /// SFTP 重命名弹窗名称输入框。
+    /// 远程文件管理重命名弹窗名称输入框。
     SftpRenameName,
     /// 来源选择器路径输入框。
     SourcePickerPath,
@@ -504,23 +510,23 @@ pub struct AppInputFocusHandles {
     pub connection_tree_search: FocusHandle,
     /// 新增目录名称输入框焦点。
     pub connection_directory_name: FocusHandle,
-    /// 新增 SSH 链接名称输入框焦点。
+    /// 新增连接链接名称输入框焦点。
     pub connection_link_name: FocusHandle,
-    /// 新增 SSH 链接主机输入框焦点。
+    /// 新增连接链接主机输入框焦点。
     pub connection_link_host: FocusHandle,
-    /// 新增 SSH 链接端口输入框焦点。
+    /// 新增连接链接端口输入框焦点。
     pub connection_link_port: FocusHandle,
-    /// 新增 SSH 链接用户名输入框焦点。
+    /// 新增连接链接用户名输入框焦点。
     pub connection_link_username: FocusHandle,
-    /// 新增 SSH 链接密码输入框焦点。
+    /// 新增连接链接密码输入框焦点。
     pub connection_link_password: FocusHandle,
     /// 新增 SSH 链接私钥路径输入框焦点。
     pub connection_link_private_key_path: FocusHandle,
     /// 新增 SSH 链接私钥口令输入框焦点。
     pub connection_link_private_key_passphrase: FocusHandle,
-    /// SFTP 文件管理地址栏焦点。
+    /// 远程文件管理地址栏焦点。
     pub sftp_address: FocusHandle,
-    /// SFTP 重命名弹窗输入框焦点。
+    /// 远程文件管理重命名弹窗输入框焦点。
     pub sftp_rename_name: FocusHandle,
     /// 右侧终端面板焦点。
     pub terminal: FocusHandle,
@@ -550,11 +556,11 @@ impl Default for SettingsTextInputState {
 pub enum ConnectionDialogState {
     /// 新增目录表单。
     NewDirectory(ConnectionDirectoryFormState),
-    /// 新增 SSH 链接表单。
+    /// 新增远程链接表单。
     NewSshLink(ConnectionLinkFormState),
     /// SSH 首次连接未知主机时的指纹确认弹窗。
     ConfirmHostKey(ConnectionHostKeyPromptState),
-    /// 删除链接目录或 SSH 链接前的二次确认弹窗。
+    /// 删除链接目录、SSH 链接或 SMB 链接前的二次确认弹窗。
     ConfirmDelete(ConnectionDeletePromptState),
 }
 
@@ -569,9 +575,11 @@ pub struct ConnectionDirectoryFormState {
     pub error_message: Option<String>,
 }
 
-/// 新增 SSH 链接表单状态。
+/// 新增远程链接表单状态。
 #[derive(Clone, Debug)]
 pub struct ConnectionLinkFormState {
+    /// 当前表单对应的链接协议。
+    pub link_kind: crate::connections::ConnectionLinkKind,
     /// 新链接的父目录 ID；为空表示创建在根层级。
     pub parent_id: Option<ConnectionNodeId>,
     /// 链接名称输入框。
@@ -584,6 +592,12 @@ pub struct ConnectionLinkFormState {
     pub username_input: SettingsTextInputState,
     /// SSH 密码输入框。
     pub password_input: SettingsTextInputState,
+    /// SMB 共享名称输入框。
+    pub share_input: SettingsTextInputState,
+    /// SMB 初始目录输入框。
+    pub initial_dir_input: SettingsTextInputState,
+    /// SMB 域或工作组输入框。
+    pub domain_input: SettingsTextInputState,
     /// SSH 私钥路径输入框。
     pub private_key_path_input: SettingsTextInputState,
     /// SSH 私钥口令输入框。
@@ -600,9 +614,9 @@ pub enum HostKeyPromptOwner {
         /// 终端会话 ID。
         session_id: usize,
     },
-    /// SFTP 文件管理会话触发的主机指纹确认。
+    /// SSH SFTP 文件管理会话触发的主机指纹确认。
     Sftp {
-        /// SFTP 会话 ID。
+        /// 远程文件管理会话 ID。
         session_id: usize,
     },
 }
@@ -635,7 +649,7 @@ pub struct ConnectionDeletePromptState {
     pub is_directory: bool,
 }
 
-/// SFTP 文件管理内的应用弹窗。
+/// 远程文件管理内的应用弹窗。
 #[derive(Clone, Debug)]
 pub enum SftpDialogState {
     /// 重命名远程文件或目录。
@@ -647,7 +661,7 @@ pub enum SftpDialogState {
 /// SFTP 重命名弹窗状态。
 #[derive(Clone, Debug)]
 pub struct SftpRenameDialogState {
-    /// SFTP 会话 ID。
+    /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 原始远程路径。
     pub remote_path: String,
@@ -662,7 +676,7 @@ pub struct SftpRenameDialogState {
 /// SFTP 删除二次确认弹窗状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SftpDeletePromptState {
-    /// SFTP 会话 ID。
+    /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 待删除远程路径。
     pub remote_path: String,
@@ -2030,7 +2044,7 @@ pub struct ArgusApp {
     pub filtered_source_ids: Vec<SourceId>,
     /// 链接树虚拟列表滚动句柄。
     pub connection_tree_scroll: UniformListScrollHandle,
-    /// 当前选中的链接目录或 SSH 链接节点。
+    /// 当前选中的链接目录、SSH 链接或 SMB 链接节点。
     pub selected_connection_node_id: Option<ConnectionNodeId>,
     /// 链接树搜索工具栏是否处于输入模式。
     pub is_connection_tree_search_open: bool,
@@ -2042,9 +2056,9 @@ pub struct ArgusApp {
     pub is_connection_directory_window_open: bool,
     /// 新增链接目录独立窗口句柄，用于重复点击时置前已有窗口。
     pub connection_directory_window_handle: Option<WindowHandle<ConnectionDirectoryWindow>>,
-    /// 新增 SSH 链接独立窗口是否处于打开状态。
+    /// 新增或编辑链接独立窗口是否处于打开状态。
     pub is_connection_link_window_open: bool,
-    /// 新增 SSH 链接独立窗口句柄，用于重复点击时置前已有窗口。
+    /// 新增或编辑链接独立窗口句柄，用于重复点击时置前已有窗口。
     pub connection_link_window_handle: Option<WindowHandle<ConnectionLinkWindow>>,
     /// 来源树子级懒加载 generation，用于丢弃过期后台结果。
     pub source_child_load_generations: HashMap<SourceId, usize>,
@@ -2092,11 +2106,11 @@ pub struct ArgusApp {
     pub terminal_sessions: HashMap<usize, TerminalSessionState>,
     /// 下一个 SSH 终端会话 ID。
     pub next_terminal_session_id: usize,
-    /// SFTP 文件管理会话状态表。
+    /// 远程文件管理会话状态表。
     pub sftp_sessions: HashMap<usize, SftpSessionState>,
-    /// 下一个 SFTP 文件管理会话 ID。
+    /// 下一个远程文件管理会话 ID。
     pub next_sftp_session_id: usize,
-    /// 当前打开的 SFTP 文件管理弹窗。
+    /// 当前打开的远程文件管理弹窗。
     pub sftp_dialog: Option<SftpDialogState>,
     /// 当前 Jstack 频率方块的内部悬浮气泡数据。
     pub jstack_cell_hover_preview: Option<JstackCellHoverPreview>,
@@ -3034,7 +3048,7 @@ impl ArgusApp {
         }
     }
 
-    /// 只保留指定 SFTP 文件管理 tab 的会话；非 SFTP tab 会断开全部文件管理会话。
+    /// 只保留指定远程文件管理 tab 的会话；非远程文件 tab 会断开全部文件管理会话。
     fn retain_sftp_session_for_tab_kind(&mut self, kept_kind: &TabKind) {
         let kept_session_id = match kept_kind {
             TabKind::SftpFileManager { session_id } => Some(*session_id),
@@ -3209,6 +3223,15 @@ impl ArgusApp {
         });
     }
 
+    /// 在指定窗口坐标打开新增链接类型下拉菜单。
+    pub fn open_connection_link_create_menu(&mut self, anchor: Point<Pixels>) {
+        self.tab_menu_scroll = UniformListScrollHandle::new();
+        self.active_menu = Some(ActiveMenu {
+            kind: ActiveMenuKind::ConnectionLinkCreate,
+            anchor,
+        });
+    }
+
     /// 关闭当前活动菜单。
     pub fn close_active_menu(&mut self) {
         self.active_menu = None;
@@ -3269,6 +3292,10 @@ impl ArgusApp {
                         .danger(),
                 ]
             }
+            ActiveMenuKind::ConnectionLinkCreate => vec![
+                MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink),
+                MenuEntry::new("新建 SMB 链接", MenuAction::NewSmbConnectionLink),
+            ],
             ActiveMenuKind::TerminalContext { session_id } => vec![MenuEntry::new(
                 "文件管理",
                 MenuAction::OpenSftpFileManager {
@@ -3304,11 +3331,14 @@ impl ArgusApp {
             MenuAction::DeleteConnectionNode { node_id } => {
                 self.request_delete_connection_node(node_id);
             }
+            MenuAction::NewSshConnectionLink | MenuAction::NewSmbConnectionLink => {
+                self.placeholder_notice = "新增链接需要从界面菜单触发".to_string();
+            }
             MenuAction::OpenSftpFileManager { .. } => {
                 self.placeholder_notice = "文件管理需要从界面菜单触发".to_string();
             }
             MenuAction::DownloadSftpSelection { .. } => {
-                self.placeholder_notice = "SFTP 下载需要从界面菜单触发".to_string();
+                self.placeholder_notice = "文件下载需要从界面菜单触发".to_string();
             }
             MenuAction::RenameSftpSelection { session_id } => {
                 self.open_sftp_rename_dialog(session_id);
@@ -3354,6 +3384,14 @@ impl ArgusApp {
             }
             MenuAction::DeleteConnectionNode { node_id } => {
                 self.request_delete_connection_node(node_id);
+                self.close_active_menu();
+            }
+            MenuAction::NewSshConnectionLink => {
+                self.open_new_ssh_link_dialog(cx);
+                self.close_active_menu();
+            }
+            MenuAction::NewSmbConnectionLink => {
+                self.open_new_smb_link_dialog(cx);
                 self.close_active_menu();
             }
             MenuAction::OpenSftpFileManager {
@@ -6941,7 +6979,12 @@ mod tests {
             .expect("应存在测试链接")
             .clone();
         let (sender, receiver) = std::sync::mpsc::channel();
-        let mut session = crate::sftp::SftpSessionState::connecting(session_id, &link, sender);
+        let mut session = crate::sftp::SftpSessionState::connecting(
+            session_id,
+            &link,
+            crate::sftp::RemoteFileBackend::Sftp,
+            sender,
+        );
         session.status = crate::sftp::SftpStatus::Connected;
         session.current_dir = "/home/tester".to_string();
         session.address_input = SettingsTextInputState::from_value(session.current_dir.clone());

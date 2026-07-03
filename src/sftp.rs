@@ -1,25 +1,30 @@
-//! 文件职责：封装 SSH SFTP 文件管理会话、后台 worker 与远程文件元数据。
+//! 文件职责：封装 SSH SFTP/SMB 文件管理会话、后台 worker 与远程文件元数据。
 //! 创建日期：2026-06-26
 //! 修改日期：2026-06-26
 //! 作者：Argus 开发团队
-//! 主要功能：使用内嵌 ssh2 SFTP 通道读取远程目录，并支持普通文件上传、下载、重命名和删除。
+//! 主要功能：使用内嵌 SSH SFTP 或 SMB 客户端读取远程目录，并支持普通文件上传、下载、重命名和删除。
 
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::io;
+use std::fs::File as LocalFile;
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use async_channel::{Receiver, Sender};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use gpui::UniformListScrollHandle;
+use smb2::{
+    ClientConfig as SmbClientConfig, DirectoryEntry as SmbDirectoryEntry, SmbClient,
+    Tree as SmbTree,
+};
 use ssh2::{HashType, Session};
 
 use crate::app::SettingsTextInputState;
-use crate::connections::{ConnectionLinkConfig, ConnectionNodeId, SshLinkConfig};
+use crate::connections::{ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig};
 use crate::terminal::PendingHostKey;
 
 /// 远程 Unix 文件类型掩码。
@@ -30,9 +35,9 @@ const SFTP_MODE_REGULAR_FILE: u32 = 0o100000;
 const SFTP_MODE_DIRECTORY: u32 = 0o040000;
 /// 远程符号链接类型位。
 const SFTP_MODE_SYMLINK: u32 = 0o120000;
-/// SFTP 文件管理会话运行期状态，存放在 `ArgusApp` 中并由 UI 渲染。
+/// 远程文件管理会话运行期状态，存放在 `ArgusApp` 中并由 UI 渲染。
 pub struct SftpSessionState {
-    /// SFTP 会话 ID，与标签页中的 `session_id` 对应。
+    /// 远程文件管理会话 ID，与标签页中的 `session_id` 对应。
     pub id: usize,
     /// 关联的链接节点 ID。
     pub link_id: ConnectionNodeId,
@@ -40,9 +45,11 @@ pub struct SftpSessionState {
     pub title: String,
     /// 远程地址展示文案。
     pub address: String,
+    /// 当前文件管理会话使用的后端协议。
+    pub backend: RemoteFileBackend,
     /// 当前连接和操作状态。
     pub status: SftpStatus,
-    /// 发送给 SFTP 后台线程的命令通道。
+    /// 发送给远程文件后台线程的命令通道。
     pub command_sender: Option<mpsc::Sender<SftpCommand>>,
     /// 等待用户确认的主机指纹；没有待确认时为空。
     pub pending_host_key: Option<PendingHostKey>,
@@ -61,17 +68,20 @@ pub struct SftpSessionState {
 }
 
 impl SftpSessionState {
-    /// 创建一个处于“连接中”的 SFTP 会话状态。
+    /// 创建一个处于“连接中”的远程文件管理会话状态。
     pub fn connecting(
         id: usize,
         link: &ConnectionLinkConfig,
+        backend: RemoteFileBackend,
         command_sender: mpsc::Sender<SftpCommand>,
     ) -> Self {
+        let protocol_label = backend.label();
         Self {
             id,
             link_id: link.id,
             title: format!("文件管理 - {}", link.name),
             address: link.address_label(),
+            backend,
             status: SftpStatus::Connecting,
             command_sender: Some(command_sender),
             pending_host_key: None,
@@ -80,7 +90,7 @@ impl SftpSessionState {
             entries: Vec::new(),
             selected_paths: BTreeSet::new(),
             list_scroll: UniformListScrollHandle::new(),
-            message: Some("正在建立 SFTP 连接...".to_string()),
+            message: Some(format!("正在建立 {protocol_label} 文件管理连接...")),
         }
     }
 
@@ -103,7 +113,26 @@ impl SftpSessionState {
     }
 }
 
-/// SFTP 文件管理会话状态。
+/// 文件管理后端协议。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteFileBackend {
+    /// SSH SFTP 文件管理。
+    Sftp,
+    /// SMB 共享文件管理。
+    Smb,
+}
+
+impl RemoteFileBackend {
+    /// 返回 UI 状态提示使用的协议名称。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sftp => "SFTP",
+            Self::Smb => "SMB",
+        }
+    }
+}
+
+/// 远程文件管理会话状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SftpStatus {
     /// 正在连接服务器。
@@ -169,20 +198,45 @@ pub struct SftpEntry {
     pub permissions: Option<u32>,
 }
 
-/// 启动 SFTP worker 时需要的不可变请求数据。
+/// 启动远程文件 worker 时需要的不可变请求数据。
 #[derive(Clone, Debug)]
 pub struct SftpWorkerRequest {
-    /// SFTP 会话 ID。
+    /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 关联链接 ID。
     pub link_id: ConnectionNodeId,
-    /// SSH 配置快照。
-    pub ssh: SshLinkConfig,
-    /// 已信任主机指纹；为空时需要 UI 二次确认。
-    pub trusted_fingerprint: Option<String>,
+    /// 后端连接请求快照。
+    pub backend: RemoteFileWorkerBackend,
 }
 
-/// UI 发送给 SFTP worker 的命令。
+/// 文件管理 worker 使用的后端连接请求。
+#[derive(Clone, Debug)]
+pub enum RemoteFileWorkerBackend {
+    /// 通过 SSH SFTP 通道管理远程文件。
+    Sftp {
+        /// SSH 配置快照。
+        ssh: SshLinkConfig,
+        /// 已信任主机指纹；为空时需要 UI 二次确认。
+        trusted_fingerprint: Option<String>,
+    },
+    /// 通过 SMB 共享管理远程文件。
+    Smb {
+        /// SMB 配置快照。
+        smb: SmbLinkConfig,
+    },
+}
+
+impl RemoteFileWorkerBackend {
+    /// 返回对应的 UI 后端协议。
+    pub fn backend(&self) -> RemoteFileBackend {
+        match self {
+            Self::Sftp { .. } => RemoteFileBackend::Sftp,
+            Self::Smb { .. } => RemoteFileBackend::Smb,
+        }
+    }
+}
+
+/// UI 发送给远程文件 worker 的命令。
 #[derive(Clone, Debug)]
 pub enum SftpCommand {
     /// 用户确认当前未知主机指纹可信。
@@ -224,11 +278,11 @@ pub enum SftpCommand {
         /// 待删除条目。
         entry: SftpEntry,
     },
-    /// 主动断开 SFTP 通道。
+    /// 主动断开远程文件通道。
     Disconnect,
 }
 
-/// SFTP worker 回传给 UI 的事件。
+/// 远程文件 worker 回传给 UI 的事件。
 #[derive(Clone, Debug)]
 pub enum SftpEvent {
     /// 发现未知主机指纹，需要 UI 弹窗确认。
@@ -242,7 +296,7 @@ pub enum SftpEvent {
         /// SHA256 指纹。
         fingerprint: String,
     },
-    /// SFTP 通道已连接并完成首次目录读取。
+    /// 远程文件通道已连接并完成首次目录读取。
     Connected {
         /// 会话 ID。
         session_id: usize,
@@ -267,7 +321,7 @@ pub enum SftpEvent {
         /// 用户可读提示。
         message: String,
     },
-    /// 操作失败，但 SFTP 会话仍可继续使用。
+    /// 操作失败，但远程文件会话仍可继续使用。
     OperationFailed {
         /// 会话 ID。
         session_id: usize,
@@ -350,14 +404,39 @@ pub fn remote_child_path(directory: &str, name: &str) -> String {
     }
 }
 
-/// SFTP worker 主流程：连接、校验主机指纹、鉴权、建立 SFTP 通道并串行执行文件操作。
+/// 文件管理 worker 主流程：按后端协议连接并串行执行文件操作。
 fn run_sftp_worker(
     request: SftpWorkerRequest,
     command_receiver: mpsc::Receiver<SftpCommand>,
     event_sender: Sender<SftpEvent>,
 ) -> Result<()> {
-    let tcp = TcpStream::connect((request.ssh.host.as_str(), request.ssh.port))
-        .with_context(|| format!("无法连接到 {}:{}", request.ssh.host, request.ssh.port))?;
+    match request.backend.clone() {
+        RemoteFileWorkerBackend::Sftp {
+            ssh,
+            trusted_fingerprint,
+        } => run_ssh_sftp_worker(
+            request.session_id,
+            ssh,
+            trusted_fingerprint,
+            command_receiver,
+            event_sender,
+        ),
+        RemoteFileWorkerBackend::Smb { smb } => {
+            run_smb_worker(request.session_id, smb, command_receiver, event_sender)
+        }
+    }
+}
+
+/// SFTP worker 主流程：连接、校验主机指纹、鉴权、建立 SFTP 通道并串行执行文件操作。
+fn run_ssh_sftp_worker(
+    session_id: usize,
+    ssh: SshLinkConfig,
+    trusted_fingerprint: Option<String>,
+    command_receiver: mpsc::Receiver<SftpCommand>,
+    event_sender: Sender<SftpEvent>,
+) -> Result<()> {
+    let tcp = TcpStream::connect((ssh.host.as_str(), ssh.port))
+        .with_context(|| format!("无法连接到 {}:{}", ssh.host, ssh.port))?;
     tcp.set_nodelay(true).ok();
 
     let mut session = Session::new().context("无法创建 SSH 会话")?;
@@ -365,8 +444,15 @@ fn run_sftp_worker(
     session.handshake().context("SSH 握手失败")?;
 
     let fingerprint = sha256_fingerprint(&session).context("无法获取 SSH 主机指纹")?;
-    verify_host_key(&request, &command_receiver, &event_sender, &fingerprint)?;
-    authenticate(&session, &request.ssh)?;
+    verify_host_key(
+        session_id,
+        &ssh,
+        trusted_fingerprint.as_deref(),
+        &command_receiver,
+        &event_sender,
+        &fingerprint,
+    )?;
+    authenticate(&session, &ssh)?;
 
     let sftp = session.sftp().context("无法创建 SFTP 通道")?;
     let mut current_dir =
@@ -375,7 +461,7 @@ fn run_sftp_worker(
     send_event_blocking(
         &event_sender,
         SftpEvent::Connected {
-            session_id: request.session_id,
+            session_id,
             current_dir: current_dir.clone(),
             entries,
         },
@@ -390,26 +476,20 @@ fn run_sftp_worker(
                     send_event_blocking(
                         &event_sender,
                         SftpEvent::DirectoryLoaded {
-                            session_id: request.session_id,
+                            session_id,
                             current_dir: current_dir.clone(),
                             entries,
                         },
                     );
                 }
-                Err(error) => send_operation_failed(&event_sender, request.session_id, error),
+                Err(error) => send_operation_failed(&event_sender, session_id, error),
             },
             SftpCommand::Refresh => {
-                send_directory_listing(&sftp, &current_dir, request.session_id, &event_sender);
+                send_directory_listing(&sftp, &current_dir, session_id, &event_sender);
             }
             SftpCommand::UploadFiles { local_paths } => {
                 let result = upload_files(&sftp, &current_dir, &local_paths);
-                send_operation_result(
-                    &sftp,
-                    &current_dir,
-                    request.session_id,
-                    &event_sender,
-                    result,
-                );
+                send_operation_result(&sftp, &current_dir, session_id, &event_sender, result);
             }
             SftpCommand::DownloadFile {
                 remote_path,
@@ -417,40 +497,28 @@ fn run_sftp_worker(
             } => {
                 let result = download_file(&sftp, &remote_path, &local_path)
                     .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
-                send_operation_result_without_refresh(request.session_id, &event_sender, result);
+                send_operation_result_without_refresh(session_id, &event_sender, result);
             }
             SftpCommand::DownloadFiles { entries, local_dir } => {
                 let result = download_files(&sftp, &entries, &local_dir);
-                send_operation_result_without_refresh(request.session_id, &event_sender, result);
+                send_operation_result_without_refresh(session_id, &event_sender, result);
             }
             SftpCommand::Rename {
                 remote_path,
                 new_name,
             } => {
                 let result = rename_entry(&sftp, &remote_path, &new_name);
-                send_operation_result(
-                    &sftp,
-                    &current_dir,
-                    request.session_id,
-                    &event_sender,
-                    result,
-                );
+                send_operation_result(&sftp, &current_dir, session_id, &event_sender, result);
             }
             SftpCommand::Delete { entry } => {
                 let result = delete_entry(&sftp, &entry);
-                send_operation_result(
-                    &sftp,
-                    &current_dir,
-                    request.session_id,
-                    &event_sender,
-                    result,
-                );
+                send_operation_result(&sftp, &current_dir, session_id, &event_sender, result);
             }
             SftpCommand::Disconnect => {
                 send_event_blocking(
                     &event_sender,
                     SftpEvent::Disconnected {
-                        session_id: request.session_id,
+                        session_id,
                         message: "SFTP 连接已断开".to_string(),
                     },
                 );
@@ -462,8 +530,147 @@ fn run_sftp_worker(
     send_event_blocking(
         &event_sender,
         SftpEvent::Disconnected {
-            session_id: request.session_id,
+            session_id,
             message: "SFTP 连接已断开".to_string(),
+        },
+    );
+    Ok(())
+}
+
+/// 在专属后台线程中运行异步 SMB worker。
+fn run_smb_worker(
+    session_id: usize,
+    smb: SmbLinkConfig,
+    command_receiver: mpsc::Receiver<SftpCommand>,
+    event_sender: Sender<SftpEvent>,
+) -> Result<()> {
+    // 使用多线程运行时：命令循环在 block_on 线程上通过同步 recv() 阻塞等待用户操作，
+    // 期间 smb2 客户端派生的后台任务（socket 读取循环、oplock/lease 通知）仍能在
+    // worker 线程上被轮询，避免空闲时错过服务端推送的帧或连接关闭。
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .context("无法创建 SMB 异步运行时")?;
+    runtime.block_on(run_smb_worker_async(
+        session_id,
+        smb,
+        command_receiver,
+        event_sender,
+    ))
+}
+
+/// SMB worker 异步主流程：连接共享、进入初始目录并串行执行文件操作。
+async fn run_smb_worker_async(
+    session_id: usize,
+    smb: SmbLinkConfig,
+    command_receiver: mpsc::Receiver<SftpCommand>,
+    event_sender: Sender<SftpEvent>,
+) -> Result<()> {
+    let mut client = create_smb_client(&smb).await?;
+    let mut current_dir = crate::connections::normalized_smb_initial_dir(&smb.initial_dir);
+    let entries = read_smb_directory(&mut client, &current_dir).await?;
+    send_event_blocking(
+        &event_sender,
+        SftpEvent::Connected {
+            session_id,
+            current_dir: current_dir.clone(),
+            entries,
+        },
+    );
+
+    while let Ok(command) = command_receiver.recv() {
+        match command {
+            SftpCommand::TrustHostKey | SftpCommand::RejectHostKey => {}
+            SftpCommand::LoadDirectory(path) => {
+                match load_smb_directory(&mut client, &current_dir, &path).await {
+                    Ok((next_dir, entries)) => {
+                        current_dir = next_dir;
+                        send_event_blocking(
+                            &event_sender,
+                            SftpEvent::DirectoryLoaded {
+                                session_id,
+                                current_dir: current_dir.clone(),
+                                entries,
+                            },
+                        );
+                    }
+                    Err(error) => send_operation_failed(&event_sender, session_id, error),
+                }
+            }
+            SftpCommand::Refresh => {
+                send_smb_directory_listing(&mut client, &current_dir, session_id, &event_sender)
+                    .await;
+            }
+            SftpCommand::UploadFiles { local_paths } => {
+                let result = upload_smb_files(&mut client, &current_dir, &local_paths).await;
+                send_smb_operation_result(
+                    &mut client,
+                    &current_dir,
+                    session_id,
+                    &event_sender,
+                    result,
+                )
+                .await;
+            }
+            SftpCommand::DownloadFile {
+                remote_path,
+                local_path,
+            } => {
+                let result = download_smb_file(&mut client, &remote_path, &local_path)
+                    .await
+                    .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
+                send_operation_result_without_refresh(session_id, &event_sender, result);
+            }
+            SftpCommand::DownloadFiles { entries, local_dir } => {
+                let result = download_smb_files(&mut client, &entries, &local_dir).await;
+                send_operation_result_without_refresh(session_id, &event_sender, result);
+            }
+            SftpCommand::Rename {
+                remote_path,
+                new_name,
+            } => {
+                let result = rename_smb_entry(&mut client, &remote_path, &new_name).await;
+                send_smb_operation_result(
+                    &mut client,
+                    &current_dir,
+                    session_id,
+                    &event_sender,
+                    result,
+                )
+                .await;
+            }
+            SftpCommand::Delete { entry } => {
+                let result = delete_smb_entry(&mut client, &entry).await;
+                send_smb_operation_result(
+                    &mut client,
+                    &current_dir,
+                    session_id,
+                    &event_sender,
+                    result,
+                )
+                .await;
+            }
+            SftpCommand::Disconnect => {
+                close_smb_client(&mut client).await;
+                send_event_blocking(
+                    &event_sender,
+                    SftpEvent::Disconnected {
+                        session_id,
+                        message: "SMB 连接已断开".to_string(),
+                    },
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    close_smb_client(&mut client).await;
+    send_event_blocking(
+        &event_sender,
+        SftpEvent::Disconnected {
+            session_id,
+            message: "SMB 连接已断开".to_string(),
         },
     );
     Ok(())
@@ -492,26 +699,7 @@ fn read_remote_directory(sftp: &ssh2::Sftp, directory: &str) -> Result<Vec<SftpE
         .into_iter()
         .filter_map(|(path, stat)| sftp_entry_from_stat(directory, path, stat))
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        let left_group = if left.kind == SftpEntryKind::Directory {
-            0
-        } else {
-            1
-        };
-        let right_group = if right.kind == SftpEntryKind::Directory {
-            0
-        } else {
-            1
-        };
-        left_group
-            .cmp(&right_group)
-            .then_with(|| {
-                left.name
-                    .to_ascii_lowercase()
-                    .cmp(&right.name.to_ascii_lowercase())
-            })
-            .then_with(|| left.name.cmp(&right.name))
-    });
+    sort_remote_entries(&mut entries);
     Ok(entries)
 }
 
@@ -542,6 +730,252 @@ fn sftp_entry_kind(permissions: Option<u32>) -> SftpEntryKind {
     }
 }
 
+/// 已连接到指定共享的 SMB 客户端封装。
+struct SmbShareClient {
+    /// SMB 客户端实例，内部持有连接和认证会话。
+    client: SmbClient,
+    /// 已连接的 SMB 共享 tree。
+    tree: SmbTree,
+}
+
+/// 根据 SMB 配置创建并连接纯 Rust SMB 客户端。
+async fn create_smb_client(smb: &SmbLinkConfig) -> Result<SmbShareClient> {
+    let mut client = SmbClient::connect(SmbClientConfig {
+        addr: format!("{}:{}", smb.host, smb.port),
+        timeout: Duration::from_secs(10),
+        username: smb.username.clone(),
+        password: smb.password.clone(),
+        domain: smb.domain.clone().unwrap_or_default(),
+        auto_reconnect: false,
+        compression: true,
+        dfs_enabled: true,
+        dfs_target_overrides: Default::default(),
+    })
+    .await
+    .with_context(|| format!("无法连接 SMB 服务器 {}:{}", smb.host, smb.port))?;
+    let tree = client
+        .connect_share(&smb.share)
+        .await
+        .with_context(|| format!("无法连接 SMB 共享 {}", smb.address_label()))?;
+    Ok(SmbShareClient { client, tree })
+}
+
+/// 关闭 SMB 客户端持有的共享连接。
+async fn close_smb_client(client: &mut SmbShareClient) {
+    let _ = client.client.disconnect_share(&client.tree).await;
+}
+
+/// 加载 SMB 目录，并返回共享内规范化路径和条目。
+async fn load_smb_directory(
+    client: &mut SmbShareClient,
+    current_dir: &str,
+    input: &str,
+) -> Result<(String, Vec<SftpEntry>)> {
+    let target = crate::connections::normalized_smb_initial_dir(&resolve_remote_path(current_dir, input)?);
+    let entries = read_smb_directory(client, &target).await?;
+    Ok((target, entries))
+}
+
+/// 读取 SMB 目录条目，并按目录优先、名称升序排序。
+async fn read_smb_directory(
+    client: &mut SmbShareClient,
+    directory: &str,
+) -> Result<Vec<SftpEntry>> {
+    let mut entries = client
+        .client
+        .list_directory(&mut client.tree, &smb_relative_path(directory))
+        .await
+        .with_context(|| format!("无法读取 SMB 目录 {directory}"))?
+        .into_iter()
+        .filter_map(|entry| smb_entry_from_directory_info(directory, entry))
+        .collect::<Vec<_>>();
+    sort_remote_entries(&mut entries);
+    Ok(entries)
+}
+
+/// 将 SMB 目录枚举条目转换为 UI 需要的远程文件条目。
+fn smb_entry_from_directory_info(directory: &str, entry: SmbDirectoryEntry) -> Option<SftpEntry> {
+    let name = entry.name;
+    if name == "." || name == ".." {
+        return None;
+    }
+    let kind = if entry.is_directory {
+        SftpEntryKind::Directory
+    } else {
+        SftpEntryKind::RegularFile
+    };
+    Some(SftpEntry {
+        name: name.clone(),
+        path: remote_child_path(directory, &name),
+        kind,
+        size: Some(entry.size),
+        mtime: smb_filetime_to_unix_seconds(entry.modified),
+        permissions: None,
+    })
+}
+
+/// 上传本地普通文件集合到 SMB 当前目录。
+async fn upload_smb_files(
+    client: &mut SmbShareClient,
+    current_dir: &str,
+    local_paths: &[PathBuf],
+) -> Result<String> {
+    if local_paths.is_empty() {
+        bail!("未选择要上传的文件");
+    }
+
+    // 复用同一块读取缓冲，避免每个分块都新分配并清零 64 KiB。
+    let mut chunk_scratch = vec![0_u8; 64 * 1024];
+    for local_path in local_paths {
+        let metadata = std::fs::metadata(local_path)
+            .with_context(|| format!("无法读取本地文件 {}", local_path.display()))?;
+        if !metadata.is_file() {
+            bail!("仅支持上传普通文件：{}", local_path.display());
+        }
+        let file_name = local_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow!("本地文件名无效：{}", local_path.display()))?;
+        let remote_path = remote_child_path(current_dir, &file_name);
+        let mut local_file = LocalFile::open(local_path)
+            .with_context(|| format!("无法打开本地文件 {}", local_path.display()))?;
+        let mut next_chunk = || read_next_local_chunk(&mut local_file, &mut chunk_scratch);
+        client
+            .client
+            .write_file_streamed(
+                &mut client.tree,
+                &smb_relative_path(&remote_path),
+                &mut next_chunk,
+            )
+            .await
+            .with_context(|| format!("上传文件失败：{}", local_path.display()))?;
+    }
+
+    Ok(format!("已上传 {} 个文件", local_paths.len()))
+}
+
+/// 从本地文件读取下一块上传数据，使用调用方提供的复用缓冲区。
+fn read_next_local_chunk(
+    local_file: &mut LocalFile,
+    scratch: &mut [u8],
+) -> Option<std::result::Result<Vec<u8>, io::Error>> {
+    match local_file.read(scratch) {
+        Ok(0) => None,
+        Ok(read_len) => Some(Ok(scratch[..read_len].to_vec())),
+        Err(error) => Some(Err(error)),
+    }
+}
+
+/// 下载单个 SMB 远程文件到本地路径。
+async fn download_smb_file(
+    client: &mut SmbShareClient,
+    remote_path: &str,
+    local_path: &Path,
+) -> Result<()> {
+    let mut download = client
+        .client
+        .download(&client.tree, &smb_relative_path(remote_path))
+        .await
+        .with_context(|| format!("无法打开 SMB 文件 {remote_path}"))?;
+    let mut local_file = LocalFile::create(local_path)
+        .with_context(|| format!("无法创建本地文件 {}", local_path.display()))?;
+    while let Some(chunk) = download.next_chunk().await {
+        let chunk = chunk.with_context(|| format!("下载文件失败：{remote_path}"))?;
+        local_file.write_all(&chunk)?;
+    }
+    local_file.flush()?;
+    Ok(())
+}
+
+/// 下载多个 SMB 远程普通文件到本地目录。
+async fn download_smb_files(
+    client: &mut SmbShareClient,
+    entries: &[SftpEntry],
+    local_dir: &Path,
+) -> Result<String> {
+    if entries.is_empty() {
+        bail!("未选择要下载的文件");
+    }
+    if !local_dir.is_dir() {
+        bail!("请选择有效的本地目录");
+    }
+
+    for entry in entries {
+        if !entry.kind.is_regular_file() {
+            bail!("仅支持下载普通文件：{}", entry.name);
+        }
+        download_smb_file(client, &entry.path, &local_dir.join(&entry.name)).await?;
+    }
+
+    Ok(format!("已下载 {} 个文件", entries.len()))
+}
+
+/// 在当前 SMB 目录内重命名远程条目。
+async fn rename_smb_entry(
+    client: &mut SmbShareClient,
+    remote_path: &str,
+    new_name: &str,
+) -> Result<String> {
+    let new_name = validate_sftp_rename_name(new_name).map_err(anyhow::Error::msg)?;
+    let parent = remote_parent_dir(remote_path).ok_or_else(|| anyhow!("无法解析远程父目录"))?;
+    let next_path = remote_child_path(&parent, &new_name);
+    client
+        .client
+        .rename(
+            &mut client.tree,
+            &smb_relative_path(remote_path),
+            &smb_relative_path(&next_path),
+        )
+        .await
+        .with_context(|| format!("重命名失败：{remote_path}"))?;
+    Ok(format!("已重命名为 {new_name}"))
+}
+
+/// 删除 SMB 远程普通文件或空目录。
+async fn delete_smb_entry(client: &mut SmbShareClient, entry: &SftpEntry) -> Result<String> {
+    match entry.kind {
+        SftpEntryKind::RegularFile => client
+            .client
+            .delete_file(&mut client.tree, &smb_relative_path(&entry.path))
+            .await
+            .with_context(|| format!("删除文件失败：{}", entry.name))
+            .map(|_| format!("已删除 {}", entry.name)),
+        SftpEntryKind::Directory => {
+            match client
+                .client
+                .delete_directory(&mut client.tree, &smb_relative_path(&entry.path))
+                .await
+            {
+                Ok(_) => Ok(format!("已删除目录 {}", entry.name)),
+                Err(error) => {
+                    // 根据 SMB 错误类型提供更精确的提示。
+                    use smb2::ErrorKind;
+                    let message = match error.kind() {
+                        ErrorKind::AccessDenied => {
+                            format!("无权限删除目录：{}", entry.name)
+                        }
+                        ErrorKind::NotFound => {
+                            format!("目录不存在：{}", entry.name)
+                        }
+                        ErrorKind::SharingViolation => {
+                            format!("目录正被其他进程使用：{}", entry.name)
+                        }
+                        _ => {
+                            // 其他错误（可能是非空目录等）显示底层错误。
+                            format!("目录可能非空或无法删除：{error}")
+                        }
+                    };
+                    Err(anyhow!(message))
+                }
+            }
+        }
+        SftpEntryKind::Symlink | SftpEntryKind::Other => {
+            Err(anyhow!("仅支持删除普通文件或空目录：{}", entry.name))
+        }
+    }
+}
+
 /// 上传本地普通文件集合到远程当前目录。
 fn upload_files(sftp: &ssh2::Sftp, current_dir: &str, local_paths: &[PathBuf]) -> Result<String> {
     if local_paths.is_empty() {
@@ -560,7 +994,7 @@ fn upload_files(sftp: &ssh2::Sftp, current_dir: &str, local_paths: &[PathBuf]) -
             .filter(|name| !name.is_empty())
             .ok_or_else(|| anyhow!("本地文件名无效：{}", local_path.display()))?;
         let remote_path = remote_child_path(current_dir, &file_name);
-        let mut local_file = File::open(local_path)
+        let mut local_file = LocalFile::open(local_path)
             .with_context(|| format!("无法打开本地文件 {}", local_path.display()))?;
         let mut remote_file = sftp
             .create(Path::new(&remote_path))
@@ -577,7 +1011,7 @@ fn download_file(sftp: &ssh2::Sftp, remote_path: &str, local_path: &Path) -> Res
     let mut remote_file = sftp
         .open(Path::new(remote_path))
         .with_context(|| format!("无法打开远程文件 {remote_path}"))?;
-    let mut local_file = File::create(local_path)
+    let mut local_file = LocalFile::create(local_path)
         .with_context(|| format!("无法创建本地文件 {}", local_path.display()))?;
     io::copy(&mut remote_file, &mut local_file)
         .with_context(|| format!("下载文件失败：{remote_path}"))?;
@@ -623,12 +1057,28 @@ fn delete_entry(sftp: &ssh2::Sftp, entry: &SftpEntry) -> Result<String> {
         }
         SftpEntryKind::Directory => {
             sftp.rmdir(Path::new(&entry.path))
-                .map_err(|error| anyhow!("目录非空或无权限，无法删除：{error}"))?;
+                .map_err(|error| describe_sftp_rmdir_error(&entry.name, error))?;
             Ok(format!("已删除目录 {}", entry.name))
         }
         SftpEntryKind::Symlink | SftpEntryKind::Other => {
             bail!("仅支持删除普通文件或空目录：{}", entry.name)
         }
+    }
+}
+
+/// 根据 libssh2 SFTP 状态码，将删除目录失败转换为面向用户的中文说明。
+fn describe_sftp_rmdir_error(entry_name: &str, error: ssh2::Error) -> anyhow::Error {
+    // libssh2 SFTP 状态码：3=无权限，18=目录非空。
+    const LIBSSH2_FX_PERMISSION_DENIED: i32 = 3;
+    const LIBSSH2_FX_DIR_NOT_EMPTY: i32 = 18;
+    match error.code() {
+        ssh2::ErrorCode::SFTP(LIBSSH2_FX_DIR_NOT_EMPTY) => {
+            anyhow!("目录非空，无法删除：{entry_name}")
+        }
+        ssh2::ErrorCode::SFTP(LIBSSH2_FX_PERMISSION_DENIED) => {
+            anyhow!("无权限删除目录：{entry_name}")
+        }
+        _ => anyhow!("删除目录失败：{entry_name}：{error}"),
     }
 }
 
@@ -640,6 +1090,26 @@ fn send_directory_listing(
     event_sender: &Sender<SftpEvent>,
 ) {
     match read_remote_directory(sftp, current_dir) {
+        Ok(entries) => send_event_blocking(
+            event_sender,
+            SftpEvent::DirectoryLoaded {
+                session_id,
+                current_dir: current_dir.to_string(),
+                entries,
+            },
+        ),
+        Err(error) => send_operation_failed(event_sender, session_id, error),
+    }
+}
+
+/// 刷新 SMB 当前目录并发送完整目录事件。
+async fn send_smb_directory_listing(
+    client: &mut SmbShareClient,
+    current_dir: &str,
+    session_id: usize,
+    event_sender: &Sender<SftpEvent>,
+) {
+    match read_smb_directory(client, current_dir).await {
         Ok(entries) => send_event_blocking(
             event_sender,
             SftpEvent::DirectoryLoaded {
@@ -670,6 +1140,29 @@ fn send_operation_result(
                 },
             );
             send_directory_listing(sftp, current_dir, session_id, event_sender);
+        }
+        Err(error) => send_operation_failed(event_sender, session_id, error),
+    }
+}
+
+/// 发送带刷新 SMB 目录的操作结果。
+async fn send_smb_operation_result(
+    client: &mut SmbShareClient,
+    current_dir: &str,
+    session_id: usize,
+    event_sender: &Sender<SftpEvent>,
+    result: Result<String>,
+) {
+    match result {
+        Ok(message) => {
+            send_event_blocking(
+                event_sender,
+                SftpEvent::OperationSucceeded {
+                    session_id,
+                    message,
+                },
+            );
+            send_smb_directory_listing(client, current_dir, session_id, event_sender).await;
         }
         Err(error) => send_operation_failed(event_sender, session_id, error),
     }
@@ -731,6 +1224,37 @@ fn normalize_remote_path(path: PathBuf) -> String {
     }
 }
 
+/// 将共享内绝对路径转换为 SMB UNC 中的相对路径，不携带前导分隔符。
+fn smb_relative_path(path: &str) -> String {
+    crate::connections::normalized_smb_initial_dir(path)
+        .trim_start_matches('/')
+        .replace('/', "\\")
+}
+
+/// 将 SMB FILETIME 转为 Unix 秒级时间戳；零值视为无时间。
+fn smb_filetime_to_unix_seconds(file_time: smb2::pack::FileTime) -> Option<u64> {
+    if file_time == smb2::pack::FileTime::ZERO {
+        return None;
+    }
+    file_time
+        .to_system_time()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+}
+
+/// 按目录优先和名称升序排序远程文件条目。
+fn sort_remote_entries(entries: &mut [SftpEntry]) {
+    // 使用 sort_by_cached_key，每个条目只计算一次小写键，避免比较时反复分配。
+    entries.sort_by_cached_key(|entry| {
+        let group = if entry.kind == SftpEntryKind::Directory {
+            0_u8
+        } else {
+            1_u8
+        };
+        (group, entry.name.to_ascii_lowercase(), entry.name.clone())
+    });
+}
+
 /// 返回远程路径中的文件名。
 fn remote_file_name(path: &str) -> String {
     path.rsplit('/')
@@ -750,21 +1274,23 @@ fn sha256_fingerprint(session: &Session) -> Result<String> {
 
 /// 校验主机指纹；未知主机需要等待 UI 发送确认或拒绝命令。
 fn verify_host_key(
-    request: &SftpWorkerRequest,
+    session_id: usize,
+    ssh: &SshLinkConfig,
+    trusted_fingerprint: Option<&str>,
     command_receiver: &mpsc::Receiver<SftpCommand>,
     event_sender: &Sender<SftpEvent>,
     fingerprint: &str,
 ) -> Result<()> {
-    match request.trusted_fingerprint.as_deref() {
+    match trusted_fingerprint {
         Some(expected) if expected == fingerprint => Ok(()),
         Some(_) => bail!("SSH 主机指纹发生变化，已阻止连接"),
         None => {
             send_event_blocking(
                 event_sender,
                 SftpEvent::HostKeyVerification {
-                    session_id: request.session_id,
-                    host: request.ssh.host.clone(),
-                    port: request.ssh.port,
+                    session_id,
+                    host: ssh.host.clone(),
+                    port: ssh.port,
                     fingerprint: fingerprint.to_string(),
                 },
             );

@@ -14,7 +14,8 @@ use crate::app::{
     InputTextSelectionDrag, SettingsTextInputState,
 };
 use crate::connections::{
-    ConnectionDeletedNodeKind, ConnectionNodeId, ConnectionTreeRow, SshLinkConfig,
+    ConnectionDeletedNodeKind, ConnectionLinkKind, ConnectionNodeId, ConnectionTreeRow,
+    SmbLinkConfig, SshLinkConfig,
 };
 use crate::terminal::PendingHostKey;
 use crate::text_selection::{
@@ -35,12 +36,12 @@ const CONNECTION_DIRECTORY_WINDOW_MIN_WIDTH: f32 = 360.0;
 const CONNECTION_DIRECTORY_WINDOW_MIN_HEIGHT: f32 = 150.0;
 /// SSH 链接表单独立窗口默认宽度。
 const CONNECTION_LINK_WINDOW_WIDTH: f32 = 520.0;
-/// SSH 链接表单独立窗口默认高度；刚好容纳 7 行输入和操作区，减少底部空白。
-const CONNECTION_LINK_WINDOW_HEIGHT: f32 = 430.0;
+/// 链接表单独立窗口默认高度；兼容 SSH/SMB 表单行数并减少底部空白。
+const CONNECTION_LINK_WINDOW_HEIGHT: f32 = 470.0;
 /// SSH 链接表单独立窗口最小宽度。
 const CONNECTION_LINK_WINDOW_MIN_WIDTH: f32 = 460.0;
-/// SSH 链接表单独立窗口最小高度。
-const CONNECTION_LINK_WINDOW_MIN_HEIGHT: f32 = 380.0;
+/// 链接表单独立窗口最小高度。
+const CONNECTION_LINK_WINDOW_MIN_HEIGHT: f32 = 420.0;
 
 impl ArgusApp {
     /// 返回当前链接树是否处于过滤模式。
@@ -95,8 +96,17 @@ impl ArgusApp {
         self.selected_connection_node_id = Some(node_id);
         if self.config.connections.is_directory(node_id) {
             self.toggle_connection_directory(node_id);
-        } else {
-            self.open_or_focus_ssh_terminal(node_id, cx);
+            return;
+        }
+        match self
+            .config
+            .connections
+            .link(node_id)
+            .and_then(|link| link.protocol())
+        {
+            Some(ConnectionLinkKind::Ssh) => self.open_or_focus_ssh_terminal(node_id, cx),
+            Some(ConnectionLinkKind::Smb) => self.open_smb_file_manager_from_link(node_id, cx),
+            None => self.placeholder_notice = "链接配置不完整，无法打开".to_string(),
         }
     }
 
@@ -170,12 +180,16 @@ impl ArgusApp {
             .connections
             .parent_for_new_link(self.selected_connection_node_id);
         let initial_form = ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Ssh,
             parent_id,
             name_input: SettingsTextInputState::default(),
             host_input: SettingsTextInputState::default(),
             port_input: SettingsTextInputState::from_value("22".to_string()),
             username_input: SettingsTextInputState::default(),
             password_input: SettingsTextInputState::default(),
+            share_input: SettingsTextInputState::default(),
+            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
+            domain_input: SettingsTextInputState::default(),
             private_key_path_input: SettingsTextInputState::default(),
             private_key_passphrase_input: SettingsTextInputState::default(),
             error_message: None,
@@ -185,7 +199,9 @@ impl ArgusApp {
             if let Some(window_handle) = self.connection_link_window_handle.clone()
                 && window_handle
                     .update(cx, |window_state, window, cx| {
-                        if !window_state.is_mode(ConnectionLinkWindowMode::Create) {
+                        if !window_state.is_mode(ConnectionLinkWindowMode::Create)
+                            || window_state.link_kind() != ConnectionLinkKind::Ssh
+                        {
                             window_state.replace_form(
                                 initial_form.clone(),
                                 ConnectionLinkWindowMode::Create,
@@ -201,6 +217,60 @@ impl ArgusApp {
             }
 
             // 句柄失效表示窗口可能已被系统关闭，清理后重新创建。
+            self.is_connection_link_window_open = false;
+            self.connection_link_window_handle = None;
+        }
+
+        self.open_connection_link_window_with_form(
+            initial_form,
+            ConnectionLinkWindowMode::Create,
+            cx,
+        );
+    }
+
+    /// 打开新增 SMB 链接独立窗口，父目录根据当前选中节点推导。
+    pub fn open_new_smb_link_dialog(&mut self, cx: &mut Context<Self>) {
+        let parent_id = self
+            .config
+            .connections
+            .parent_for_new_link(self.selected_connection_node_id);
+        let initial_form = ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Smb,
+            parent_id,
+            name_input: SettingsTextInputState::default(),
+            host_input: SettingsTextInputState::default(),
+            port_input: SettingsTextInputState::from_value("445".to_string()),
+            username_input: SettingsTextInputState::default(),
+            password_input: SettingsTextInputState::default(),
+            share_input: SettingsTextInputState::default(),
+            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
+            domain_input: SettingsTextInputState::default(),
+            private_key_path_input: SettingsTextInputState::default(),
+            private_key_passphrase_input: SettingsTextInputState::default(),
+            error_message: None,
+        };
+
+        if self.is_connection_link_window_open {
+            if let Some(window_handle) = self.connection_link_window_handle.clone()
+                && window_handle
+                    .update(cx, |window_state, window, cx| {
+                        if !window_state.is_mode(ConnectionLinkWindowMode::Create)
+                            || window_state.link_kind() != ConnectionLinkKind::Smb
+                        {
+                            window_state.replace_form(
+                                initial_form.clone(),
+                                ConnectionLinkWindowMode::Create,
+                            );
+                            cx.notify();
+                        }
+                        window.activate_window();
+                    })
+                    .is_ok()
+            {
+                self.placeholder_notice = "新增链接窗口已显示到最前".to_string();
+                return;
+            }
+
             self.is_connection_link_window_open = false;
             self.connection_link_window_handle = None;
         }
@@ -246,8 +316,12 @@ impl ArgusApp {
     ) {
         if self.config.connections.is_directory(node_id) {
             self.open_edit_connection_directory_window(node_id, cx);
-        } else if self.config.connections.is_link(node_id) {
-            self.open_edit_ssh_link_window(node_id, cx);
+        } else if let Some(link) = self.config.connections.link(node_id) {
+            match link.protocol() {
+                Some(ConnectionLinkKind::Ssh) => self.open_edit_ssh_link_window(node_id, cx),
+                Some(ConnectionLinkKind::Smb) => self.open_edit_smb_link_window(node_id, cx),
+                None => self.placeholder_notice = "链接配置不完整，无法编辑".to_string(),
+            }
         } else {
             self.placeholder_notice = "未找到可编辑的连接节点".to_string();
         }
@@ -296,19 +370,74 @@ impl ArgusApp {
             self.placeholder_notice = "未找到可编辑的 SSH 链接".to_string();
             return;
         };
+        let Some(ssh) = link.ssh_config().cloned() else {
+            self.placeholder_notice = "当前链接不是 SSH 链接".to_string();
+            return;
+        };
         let initial_form = ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Ssh,
             parent_id: link.parent_id,
             name_input: SettingsTextInputState::from_value(link.name),
-            host_input: SettingsTextInputState::from_value(link.ssh.host),
-            port_input: SettingsTextInputState::from_value(link.ssh.port.to_string()),
-            username_input: SettingsTextInputState::from_value(link.ssh.username),
-            password_input: SettingsTextInputState::from_value(link.ssh.password),
+            host_input: SettingsTextInputState::from_value(ssh.host),
+            port_input: SettingsTextInputState::from_value(ssh.port.to_string()),
+            username_input: SettingsTextInputState::from_value(ssh.username),
+            password_input: SettingsTextInputState::from_value(ssh.password),
+            share_input: SettingsTextInputState::default(),
+            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
+            domain_input: SettingsTextInputState::default(),
             private_key_path_input: SettingsTextInputState::from_value(
-                link.ssh.private_key_path.unwrap_or_default(),
+                ssh.private_key_path.unwrap_or_default(),
             ),
             private_key_passphrase_input: SettingsTextInputState::from_value(
-                link.ssh.private_key_passphrase.unwrap_or_default(),
+                ssh.private_key_passphrase.unwrap_or_default(),
             ),
+            error_message: None,
+        };
+        let mode = ConnectionLinkWindowMode::Edit { link_id };
+
+        if self.is_connection_link_window_open {
+            if let Some(window_handle) = self.connection_link_window_handle.clone()
+                && window_handle
+                    .update(cx, |window_state, window, cx| {
+                        window_state.replace_form(initial_form.clone(), mode);
+                        window.activate_window();
+                        cx.notify();
+                    })
+                    .is_ok()
+            {
+                self.placeholder_notice = "已打开链接编辑窗口".to_string();
+                return;
+            }
+            self.is_connection_link_window_open = false;
+            self.connection_link_window_handle = None;
+        }
+
+        self.open_connection_link_window_with_form(initial_form, mode, cx);
+    }
+
+    /// 打开编辑 SMB 链接独立窗口。
+    fn open_edit_smb_link_window(&mut self, link_id: ConnectionNodeId, cx: &mut Context<Self>) {
+        let Some(link) = self.config.connections.link(link_id).cloned() else {
+            self.placeholder_notice = "未找到可编辑的 SMB 链接".to_string();
+            return;
+        };
+        let Some(smb) = link.smb_config().cloned() else {
+            self.placeholder_notice = "当前链接不是 SMB 链接".to_string();
+            return;
+        };
+        let initial_form = ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Smb,
+            parent_id: link.parent_id,
+            name_input: SettingsTextInputState::from_value(link.name),
+            host_input: SettingsTextInputState::from_value(smb.host),
+            port_input: SettingsTextInputState::from_value(smb.port.to_string()),
+            username_input: SettingsTextInputState::from_value(smb.username),
+            password_input: SettingsTextInputState::from_value(smb.password),
+            share_input: SettingsTextInputState::from_value(smb.share),
+            initial_dir_input: SettingsTextInputState::from_value(smb.initial_dir),
+            domain_input: SettingsTextInputState::from_value(smb.domain.unwrap_or_default()),
+            private_key_path_input: SettingsTextInputState::default(),
+            private_key_passphrase_input: SettingsTextInputState::default(),
             error_message: None,
         };
         let mode = ConnectionLinkWindowMode::Edit { link_id };
@@ -410,9 +539,13 @@ impl ArgusApp {
         };
 
         self.is_connection_link_window_open = true;
+        let protocol_label = match initial_form.link_kind {
+            ConnectionLinkKind::Ssh => "SSH",
+            ConnectionLinkKind::Smb => "SMB",
+        };
         self.placeholder_notice = match mode {
-            ConnectionLinkWindowMode::Create => "请输入 SSH 链接信息".to_string(),
-            ConnectionLinkWindowMode::Edit { .. } => "请编辑 SSH 链接信息".to_string(),
+            ConnectionLinkWindowMode::Create => format!("请输入 {protocol_label} 链接信息"),
+            ConnectionLinkWindowMode::Edit { .. } => format!("请编辑 {protocol_label} 链接信息"),
         };
 
         match cx.open_window(window_options, move |_, cx| {
@@ -485,6 +618,9 @@ impl ArgusApp {
                     clear_connection_input_focus(&mut form.port_input);
                     clear_connection_input_focus(&mut form.username_input);
                     clear_connection_input_focus(&mut form.password_input);
+                    clear_connection_input_focus(&mut form.share_input);
+                    clear_connection_input_focus(&mut form.initial_dir_input);
+                    clear_connection_input_focus(&mut form.domain_input);
                     clear_connection_input_focus(&mut form.private_key_path_input);
                     clear_connection_input_focus(&mut form.private_key_passphrase_input);
                 }
@@ -525,6 +661,20 @@ impl ArgusApp {
             },
             AppTextInputTarget::ConnectionLinkPassword => match self.connection_dialog.as_ref()? {
                 ConnectionDialogState::NewSshLink(form) => Some(&form.password_input),
+                _ => None,
+            },
+            AppTextInputTarget::ConnectionLinkShare => match self.connection_dialog.as_ref()? {
+                ConnectionDialogState::NewSshLink(form) => Some(&form.share_input),
+                _ => None,
+            },
+            AppTextInputTarget::ConnectionLinkInitialDir => {
+                match self.connection_dialog.as_ref()? {
+                    ConnectionDialogState::NewSshLink(form) => Some(&form.initial_dir_input),
+                    _ => None,
+                }
+            }
+            AppTextInputTarget::ConnectionLinkDomain => match self.connection_dialog.as_ref()? {
+                ConnectionDialogState::NewSshLink(form) => Some(&form.domain_input),
                 _ => None,
             },
             AppTextInputTarget::ConnectionLinkPrivateKeyPath => {
@@ -578,6 +728,20 @@ impl ArgusApp {
             },
             AppTextInputTarget::ConnectionLinkPassword => match self.connection_dialog.as_mut()? {
                 ConnectionDialogState::NewSshLink(form) => Some(&mut form.password_input),
+                _ => None,
+            },
+            AppTextInputTarget::ConnectionLinkShare => match self.connection_dialog.as_mut()? {
+                ConnectionDialogState::NewSshLink(form) => Some(&mut form.share_input),
+                _ => None,
+            },
+            AppTextInputTarget::ConnectionLinkInitialDir => {
+                match self.connection_dialog.as_mut()? {
+                    ConnectionDialogState::NewSshLink(form) => Some(&mut form.initial_dir_input),
+                    _ => None,
+                }
+            }
+            AppTextInputTarget::ConnectionLinkDomain => match self.connection_dialog.as_mut()? {
+                ConnectionDialogState::NewSshLink(form) => Some(&mut form.domain_input),
                 _ => None,
             },
             AppTextInputTarget::ConnectionLinkPrivateKeyPath => {
@@ -737,7 +901,7 @@ impl ArgusApp {
 
     /// 提交新增 SSH 链接表单。
     fn submit_ssh_link_form(&mut self, form: ConnectionLinkFormState) {
-        match self.create_ssh_link_from_form(form) {
+        match self.create_connection_link_from_form(form) {
             Ok(_) => self.connection_dialog = None,
             Err(error) => self.update_link_form_error(error),
         }
@@ -764,6 +928,17 @@ impl ArgusApp {
         self.placeholder_notice = "已新增链接目录".to_string();
         self.persist_config_or_report();
         Ok(directory_id)
+    }
+
+    /// 校验并创建 SSH 链接，供独立窗口和兼容弹窗共同复用。
+    pub fn create_connection_link_from_form(
+        &mut self,
+        form: ConnectionLinkFormState,
+    ) -> Result<ConnectionNodeId, String> {
+        match form.link_kind {
+            ConnectionLinkKind::Ssh => self.create_ssh_link_from_form(form),
+            ConnectionLinkKind::Smb => self.create_smb_link_from_form(form),
+        }
     }
 
     /// 校验并创建 SSH 链接，供独立窗口和兼容弹窗共同复用。
@@ -797,6 +972,37 @@ impl ArgusApp {
         Ok(link_id)
     }
 
+    /// 校验并创建 SMB 链接，供独立窗口和兼容弹窗共同复用。
+    pub fn create_smb_link_from_form(
+        &mut self,
+        form: ConnectionLinkFormState,
+    ) -> Result<ConnectionNodeId, String> {
+        let smb = match smb_config_from_form(&form) {
+            Ok(smb) => smb,
+            Err(message) => {
+                self.placeholder_notice = message.clone();
+                return Err(message);
+            }
+        };
+        let link_id =
+            match self
+                .config
+                .connections
+                .add_smb_link(form.parent_id, &form.name_input.value, smb)
+            {
+                Ok(link_id) => link_id,
+                Err(error) => {
+                    let message = error.to_string();
+                    self.placeholder_notice = message.clone();
+                    return Err(message);
+                }
+            };
+        self.selected_connection_node_id = Some(link_id);
+        self.placeholder_notice = "已新增 SMB 链接".to_string();
+        self.persist_config_or_report();
+        Ok(link_id)
+    }
+
     /// 校验并更新链接目录名称。
     pub fn update_connection_directory_from_form(
         &mut self,
@@ -819,6 +1025,18 @@ impl ArgusApp {
                 self.placeholder_notice = message.clone();
                 Err(message)
             }
+        }
+    }
+
+    /// 校验并更新 SSH 链接名称和连接参数。
+    pub fn update_connection_link_from_form(
+        &mut self,
+        link_id: ConnectionNodeId,
+        form: ConnectionLinkFormState,
+    ) -> Result<(), String> {
+        match form.link_kind {
+            ConnectionLinkKind::Ssh => self.update_ssh_link_from_form(link_id, form),
+            ConnectionLinkKind::Smb => self.update_smb_link_from_form(link_id, form),
         }
     }
 
@@ -854,6 +1072,38 @@ impl ArgusApp {
         }
     }
 
+    /// 校验并更新 SMB 链接名称和连接参数。
+    pub fn update_smb_link_from_form(
+        &mut self,
+        link_id: ConnectionNodeId,
+        form: ConnectionLinkFormState,
+    ) -> Result<(), String> {
+        let smb = match smb_config_from_form(&form) {
+            Ok(smb) => smb,
+            Err(message) => {
+                self.placeholder_notice = message.clone();
+                return Err(message);
+            }
+        };
+        match self
+            .config
+            .connections
+            .update_smb_link(link_id, &form.name_input.value, smb)
+        {
+            Ok(()) => {
+                self.selected_connection_node_id = Some(link_id);
+                self.placeholder_notice = "已更新 SMB 链接".to_string();
+                self.persist_config_or_report();
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.placeholder_notice = message.clone();
+                Err(message)
+            }
+        }
+    }
+
     /// 请求删除链接目录或 SSH 链接；删除前必须进入二次确认。
     pub fn request_delete_connection_node(&mut self, node_id: ConnectionNodeId) {
         if let Some(directory) = self.config.connections.directory(node_id) {
@@ -877,6 +1127,11 @@ impl ArgusApp {
 
         if let Some(link) = self.config.connections.link(node_id) {
             self.selected_connection_node_id = Some(node_id);
+            let protocol_label = match link.protocol() {
+                Some(ConnectionLinkKind::Ssh) => "SSH",
+                Some(ConnectionLinkKind::Smb) => "SMB",
+                None => "远程",
+            };
             self.connection_dialog = Some(ConnectionDialogState::ConfirmDelete(
                 ConnectionDeletePromptState {
                     node_id,
@@ -884,7 +1139,7 @@ impl ArgusApp {
                     is_directory: false,
                 },
             ));
-            self.placeholder_notice = "请确认是否删除 SSH 链接".to_string();
+            self.placeholder_notice = format!("请确认是否删除 {protocol_label} 链接");
             return;
         }
 
@@ -914,6 +1169,20 @@ impl ArgusApp {
                 }
                 self.persist_config_or_report();
                 self.placeholder_notice = "已删除 SSH 链接".to_string();
+            }
+            Ok(ConnectionDeletedNodeKind::SmbLink) => {
+                if self.selected_connection_node_id == Some(node_id) {
+                    self.selected_connection_node_id = fallback_selection;
+                }
+                self.persist_config_or_report();
+                self.placeholder_notice = "已删除 SMB 链接".to_string();
+            }
+            Ok(ConnectionDeletedNodeKind::UnknownLink) => {
+                if self.selected_connection_node_id == Some(node_id) {
+                    self.selected_connection_node_id = fallback_selection;
+                }
+                self.persist_config_or_report();
+                self.placeholder_notice = "已删除损坏的链接".to_string();
             }
             Err(error) => {
                 self.placeholder_notice = error.to_string();
@@ -1067,6 +1336,27 @@ fn ssh_config_from_form(form: &ConnectionLinkFormState) -> Result<SshLinkConfig,
     .map_err(|error| error.to_string())
 }
 
+/// 从新增 SMB 链接表单构造 SMB 配置。
+fn smb_config_from_form(form: &ConnectionLinkFormState) -> Result<SmbLinkConfig, String> {
+    let port = form
+        .port_input
+        .value
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "端口必须在 1 到 65535 之间".to_string())?;
+    SmbLinkConfig {
+        host: form.host_input.value.clone(),
+        port,
+        share: form.share_input.value.clone(),
+        initial_dir: form.initial_dir_input.value.clone(),
+        domain: Some(form.domain_input.value.clone()),
+        username: form.username_input.value.clone(),
+        password: form.password_input.value.clone(),
+    }
+    .normalized_for_save()
+    .map_err(|error| error.to_string())
+}
+
 /// 清理单个链接输入框焦点态。
 fn clear_connection_input_focus(input: &mut SettingsTextInputState) {
     input.is_focused = false;
@@ -1145,12 +1435,16 @@ mod tests {
     fn submit_link_form_rejects_invalid_port() {
         let mut app = test_app("submit-link-invalid-port");
         app.connection_dialog = Some(ConnectionDialogState::NewSshLink(ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Ssh,
             parent_id: None,
             name_input: SettingsTextInputState::from_value("app-01".to_string()),
             host_input: SettingsTextInputState::from_value("10.0.0.1".to_string()),
             port_input: SettingsTextInputState::from_value("70000".to_string()),
             username_input: SettingsTextInputState::from_value("deploy".to_string()),
             password_input: SettingsTextInputState::from_value("secret".to_string()),
+            share_input: SettingsTextInputState::default(),
+            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
+            domain_input: SettingsTextInputState::default(),
             private_key_path_input: SettingsTextInputState::default(),
             private_key_passphrase_input: SettingsTextInputState::default(),
             error_message: None,
@@ -1163,6 +1457,40 @@ mod tests {
             app.connection_dialog,
             Some(ConnectionDialogState::NewSshLink(_))
         ));
+    }
+
+    /// 验证新增 SMB 链接会写入共享配置并保留密码原文。
+    #[test]
+    fn submit_smb_link_form_creates_smb_link() {
+        let mut app = test_app("submit-smb-link");
+        app.connection_dialog = Some(ConnectionDialogState::NewSshLink(ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Smb,
+            parent_id: None,
+            name_input: SettingsTextInputState::from_value("共享日志".to_string()),
+            host_input: SettingsTextInputState::from_value("10.0.0.2".to_string()),
+            port_input: SettingsTextInputState::from_value("445".to_string()),
+            username_input: SettingsTextInputState::from_value("smbuser".to_string()),
+            password_input: SettingsTextInputState::from_value(" secret ".to_string()),
+            share_input: SettingsTextInputState::from_value("logs".to_string()),
+            initial_dir_input: SettingsTextInputState::from_value("runtime".to_string()),
+            domain_input: SettingsTextInputState::from_value("WORKGROUP".to_string()),
+            private_key_path_input: SettingsTextInputState::default(),
+            private_key_passphrase_input: SettingsTextInputState::default(),
+            error_message: None,
+        }));
+
+        app.submit_connection_dialog();
+
+        let link = app
+            .config
+            .connections
+            .links
+            .first()
+            .expect("应创建 SMB 链接");
+        let smb = link.smb_config().expect("应保存 SMB 配置");
+        assert_eq!(smb.share, "logs");
+        assert_eq!(smb.initial_dir, "/runtime");
+        assert_eq!(smb.password, " secret ");
     }
 
     /// 验证删除非空目录时不会进入确认弹窗，而是直接给出错误提示。

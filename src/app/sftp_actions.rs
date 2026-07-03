@@ -1,8 +1,8 @@
-//! 文件职责：实现 SFTP 文件管理标签创建、事件回收、文件操作和输入框交互。
+//! 文件职责：实现远程文件管理标签创建、事件回收、文件操作和输入框交互。
 //! 创建日期：2026-06-26
 //! 修改日期：2026-06-26
 //! 作者：Argus 开发团队
-//! 主要功能：从 SSH 终端右键菜单打开远程文件管理，并通过 SFTP worker 管理服务器文件。
+//! 主要功能：从 SSH 终端或 SMB 链接打开远程文件管理，并通过对应协议 worker 管理服务器文件。
 
 use std::borrow::Borrow;
 use std::path::PathBuf;
@@ -16,8 +16,9 @@ use crate::app::{
 };
 use crate::loader::PathBrowser;
 use crate::sftp::{
-    SftpCommand, SftpEntry, SftpEntryKind, SftpEvent, SftpSessionState, SftpStatus,
-    SftpWorkerRequest, remote_parent_dir, spawn_sftp_worker, validate_sftp_rename_name,
+    RemoteFileBackend, RemoteFileWorkerBackend, SftpCommand, SftpEntry, SftpEntryKind, SftpEvent,
+    SftpSessionState, SftpStatus, SftpWorkerRequest, remote_parent_dir, spawn_sftp_worker,
+    validate_sftp_rename_name,
 };
 use crate::terminal::PendingHostKey;
 use crate::text_selection::{
@@ -26,7 +27,7 @@ use crate::text_selection::{
 };
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind};
 
-/// SFTP 输入框的可变部件引用。
+/// 远程文件管理输入框的可变部件引用。
 struct SftpInputParts<'a> {
     /// 当前文本。
     value: &'a mut String,
@@ -54,7 +55,7 @@ impl ArgusApp {
         });
     }
 
-    /// 在 SFTP 文件表格行指定窗口坐标打开右键菜单。
+    /// 在远程文件表格行指定窗口坐标打开右键菜单。
     pub fn open_sftp_entry_context_menu(
         &mut self,
         session_id: usize,
@@ -62,7 +63,7 @@ impl ArgusApp {
         anchor: Point<Pixels>,
     ) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
-            self.placeholder_notice = "SFTP 会话不存在".to_string();
+            self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
         };
         if !session
@@ -98,10 +99,19 @@ impl ArgusApp {
             self.placeholder_notice = "当前终端无法打开文件管理".to_string();
             return;
         };
-        self.create_sftp_file_manager_session(link_id, cx);
+        self.create_sftp_file_manager_session(link_id, RemoteFileBackend::Sftp, cx);
     }
 
-    /// 断开并移除指定 SFTP 文件管理会话。
+    /// 从 SMB 链接树节点打开一个新的 SMB 文件管理标签页。
+    pub fn open_smb_file_manager_from_link(
+        &mut self,
+        link_id: crate::connections::ConnectionNodeId,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_sftp_file_manager_session(link_id, RemoteFileBackend::Smb, cx);
+    }
+
+    /// 断开并移除指定远程文件管理会话。
     pub fn disconnect_sftp_session(&mut self, session_id: usize) {
         if let Some(session) = self.sftp_sessions.remove(&session_id)
             && let Some(sender) = session.command_sender
@@ -115,7 +125,7 @@ impl ArgusApp {
         }
     }
 
-    /// 断开所有 SFTP 文件管理会话。
+    /// 断开所有远程文件管理会话。
     pub fn disconnect_all_sftp_sessions(&mut self) {
         let session_ids = self.sftp_sessions.keys().copied().collect::<Vec<_>>();
         for session_id in session_ids {
@@ -123,7 +133,7 @@ impl ArgusApp {
         }
     }
 
-    /// 用户确认当前 SFTP 主机指纹可信，并继续后台 worker。
+    /// 用户确认当前 SSH SFTP 主机指纹可信，并继续后台 worker。
     pub fn confirm_sftp_host_key(&mut self, session_id: usize) {
         let Some((pending, sender)) = self.sftp_sessions.get(&session_id).and_then(|session| {
             session
@@ -131,7 +141,7 @@ impl ArgusApp {
                 .clone()
                 .map(|pending| (pending, session.command_sender.clone()))
         }) else {
-            self.placeholder_notice = "SFTP 会话不存在".to_string();
+            self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
         };
 
@@ -151,7 +161,7 @@ impl ArgusApp {
         self.placeholder_notice = "已信任 SSH 主机指纹".to_string();
     }
 
-    /// 用户拒绝当前 SFTP 主机指纹。
+    /// 用户拒绝当前 SSH SFTP 主机指纹。
     pub fn reject_sftp_host_key(&mut self, session_id: usize) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
             return;
@@ -186,14 +196,14 @@ impl ArgusApp {
         }
     }
 
-    /// 加载 SFTP 地址栏中的远程目录。
+    /// 加载远程文件管理地址栏中的目录。
     pub fn load_sftp_address_directory(&mut self, session_id: usize) {
         let Some(path) = self
             .sftp_sessions
             .get(&session_id)
             .map(|session| session.address_input.value.clone())
         else {
-            self.placeholder_notice = "SFTP 会话不存在".to_string();
+            self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
         };
         self.send_sftp_command(
@@ -204,7 +214,7 @@ impl ArgusApp {
         );
     }
 
-    /// 刷新当前 SFTP 目录。
+    /// 刷新当前远程目录。
     pub fn refresh_sftp_directory(&mut self, session_id: usize) {
         self.send_sftp_command(
             session_id,
@@ -232,7 +242,7 @@ impl ArgusApp {
         );
     }
 
-    /// 双击 SFTP 表格行；目录进入，普通文件保持选中。
+    /// 双击远程文件表格行；目录进入，普通文件保持选中。
     pub fn handle_sftp_entry_double_click(&mut self, session_id: usize, path: String) {
         let Some(entry) = self.sftp_entry(session_id, &path).cloned() else {
             self.placeholder_notice = "未找到远程文件".to_string();
@@ -248,7 +258,7 @@ impl ArgusApp {
         }
     }
 
-    /// 设置 SFTP 文件列表当前选中项。
+    /// 设置远程文件列表当前选中项。
     pub fn select_sftp_entry(&mut self, session_id: usize, path: String, extend: bool) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
             return;
@@ -266,7 +276,7 @@ impl ArgusApp {
     /// 打开本地文件选择器，并把选中的普通文件上传到当前远程目录。
     pub fn choose_sftp_upload_files(&mut self, session_id: usize, cx: &mut Context<Self>) {
         if !self.sftp_sessions.contains_key(&session_id) {
-            self.placeholder_notice = "SFTP 会话不存在".to_string();
+            self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
         }
         let receiver = {
@@ -429,13 +439,13 @@ impl ArgusApp {
         }));
     }
 
-    /// 关闭当前 SFTP 文件管理弹窗。
+    /// 关闭当前远程文件管理弹窗。
     pub fn close_sftp_dialog(&mut self) {
         self.sftp_dialog = None;
         self.placeholder_notice = "已关闭文件管理弹窗".to_string();
     }
 
-    /// 提交当前 SFTP 文件管理弹窗。
+    /// 提交当前远程文件管理弹窗。
     pub fn submit_sftp_dialog(&mut self) {
         match self.sftp_dialog.clone() {
             Some(SftpDialogState::Rename(dialog)) => self.submit_sftp_rename(dialog),
@@ -524,7 +534,7 @@ impl ArgusApp {
         }
     }
 
-    /// 清理 SFTP 地址栏和弹窗输入框焦点。
+    /// 清理远程文件地址栏和弹窗输入框焦点。
     pub fn clear_sftp_text_input_focuses(&mut self) {
         for session in self.sftp_sessions.values_mut() {
             clear_sftp_input_focus(&mut session.address_input);
@@ -534,7 +544,7 @@ impl ArgusApp {
         }
     }
 
-    /// 处理 SFTP 地址栏或重命名输入框按键。
+    /// 处理远程文件地址栏或重命名输入框按键。
     pub fn handle_sftp_text_input_key(
         &mut self,
         target: AppTextInputTarget,
@@ -658,7 +668,7 @@ impl ArgusApp {
         }
     }
 
-    /// 返回当前选中的 SFTP 文件条目。
+    /// 返回当前选中的远程文件条目。
     pub fn selected_sftp_entries(&self, session_id: usize) -> Vec<SftpEntry> {
         self.sftp_sessions
             .get(&session_id)
@@ -666,14 +676,14 @@ impl ArgusApp {
             .unwrap_or_default()
     }
 
-    /// 判断指定 SFTP 会话是否选中了单个可重命名条目。
+    /// 判断指定远程文件会话是否选中了单个可重命名条目。
     pub fn can_rename_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
             session.status == SftpStatus::Connected && session.selected_entries().len() == 1
         })
     }
 
-    /// 判断指定 SFTP 会话是否选中了可下载的普通文件。
+    /// 判断指定远程文件会话是否选中了可下载的普通文件。
     pub fn can_download_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
             let selected = session.selected_entries();
@@ -683,7 +693,7 @@ impl ArgusApp {
         })
     }
 
-    /// 判断指定 SFTP 会话是否选中了单个可删除条目。
+    /// 判断指定远程文件会话是否选中了单个可删除条目。
     pub fn can_delete_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
             let selected = session.selected_entries();
@@ -696,7 +706,7 @@ impl ArgusApp {
         })
     }
 
-    /// 返回指定 SFTP 会话中的远程文件条目。
+    /// 返回指定远程文件会话中的远程文件条目。
     fn sftp_entry(&self, session_id: usize, path: &str) -> Option<&SftpEntry> {
         self.sftp_sessions
             .get(&session_id)?
@@ -705,35 +715,58 @@ impl ArgusApp {
             .find(|entry| entry.path == path)
     }
 
-    /// 创建新的 SFTP 文件管理会话并启动后台 worker。
+    /// 创建新的远程文件管理会话并启动后台 worker。
     fn create_sftp_file_manager_session(
         &mut self,
         link_id: crate::connections::ConnectionNodeId,
+        backend: RemoteFileBackend,
         cx: &mut Context<Self>,
     ) {
         let Some(link) = self.config.connections.link(link_id).cloned() else {
-            self.placeholder_notice = "未找到 SSH 链接".to_string();
+            self.placeholder_notice = "未找到链接".to_string();
             return;
+        };
+        let worker_backend = match backend {
+            RemoteFileBackend::Sftp => {
+                let Some(ssh) = link.ssh_config().cloned() else {
+                    self.placeholder_notice = "当前链接不是 SSH 链接".to_string();
+                    return;
+                };
+                let trusted_fingerprint = self
+                    .config
+                    .connections
+                    .trusted_fingerprint(&ssh.host, ssh.port)
+                    .map(ToString::to_string);
+                RemoteFileWorkerBackend::Sftp {
+                    ssh,
+                    trusted_fingerprint,
+                }
+            }
+            RemoteFileBackend::Smb => {
+                let Some(smb) = link.smb_config().cloned() else {
+                    self.placeholder_notice = "当前链接不是 SMB 链接".to_string();
+                    return;
+                };
+                RemoteFileWorkerBackend::Smb { smb }
+            }
         };
         let session_id = self.next_sftp_session_id;
         self.next_sftp_session_id += 1;
-        let trusted_fingerprint = self
-            .config
-            .connections
-            .trusted_fingerprint(&link.ssh.host, link.ssh.port)
-            .map(ToString::to_string);
         let request = SftpWorkerRequest {
             session_id,
             link_id,
-            ssh: link.ssh.clone(),
-            trusted_fingerprint,
+            backend: worker_backend,
         };
         let (command_sender, event_receiver) = spawn_sftp_worker(request);
-        let session = SftpSessionState::connecting(session_id, &link, command_sender);
+        let session = SftpSessionState::connecting(session_id, &link, backend, command_sender);
         self.sftp_sessions.insert(session_id, session);
         self.create_sftp_tab_for_session(session_id);
         self.workspace = Workspace::Connections;
-        self.placeholder_notice = format!("正在打开 {} 的文件管理", link.address_label());
+        self.placeholder_notice = format!(
+            "正在打开 {} 的 {} 文件管理",
+            link.address_label(),
+            backend.label()
+        );
 
         cx.spawn(async move |view, cx| {
             while let Ok(event) = event_receiver.recv().await {
@@ -746,7 +779,7 @@ impl ArgusApp {
         .detach();
     }
 
-    /// 为已有 SFTP 会话创建标签。
+    /// 为已有远程文件会话创建标签。
     pub(crate) fn create_sftp_tab_for_session(&mut self, session_id: usize) {
         let Some(session) = self.sftp_sessions.get(&session_id) else {
             return;
@@ -794,7 +827,7 @@ impl ArgusApp {
                     session.apply_directory_listing(current_dir.clone(), entries);
                     session.message = Some(format!("已读取目录 {current_dir}"));
                 }
-                self.placeholder_notice = "SFTP 目录已加载".to_string();
+                self.placeholder_notice = "远程目录已加载".to_string();
             }
             SftpEvent::OperationSucceeded {
                 session_id,
@@ -870,7 +903,7 @@ impl ArgusApp {
         self.placeholder_notice = "请确认 SSH 主机指纹".to_string();
     }
 
-    /// 设置 SFTP 主机指纹确认弹窗状态。
+    /// 设置 SSH SFTP 主机指纹确认弹窗状态。
     fn open_sftp_host_key_prompt(
         &mut self,
         session_id: usize,
@@ -898,15 +931,16 @@ impl ArgusApp {
         busy_message: &str,
     ) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
-            self.placeholder_notice = "SFTP 会话不存在".to_string();
+            self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
         };
+        let protocol_label = session.backend.label();
         if session.status != SftpStatus::Connected {
-            self.placeholder_notice = "SFTP 尚未连接，暂不能执行文件操作".to_string();
+            self.placeholder_notice = format!("{protocol_label} 尚未连接，暂不能执行文件操作");
             return;
         }
         let Some(sender) = &session.command_sender else {
-            self.placeholder_notice = "SFTP 通道不可用".to_string();
+            self.placeholder_notice = format!("{protocol_label} 通道不可用");
             return;
         };
         let _ = sender.send(command);

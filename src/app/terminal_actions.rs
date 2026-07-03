@@ -267,17 +267,21 @@ impl ArgusApp {
             self.placeholder_notice = "未找到 SSH 链接".to_string();
             return;
         };
+        let Some(ssh) = link.ssh_config().cloned() else {
+            self.placeholder_notice = "当前链接不是 SSH 链接".to_string();
+            return;
+        };
         let session_id = self.next_terminal_session_id;
         self.next_terminal_session_id += 1;
         let trusted_fingerprint = self
             .config
             .connections
-            .trusted_fingerprint(&link.ssh.host, link.ssh.port)
+            .trusted_fingerprint(&ssh.host, ssh.port)
             .map(ToString::to_string);
         let request = TerminalWorkerRequest {
             session_id,
             link_id,
-            ssh: link.ssh.clone(),
+            ssh,
             trusted_fingerprint,
             rows: DEFAULT_TERMINAL_ROWS,
             cols: DEFAULT_TERMINAL_COLS,

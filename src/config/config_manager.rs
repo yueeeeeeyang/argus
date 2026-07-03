@@ -133,8 +133,8 @@ mod tests {
         LogSearchConfig, UpgradeConfig,
     };
     use crate::connections::{
-        ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SshLinkConfig,
-        TrustedHostKeyConfig,
+        ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SmbLinkConfig,
+        SshLinkConfig, TrustedHostKeyConfig,
     };
 
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
@@ -186,6 +186,53 @@ mod tests {
         );
     }
 
+    /// 验证协议化连接配置仍能读取旧版本保存的 SSH 链接字段。
+    #[test]
+    fn legacy_ssh_connection_config_loads_as_ssh_link() {
+        let path = test_settings_path("legacy-ssh-connection");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("测试目录应可创建");
+        }
+        fs::write(
+            &path,
+            r#"
+[connections]
+next_id = 2
+
+[[connections.links]]
+id = 1
+name = "legacy-ssh"
+
+[connections.links.ssh]
+host = "10.0.0.8"
+port = 2202
+username = "deploy"
+password = " secret "
+private_key_path = "/Users/yueyang/.ssh/id_ed25519"
+private_key_passphrase = " phrase "
+"#,
+        )
+        .expect("测试旧 SSH 配置应可写入");
+
+        let config = ConfigManager::load_from_path(&path).expect("旧 SSH 配置应可读取");
+        let link = config
+            .connections
+            .links
+            .first()
+            .expect("旧 SSH 链接应被加载");
+        let ssh = link.ssh.as_ref().expect("旧链接应识别为 SSH");
+
+        assert!(link.smb.is_none());
+        assert_eq!(ssh.host, "10.0.0.8");
+        assert_eq!(ssh.port, 2202);
+        assert_eq!(ssh.password, " secret ");
+        assert_eq!(
+            ssh.private_key_path.as_deref(),
+            Some("/Users/yueyang/.ssh/id_ed25519")
+        );
+        assert_eq!(ssh.private_key_passphrase.as_deref(), Some(" phrase "));
+    }
+
     /// 验证保存后再次读取可以恢复用户设置。
     #[test]
     fn save_then_load_round_trips_settings() {
@@ -208,26 +255,44 @@ mod tests {
                 jstack_stack_segment_filters: "Unsafe.park\n\nSocketInputStream\\nread".to_string(),
             },
             connections: ConnectionConfig {
-                next_id: 3,
+                next_id: 4,
                 directories: vec![ConnectionDirectoryConfig {
                     id: 1,
                     parent_id: None,
                     name: "生产环境".to_string(),
                     expanded: true,
                 }],
-                links: vec![ConnectionLinkConfig {
-                    id: 2,
-                    parent_id: Some(1),
-                    name: "app-01".to_string(),
-                    ssh: SshLinkConfig {
-                        host: "10.0.0.1".to_string(),
-                        port: 22,
-                        username: "deploy".to_string(),
-                        password: "secret".to_string(),
-                        private_key_path: Some("/Users/yueyang/.ssh/id_ed25519".to_string()),
-                        private_key_passphrase: Some("phrase".to_string()),
+                links: vec![
+                    ConnectionLinkConfig {
+                        id: 2,
+                        parent_id: Some(1),
+                        name: "app-01".to_string(),
+                        ssh: Some(SshLinkConfig {
+                            host: "10.0.0.1".to_string(),
+                            port: 22,
+                            username: "deploy".to_string(),
+                            password: "secret".to_string(),
+                            private_key_path: Some("/Users/yueyang/.ssh/id_ed25519".to_string()),
+                            private_key_passphrase: Some("phrase".to_string()),
+                        }),
+                        smb: None,
                     },
-                }],
+                    ConnectionLinkConfig {
+                        id: 3,
+                        parent_id: Some(1),
+                        name: "share-01".to_string(),
+                        ssh: None,
+                        smb: Some(SmbLinkConfig {
+                            host: "10.0.0.2".to_string(),
+                            port: 445,
+                            share: "logs".to_string(),
+                            initial_dir: "/runtime".to_string(),
+                            domain: Some("WORKGROUP".to_string()),
+                            username: "smbuser".to_string(),
+                            password: " smb-secret ".to_string(),
+                        }),
+                    },
+                ],
                 trusted_hosts: vec![TrustedHostKeyConfig {
                     host: "10.0.0.1".to_string(),
                     port: 22,
@@ -268,14 +333,12 @@ mod tests {
             "Unsafe.park\n\nSocketInputStream\\nread"
         );
         assert_eq!(loaded.connections.directories[0].name, "生产环境");
-        assert_eq!(loaded.connections.links[0].ssh.password, "secret");
-        assert_eq!(
-            loaded.connections.links[0]
-                .ssh
-                .private_key_passphrase
-                .as_deref(),
-            Some("phrase")
-        );
+        let ssh = loaded.connections.links[0].ssh.as_ref().unwrap();
+        assert_eq!(ssh.password, "secret");
+        assert_eq!(ssh.private_key_passphrase.as_deref(), Some("phrase"));
+        let smb = loaded.connections.links[1].smb.as_ref().unwrap();
+        assert_eq!(smb.share, "logs");
+        assert_eq!(smb.password, " smb-secret ");
         assert_eq!(
             loaded.connections.trusted_hosts[0].fingerprint,
             "SHA256:test"

@@ -188,7 +188,7 @@ fn source_icon_button(
         false,
         IconButtonSize::Small,
         theme,
-        cx.listener(move |app, _, window, cx| {
+        cx.listener(move |app, _event: &ClickEvent, window, cx| {
             match action_name {
                 "加载日志" => app.request_load_sources(cx),
                 "过滤" => {
@@ -232,9 +232,9 @@ fn connection_icon_button(
         false,
         IconButtonSize::Small,
         theme,
-        cx.listener(move |app, _, window, cx| {
+        cx.listener(move |app, event: &ClickEvent, window, cx| {
             match action_name {
-                "新增链接" => app.open_new_ssh_link_dialog(cx),
+                "新增链接" => app.open_connection_link_create_menu(event.position()),
                 "新增目录" => app.open_new_connection_directory_dialog(cx),
                 "过滤" => {
                     app.open_connection_tree_search();

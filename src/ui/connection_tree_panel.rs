@@ -66,7 +66,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let empty_message = if app.is_connection_tree_filtering() {
         "未找到匹配链接"
     } else {
-        "暂无 SSH 链接"
+        "暂无链接"
     };
     let empty_icon = if app.is_connection_tree_filtering() {
         ArgusIcon::Filter
@@ -128,6 +128,7 @@ fn render_row(
         ConnectionTreeRowKind::Directory if row.expanded => ArgusIcon::FolderOpen,
         ConnectionTreeRowKind::Directory => ArgusIcon::Folder,
         ConnectionTreeRowKind::SshLink => ArgusIcon::Link,
+        ConnectionTreeRowKind::SmbLink => ArgusIcon::Database,
     };
     let expand_icon = if row.expanded {
         ArgusIcon::Collapse
@@ -137,6 +138,7 @@ fn render_row(
     let meta_text = match row.kind {
         ConnectionTreeRowKind::Directory => "",
         ConnectionTreeRowKind::SshLink => "ssh",
+        ConnectionTreeRowKind::SmbLink => "smb",
     };
     let tooltip = row.tooltip.clone();
     let tooltip_theme = theme.clone();

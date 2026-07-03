@@ -34,19 +34,26 @@ sevenz-rust = "0.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"
+smb2 = "0.11.4"
 ssh2 = { version = "0.9.5", features = ["vendored-openssl"] }
 tar = "0.4.46"
 thiserror = "2.0.18"
 toml = "0.8.23"
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "fs"] }
 ureq = "2.12.1"
 url = "2.5.8"
 vt100 = "0.16.2"
 walkdir = "2.5.0"
 xz2 = "0.1.7"
-zip = "8.6.0"
+zip = { version = "8.6.0", default-features = false, features = ["bzip2", "deflate64", "deflate", "lzma", "ppmd", "time", "zstd", "xz"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry"] }
 
 [build-dependencies]
 embed-resource = "3.0.9"
+
+[patch.crates-io]
+# smb2 固定依赖 aes 0.9.0-rc.4；本地补丁让 rars-crypto 复用同一 aes 版本，避免同一 0.9 系列的
+# 稳定版与预发布版在 Cargo 解析时冲突，同时保留现有 RAR 解密能力。
+rars-crypto = { path = "third_party/rars-crypto" }

@@ -16,6 +16,7 @@ use crate::app::{
     ConnectionHostKeyPromptState, ConnectionLinkFormState, InputTextSelectionDrag,
     SettingsTextInputState,
 };
+use crate::connections::ConnectionLinkKind;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
@@ -273,6 +274,12 @@ struct ConnectionLinkWindowFocusHandles {
     username: FocusHandle,
     /// 密码输入框真实焦点。
     password: FocusHandle,
+    /// SMB 共享名称输入框真实焦点。
+    share: FocusHandle,
+    /// SMB 初始目录输入框真实焦点。
+    initial_dir: FocusHandle,
+    /// SMB 域或工作组输入框真实焦点。
+    domain: FocusHandle,
     /// 私钥路径输入框真实焦点。
     private_key_path: FocusHandle,
     /// 私钥口令输入框真实焦点。
@@ -314,6 +321,9 @@ impl ConnectionLinkWindow {
                 port: cx.focus_handle(),
                 username: cx.focus_handle(),
                 password: cx.focus_handle(),
+                share: cx.focus_handle(),
+                initial_dir: cx.focus_handle(),
+                domain: cx.focus_handle(),
                 private_key_path: cx.focus_handle(),
                 private_key_passphrase: cx.focus_handle(),
             },
@@ -324,6 +334,11 @@ impl ConnectionLinkWindow {
     /// 判断当前链接窗口是否为指定模式，用于重复点击按钮时决定置前还是替换表单。
     pub fn is_mode(&self, mode: ConnectionLinkWindowMode) -> bool {
         self.mode == mode
+    }
+
+    /// 返回当前链接窗口表单协议，用于重复打开不同协议表单时判断是否需要替换。
+    pub fn link_kind(&self) -> ConnectionLinkKind {
+        self.form.link_kind
     }
 
     /// 替换链接窗口表单和模式，供右键编辑入口复用已经打开的窗口。
@@ -352,6 +367,9 @@ impl ConnectionLinkWindow {
         clear_input_focus_state(&mut self.form.port_input);
         clear_input_focus_state(&mut self.form.username_input);
         clear_input_focus_state(&mut self.form.password_input);
+        clear_input_focus_state(&mut self.form.share_input);
+        clear_input_focus_state(&mut self.form.initial_dir_input);
+        clear_input_focus_state(&mut self.form.domain_input);
         clear_input_focus_state(&mut self.form.private_key_path_input);
         clear_input_focus_state(&mut self.form.private_key_passphrase_input);
     }
@@ -367,6 +385,9 @@ impl ConnectionLinkWindow {
             ConnectionFormInputTarget::LinkPort => Some(&mut self.form.port_input),
             ConnectionFormInputTarget::LinkUsername => Some(&mut self.form.username_input),
             ConnectionFormInputTarget::LinkPassword => Some(&mut self.form.password_input),
+            ConnectionFormInputTarget::LinkShare => Some(&mut self.form.share_input),
+            ConnectionFormInputTarget::LinkInitialDir => Some(&mut self.form.initial_dir_input),
+            ConnectionFormInputTarget::LinkDomain => Some(&mut self.form.domain_input),
             ConnectionFormInputTarget::LinkPrivateKeyPath => {
                 Some(&mut self.form.private_key_path_input)
             }
@@ -467,6 +488,12 @@ enum ConnectionFormInputTarget {
     LinkUsername,
     /// SSH 密码输入框。
     LinkPassword,
+    /// SMB 共享名称输入框。
+    LinkShare,
+    /// SMB 初始目录输入框。
+    LinkInitialDir,
+    /// SMB 域或工作组输入框。
+    LinkDomain,
     /// SSH 私钥路径输入框。
     LinkPrivateKeyPath,
     /// SSH 私钥口令输入框。
@@ -615,9 +642,27 @@ fn render_link_window_content(
     let close_window_entity = window_entity.clone();
     let root_focus_for_track = focus_handles.root.clone();
     let root_focus_for_click = focus_handles.root.clone();
-    let (title, close_tooltip) = match mode {
-        ConnectionLinkWindowMode::Create => ("新增 SSH 链接", "关闭新增链接"),
-        ConnectionLinkWindowMode::Edit { .. } => ("编辑 SSH 链接", "关闭编辑链接"),
+    let (title, close_tooltip) = match (mode, form.link_kind) {
+        (ConnectionLinkWindowMode::Create, ConnectionLinkKind::Ssh) => {
+            ("新增 SSH 链接", "关闭新增链接")
+        }
+        (ConnectionLinkWindowMode::Create, ConnectionLinkKind::Smb) => {
+            ("新增 SMB 链接", "关闭新增链接")
+        }
+        (ConnectionLinkWindowMode::Edit { .. }, ConnectionLinkKind::Ssh) => {
+            ("编辑 SSH 链接", "关闭编辑链接")
+        }
+        (ConnectionLinkWindowMode::Edit { .. }, ConnectionLinkKind::Smb) => {
+            ("编辑 SMB 链接", "关闭编辑链接")
+        }
+    };
+    let port_placeholder = match form.link_kind {
+        ConnectionLinkKind::Ssh => "22",
+        ConnectionLinkKind::Smb => "445",
+    };
+    let password_placeholder = match form.link_kind {
+        ConnectionLinkKind::Ssh => "可选",
+        ConnectionLinkKind::Smb => "必填",
     };
 
     div()
@@ -689,7 +734,7 @@ fn render_link_window_content(
                     ConnectionFormInputTarget::LinkPort,
                     &form.port_input,
                     focus_handles.port.clone(),
-                    "22",
+                    port_placeholder,
                     false,
                     &theme,
                     &window_entity,
@@ -711,34 +756,71 @@ fn render_link_window_content(
                     ConnectionFormInputTarget::LinkPassword,
                     &form.password_input,
                     focus_handles.password.clone(),
-                    "可选",
+                    password_placeholder,
                     true,
                     &theme,
                     &window_entity,
                     &app_handle,
                 ))
-                .child(render_link_input_row(
-                    "私钥路径",
-                    ConnectionFormInputTarget::LinkPrivateKeyPath,
-                    &form.private_key_path_input,
-                    focus_handles.private_key_path.clone(),
-                    "~/.ssh/id_ed25519",
-                    false,
-                    &theme,
-                    &window_entity,
-                    &app_handle,
-                ))
-                .child(render_link_input_row(
-                    "私钥口令",
-                    ConnectionFormInputTarget::LinkPrivateKeyPassphrase,
-                    &form.private_key_passphrase_input,
-                    focus_handles.private_key_passphrase.clone(),
-                    "可选",
-                    true,
-                    &theme,
-                    &window_entity,
-                    &app_handle,
-                ))
+                .when(form.link_kind == ConnectionLinkKind::Smb, |this| {
+                    this.child(render_link_input_row(
+                        "共享名称",
+                        ConnectionFormInputTarget::LinkShare,
+                        &form.share_input,
+                        focus_handles.share.clone(),
+                        "share",
+                        false,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                    .child(render_link_input_row(
+                        "初始目录",
+                        ConnectionFormInputTarget::LinkInitialDir,
+                        &form.initial_dir_input,
+                        focus_handles.initial_dir.clone(),
+                        "/",
+                        false,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                    .child(render_link_input_row(
+                        "域/工作组",
+                        ConnectionFormInputTarget::LinkDomain,
+                        &form.domain_input,
+                        focus_handles.domain.clone(),
+                        "可选",
+                        false,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                })
+                .when(form.link_kind == ConnectionLinkKind::Ssh, |this| {
+                    this.child(render_link_input_row(
+                        "私钥路径",
+                        ConnectionFormInputTarget::LinkPrivateKeyPath,
+                        &form.private_key_path_input,
+                        focus_handles.private_key_path.clone(),
+                        "~/.ssh/id_ed25519",
+                        false,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                    .child(render_link_input_row(
+                        "私钥口令",
+                        ConnectionFormInputTarget::LinkPrivateKeyPassphrase,
+                        &form.private_key_passphrase_input,
+                        focus_handles.private_key_passphrase.clone(),
+                        "可选",
+                        true,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                })
                 .when_some(form.error_message, |this, message| {
                     this.child(error_text(message, &theme))
                 })
@@ -1154,6 +1236,9 @@ fn input_id_for_target(target: ConnectionFormInputTarget) -> &'static str {
         ConnectionFormInputTarget::LinkPort => "connection-link-port-input",
         ConnectionFormInputTarget::LinkUsername => "connection-link-username-input",
         ConnectionFormInputTarget::LinkPassword => "connection-link-password-input",
+        ConnectionFormInputTarget::LinkShare => "connection-link-share-input",
+        ConnectionFormInputTarget::LinkInitialDir => "connection-link-initial-dir-input",
+        ConnectionFormInputTarget::LinkDomain => "connection-link-domain-input",
         ConnectionFormInputTarget::LinkPrivateKeyPath => "connection-link-private-key-input",
         ConnectionFormInputTarget::LinkPrivateKeyPassphrase => {
             "connection-link-private-key-passphrase-input"
@@ -1230,11 +1315,11 @@ fn submit_link_window(
     });
     let result = match mode {
         ConnectionLinkWindowMode::Create => update_connection_app(app_handle, cx, |app, _| {
-            app.create_ssh_link_from_form(form).map(|_| ())
+            app.create_connection_link_from_form(form).map(|_| ())
         }),
         ConnectionLinkWindowMode::Edit { link_id } => {
             update_connection_app(app_handle, cx, |app, _| {
-                app.update_ssh_link_from_form(link_id, form)
+                app.update_connection_link_from_form(link_id, form)
             })
         }
     };

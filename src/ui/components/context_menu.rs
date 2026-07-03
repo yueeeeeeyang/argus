@@ -25,6 +25,8 @@ const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
 const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
 /// 链接树右键菜单宽度，容纳编辑和删除动作。
 const CONNECTION_TREE_CONTEXT_MENU_WIDTH: f32 = 132.0;
+/// 新增链接类型下拉菜单宽度，容纳 SSH/SMB 两种连接类型。
+const CONNECTION_LINK_CREATE_MENU_WIDTH: f32 = 156.0;
 /// 终端右键菜单宽度，容纳文件管理动作。
 const TERMINAL_CONTEXT_MENU_WIDTH: f32 = 132.0;
 /// SFTP 文件行右键菜单宽度，容纳下载、重命名和删除动作。
@@ -60,6 +62,8 @@ pub enum ActiveMenuKind {
         /// 被右键点击的连接节点 ID。
         node_id: ConnectionNodeId,
     },
+    /// 新增链接类型下拉菜单，动作作用于当前链接树选中目录上下文。
+    ConnectionLinkCreate,
     /// 终端右键菜单，动作作用于指定 SSH 终端会话。
     TerminalContext {
         /// 被右键点击的终端会话 ID。
@@ -125,6 +129,10 @@ pub enum MenuAction {
         /// 右键触发删除的连接节点 ID。
         node_id: ConnectionNodeId,
     },
+    /// 打开新增 SSH 链接窗口。
+    NewSshConnectionLink,
+    /// 打开新增 SMB 链接窗口。
+    NewSmbConnectionLink,
     /// 从 SSH 终端打开 SFTP 文件管理标签页。
     OpenSftpFileManager {
         /// 终端会话 ID。
@@ -167,6 +175,8 @@ impl MenuAction {
             Self::DeleteConnectionNode { node_id } => {
                 format!("delete-connection-node-{node_id}")
             }
+            Self::NewSshConnectionLink => "new-ssh-connection-link".to_string(),
+            Self::NewSmbConnectionLink => "new-smb-connection-link".to_string(),
             Self::OpenSftpFileManager {
                 terminal_session_id,
             } => format!("open-sftp-file-manager-{terminal_session_id}"),
@@ -239,6 +249,7 @@ pub fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl In
         ActiveMenuKind::SearchResultsPanel => SEARCH_RESULTS_MENU_WIDTH,
         ActiveMenuKind::SourceTree { .. } => SOURCE_TREE_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::ConnectionTree { .. } => CONNECTION_TREE_CONTEXT_MENU_WIDTH,
+        ActiveMenuKind::ConnectionLinkCreate => CONNECTION_LINK_CREATE_MENU_WIDTH,
         ActiveMenuKind::TerminalContext { .. } => TERMINAL_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::SftpEntry { .. } => SFTP_ENTRY_CONTEXT_MENU_WIDTH,
     };

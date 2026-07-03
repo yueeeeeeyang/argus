@@ -111,6 +111,9 @@ impl ArgusApp {
             | AppTextInputTarget::ConnectionLinkPort
             | AppTextInputTarget::ConnectionLinkUsername
             | AppTextInputTarget::ConnectionLinkPassword
+            | AppTextInputTarget::ConnectionLinkShare
+            | AppTextInputTarget::ConnectionLinkInitialDir
+            | AppTextInputTarget::ConnectionLinkDomain
             | AppTextInputTarget::ConnectionLinkPrivateKeyPath
             | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
                 apply_native_connection_edit(self, target, &edit);
@@ -270,6 +273,9 @@ impl ArgusApp {
             | AppTextInputTarget::ConnectionLinkPort
             | AppTextInputTarget::ConnectionLinkUsername
             | AppTextInputTarget::ConnectionLinkPassword
+            | AppTextInputTarget::ConnectionLinkShare
+            | AppTextInputTarget::ConnectionLinkInitialDir
+            | AppTextInputTarget::ConnectionLinkDomain
             | AppTextInputTarget::ConnectionLinkPrivateKeyPath
             | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
                 self.focus_connection_text_input_target(target);

@@ -1,4 +1,4 @@
-//! 文件职责：渲染 SFTP 文件管理标签页。
+//! 文件职责：渲染远程文件管理标签页。
 //! 创建日期：2026-06-26
 //! 修改日期：2026-06-26
 //! 作者：Argus 开发团队
@@ -22,11 +22,11 @@ use crate::ui::components::input::{
 use crate::ui::input_native::app_native_input;
 use crate::utils::size_format::format_bytes;
 
-/// SFTP 工具栏高度。
+/// 远程文件管理工具栏高度。
 const SFTP_TOOLBAR_HEIGHT: f32 = 44.0;
-/// SFTP 表头高度。
+/// 远程文件管理表头高度。
 const SFTP_TABLE_HEADER_HEIGHT: f32 = 32.0;
-/// SFTP 文件行高度。
+/// 远程文件行高度。
 const SFTP_ROW_HEIGHT: f32 = 30.0;
 /// 文件类型列宽。
 const SFTP_TYPE_COLUMN_WIDTH: f32 = 76.0;
@@ -37,7 +37,7 @@ const SFTP_MTIME_COLUMN_WIDTH: f32 = 168.0;
 /// 权限列宽。
 const SFTP_PERM_COLUMN_WIDTH: f32 = 96.0;
 
-/// 渲染 SFTP 文件管理页面。
+/// 渲染远程文件管理页面。
 pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(session) = app.sftp_sessions.get(&session_id) else {
@@ -47,7 +47,7 @@ pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> 
             .items_center()
             .justify_center()
             .text_color(rgb(theme.foreground_muted))
-            .child("SFTP 会话不存在")
+            .child("文件管理会话不存在")
             .into_any_element();
     };
     let entries = session.entries.clone();

@@ -14,8 +14,10 @@ pub type ConnectionNodeId = usize;
 
 /// SSH 连接默认端口；新增链接表单未填写端口时使用该值。
 pub const DEFAULT_SSH_PORT: u16 = 22;
+/// SMB 连接默认端口；新增 SMB 链接表单未填写端口时使用该值。
+pub const DEFAULT_SMB_PORT: u16 = 445;
 
-/// 链接工作区持久化配置，保存目录、SSH 链接和已确认的主机指纹。
+/// 链接工作区持久化配置，保存目录、远程链接和已确认的主机指纹。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ConnectionConfig {
     /// 下一个可分配的目录或链接 ID。
@@ -24,7 +26,7 @@ pub struct ConnectionConfig {
     /// 用户创建的链接目录，根目录不单独落盘，使用 `parent_id = None` 表示根层级。
     #[serde(default)]
     pub directories: Vec<ConnectionDirectoryConfig>,
-    /// 用户创建的 SSH 链接。
+    /// 用户创建的远程链接；旧配置中的 SSH 链接会通过 `ssh` 字段兼容读取。
     #[serde(default)]
     pub links: Vec<ConnectionLinkConfig>,
     /// 已经由用户确认可信的主机指纹。
@@ -55,8 +57,17 @@ impl ConnectionConfig {
             link.id > 0
                 && used_ids.insert(link.id)
                 && !link.name.trim().is_empty()
-                && !link.ssh.host.trim().is_empty()
-                && !link.ssh.username.trim().is_empty()
+                && match link.protocol() {
+                    Some(ConnectionLinkKind::Ssh) => link
+                        .ssh
+                        .clone()
+                        .is_some_and(|ssh| ssh.normalized_for_save().is_ok()),
+                    Some(ConnectionLinkKind::Smb) => link
+                        .smb
+                        .clone()
+                        .is_some_and(|smb| smb.normalized_for_save().is_ok()),
+                    None => false,
+                }
         });
         let directory_ids = self
             .directories
@@ -74,13 +85,25 @@ impl ConnectionConfig {
         });
         for link in &mut self.links {
             link.name = normalized_required_text(&link.name);
-            link.ssh.host = normalized_required_text(&link.ssh.host);
-            link.ssh.username = normalized_required_text(&link.ssh.username);
-            link.ssh.private_key_path = normalized_optional_text(link.ssh.private_key_path.take());
-            link.ssh.private_key_passphrase =
-                normalized_optional_secret_text(link.ssh.private_key_passphrase.take());
-            if link.ssh.port == 0 {
-                link.ssh.port = DEFAULT_SSH_PORT;
+            if let Some(ssh) = link.ssh.as_mut() {
+                ssh.host = normalized_required_text(&ssh.host);
+                ssh.username = normalized_required_text(&ssh.username);
+                ssh.private_key_path = normalized_optional_text(ssh.private_key_path.take());
+                ssh.private_key_passphrase =
+                    normalized_optional_secret_text(ssh.private_key_passphrase.take());
+                if ssh.port == 0 {
+                    ssh.port = DEFAULT_SSH_PORT;
+                }
+            }
+            if let Some(smb) = link.smb.as_mut() {
+                smb.host = normalized_required_text(&smb.host);
+                smb.share = normalized_smb_share_name(&smb.share);
+                smb.initial_dir = normalized_smb_initial_dir(&smb.initial_dir);
+                smb.domain = normalized_optional_text(smb.domain.take());
+                smb.username = normalized_required_text(&smb.username);
+                if smb.port == 0 {
+                    smb.port = DEFAULT_SMB_PORT;
+                }
             }
         }
         for directory in &mut self.directories {
@@ -158,7 +181,36 @@ impl ConnectionConfig {
             id,
             parent_id,
             name,
-            ssh,
+            ssh: Some(ssh),
+            smb: None,
+        });
+        if let Some(parent_id) = parent_id
+            && let Some(parent) = self.directory_mut(parent_id)
+        {
+            parent.expanded = true;
+        }
+        Ok(id)
+    }
+
+    /// 创建 SMB 链接并返回新链接 ID。
+    pub fn add_smb_link(
+        &mut self,
+        parent_id: Option<ConnectionNodeId>,
+        name: &str,
+        smb: SmbLinkConfig,
+    ) -> Result<ConnectionNodeId, ConnectionValidationError> {
+        let name = validate_node_name(name)?;
+        let smb = smb.normalized_for_save()?;
+        self.validate_parent_directory(parent_id)?;
+        self.validate_sibling_name_available(parent_id, &name, None)?;
+
+        let id = self.take_next_id();
+        self.links.push(ConnectionLinkConfig {
+            id,
+            parent_id,
+            name,
+            ssh: None,
+            smb: Some(smb),
         });
         if let Some(parent_id) = parent_id
             && let Some(parent) = self.directory_mut(parent_id)
@@ -207,7 +259,33 @@ impl ConnectionConfig {
             .find(|link| link.id == link_id)
             .ok_or(ConnectionValidationError::NodeNotFound)?;
         link.name = name;
-        link.ssh = ssh;
+        link.ssh = Some(ssh);
+        link.smb = None;
+        Ok(())
+    }
+
+    /// 更新 SMB 链接名称和连接参数；同级重名校验会忽略当前链接自身。
+    pub fn update_smb_link(
+        &mut self,
+        link_id: ConnectionNodeId,
+        name: &str,
+        smb: SmbLinkConfig,
+    ) -> Result<(), ConnectionValidationError> {
+        let name = validate_node_name(name)?;
+        let smb = smb.normalized_for_save()?;
+        let parent_id = self
+            .link(link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?
+            .parent_id;
+        self.validate_sibling_name_available(parent_id, &name, Some(link_id))?;
+        let link = self
+            .links
+            .iter_mut()
+            .find(|link| link.id == link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?;
+        link.name = name;
+        link.ssh = None;
+        link.smb = Some(smb);
         Ok(())
     }
 
@@ -225,8 +303,15 @@ impl ConnectionConfig {
         }
 
         if self.link(node_id).is_some() {
+            // 依据链接协议推导删除结果类型；协议缺失属于损坏配置，
+            // 显式归类为 UnknownLink 而非默认按 SSH 处理，避免误导用户。
+            let deleted_kind = self
+                .link(node_id)
+                .and_then(ConnectionLinkConfig::protocol)
+                .map(ConnectionDeletedNodeKind::from)
+                .unwrap_or(ConnectionDeletedNodeKind::UnknownLink);
             self.links.retain(|link| link.id != node_id);
-            return Ok(ConnectionDeletedNodeKind::SshLink);
+            return Ok(deleted_kind);
         }
 
         Err(ConnectionValidationError::NodeNotFound)
@@ -547,7 +632,10 @@ impl ConnectionConfig {
                         depth,
                         label: link.name.clone(),
                         tooltip: Some(link.address_label()),
-                        kind: ConnectionTreeRowKind::SshLink,
+                        kind: match link.protocol() {
+                            Some(ConnectionLinkKind::Smb) => ConnectionTreeRowKind::SmbLink,
+                            Some(ConnectionLinkKind::Ssh) | None => ConnectionTreeRowKind::SshLink,
+                        },
                         expanded: false,
                         has_children: false,
                         is_selected: selected_id == Some(link.id),
@@ -574,7 +662,7 @@ pub struct ConnectionDirectoryConfig {
     pub expanded: bool,
 }
 
-/// 单个 SSH 链接配置。
+/// 单个远程链接配置；同一链接只允许保存一种协议配置。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ConnectionLinkConfig {
     /// 链接节点 ID。
@@ -583,22 +671,76 @@ pub struct ConnectionLinkConfig {
     pub parent_id: Option<ConnectionNodeId>,
     /// 链接展示名称。
     pub name: String,
-    /// SSH 连接参数。
-    pub ssh: SshLinkConfig,
+    /// SSH 连接参数；旧配置文件已经使用该字段，因此保持字段名兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshLinkConfig>,
+    /// SMB 连接参数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smb: Option<SmbLinkConfig>,
 }
 
 impl ConnectionLinkConfig {
-    /// 返回状态栏和终端标题可展示的 SSH 地址。
+    /// 返回当前链接协议；异常配置没有可用协议时返回空。
+    pub fn protocol(&self) -> Option<ConnectionLinkKind> {
+        if self.smb.is_some() {
+            Some(ConnectionLinkKind::Smb)
+        } else if self.ssh.is_some() {
+            Some(ConnectionLinkKind::Ssh)
+        } else {
+            None
+        }
+    }
+
+    /// 返回 SSH 配置引用。
+    pub fn ssh_config(&self) -> Option<&SshLinkConfig> {
+        self.ssh.as_ref()
+    }
+
+    /// 返回 SMB 配置引用。
+    pub fn smb_config(&self) -> Option<&SmbLinkConfig> {
+        self.smb.as_ref()
+    }
+
+    /// 返回状态栏、标签和悬浮提示可展示的远程地址。
     pub fn address_label(&self) -> String {
-        format!("{}@{}:{}", self.ssh.username, self.ssh.host, self.ssh.port)
+        match (&self.ssh, &self.smb) {
+            (_, Some(smb)) => smb.address_label(),
+            (Some(ssh), _) => format!("{}@{}:{}", ssh.username, ssh.host, ssh.port),
+            (None, None) => "未知链接".to_string(),
+        }
     }
 
     /// 判断链接是否匹配过滤关键字。
     fn matches_query(&self, query: &str) -> bool {
-        self.name.to_ascii_lowercase().contains(query)
-            || self.ssh.host.to_ascii_lowercase().contains(query)
-            || self.ssh.username.to_ascii_lowercase().contains(query)
+        if self.name.to_ascii_lowercase().contains(query) {
+            return true;
+        }
+        if let Some(ssh) = &self.ssh
+            && (ssh.host.to_ascii_lowercase().contains(query)
+                || ssh.username.to_ascii_lowercase().contains(query))
+        {
+            return true;
+        }
+        if let Some(smb) = &self.smb {
+            return smb.host.to_ascii_lowercase().contains(query)
+                || smb.share.to_ascii_lowercase().contains(query)
+                || smb.username.to_ascii_lowercase().contains(query)
+                || smb
+                    .domain
+                    .as_deref()
+                    .is_some_and(|domain| domain.to_ascii_lowercase().contains(query));
+        }
+        false
     }
+}
+
+/// 远程链接协议类型，用于树行、窗口模式和点击动作分发。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ConnectionLinkKind {
+    /// SSH shell/SFTP 链接。
+    Ssh,
+    /// SMB 共享链接。
+    Smb,
 }
 
 /// SSH 链接参数；按当前产品选择，密码和私钥口令也会持久化到配置文件。
@@ -655,6 +797,84 @@ impl SshLinkConfig {
     }
 }
 
+/// SMB 链接参数；密码按当前产品策略持久化到本地配置文件。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SmbLinkConfig {
+    /// SMB 服务器主机名或 IP。
+    pub host: String,
+    /// SMB 端口。
+    #[serde(default = "default_smb_port")]
+    pub port: u16,
+    /// 共享名称，不包含前导斜杠。
+    pub share: String,
+    /// 打开文件管理时进入的共享内初始目录。
+    #[serde(default = "default_smb_initial_dir")]
+    pub initial_dir: String,
+    /// 域或工作组；为空时按服务器默认处理。
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// 登录用户名。
+    pub username: String,
+    /// 密码鉴权字段。
+    #[serde(default)]
+    pub password: String,
+}
+
+impl Default for SmbLinkConfig {
+    /// 构造新增 SMB 链接表单使用的默认值。
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: DEFAULT_SMB_PORT,
+            share: String::new(),
+            initial_dir: default_smb_initial_dir(),
+            domain: None,
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+impl SmbLinkConfig {
+    /// 归一化并校验 SMB 配置，确保保存前已经具备第一版文件管理能力。
+    pub fn normalized_for_save(mut self) -> Result<Self, ConnectionValidationError> {
+        self.host = validate_required_text(&self.host, ConnectionValidationError::MissingHost)?;
+        if self.port == 0 {
+            return Err(ConnectionValidationError::InvalidPort);
+        }
+        self.share = validate_smb_share_name(&self.share)?;
+        self.initial_dir = normalized_smb_initial_dir(&self.initial_dir);
+        self.domain = normalized_optional_text(self.domain.take());
+        self.username =
+            validate_required_text(&self.username, ConnectionValidationError::MissingUsername)?;
+        if self.password.is_empty() {
+            return Err(ConnectionValidationError::MissingPassword);
+        }
+        Ok(self)
+    }
+
+    /// 返回 SMB 链接在 UI 中展示的地址文案。
+    pub fn address_label(&self) -> String {
+        let user = self
+            .domain
+            .as_deref()
+            .filter(|domain| !domain.is_empty())
+            .map(|domain| format!("{domain}\\{}", self.username))
+            .unwrap_or_else(|| self.username.clone());
+        format!("{user}@{}:{}/{}", self.host, self.port, self.share)
+    }
+
+    /// 返回 SMB 客户端需要的服务器地址。
+    pub fn server_url(&self) -> String {
+        format!("smb://{}:{}", self.host, self.port)
+    }
+
+    /// 返回 SMB 客户端需要的共享名参数。
+    pub fn share_path(&self) -> String {
+        format!("/{}", self.share.trim_start_matches('/'))
+    }
+}
+
 /// 用户确认可信的 SSH 主机指纹。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TrustedHostKeyConfig {
@@ -700,6 +920,8 @@ pub enum ConnectionTreeRowKind {
     Directory,
     /// SSH 链接叶子节点。
     SshLink,
+    /// SMB 链接叶子节点。
+    SmbLink,
 }
 
 /// 删除连接节点后的节点类型，用于应用层展示差异化提示。
@@ -709,6 +931,20 @@ pub enum ConnectionDeletedNodeKind {
     Directory,
     /// 被删除的是 SSH 链接。
     SshLink,
+    /// 被删除的是 SMB 链接。
+    SmbLink,
+    /// 被删除的是协议缺失的损坏链接。
+    UnknownLink,
+}
+
+impl From<ConnectionLinkKind> for ConnectionDeletedNodeKind {
+    /// 将链接协议映射为删除结果类型，供应用层展示差异化提示。
+    fn from(value: ConnectionLinkKind) -> Self {
+        match value {
+            ConnectionLinkKind::Ssh => Self::SshLink,
+            ConnectionLinkKind::Smb => Self::SmbLink,
+        }
+    }
 }
 
 /// 创建或保存连接配置时的校验错误。
@@ -723,12 +959,18 @@ pub enum ConnectionValidationError {
     /// SSH 用户名为空。
     #[error("用户名不能为空")]
     MissingUsername,
+    /// SMB 共享名为空。
+    #[error("共享名称不能为空")]
+    MissingShare,
     /// SSH 端口非法。
     #[error("端口必须在 1 到 65535 之间")]
     InvalidPort,
     /// 未填写任何支持的鉴权凭据。
     #[error("请填写密码或私钥路径")]
     MissingCredential,
+    /// SMB 密码为空。
+    #[error("密码不能为空")]
+    MissingPassword,
     /// 父目录不存在。
     #[error("父目录不存在")]
     ParentNotFound,
@@ -776,9 +1018,58 @@ fn default_ssh_port() -> u16 {
     DEFAULT_SSH_PORT
 }
 
+/// 返回 SMB 默认端口。
+fn default_smb_port() -> u16 {
+    DEFAULT_SMB_PORT
+}
+
+/// 返回 SMB 共享内默认初始目录。
+fn default_smb_initial_dir() -> String {
+    "/".to_string()
+}
+
 /// 校验节点名称并返回去除首尾空白后的文本。
 fn validate_node_name(name: &str) -> Result<String, ConnectionValidationError> {
     validate_required_text(name, ConnectionValidationError::MissingName)
+}
+
+/// 校验 SMB 共享名称，第一版不接受包含路径分隔符的跨共享写法。
+fn validate_smb_share_name(value: &str) -> Result<String, ConnectionValidationError> {
+    let share = normalized_smb_share_name(value);
+    if share.is_empty() {
+        return Err(ConnectionValidationError::MissingShare);
+    }
+    if share.contains('/') || share.contains('\\') {
+        return Err(ConnectionValidationError::MissingShare);
+    }
+    Ok(share)
+}
+
+/// 归一化 SMB 共享名称。
+fn normalized_smb_share_name(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('/')
+        .trim_matches('\\')
+        .to_string()
+}
+
+/// 归一化 SMB 共享内目录，统一使用类 Unix 路径便于 UI 地址栏复用。
+pub fn normalized_smb_initial_dir(value: &str) -> String {
+    let mut path = value.trim().replace('\\', "/");
+    if path.is_empty() {
+        return default_smb_initial_dir();
+    }
+    if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    while path.contains("//") {
+        path = path.replace("//", "/");
+    }
+    if path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    path
 }
 
 /// 校验必填文本字段。
@@ -1028,5 +1319,64 @@ mod tests {
         assert_eq!(ssh.password, " secret ");
         assert_eq!(ssh.private_key_path.as_deref(), Some("~/.ssh/id_ed25519"));
         assert_eq!(ssh.private_key_passphrase.as_deref(), Some(" phrase "));
+    }
+
+    /// 验证 SMB 链接会生成 SMB 树行和地址提示。
+    #[test]
+    fn add_smb_link_creates_smb_tree_row() {
+        let mut config = ConnectionConfig::default();
+        let link_id = config
+            .add_smb_link(
+                None,
+                "共享日志",
+                SmbLinkConfig {
+                    host: "10.0.0.2".to_string(),
+                    port: 445,
+                    share: "logs".to_string(),
+                    initial_dir: "/runtime".to_string(),
+                    domain: Some("WORKGROUP".to_string()),
+                    username: "smbuser".to_string(),
+                    password: "secret".to_string(),
+                },
+            )
+            .unwrap();
+
+        let rows = config.visible_rows("", Some(link_id));
+
+        assert_eq!(rows[0].kind, ConnectionTreeRowKind::SmbLink);
+        assert_eq!(
+            rows[0].tooltip.as_deref(),
+            Some("WORKGROUP\\smbuser@10.0.0.2:445/logs")
+        );
+    }
+
+    /// 验证 SMB 配置会拦截缺失密码，并规范化共享内初始目录。
+    #[test]
+    fn smb_link_validation_rejects_missing_password_and_normalizes_dir() {
+        let error = SmbLinkConfig {
+            host: "10.0.0.2".to_string(),
+            port: 445,
+            share: "logs".to_string(),
+            initial_dir: "runtime".to_string(),
+            domain: None,
+            username: "smbuser".to_string(),
+            password: String::new(),
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(error, ConnectionValidationError::MissingPassword);
+
+        let smb = SmbLinkConfig {
+            host: "10.0.0.2".to_string(),
+            port: 445,
+            share: "logs".to_string(),
+            initial_dir: "runtime/".to_string(),
+            domain: None,
+            username: "smbuser".to_string(),
+            password: "secret".to_string(),
+        }
+        .normalized_for_save()
+        .unwrap();
+        assert_eq!(smb.initial_dir, "/runtime");
     }
 }
