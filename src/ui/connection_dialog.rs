@@ -7,8 +7,9 @@
 use std::ops::Range;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, Render, Subscription, Window, div, prelude::*, px, rgb,
+    App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, FontWeight, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, Render, Subscription, Window, div, prelude::*,
+    px, rgb,
 };
 
 use crate::app::{
@@ -20,7 +21,7 @@ use crate::connections::ConnectionLinkKind;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
-    word_range_at,
+    slice_character_range, word_range_at,
 };
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -173,10 +174,17 @@ impl ConnectionDirectoryWindow {
         &mut self,
         target: ConnectionFormInputTarget,
         keystroke: &gpui::Keystroke,
+        cx: &mut Context<Self>,
     ) -> ConnectionWindowInputAction {
         let Some(input) = self.input_mut(target) else {
             return ConnectionWindowInputAction::None;
         };
+        if let Some(action) = handle_text_input_clipboard(input, keystroke, cx) {
+            if action == ConnectionWindowInputAction::Changed {
+                self.form.error_message = None;
+            }
+            return action;
+        }
         let action = handle_text_input_key(input, keystroke);
         if action == ConnectionWindowInputAction::Changed {
             self.form.error_message = None;
@@ -403,10 +411,17 @@ impl ConnectionLinkWindow {
         &mut self,
         target: ConnectionFormInputTarget,
         keystroke: &gpui::Keystroke,
+        cx: &mut Context<Self>,
     ) -> ConnectionWindowInputAction {
         let Some(input) = self.input_mut(target) else {
             return ConnectionWindowInputAction::None;
         };
+        if let Some(action) = handle_text_input_clipboard(input, keystroke, cx) {
+            if action == ConnectionWindowInputAction::Changed {
+                self.form.error_message = None;
+            }
+            return action;
+        }
         let action = handle_text_input_key(input, keystroke);
         if action == ConnectionWindowInputAction::Changed {
             self.form.error_message = None;
@@ -930,7 +945,8 @@ fn render_directory_input_row(
             move |event: &KeyDownEvent, window, cx| {
                 cx.stop_propagation();
                 let action = key_window.update(cx, |window_state, state_cx| {
-                    let action = window_state.handle_input_key(target, &event.keystroke);
+                    let action =
+                        window_state.handle_input_key(target, &event.keystroke, state_cx);
                     state_cx.notify();
                     action
                 });
@@ -1021,7 +1037,8 @@ fn render_link_input_row(
             move |event: &KeyDownEvent, window, cx| {
                 cx.stop_propagation();
                 let action = key_window.update(cx, |window_state, state_cx| {
-                    let action = window_state.handle_input_key(target, &event.keystroke);
+                    let action =
+                        window_state.handle_input_key(target, &event.keystroke, state_cx);
                     state_cx.notify();
                     action
                 });
@@ -1607,6 +1624,58 @@ fn clear_input_focus_state(input: &mut SettingsTextInputState) {
     input.selection_anchor = None;
     input.marked_range = None;
     input.selection_drag = None;
+}
+
+/// 处理输入框剪贴板快捷键（粘贴/复制/剪切/全选），命中时返回对应动作，否则返回 `None`。
+///
+/// 这些快捷键带有平台修饰键（macOS 为 Cmd，Windows/Linux 为 Ctrl），会被
+/// [`handle_text_input_key`] 的字符插入分支跳过，因此在这里单独拦截处理，
+/// 和设置窗口、Runtime 过滤输入框的粘贴行为保持一致。
+fn handle_text_input_clipboard(
+    input: &mut SettingsTextInputState,
+    keystroke: &gpui::Keystroke,
+    cx: &mut gpui::App,
+) -> Option<ConnectionWindowInputAction> {
+    if !keystroke.modifiers.secondary() {
+        return None;
+    }
+    match keystroke.key.to_lowercase().as_str() {
+        "v" => {
+            let text = cx.read_from_clipboard().and_then(|item| item.text());
+            if let Some(text) = text {
+                // 单行输入框不支持换行，把换行符折叠成空格，避免光标计算错乱。
+                insert_input_text(input, &text.replace(['\r', '\n'], " "));
+            }
+            Some(ConnectionWindowInputAction::Changed)
+        }
+        "c" => {
+            if let Some(range) = input_selection_range(input) {
+                cx.write_to_clipboard(ClipboardItem::new_string(slice_character_range(
+                    &input.value,
+                    range,
+                )));
+            }
+            Some(ConnectionWindowInputAction::None)
+        }
+        "x" => {
+            if let Some(range) = input_selection_range(input) {
+                cx.write_to_clipboard(ClipboardItem::new_string(slice_character_range(
+                    &input.value,
+                    range,
+                )));
+                delete_input_selection(input);
+            }
+            Some(ConnectionWindowInputAction::Changed)
+        }
+        "a" => {
+            input.cursor = character_count(&input.value);
+            input.selection_anchor = Some(0);
+            input.marked_range = None;
+            input.selection_drag = None;
+            Some(ConnectionWindowInputAction::Changed)
+        }
+        _ => None,
+    }
 }
 
 /// 处理单行输入框按键编辑。

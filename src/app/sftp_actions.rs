@@ -17,8 +17,8 @@ use crate::app::{
 use crate::loader::PathBrowser;
 use crate::sftp::{
     RemoteFileBackend, RemoteFileWorkerBackend, SftpCommand, SftpEntry, SftpEntryKind, SftpEvent,
-    SftpSessionState, SftpStatus, SftpWorkerRequest, remote_parent_dir, spawn_sftp_worker,
-    validate_sftp_rename_name,
+    SftpSessionState, SftpStatus, SftpWorkerRequest, is_sftp_entry_previewable, remote_parent_dir,
+    spawn_sftp_worker, validate_sftp_rename_name,
 };
 use crate::terminal::PendingHostKey;
 use crate::text_selection::{
@@ -242,7 +242,7 @@ impl ArgusApp {
         );
     }
 
-    /// 双击远程文件表格行；目录进入，普通文件保持选中。
+    /// 双击远程文件表格行；目录进入，可预览的普通文件打开预览。
     pub fn handle_sftp_entry_double_click(&mut self, session_id: usize, path: String) {
         let Some(entry) = self.sftp_entry(session_id, &path).cloned() else {
             self.placeholder_notice = "未找到远程文件".to_string();
@@ -255,7 +255,55 @@ impl ArgusApp {
                 SftpStatus::Loading,
                 "正在进入远程目录...",
             );
+        } else if is_sftp_entry_previewable(&entry) {
+            self.request_sftp_file_preview(session_id, entry.path, entry.size);
         }
+    }
+
+    /// 请求读取远程普通文件内容用于预览；超上限或未连接时给出提示。
+    pub fn request_sftp_file_preview(
+        &mut self,
+        session_id: usize,
+        remote_path: String,
+        size: Option<u64>,
+    ) {
+        if let Some(size) = size
+            && size > crate::sftp::SFTP_PREVIEW_MAX_FILE_SIZE
+        {
+            self.placeholder_notice = "文件过大，无法预览".to_string();
+            return;
+        }
+        self.send_sftp_command(
+            session_id,
+            SftpCommand::ReadFileContent { remote_path },
+            SftpStatus::Transferring,
+            "正在读取文件...",
+        );
+    }
+
+    /// 右键菜单触发：对当前唯一选中的可预览普通文件发起预览。
+    pub fn preview_sftp_selection(&mut self, session_id: usize) {
+        let Some(session) = self.sftp_sessions.get(&session_id) else {
+            self.placeholder_notice = "文件管理会话不存在".to_string();
+            return;
+        };
+        if session.selected_paths.len() != 1 {
+            self.placeholder_notice = "请选择单个文件预览".to_string();
+            return;
+        }
+        let path = session.selected_paths.iter().next().cloned();
+        let Some(path) = path else {
+            return;
+        };
+        let Some(entry) = self.sftp_entry(session_id, &path).cloned() else {
+            self.placeholder_notice = "未找到远程文件".to_string();
+            return;
+        };
+        if !is_sftp_entry_previewable(&entry) {
+            self.placeholder_notice = "该文件不支持预览".to_string();
+            return;
+        }
+        self.request_sftp_file_preview(session_id, entry.path, entry.size);
     }
 
     /// 设置远程文件列表当前选中项。
@@ -270,6 +318,26 @@ impl ArgusApp {
         } else {
             session.selected_paths.clear();
             session.selected_paths.insert(path);
+        }
+    }
+
+    /// 切换远程文件列表排序字段与方向；同列点击翻转方向，异列点击切到该列升序。
+    pub fn set_sftp_sort(
+        &mut self,
+        session_id: usize,
+        field: crate::sftp::SftpSortField,
+    ) {
+        let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
+            return;
+        };
+        if session.sort_field == field {
+            session.sort_direction = match session.sort_direction {
+                crate::sftp::SftpSortDirection::Asc => crate::sftp::SftpSortDirection::Desc,
+                crate::sftp::SftpSortDirection::Desc => crate::sftp::SftpSortDirection::Asc,
+            };
+        } else {
+            session.sort_field = field;
+            session.sort_direction = crate::sftp::SftpSortDirection::Asc;
         }
     }
 
@@ -693,6 +761,16 @@ impl ArgusApp {
         })
     }
 
+    /// 判断指定远程文件会话是否选中了单个可预览的普通文件。
+    pub fn can_preview_sftp_selection(&self, session_id: usize) -> bool {
+        self.sftp_sessions.get(&session_id).is_some_and(|session| {
+            let selected = session.selected_entries();
+            session.status == SftpStatus::Connected
+                && selected.len() == 1
+                && selected.iter().all(is_sftp_entry_previewable)
+        })
+    }
+
     /// 判断指定远程文件会话是否选中了单个可删除条目。
     pub fn can_delete_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
@@ -771,7 +849,7 @@ impl ArgusApp {
         cx.spawn(async move |view, cx| {
             while let Ok(event) = event_receiver.recv().await {
                 let _ = view.update(cx, |app, cx| {
-                    app.apply_sftp_event(event);
+                    app.apply_sftp_event(event, cx);
                     cx.notify();
                 });
             }
@@ -805,7 +883,7 @@ impl ArgusApp {
     }
 
     /// 应用 SFTP worker 回传事件。
-    fn apply_sftp_event(&mut self, event: SftpEvent) {
+    fn apply_sftp_event(&mut self, event: SftpEvent, cx: &mut Context<Self>) {
         match event {
             SftpEvent::HostKeyVerification {
                 session_id,
@@ -828,6 +906,18 @@ impl ArgusApp {
                     session.message = Some(format!("已读取目录 {current_dir}"));
                 }
                 self.placeholder_notice = "远程目录已加载".to_string();
+            }
+            SftpEvent::FileContentLoaded {
+                session_id,
+                remote_path: _,
+                file_name,
+                content,
+            } => {
+                if let Some(session) = self.sftp_sessions.get_mut(&session_id) {
+                    session.status = SftpStatus::Connected;
+                    session.message = Some(format!("已加载预览：{file_name}"));
+                }
+                self.open_file_preview_window(file_name, content, cx);
             }
             SftpEvent::OperationSucceeded {
                 session_id,

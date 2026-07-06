@@ -62,6 +62,7 @@ use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
+use crate::ui::file_preview_window::FilePreviewWindow;
 use crate::ui::log_search_window::LogSearchWindow;
 use crate::ui::main_window;
 use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
@@ -71,8 +72,9 @@ use crate::updater::{
 };
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use gpui::{
-    AppContext, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, Keystroke, Pixels, Point,
-    Render, Timer, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
+    AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, IntoElement, Keystroke,
+    Pixels, Point, Render, Subscription, Timer, TitlebarOptions, Window, WindowBounds, WindowHandle,
+    WindowOptions, point, px, size,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -116,6 +118,14 @@ const JSTACK_THREAD_DETAIL_WINDOW_HEIGHT: f32 = 640.0;
 const JSTACK_THREAD_DETAIL_WINDOW_MIN_WIDTH: f32 = 600.0;
 /// Jstack 线程详情窗口最小高度。
 const JSTACK_THREAD_DETAIL_WINDOW_MIN_HEIGHT: f32 = 420.0;
+/// 远程文件预览窗口默认宽度。
+const FILE_PREVIEW_WINDOW_WIDTH: f32 = 920.0;
+/// 远程文件预览窗口默认高度。
+const FILE_PREVIEW_WINDOW_HEIGHT: f32 = 640.0;
+/// 远程文件预览窗口最小宽度。
+const FILE_PREVIEW_WINDOW_MIN_WIDTH: f32 = 600.0;
+/// 远程文件预览窗口最小高度。
+const FILE_PREVIEW_WINDOW_MIN_HEIGHT: f32 = 420.0;
 /// 日志正文固定行高；分页滚动和 UI 渲染必须保持一致。
 pub const LOG_VIEWER_ROW_HEIGHT: f32 = 20.0;
 /// 行号栏最小宽度，保证小文件也有稳定的视觉留白。
@@ -146,6 +156,28 @@ pub fn log_viewer_line_number_width(line_count: usize) -> f32 {
         LOG_VIEWER_LINE_NUMBER_MIN_WIDTH,
         LOG_VIEWER_LINE_NUMBER_MAX_WIDTH,
     )
+}
+
+/// 订阅主应用主题变化，主题切换时回调 `apply` 更新视图状态并刷新渲染。
+///
+/// 用于替代各独立窗口中重复的 `cx.observe(&app, |view, app_entity, cx| { view.theme = ...app.theme.clone(); cx.notify(); })` 样板。
+///
+/// 参数说明：
+/// - `cx`：当前视图上下文。
+/// - `app`：主应用实体。
+/// - `apply`：主题变化时更新视图状态的回调，参数为视图、最新主题、上下文。
+///
+/// 返回值：主题订阅句柄，需由调用者持有以保持订阅存活。
+pub fn observe_app_theme<V: 'static>(
+    cx: &mut Context<V>,
+    app: &Entity<ArgusApp>,
+    apply: impl Fn(&mut V, &AppTheme, &mut Context<V>) + 'static,
+) -> Subscription {
+    cx.observe(app, move |view, app_entity, cx| {
+        let theme = app_entity.read_with(cx, |app, _| app.theme.clone());
+        apply(view, &theme, cx);
+        cx.notify();
+    })
 }
 
 /// 将日志原文转换为阅读区展示文本。
@@ -3302,11 +3334,28 @@ impl ArgusApp {
                     terminal_session_id: session_id,
                 },
             )],
-            ActiveMenuKind::SftpEntry { session_id } => vec![
-                MenuEntry::new("下载", MenuAction::DownloadSftpSelection { session_id }),
-                MenuEntry::new("重命名", MenuAction::RenameSftpSelection { session_id }),
-                MenuEntry::new("删除", MenuAction::DeleteSftpSelection { session_id }).danger(),
-            ],
+            ActiveMenuKind::SftpEntry { session_id } => {
+                let mut entries = Vec::new();
+                if self.can_preview_sftp_selection(session_id) {
+                    entries.push(MenuEntry::new(
+                        "预览",
+                        MenuAction::PreviewSftpSelection { session_id },
+                    ));
+                }
+                entries.push(MenuEntry::new(
+                    "下载",
+                    MenuAction::DownloadSftpSelection { session_id },
+                ));
+                entries.push(MenuEntry::new(
+                    "重命名",
+                    MenuAction::RenameSftpSelection { session_id },
+                ));
+                entries.push(
+                    MenuEntry::new("删除", MenuAction::DeleteSftpSelection { session_id })
+                        .danger(),
+                );
+                entries
+            }
         }
     }
 
@@ -3339,6 +3388,9 @@ impl ArgusApp {
             }
             MenuAction::DownloadSftpSelection { .. } => {
                 self.placeholder_notice = "文件下载需要从界面菜单触发".to_string();
+            }
+            MenuAction::PreviewSftpSelection { .. } => {
+                self.placeholder_notice = "文件预览需要从界面菜单触发".to_string();
             }
             MenuAction::RenameSftpSelection { session_id } => {
                 self.open_sftp_rename_dialog(session_id);
@@ -3402,6 +3454,10 @@ impl ArgusApp {
             }
             MenuAction::DownloadSftpSelection { session_id } => {
                 self.choose_sftp_download_target(session_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::PreviewSftpSelection { session_id } => {
+                self.preview_sftp_selection(session_id);
                 self.close_active_menu();
             }
             MenuAction::RenameSftpSelection { session_id } => {
@@ -3686,6 +3742,57 @@ impl ArgusApp {
             }
             Err(error) => {
                 self.placeholder_notice = format!("打开线程详情失败：{error}");
+            }
+        }
+    }
+
+    /// 打开远程文件预览独立窗口，展示 worker 读取回传的文件内容。
+    ///
+    /// 参数说明：
+    /// - `file_name`：文件名，用于窗口标题。
+    /// - `content`：预览内容，可能为文本、二进制提示或读取错误。
+    /// - `cx`：主应用上下文，用于创建无系统标题栏窗口并同步主题。
+    pub fn open_file_preview_window(
+        &mut self,
+        file_name: String,
+        content: crate::sftp::FilePreviewContent,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_theme = self.theme.clone();
+        let app_entity = cx.entity();
+        let bounds = Bounds::centered(
+            None,
+            size(px(FILE_PREVIEW_WINDOW_WIDTH), px(FILE_PREVIEW_WINDOW_HEIGHT)),
+            cx,
+        );
+        let window_options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                // GPUI 在 `titlebar: Some` 时会强制添加关闭/缩放按钮（红绿灯），
+                // 而 `titlebar: None` 又会忽略 `is_resizable` 导致窗口不可缩放。
+                // 这里把红绿灯定位到窗口可视区外，既保留可缩放能力，又不显示系统按钮，
+                // 关闭操作改由标题栏右侧的自定义关闭按钮承担。
+                traffic_light_position: Some(point(px(-1000.0), px(0.0))),
+            }),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(FILE_PREVIEW_WINDOW_MIN_WIDTH),
+                px(FILE_PREVIEW_WINDOW_MIN_HEIGHT),
+            )),
+            ..Default::default()
+        };
+
+        match cx.open_window(window_options, move |_, cx| {
+            cx.new(|cx| {
+                FilePreviewWindow::new(app_entity, initial_theme, file_name, content, cx)
+            })
+        }) {
+            Ok(_) => {
+                self.placeholder_notice = "已打开文件预览".to_string();
+            }
+            Err(error) => {
+                self.placeholder_notice = format!("打开文件预览失败：{error}");
             }
         }
     }
@@ -7244,20 +7351,24 @@ mod tests {
             vec![remote_path]
         );
         let entries = app.active_menu_entries();
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
         assert!(matches!(
             entries[0].action,
-            MenuAction::DownloadSftpSelection { session_id } if session_id == 1
+            MenuAction::PreviewSftpSelection { session_id } if session_id == 1
         ));
         assert!(matches!(
             entries[1].action,
-            MenuAction::RenameSftpSelection { session_id } if session_id == 1
+            MenuAction::DownloadSftpSelection { session_id } if session_id == 1
         ));
         assert!(matches!(
             entries[2].action,
+            MenuAction::RenameSftpSelection { session_id } if session_id == 1
+        ));
+        assert!(matches!(
+            entries[3].action,
             MenuAction::DeleteSftpSelection { session_id } if session_id == 1
         ));
-        assert!(entries[2].is_danger);
+        assert!(entries[3].is_danger);
     }
 
     /// 验证右键已选集合内文件时保留多选，方便从菜单下载多个文件。

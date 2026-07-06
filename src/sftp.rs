@@ -35,6 +35,20 @@ const SFTP_MODE_REGULAR_FILE: u32 = 0o100000;
 const SFTP_MODE_DIRECTORY: u32 = 0o040000;
 /// 远程符号链接类型位。
 const SFTP_MODE_SYMLINK: u32 = 0o120000;
+/// 允许预览的文件总大小上限，超过则不发起预览读取。
+pub const SFTP_PREVIEW_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
+/// 预览单次读取的字节上限，超出部分截断并提示。
+pub const SFTP_PREVIEW_MAX_READ: usize = 512 * 1024;
+
+/// 判断远程条目是否允许文本预览：普通文件且总大小不超过预览上限。
+pub fn is_sftp_entry_previewable(entry: &SftpEntry) -> bool {
+    if entry.kind != SftpEntryKind::RegularFile {
+        return false;
+    }
+    entry
+        .size
+        .is_none_or(|size| size <= SFTP_PREVIEW_MAX_FILE_SIZE)
+}
 /// 远程文件管理会话运行期状态，存放在 `ArgusApp` 中并由 UI 渲染。
 pub struct SftpSessionState {
     /// 远程文件管理会话 ID，与标签页中的 `session_id` 对应。
@@ -63,6 +77,10 @@ pub struct SftpSessionState {
     pub selected_paths: BTreeSet<String>,
     /// 文件列表滚动句柄。
     pub list_scroll: UniformListScrollHandle,
+    /// 当前排序字段。
+    pub sort_field: SftpSortField,
+    /// 当前排序方向。
+    pub sort_direction: SftpSortDirection,
     /// 最近一次提示或错误。
     pub message: Option<String>,
 }
@@ -90,6 +108,8 @@ impl SftpSessionState {
             entries: Vec::new(),
             selected_paths: BTreeSet::new(),
             list_scroll: UniformListScrollHandle::new(),
+            sort_field: SftpSortField::Name,
+            sort_direction: SftpSortDirection::Asc,
             message: Some(format!("正在建立 {protocol_label} 文件管理连接...")),
         }
     }
@@ -152,7 +172,7 @@ pub enum SftpStatus {
 }
 
 /// 远程文件条目类型。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SftpEntryKind {
     /// 目录。
     Directory,
@@ -179,6 +199,30 @@ impl SftpEntryKind {
     pub fn is_regular_file(self) -> bool {
         self == Self::RegularFile
     }
+}
+
+/// 远程文件列表排序字段，对应表头各列。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SftpSortField {
+    /// 名称列。
+    Name,
+    /// 类型列。
+    Type,
+    /// 大小列。
+    Size,
+    /// 修改时间列。
+    Mtime,
+    /// 权限列。
+    Permissions,
+}
+
+/// 远程文件列表排序方向。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SftpSortDirection {
+    /// 升序。
+    Asc,
+    /// 降序。
+    Desc,
 }
 
 /// 远程目录中的单个文件条目。
@@ -266,6 +310,11 @@ pub enum SftpCommand {
         /// 本地保存目录。
         local_dir: PathBuf,
     },
+    /// 读取远程普通文件内容用于预览。
+    ReadFileContent {
+        /// 远程文件路径。
+        remote_path: String,
+    },
     /// 在当前目录内重命名文件或目录。
     Rename {
         /// 原始远程路径。
@@ -280,6 +329,22 @@ pub enum SftpCommand {
     },
     /// 主动断开远程文件通道。
     Disconnect,
+}
+
+/// 远程文件预览内容；由 worker 读取后回传给 UI 展示。
+#[derive(Clone, Debug)]
+pub enum FilePreviewContent {
+    /// 文本内容；`truncated` 为真表示因超过预览读取上限被截断。
+    Text {
+        /// 解码后的文本。
+        content: String,
+        /// 是否因超过预览读取上限被截断。
+        truncated: bool,
+    },
+    /// 检测为二进制文件，无法以文本预览。
+    Binary,
+    /// 读取失败时携带的用户可读错误。
+    Error(String),
 }
 
 /// 远程文件 worker 回传给 UI 的事件。
@@ -313,6 +378,17 @@ pub enum SftpEvent {
         current_dir: String,
         /// 当前目录条目。
         entries: Vec<SftpEntry>,
+    },
+    /// 远程文件预览内容读取完成。
+    FileContentLoaded {
+        /// 会话 ID。
+        session_id: usize,
+        /// 远程文件路径。
+        remote_path: String,
+        /// 文件名，用于预览窗口标题。
+        file_name: String,
+        /// 预览内容。
+        content: FilePreviewContent,
     },
     /// 操作成功。
     OperationSucceeded {
@@ -503,6 +579,9 @@ fn run_ssh_sftp_worker(
                 let result = download_files(&sftp, &entries, &local_dir);
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
+            SftpCommand::ReadFileContent { remote_path } => {
+                send_file_preview_loaded(session_id, &remote_path, read_sftp_file_preview(&sftp, &remote_path), &event_sender);
+            }
             SftpCommand::Rename {
                 remote_path,
                 new_name,
@@ -625,6 +704,14 @@ async fn run_smb_worker_async(
             SftpCommand::DownloadFiles { entries, local_dir } => {
                 let result = download_smb_files(&mut client, &entries, &local_dir).await;
                 send_operation_result_without_refresh(session_id, &event_sender, result);
+            }
+            SftpCommand::ReadFileContent { remote_path } => {
+                send_file_preview_loaded(
+                    session_id,
+                    &remote_path,
+                    read_smb_file_preview(&mut client, &remote_path).await,
+                    &event_sender,
+                );
             }
             SftpCommand::Rename {
                 remote_path,
@@ -1186,6 +1273,106 @@ fn send_operation_result_without_refresh(
     }
 }
 
+/// 发送远程文件预览内容读取完成事件。
+fn send_file_preview_loaded(
+    session_id: usize,
+    remote_path: &str,
+    preview: (String, FilePreviewContent),
+    event_sender: &Sender<SftpEvent>,
+) {
+    let (file_name, content) = preview;
+    send_event_blocking(
+        event_sender,
+        SftpEvent::FileContentLoaded {
+            session_id,
+            remote_path: remote_path.to_string(),
+            file_name,
+            content,
+        },
+    );
+}
+
+/// 把读取到的字节转换为预览内容；含空字节判定为二进制，否则按 UTF-8 失败安全解码。
+fn preview_content_from_bytes(buf: Vec<u8>, truncated: bool) -> FilePreviewContent {
+    if buf.contains(&0) {
+        FilePreviewContent::Binary
+    } else {
+        FilePreviewContent::Text {
+            content: String::from_utf8_lossy(&buf).into_owned(),
+            truncated,
+        }
+    }
+}
+
+/// 读取 SFTP 远程普通文件前若干字节用于预览，返回文件名与预览内容。
+fn read_sftp_file_preview(sftp: &ssh2::Sftp, remote_path: &str) -> (String, FilePreviewContent) {
+    let file_name = remote_file_name(remote_path);
+    let mut remote = match sftp.open(Path::new(remote_path)) {
+        Ok(file) => file,
+        Err(error) => {
+            return (
+                file_name,
+                FilePreviewContent::Error(format!("无法打开远程文件：{error}")),
+            );
+        }
+    };
+    // 多读 1 字节用于判断是否达到读取上限被截断。
+    let mut buf = Vec::with_capacity(SFTP_PREVIEW_MAX_READ + 1);
+    if let Err(error) = (&mut remote)
+        .take((SFTP_PREVIEW_MAX_READ + 1) as u64)
+        .read_to_end(&mut buf)
+    {
+        return (
+            file_name,
+            FilePreviewContent::Error(format!("读取文件失败：{error}")),
+        );
+    }
+    let truncated = buf.len() > SFTP_PREVIEW_MAX_READ;
+    if truncated {
+        buf.truncate(SFTP_PREVIEW_MAX_READ);
+    }
+    (file_name, preview_content_from_bytes(buf, truncated))
+}
+
+/// 读取 SMB 远程普通文件前若干字节用于预览，返回文件名与预览内容。
+async fn read_smb_file_preview(
+    client: &mut SmbShareClient,
+    remote_path: &str,
+) -> (String, FilePreviewContent) {
+    let file_name = remote_file_name(remote_path);
+    let mut download = match client
+        .client
+        .download(&client.tree, &smb_relative_path(remote_path))
+        .await
+    {
+        Ok(download) => download,
+        Err(error) => {
+            return (
+                file_name,
+                FilePreviewContent::Error(format!("无法打开远程文件：{error}")),
+            );
+        }
+    };
+    let mut buf = Vec::with_capacity(SFTP_PREVIEW_MAX_READ + 1);
+    while buf.len() <= SFTP_PREVIEW_MAX_READ {
+        match download.next_chunk().await {
+            Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
+            Some(Err(error)) => {
+                return (
+                    file_name,
+                    FilePreviewContent::Error(format!("读取文件失败：{error}")),
+                );
+            }
+            None => break,
+        }
+    }
+    let truncated = buf.len() > SFTP_PREVIEW_MAX_READ;
+    if truncated {
+        buf.truncate(SFTP_PREVIEW_MAX_READ);
+    }
+    (file_name, preview_content_from_bytes(buf, truncated))
+}
+
 /// 发送可恢复的操作失败事件。
 fn send_operation_failed(
     event_sender: &Sender<SftpEvent>,
@@ -1255,6 +1442,52 @@ fn sort_remote_entries(entries: &mut [SftpEntry]) {
     });
 }
 
+/// 按指定字段和方向排序远程文件条目；目录始终分组靠前，方向只在各自分组内生效。
+pub fn sort_sftp_entries(entries: &mut [SftpEntry], field: SftpSortField, direction: SftpSortDirection) {
+    entries.sort_by(|a, b| {
+        let group_a = if a.kind == SftpEntryKind::Directory { 0_u8 } else { 1_u8 };
+        let group_b = if b.kind == SftpEntryKind::Directory { 0_u8 } else { 1_u8 };
+        group_a.cmp(&group_b).then_with(|| {
+            let order = compare_sftp_entries(a, b, field);
+            if direction == SftpSortDirection::Desc {
+                order.reverse()
+            } else {
+                order
+            }
+        })
+    });
+}
+
+/// 按排序字段比较两个条目；同列相等时回退名称，保证排序稳定可预期。
+fn compare_sftp_entries(a: &SftpEntry, b: &SftpEntry, field: SftpSortField) -> std::cmp::Ordering {
+    match field {
+        SftpSortField::Name => a
+            .name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+            .then_with(|| a.name.cmp(&b.name)),
+        SftpSortField::Type => a
+            .kind
+            .cmp(&b.kind)
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
+        SftpSortField::Size => a
+            .size
+            .unwrap_or(0)
+            .cmp(&b.size.unwrap_or(0))
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
+        SftpSortField::Mtime => a
+            .mtime
+            .unwrap_or(0)
+            .cmp(&b.mtime.unwrap_or(0))
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
+        SftpSortField::Permissions => a
+            .permissions
+            .unwrap_or(0)
+            .cmp(&b.permissions.unwrap_or(0))
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
+    }
+}
+
 /// 返回远程路径中的文件名。
 fn remote_file_name(path: &str) -> String {
     path.rsplit('/')
@@ -1305,6 +1538,7 @@ fn verify_host_key(
                         | SftpCommand::UploadFiles { .. }
                         | SftpCommand::DownloadFile { .. }
                         | SftpCommand::DownloadFiles { .. }
+                        | SftpCommand::ReadFileContent { .. }
                         | SftpCommand::Rename { .. }
                         | SftpCommand::Delete { .. },
                     ) => {}
@@ -1380,5 +1614,124 @@ mod tests {
             remote_child_path("/var/log/", "app.log"),
             "/var/log/app.log"
         );
+    }
+
+    /// 构造一个最小可用的远程文件条目用于排序测试。
+    fn make_entry(name: &str, kind: SftpEntryKind, size: Option<u64>, mtime: Option<u64>) -> SftpEntry {
+        SftpEntry {
+            name: name.to_string(),
+            path: format!("/{name}"),
+            kind,
+            size,
+            mtime,
+            permissions: None,
+        }
+    }
+
+    /// 验证排序始终把目录置于文件之前，即使降序也不改变分组顺序。
+    #[test]
+    fn sort_sftp_entries_keeps_directories_first_regardless_of_direction() {
+        let mut entries = vec![
+            make_entry("app.log", SftpEntryKind::RegularFile, Some(10), None),
+            make_entry("configs", SftpEntryKind::Directory, None, None),
+            make_entry("z-dir", SftpEntryKind::Directory, None, None),
+        ];
+
+        sort_sftp_entries(&mut entries, SftpSortField::Name, SftpSortDirection::Asc);
+        assert_eq!(entries[0].name, "configs");
+        assert_eq!(entries[1].name, "z-dir");
+        assert_eq!(entries[2].name, "app.log");
+
+        // 降序只在目录组内反转，文件仍排在所有目录之后。
+        sort_sftp_entries(&mut entries, SftpSortField::Name, SftpSortDirection::Desc);
+        assert_eq!(entries[0].name, "z-dir");
+        assert_eq!(entries[1].name, "configs");
+        assert_eq!(entries[2].name, "app.log");
+    }
+
+    /// 验证按大小排序在文件组内正确升降序，并以名称作为稳定回退。
+    #[test]
+    fn sort_sftp_entries_orders_by_size_within_file_group() {
+        let mut entries = vec![
+            make_entry("big.log", SftpEntryKind::RegularFile, Some(300), None),
+            make_entry("small.log", SftpEntryKind::RegularFile, Some(10), None),
+            make_entry("mid.log", SftpEntryKind::RegularFile, Some(100), None),
+        ];
+
+        sort_sftp_entries(&mut entries, SftpSortField::Size, SftpSortDirection::Asc);
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["small.log", "mid.log", "big.log"]
+        );
+
+        sort_sftp_entries(&mut entries, SftpSortField::Size, SftpSortDirection::Desc);
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["big.log", "mid.log", "small.log"]
+        );
+    }
+
+    /// 验证名称排序大小写不敏感，并保留原大小写形式。
+    #[test]
+    fn sort_sftp_entries_sorts_names_case_insensitively() {
+        let mut entries = vec![
+            make_entry("Banana", SftpEntryKind::RegularFile, None, None),
+            make_entry("apple", SftpEntryKind::RegularFile, None, None),
+            make_entry("Cherry", SftpEntryKind::RegularFile, None, None),
+        ];
+
+        sort_sftp_entries(&mut entries, SftpSortField::Name, SftpSortDirection::Asc);
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["apple", "Banana", "Cherry"]
+        );
+    }
+
+    /// 验证缺少大小信息的条目按 0 参与比较，不会导致排序崩溃。
+    #[test]
+    fn sort_sftp_entries_treats_missing_size_as_zero() {
+        let mut entries = vec![
+            make_entry("with-size", SftpEntryKind::RegularFile, Some(5), None),
+            make_entry("no-size", SftpEntryKind::RegularFile, None, None),
+        ];
+
+        sort_sftp_entries(&mut entries, SftpSortField::Size, SftpSortDirection::Asc);
+        // 两条目大小同为 0，回退名称升序。
+        assert_eq!(entries[0].name, "no-size");
+        assert_eq!(entries[1].name, "with-size");
+    }
+
+    /// 验证纯文本字节解码为文本内容并携带截断标记。
+    #[test]
+    fn preview_content_from_bytes_decodes_utf8_text() {
+        match preview_content_from_bytes(b"hello\nworld".to_vec(), false) {
+            FilePreviewContent::Text { content, truncated } => {
+                assert_eq!(content, "hello\nworld");
+                assert!(!truncated);
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// 验证包含空字节的字节流被识别为二进制文件。
+    #[test]
+    fn preview_content_from_bytes_detects_binary_by_null_byte() {
+        let buf = b"some\x00binary".to_vec();
+        match preview_content_from_bytes(buf, true) {
+            FilePreviewContent::Binary => {}
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    /// 验证截断标记透传到文本预览结果。
+    #[test]
+    fn preview_content_from_bytes_propagates_truncated_flag() {
+        match preview_content_from_bytes(b"truncated payload".to_vec(), true) {
+            FilePreviewContent::Text { content, truncated } => {
+                assert_eq!(content, "truncated payload");
+                assert!(truncated);
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 }

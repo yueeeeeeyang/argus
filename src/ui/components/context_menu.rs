@@ -143,6 +143,11 @@ pub enum MenuAction {
         /// SFTP 会话 ID。
         session_id: usize,
     },
+    /// 预览 SFTP 文件管理中当前选中的普通文件。
+    PreviewSftpSelection {
+        /// SFTP 会话 ID。
+        session_id: usize,
+    },
     /// 重命名 SFTP 文件管理中当前选中的文件或目录。
     RenameSftpSelection {
         /// SFTP 会话 ID。
@@ -182,6 +187,9 @@ impl MenuAction {
             } => format!("open-sftp-file-manager-{terminal_session_id}"),
             Self::DownloadSftpSelection { session_id } => {
                 format!("download-sftp-selection-{session_id}")
+            }
+            Self::PreviewSftpSelection { session_id } => {
+                format!("preview-sftp-selection-{session_id}")
             }
             Self::RenameSftpSelection { session_id } => {
                 format!("rename-sftp-selection-{session_id}")

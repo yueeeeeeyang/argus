@@ -10,6 +10,7 @@ pub mod connection_dialog;
 pub mod connection_tree_panel;
 pub mod custom_title_bar;
 pub mod dir_tree_panel;
+pub mod file_preview_window;
 pub mod input_native;
 pub mod jstack_analysis_view;
 pub mod jstack_thread_detail_window;

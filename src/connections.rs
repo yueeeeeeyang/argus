@@ -1072,6 +1072,36 @@ pub fn normalized_smb_initial_dir(value: &str) -> String {
     path
 }
 
+/// 尝试把输入解析为 SMB UNC 地址，返回 `(主机, 共享名, 共享内初始目录)`。
+///
+/// 支持 `\\host\share[\path...]`、`//host/share[/path...]`、`smb://host/share/path`
+/// 三种前缀；非 UNC 形式（无前缀）或段数不足（缺共享名）时返回 `None`，由调用方
+/// 回退到分别填写的主机/共享名/初始目录字段。解析出的共享名为单段路径组件，
+/// 不含分隔符，能通过 [`validate_smb_share_name`]；初始目录已是 `/` 前缀的类 Unix 路径。
+pub fn parse_smb_unc_address(value: &str) -> Option<(String, String, String)> {
+    let trimmed = value.trim();
+    let body = trimmed
+        .strip_prefix(r"\\")
+        .or_else(|| trimmed.strip_prefix("//"))
+        .or_else(|| trimmed.strip_prefix("smb://"))
+        .or_else(|| trimmed.strip_prefix("SMB://"))?;
+    let segments: Vec<&str> = body
+        .split(['\\', '/'])
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let host = segments[0].to_string();
+    let share = segments[1].to_string();
+    let initial_dir = if segments.len() > 2 {
+        format!("/{}", segments[2..].join("/"))
+    } else {
+        "/".to_string()
+    };
+    Some((host, share, initial_dir))
+}
+
 /// 校验必填文本字段。
 fn validate_required_text(
     value: &str,
@@ -1378,5 +1408,64 @@ mod tests {
         .normalized_for_save()
         .unwrap();
         assert_eq!(smb.initial_dir, "/runtime");
+    }
+
+    /// 验证完整 UNC 地址能拆分为主机、共享名和共享内初始目录。
+    #[test]
+    fn parse_smb_unc_address_splits_host_share_and_dir() {
+        let (host, share, initial_dir) = parse_smb_unc_address(
+            r"\\192.168.7.173\ecology-customer2\Z\Z中国机械工业集团有限公司\历史文件\ecology",
+        )
+        .expect("完整 UNC 应能解析");
+        assert_eq!(host, "192.168.7.173");
+        assert_eq!(share, "ecology-customer2");
+        assert_eq!(
+            initial_dir,
+            "/Z/Z中国机械工业集团有限公司/历史文件/ecology"
+        );
+    }
+
+    /// 验证正斜杠和 `smb://` 前缀的 UNC 地址同样能解析。
+    #[test]
+    fn parse_smb_unc_address_accepts_forward_slash_and_smb_prefix() {
+        let (host, share, initial_dir) =
+            parse_smb_unc_address("//host/share/a/b").expect("正斜杠 UNC 应能解析");
+        assert_eq!(host, "host");
+        assert_eq!(share, "share");
+        assert_eq!(initial_dir, "/a/b");
+
+        let (host, share, initial_dir) =
+            parse_smb_unc_address("smb://HOST/share/a").expect("smb:// 前缀应能解析");
+        assert_eq!(host, "HOST");
+        assert_eq!(share, "share");
+        assert_eq!(initial_dir, "/a");
+    }
+
+    /// 验证无路径的 UNC 地址初始目录归一化为根目录。
+    #[test]
+    fn parse_smb_unc_address_defaults_initial_dir_to_root() {
+        let (host, share, initial_dir) =
+            parse_smb_unc_address(r"\\host\share").expect("无路径 UNC 应能解析");
+        assert_eq!(host, "host");
+        assert_eq!(share, "share");
+        assert_eq!(initial_dir, "/");
+    }
+
+    /// 验证非 UNC 形式和段数不足的输入返回 `None`，由调用方回退到分字段填写。
+    #[test]
+    fn parse_smb_unc_address_returns_none_for_plain_host_or_missing_share() {
+        assert!(parse_smb_unc_address("192.168.7.173").is_none());
+        assert!(parse_smb_unc_address(r"\\host").is_none());
+        assert!(parse_smb_unc_address("").is_none());
+    }
+
+    /// 验证解析会先去除首尾空白，且连续分隔符不产生空段。
+    #[test]
+    fn parse_smb_unc_address_trims_and_skips_empty_segments() {
+        let (host, share, initial_dir) =
+            parse_smb_unc_address(r"  \\host\share\\dir  ").expect("含空白 UNC 应能解析");
+        assert_eq!(host, "host");
+        assert_eq!(share, "share");
+        assert_eq!(initial_dir, "/dir");
     }
 }

@@ -13,7 +13,10 @@ use gpui::{
 };
 
 use crate::app::{AppTextInputTarget, ArgusApp};
-use crate::sftp::{SftpEntry, SftpEntryKind, SftpSessionState, SftpStatus};
+use crate::sftp::{
+    SftpEntry, SftpEntryKind, SftpSessionState, SftpSortDirection, SftpSortField, SftpStatus,
+    sort_sftp_entries,
+};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::input::{
@@ -51,6 +54,8 @@ pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> 
             .into_any_element();
     };
     let entries = session.entries.clone();
+    let sort_field = session.sort_field;
+    let sort_direction = session.sort_direction;
 
     div()
         .id("sftp-file-manager-view")
@@ -60,7 +65,13 @@ pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> 
         .bg(rgb(theme.content))
         .child(render_toolbar(app, session, &theme, cx))
         .child(render_status_line(session, &theme))
-        .child(render_table_header(&theme))
+        .child(render_table_header(
+            session.id,
+            sort_field,
+            sort_direction,
+            &theme,
+            cx,
+        ))
         .child(
             div()
                 .flex_1()
@@ -69,7 +80,8 @@ pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> 
                 .child(if entries.is_empty() {
                     render_empty_state(session, &theme).into_any_element()
                 } else {
-                    render_file_list(session, entries, cx).into_any_element()
+                    render_file_list(session, entries, sort_field, sort_direction, cx)
+                        .into_any_element()
                 }),
         )
         .into_any_element()
@@ -308,7 +320,13 @@ fn render_status_line(session: &SftpSessionState, theme: &AppTheme) -> impl Into
 }
 
 /// 渲染文件列表表头。
-fn render_table_header(theme: &AppTheme) -> impl IntoElement {
+fn render_table_header(
+    session_id: usize,
+    sort_field: SftpSortField,
+    sort_direction: SftpSortDirection,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     div()
         .h(px(SFTP_TABLE_HEADER_HEIGHT))
         .w_full()
@@ -319,30 +337,116 @@ fn render_table_header(theme: &AppTheme) -> impl IntoElement {
         .bg(rgb(theme.side_bar))
         .text_size(px(12.0))
         .text_color(rgb(theme.foreground_muted))
-        .child(header_cell("名称", None))
-        .child(header_cell("类型", Some(SFTP_TYPE_COLUMN_WIDTH)))
-        .child(header_cell("大小", Some(SFTP_SIZE_COLUMN_WIDTH)))
-        .child(header_cell("修改时间", Some(SFTP_MTIME_COLUMN_WIDTH)))
-        .child(header_cell("权限", Some(SFTP_PERM_COLUMN_WIDTH)))
+        .child(header_cell(
+            "名称",
+            None,
+            SftpSortField::Name,
+            session_id,
+            sort_field,
+            sort_direction,
+            theme,
+            cx,
+        ))
+        .child(header_cell(
+            "类型",
+            Some(SFTP_TYPE_COLUMN_WIDTH),
+            SftpSortField::Type,
+            session_id,
+            sort_field,
+            sort_direction,
+            theme,
+            cx,
+        ))
+        .child(header_cell(
+            "大小",
+            Some(SFTP_SIZE_COLUMN_WIDTH),
+            SftpSortField::Size,
+            session_id,
+            sort_field,
+            sort_direction,
+            theme,
+            cx,
+        ))
+        .child(header_cell(
+            "修改时间",
+            Some(SFTP_MTIME_COLUMN_WIDTH),
+            SftpSortField::Mtime,
+            session_id,
+            sort_field,
+            sort_direction,
+            theme,
+            cx,
+        ))
+        .child(header_cell(
+            "权限",
+            Some(SFTP_PERM_COLUMN_WIDTH),
+            SftpSortField::Permissions,
+            session_id,
+            sort_field,
+            sort_direction,
+            theme,
+            cx,
+        ))
 }
 
-/// 渲染表头单元格。
-fn header_cell(label: &'static str, width: Option<f32>) -> impl IntoElement {
+/// 渲染表头单元格；点击切换排序，活动列展示方向箭头。
+#[allow(clippy::too_many_arguments)]
+fn header_cell(
+    label: &'static str,
+    width: Option<f32>,
+    field: SftpSortField,
+    session_id: usize,
+    sort_field: SftpSortField,
+    sort_direction: SftpSortDirection,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let is_active = sort_field == field;
+    let arrow = if is_active {
+        match sort_direction {
+            SftpSortDirection::Asc => " ↑",
+            SftpSortDirection::Desc => " ↓",
+        }
+    } else {
+        ""
+    };
+    let label_text = SharedString::from(format!("{label}{arrow}"));
     div()
+        .id(SharedString::from(format!(
+            "sftp-header-{session_id}-{:?}",
+            field
+        )))
         .when_some(width, |this, width| this.w(px(width)).flex_none())
         .when(width.is_none(), |this| this.flex_1().min_w(px(0.0)))
+        .h_full()
+        .flex()
+        .items_center()
         .px_3()
-        .child(label)
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(theme.current_line)))
+        .text_color(rgb(if is_active {
+            theme.foreground
+        } else {
+            theme.foreground_muted
+        }))
+        .child(label_text)
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.set_sftp_sort(session_id, field);
+            cx.notify();
+        }))
 }
 
 /// 渲染远程文件列表。
 fn render_file_list(
     session: &SftpSessionState,
-    entries: Vec<SftpEntry>,
+    mut entries: Vec<SftpEntry>,
+    sort_field: SftpSortField,
+    sort_direction: SftpSortDirection,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let session_id = session.id;
     let selected_paths = session.selected_paths.clone();
+    sort_sftp_entries(&mut entries, sort_field, sort_direction);
     let row_count = entries.len();
     uniform_list(
         "sftp-file-list",

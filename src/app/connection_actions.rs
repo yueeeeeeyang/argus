@@ -1344,11 +1344,22 @@ fn smb_config_from_form(form: &ConnectionLinkFormState) -> Result<SmbLinkConfig,
         .trim()
         .parse::<u16>()
         .map_err(|_| "端口必须在 1 到 65535 之间".to_string())?;
+    // 主机框若填了完整 UNC 地址（如 \\host\share\path），则从中拆出主机/共享名/初始目录，
+    // 覆盖对应的共享名称、初始目录字段；纯主机名时回退到分字段填写，保持编辑已有链接兼容。
+    let (host, share, initial_dir) =
+        match crate::connections::parse_smb_unc_address(&form.host_input.value) {
+            Some((host, share, initial_dir)) => (host, share, initial_dir),
+            None => (
+                form.host_input.value.clone(),
+                form.share_input.value.clone(),
+                form.initial_dir_input.value.clone(),
+            ),
+        };
     SmbLinkConfig {
-        host: form.host_input.value.clone(),
+        host,
         port,
-        share: form.share_input.value.clone(),
-        initial_dir: form.initial_dir_input.value.clone(),
+        share,
+        initial_dir,
         domain: Some(form.domain_input.value.clone()),
         username: form.username_input.value.clone(),
         password: form.password_input.value.clone(),
