@@ -381,6 +381,7 @@ fn render_ready_view(
                 analysis_id,
                 dialog,
                 sql_dialog_focus_handle.clone(),
+                state.sql_dialog_scroll.clone(),
                 theme,
                 cx,
             ))
@@ -477,6 +478,7 @@ fn render_runtime_sql_text_dialog(
     analysis_id: usize,
     dialog: RuntimeSqlTextDialog,
     analysis_focus_handle: Option<FocusHandle>,
+    scroll_handle: ScrollHandle,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
@@ -557,6 +559,7 @@ fn render_runtime_sql_text_dialog(
             &dialog.sql_text,
             dialog.selection.as_ref(),
             analysis_focus_handle,
+            scroll_handle,
             theme,
             cx,
         ));
@@ -605,6 +608,7 @@ fn render_sql_dialog_code_block(
     sql_text: &str,
     selection: Option<&RuntimeSqlTextSelection>,
     analysis_focus_handle: Option<FocusHandle>,
+    scroll_handle: ScrollHandle,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -617,12 +621,14 @@ fn render_sql_dialog_code_block(
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(theme.content))
+        .relative()
         .occlude()
         .child(
             div()
                 .id("runtime-sql-dialog-code-scroll")
                 .overflow_y_scroll()
                 .scrollbar_width(px(6.0))
+                .track_scroll(&scroll_handle)
                 .size_full()
                 .occlude()
                 .font_family(ARGUS_LOG_FONT_FAMILY)
@@ -653,9 +659,68 @@ fn render_sql_dialog_code_block(
                         })),
                 ),
         )
+        .child(render_sql_dialog_scrollbar(analysis_id, &scroll_handle, theme, cx))
+}
+
+/// 渲染完整 SQL 弹窗的可拖拽垂直滚动条滑块。
+///
+/// 复用表格滚动条的度量与拖拽逻辑，但内容高度由 `ScrollHandle::max_offset` 推算
+/// （`viewport + max_offset`），以适配自动折行后动态变化的 SQL 正文高度。
+///
+/// 首帧渲染时滚动句柄尚未布局，`bounds` 为零导致 `runtime_scrollbar_metrics` 返回 `None`，
+/// 此时返回一个透明哨兵元素：其 paint 回调在布局完成后执行，若检测到内容已溢出则触发一次重绘，
+/// 下一帧即可用有效 bounds 渲染真实滑块。滑块出现后哨兵不再渲染，自然收敛，不会无限重绘。
+fn render_sql_dialog_scrollbar(
+    analysis_id: usize,
+    scroll_handle: &ScrollHandle,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    let bounds = scroll_handle.bounds();
+    let max_offset = scroll_handle.max_offset();
+    let offset = scroll_handle.offset();
+    let content_height = bounds.size.height + max_offset.height;
+    match runtime_scrollbar_metrics(bounds.size.height, content_height, -offset.y) {
+        Some(metrics) => render_runtime_scrollbar_thumb(
+            analysis_id,
+            RuntimeScrollbarTable::SqlDialog,
+            RuntimeScrollTarget::Uniform(scroll_handle.clone()),
+            metrics,
+            px(0.0),
+            bounds,
+            theme,
+            cx,
+        ),
+        None => render_sql_dialog_scrollbar_sentinel(scroll_handle.clone(), cx),
+    }
+}
+
+/// 渲染首帧哨兵：在滚动句柄完成布局前占位，布局完成后触发一次重绘以显示真实滑块。
+fn render_sql_dialog_scrollbar_sentinel(
+    scroll_handle: ScrollHandle,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    let entity = cx.entity();
+    canvas(
+        |_, _, _| (),
+        move |_, _, _, cx: &mut App| {
+            // paint 在布局之后执行，此时 bounds 已是有效值；若内容溢出则触发下一帧渲染滑块。
+            let bounds = scroll_handle.bounds();
+            if bounds.size.height > px(0.0) && scroll_handle.max_offset().height > px(0.0) {
+                cx.notify(entity.entity_id());
+            }
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 /// 渲染 SQL 弹窗中的一行，支持拖拽选中文本。
+///
+/// 文本外层套一层 `min_w(0)+w_full` 容器以限定宽度：长 SQL 行会在弹窗宽度内自动折行，
+/// 配合代码块的 `overflow_y_scroll` 实现完整展示与垂直滚动；选区命中测试同样按折行后的
+/// 视觉布局计算（见 `runtime_sql_dialog_character_index_from_pointer`）。
 fn render_sql_dialog_line(
     analysis_id: usize,
     line_index: usize,
@@ -677,11 +742,12 @@ fn render_sql_dialog_line(
         .items_center()
         .whitespace_normal()
         .line_height(px(RUNTIME_SQL_DIALOG_LINE_HEIGHT))
-        .child(render_runtime_cell_text(
-            line.clone(),
-            selection_range,
-            theme,
-        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .w_full()
+                .child(render_runtime_cell_text(line.clone(), selection_range, theme)),
+        )
         .child(render_sql_dialog_line_pointer_layer(
             analysis_id,
             line_index,
@@ -1367,6 +1433,7 @@ fn render_sql_frequency_table(
                                 analysis_id,
                                 range.start + offset,
                                 row,
+                                state.hovered_sql_cell,
                                 state.cell_selection.as_ref(),
                                 analysis_focus_handle.clone(),
                                 &theme,
@@ -1456,6 +1523,7 @@ fn render_sql_frequency_detail_table(
                                         analysis_id,
                                         result,
                                         row,
+                                        state.hovered_sql_cell,
                                         state.cell_selection.as_ref(),
                                         analysis_focus_handle.clone(),
                                         &theme,
@@ -1537,6 +1605,7 @@ fn render_slow_sql_table(
                                 analysis_id,
                                 range.start + offset,
                                 row,
+                                state.hovered_sql_cell,
                                 state.cell_selection.as_ref(),
                                 analysis_focus_handle.clone(),
                                 &theme,
@@ -1626,6 +1695,7 @@ fn render_slow_sql_detail_table(
                                         analysis_id,
                                         result,
                                         row,
+                                        state.hovered_sql_cell,
                                         state.cell_selection.as_ref(),
                                         analysis_focus_handle.clone(),
                                         &theme,
@@ -1689,19 +1759,31 @@ fn render_sql_frequency_row(
     analysis_id: usize,
     row_index: usize,
     row: &RuntimeSqlFrequencyAnalysisRow,
+    hovered_sql_cell: Option<RuntimeSqlCellKey>,
     selection: Option<&RuntimeTableCellSelection>,
     analysis_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
+    let hover_key = RuntimeSqlCellKey::Summary { row_index };
+    let is_hovered = hovered_sql_cell == Some(hover_key);
     render_table_row(SQL_ROW_HEIGHT, theme)
-        .child(render_selectable_scroll_cell_with_font(
+        .child(render_sql_text_cell_with_more(
             analysis_id,
             format!("runtime-sql-frequency-text-{row_index}"),
+            format!("runtime-sql-frequency-text-scroll-{row_index}"),
             runtime_cell_key("sql-frequency", row_index, "text"),
-            row.normalized_sql.clone(),
-            SQL_ROW_HEIGHT,
-            ARGUS_LOG_FONT_FAMILY,
+            hover_key,
+            format!("sql-frequency-{row_index}"),
+            RuntimeSqlTextDialog {
+                request_path: "SQL频率分析".to_string(),
+                request_time_label: format!("共 {} 次执行", row.execute_count),
+                username: String::new(),
+                sql_text: row.normalized_sql.clone(),
+                selection: None,
+                selection_drag: None,
+            },
+            is_hovered,
             selection,
             analysis_focus_handle.clone(),
             theme,
@@ -1831,6 +1913,7 @@ fn render_sql_frequency_detail_row(
     analysis_id: usize,
     result: &RuntimeAnalysisResult,
     row: &RuntimeSqlFrequencyDetailRow,
+    hovered_sql_cell: Option<RuntimeSqlCellKey>,
     selection: Option<&RuntimeTableCellSelection>,
     analysis_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
@@ -1847,18 +1930,38 @@ fn render_sql_frequency_detail_row(
     let request_time_label = request
         .map(|request| request.request_time_label.clone())
         .unwrap_or_else(|| "-".to_string());
+    let username = request
+        .map(|request| request.username.clone())
+        .unwrap_or_default();
+    let hover_key = RuntimeSqlCellKey::Record {
+        request_index: row.request_index,
+        sql_index: row.sql_index,
+    };
+    let is_hovered = hovered_sql_cell == Some(hover_key);
 
     render_table_row(SQL_ROW_HEIGHT, theme)
-        .child(render_selectable_scroll_cell_with_font(
+        .child(render_sql_text_cell_with_more(
             analysis_id,
             format!(
                 "runtime-sql-frequency-detail-text-{}-{}",
                 row.request_index, row.sql_index
             ),
+            format!(
+                "runtime-sql-frequency-detail-text-scroll-{}-{}",
+                row.request_index, row.sql_index
+            ),
             runtime_sql_cell_key(row.request_index, row.sql_index, "frequency-detail-text"),
-            sql_text,
-            SQL_ROW_HEIGHT,
-            ARGUS_LOG_FONT_FAMILY,
+            hover_key,
+            format!("frequency-detail-{}-{}", row.request_index, row.sql_index),
+            RuntimeSqlTextDialog {
+                request_path: request_path.clone(),
+                request_time_label: request_time_label.clone(),
+                username,
+                sql_text,
+                selection: None,
+                selection_drag: None,
+            },
+            is_hovered,
             selection,
             analysis_focus_handle.clone(),
             theme,
@@ -1928,19 +2031,31 @@ fn render_slow_sql_row(
     analysis_id: usize,
     row_index: usize,
     row: &RuntimeSlowSqlSummaryRow,
+    hovered_sql_cell: Option<RuntimeSqlCellKey>,
     selection: Option<&RuntimeTableCellSelection>,
     analysis_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
+    let hover_key = RuntimeSqlCellKey::Summary { row_index };
+    let is_hovered = hovered_sql_cell == Some(hover_key);
     render_table_row(SQL_ROW_HEIGHT, theme)
-        .child(render_selectable_scroll_cell_with_font(
+        .child(render_sql_text_cell_with_more(
             analysis_id,
             format!("runtime-slow-sql-text-{row_index}"),
+            format!("runtime-slow-sql-text-scroll-{row_index}"),
             runtime_cell_key("slow-sql", row_index, "text"),
-            row.normalized_sql.clone(),
-            SQL_ROW_HEIGHT,
-            ARGUS_LOG_FONT_FAMILY,
+            hover_key,
+            format!("slow-sql-{row_index}"),
+            RuntimeSqlTextDialog {
+                request_path: "慢SQL分析".to_string(),
+                request_time_label: format!("共 {} 次执行", row.execute_count),
+                username: String::new(),
+                sql_text: row.normalized_sql.clone(),
+                selection: None,
+                selection_drag: None,
+            },
+            is_hovered,
             selection,
             analysis_focus_handle.clone(),
             theme,
@@ -2065,6 +2180,7 @@ fn render_slow_sql_detail_row(
     analysis_id: usize,
     result: &RuntimeAnalysisResult,
     row: &RuntimeSqlFrequencyDetailRow,
+    hovered_sql_cell: Option<RuntimeSqlCellKey>,
     selection: Option<&RuntimeTableCellSelection>,
     analysis_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
@@ -2081,18 +2197,38 @@ fn render_slow_sql_detail_row(
     let request_time_label = request
         .map(|request| request.request_time_label.clone())
         .unwrap_or_else(|| "-".to_string());
+    let username = request
+        .map(|request| request.username.clone())
+        .unwrap_or_default();
+    let hover_key = RuntimeSqlCellKey::Record {
+        request_index: row.request_index,
+        sql_index: row.sql_index,
+    };
+    let is_hovered = hovered_sql_cell == Some(hover_key);
 
     render_table_row(SQL_ROW_HEIGHT, theme)
-        .child(render_selectable_scroll_cell_with_font(
+        .child(render_sql_text_cell_with_more(
             analysis_id,
             format!(
                 "runtime-slow-sql-detail-text-{}-{}",
                 row.request_index, row.sql_index
             ),
+            format!(
+                "runtime-slow-sql-detail-text-scroll-{}-{}",
+                row.request_index, row.sql_index
+            ),
             runtime_sql_cell_key(row.request_index, row.sql_index, "slow-detail-text"),
-            sql_text,
-            SQL_ROW_HEIGHT,
-            ARGUS_LOG_FONT_FAMILY,
+            hover_key,
+            format!("slow-detail-{}-{}", row.request_index, row.sql_index),
+            RuntimeSqlTextDialog {
+                request_path: request_path.clone(),
+                request_time_label: request_time_label.clone(),
+                username,
+                sql_text,
+                selection: None,
+                selection_drag: None,
+            },
+            is_hovered,
             selection,
             analysis_focus_handle.clone(),
             theme,
@@ -2719,6 +2855,60 @@ fn render_sql_row(
         )
 }
 
+/// 渲染带"更多"入口的 SQL 文本单元格：横向滚动展示 SQL，末尾悬浮按钮可打开完整 SQL 弹窗。
+///
+/// 统计分析、频率/慢 SQL 分析及其详情列表共用此函数；调用方通过 `hover_key` 区分
+/// 具体记录（`Record`）与聚合行（`Summary`），通过 `dialog` 传入弹窗所需上下文。
+fn render_sql_text_cell_with_more(
+    analysis_id: usize,
+    cell_id: String,
+    scroll_cell_id: String,
+    cell_key: String,
+    hover_key: RuntimeSqlCellKey,
+    more_button_id: String,
+    dialog: RuntimeSqlTextDialog,
+    hovered: bool,
+    selection: Option<&RuntimeTableCellSelection>,
+    analysis_focus_handle: Option<FocusHandle>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(cell_id))
+        .flex_1()
+        .min_w(px(0.0))
+        .h(px(SQL_ROW_HEIGHT - 2.0))
+        .relative()
+        .flex()
+        .items_center()
+        .on_hover(cx.listener(move |app, is_hovered: &bool, _, cx| {
+            if app.set_runtime_sql_cell_hovered(analysis_id, hover_key, *is_hovered) {
+                cx.notify();
+            }
+        }))
+        .child(render_selectable_scroll_cell_with_font(
+            analysis_id,
+            scroll_cell_id,
+            cell_key,
+            dialog.sql_text.clone(),
+            SQL_ROW_HEIGHT,
+            ARGUS_LOG_FONT_FAMILY,
+            selection,
+            analysis_focus_handle,
+            theme,
+            cx,
+        ))
+        .child(render_sql_more_button(
+            analysis_id,
+            more_button_id,
+            dialog,
+            hovered,
+            theme,
+            cx,
+        ))
+        .into_any_element()
+}
+
 /// 渲染 SQL 文本单元格；单元格宽度由表格列固定，长 SQL 在单元格内部横向滚动。
 fn render_sql_text_cell(
     analysis_id: usize,
@@ -2734,94 +2924,45 @@ fn render_sql_text_cell(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
-    let cell_key = runtime_sql_cell_key(request_index, sql_index, "text");
-    let display_text = runtime_cell_display_text(&sql.sql_text);
-    let sql_cell_key = RuntimeSqlCellKey {
+    let hover_key = RuntimeSqlCellKey::Record {
         request_index,
         sql_index,
     };
-    let is_hovered = hovered_sql_cell == Some(sql_cell_key);
-    let sql_text = sql.sql_text.clone();
-
-    div()
-        .id(SharedString::from(format!(
-            "runtime-sql-text-{request_index}-{sql_index}"
-        )))
-        .flex_1()
-        .min_w(px(0.0))
-        .h(px(SQL_ROW_HEIGHT - 2.0))
-        .relative()
-        .flex()
-        .items_center()
-        .font_family(ARGUS_LOG_FONT_FAMILY)
-        .text_color(rgb(theme.foreground))
-        .on_hover(cx.listener(move |app, is_hovered: &bool, _, cx| {
-            if app.set_runtime_sql_cell_hovered(analysis_id, request_index, sql_index, *is_hovered)
-            {
-                cx.notify();
-            }
-        }))
-        .child(
-            div()
-                .id(SharedString::from(format!(
-                    "runtime-sql-text-scroll-{request_index}-{sql_index}"
-                )))
-                .flex_1()
-                .min_w(px(0.0))
-                .h_full()
-                .relative()
-                .flex()
-                .items_center()
-                .overflow_x_scroll()
-                .scrollbar_width(px(4.0))
-                .child(div().flex_none().pr_2().whitespace_nowrap().child(
-                    render_runtime_cell_text(
-                        display_text.clone(),
-                        runtime_cell_selection_range(selection, &cell_key),
-                        theme,
-                    ),
-                ))
-                .child(render_runtime_cell_pointer_layer(
-                    analysis_id,
-                    cell_key,
-                    display_text,
-                    ARGUS_LOG_FONT_FAMILY,
-                    analysis_focus_handle,
-                    cx,
-                )),
-        )
-        .child(render_sql_more_button(
-            analysis_id,
-            request_index,
-            sql_index,
+    let is_hovered = hovered_sql_cell == Some(hover_key);
+    render_sql_text_cell_with_more(
+        analysis_id,
+        format!("runtime-sql-text-{request_index}-{sql_index}"),
+        format!("runtime-sql-text-scroll-{request_index}-{sql_index}"),
+        runtime_sql_cell_key(request_index, sql_index, "text"),
+        hover_key,
+        format!("{request_index}-{sql_index}"),
+        RuntimeSqlTextDialog {
             request_path,
             request_time_label,
             username,
-            sql_text,
-            is_hovered,
-            theme,
-            cx,
-        ))
-        .into_any_element()
+            sql_text: sql.sql_text.clone(),
+            selection: None,
+            selection_drag: None,
+        },
+        is_hovered,
+        selection,
+        analysis_focus_handle,
+        theme,
+        cx,
+    )
 }
 
 /// 渲染 SQL 单元格末尾的更多入口，点击后展示保留格式的完整 SQL。
 fn render_sql_more_button(
     analysis_id: usize,
-    request_index: usize,
-    sql_index: usize,
-    request_path: String,
-    request_time_label: String,
-    username: String,
-    sql_text: String,
+    id: String,
+    dialog: RuntimeSqlTextDialog,
     is_visible: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
     div()
-        .id(SharedString::from(format!(
-            "runtime-sql-more-{request_index}-{sql_index}"
-        )))
+        .id(SharedString::from(format!("runtime-sql-more-{id}")))
         .w(px(30.0))
         .h_full()
         .flex_none()
@@ -2847,17 +2988,7 @@ fn render_sql_more_button(
         )
         .on_click(cx.listener(move |app, _, _, cx| {
             cx.stop_propagation();
-            app.open_runtime_sql_text_dialog(
-                analysis_id,
-                RuntimeSqlTextDialog {
-                    request_path: request_path.clone(),
-                    request_time_label: request_time_label.clone(),
-                    username: username.clone(),
-                    sql_text: sql_text.clone(),
-                    selection: None,
-                    selection_drag: None,
-                },
-            );
+            app.open_runtime_sql_text_dialog(analysis_id, dialog.clone());
             cx.notify();
         }))
 }
@@ -4274,6 +4405,7 @@ mod tests {
             sql_frequency_detail_rows_cache: RefCell::new(None),
             slow_sql_rows_cache: RefCell::new(None),
             scrollbar_drag: None,
+            sql_dialog_scroll: ScrollHandle::new(),
             task_state: RuntimeAnalysisTaskState::Loading {
                 message: String::new(),
             },

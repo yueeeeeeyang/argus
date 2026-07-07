@@ -1148,6 +1148,8 @@ pub enum RuntimeScrollbarTable {
     SqlFrequencyDetail,
     /// 慢 SQL 分析表。
     SlowSql,
+    /// 完整 SQL 弹窗代码块。
+    SqlDialog,
 }
 
 /// Runtime 表格滚动条拖拽状态。
@@ -1319,17 +1321,30 @@ pub struct RuntimeAnalysisState {
     pub slow_sql_rows_cache: RefCell<Option<RuntimeSlowSqlRowsCache>>,
     /// 当前 Runtime 表格滚动条拖拽状态。
     pub scrollbar_drag: Option<RuntimeScrollbarDrag>,
+    /// 完整 SQL 弹窗代码块滚动句柄，用于自定义可拖拽滚动条。
+    pub sql_dialog_scroll: ScrollHandle,
     /// 当前任务状态。
     pub task_state: RuntimeAnalysisTaskState,
 }
 
-/// Runtime SQL 文本单元格身份。
+/// Runtime SQL 文本单元格悬浮目标，用于在单元格末尾展示"更多"入口。
+///
+/// 统计分析、频率/慢 SQL 详情中的具体 SQL 记录使用 `Record`；
+/// 频率/慢 SQL 分析中的聚合行使用 `Summary`。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlCellKey {
-    /// 请求记录在分析结果中的稳定索引。
-    pub request_index: usize,
-    /// SQL 记录在当前请求中的稳定索引。
-    pub sql_index: usize,
+pub enum RuntimeSqlCellKey {
+    /// 具体请求中的某条 SQL 记录。
+    Record {
+        /// 请求记录在分析结果中的稳定索引。
+        request_index: usize,
+        /// SQL 记录在当前请求中的稳定索引。
+        sql_index: usize,
+    },
+    /// 频率/慢 SQL 分析中的聚合行。
+    Summary {
+        /// 聚合行在当前结果列表中的索引。
+        row_index: usize,
+    },
 }
 
 /// Runtime SQL 完整文本弹窗状态。
@@ -1813,6 +1828,11 @@ fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysisState) {
     state.cell_selection_drag = None;
     state.hovered_sql_cell = None;
     state.sql_text_dialog = None;
+    state.sql_dialog_scroll = ScrollHandle::new();
+    // 弹窗关闭后清理可能残留的弹窗滚动条拖拽状态，避免影响表格滚动条。
+    state.scrollbar_drag = state
+        .scrollbar_drag
+        .filter(|drag| drag.table != RuntimeScrollbarTable::SqlDialog);
     state.sql_frequency_rows_cache.borrow_mut().take();
     state.sql_frequency_detail_rows_cache.borrow_mut().take();
     state.slow_sql_rows_cache.borrow_mut().take();
@@ -4301,6 +4321,7 @@ impl ArgusApp {
                 sql_frequency_detail_rows_cache: RefCell::new(None),
                 slow_sql_rows_cache: RefCell::new(None),
                 scrollbar_drag: None,
+                sql_dialog_scroll: ScrollHandle::new(),
                 task_state: RuntimeAnalysisTaskState::Loading {
                     message: "正在分析 Runtime 日志文件".to_string(),
                 },
@@ -5017,20 +5038,15 @@ impl ArgusApp {
 
     /// 更新 Runtime SQL 文本单元格悬浮状态。
     ///
-    /// 返回值：状态是否发生变化，需要触发界面刷新。
+    /// `cell_key` 标识当前悬浮的具体 SQL 记录或聚合行；返回值表示状态是否变化，需要触发界面刷新。
     pub fn set_runtime_sql_cell_hovered(
         &mut self,
         analysis_id: usize,
-        request_index: usize,
-        sql_index: usize,
+        cell_key: RuntimeSqlCellKey,
         is_hovered: bool,
     ) -> bool {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return false;
-        };
-        let cell_key = RuntimeSqlCellKey {
-            request_index,
-            sql_index,
         };
         if is_hovered {
             if state.hovered_sql_cell == Some(cell_key) {
@@ -5061,6 +5077,11 @@ impl ArgusApp {
         state.sql_text_dialog = Some(dialog);
         state.cell_selection = None;
         state.cell_selection_drag = None;
+        // 重新打开弹窗时将代码块滚动复位到顶部，并清理可能残留的弹窗滚动条拖拽。
+        state.sql_dialog_scroll.set_offset(point(px(0.0), px(0.0)));
+        state.scrollbar_drag = state
+            .scrollbar_drag
+            .filter(|drag| drag.table != RuntimeScrollbarTable::SqlDialog);
     }
 
     /// 关闭 Runtime SQL 完整文本弹窗。
@@ -5068,7 +5089,14 @@ impl ArgusApp {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return false;
         };
-        state.sql_text_dialog.take().is_some()
+        let closed = state.sql_text_dialog.take().is_some();
+        if closed {
+            // 弹窗关闭后清理可能残留的弹窗滚动条拖拽状态，避免影响表格滚动条。
+            state.scrollbar_drag = state
+                .scrollbar_drag
+                .filter(|drag| drag.table != RuntimeScrollbarTable::SqlDialog);
+        }
+        closed
     }
 
     /// 清理 Runtime SQL 完整文本弹窗中的正文选区。
@@ -7812,7 +7840,7 @@ mod tests {
                 anchor_range: 0..4,
                 granularity: TextSelectionGranularity::Character,
             });
-            state.hovered_sql_cell = Some(RuntimeSqlCellKey {
+            state.hovered_sql_cell = Some(RuntimeSqlCellKey::Record {
                 request_index: 0,
                 sql_index: 0,
             });
