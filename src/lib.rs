@@ -17,5 +17,6 @@ pub mod reader;
 pub mod remote;
 pub mod search;
 pub mod theme;
+pub mod types;
 pub mod ui;
 pub mod utils;

@@ -23,7 +23,7 @@ use smb2::{
 };
 use ssh2::{HashType, Session};
 
-use crate::app::SettingsTextInputState;
+use crate::types::SettingsTextInputState;
 use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig};
 use crate::remote::terminal::PendingHostKey;
 

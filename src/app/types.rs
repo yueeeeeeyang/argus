@@ -3,11 +3,12 @@
 //! 作者：Argus 开发团队
 //! 主要功能：定义工作区、标签页、文本输入目标和占位数据等跨功能域共享类型。
 
-
 use gpui::FocusHandle;
 
-use crate::infra::text_selection::{TextSelectionGranularity, character_count};
 use crate::loader::SourceId;
+
+// 从共享类型模块重导出，保持 `crate::app::SettingsTextInputState` 等路径向后兼容。
+pub use crate::types::{InputTextSelectionDrag, SettingsTextInputState};
 
 /// 当前界面工作区，驱动标题栏入口和左侧侧栏内容。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,15 +119,6 @@ impl PendingSourceAnalysisAction {
             Self::Jstack { source_id } | Self::Runtime { source_id } => source_id,
         }
     }
-}
-
-/// 单行输入框拖拽选择状态，记录起始字符范围和当前拖拽粒度。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InputTextSelectionDrag {
-    /// 鼠标按下时形成的基础字符范围。
-    pub anchor_range: std::ops::Range<usize>,
-    /// 当前拖拽粒度，决定移动时按字符、词或整行扩展。
-    pub granularity: TextSelectionGranularity,
 }
 
 /// 日志搜索窗口输入框类型，用于复用同一套输入状态处理。
@@ -271,38 +263,6 @@ impl Default for LogSearchInputState {
     }
 }
 
-/// 设置窗口中的单行输入框状态；用于保存持久化设置项的编辑光标和选区。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SettingsTextInputState {
-    /// 输入框当前文本。
-    pub value: String,
-    /// 光标字符位置。
-    pub cursor: usize,
-    /// 选区锚点；与光标不一致时表示存在选区。
-    pub selection_anchor: Option<usize>,
-    /// 输入法 marked text 字符范围，候选态替换时使用。
-    pub marked_range: Option<std::ops::Range<usize>>,
-    /// 鼠标拖拽选区状态。
-    pub selection_drag: Option<InputTextSelectionDrag>,
-    /// 是否处于焦点状态。
-    pub is_focused: bool,
-}
-
-impl SettingsTextInputState {
-    /// 根据已有配置值构造设置输入框状态，光标默认位于文本末尾。
-    pub fn from_value(value: String) -> Self {
-        let cursor = character_count(&value);
-        Self {
-            value,
-            cursor,
-            selection_anchor: None,
-            marked_range: None,
-            selection_drag: None,
-            is_focused: false,
-        }
-    }
-}
-
 /// 主窗口内输入框真实焦点句柄集合。
 #[derive(Clone)]
 pub struct AppInputFocusHandles {
@@ -346,13 +306,6 @@ pub struct AppInputFocusHandles {
     pub runtime_filter_start_time: FocusHandle,
     /// Runtime 结束时间过滤输入框焦点。
     pub runtime_filter_end_time: FocusHandle,
-}
-
-impl Default for SettingsTextInputState {
-    /// 创建空设置输入框状态。
-    fn default() -> Self {
-        Self::from_value(String::new())
-    }
 }
 
 /// 来源树占位节点，用于模拟文件、目录和压缩包结构。
