@@ -348,8 +348,9 @@ fn render_tab(
             this.child(active_tab_connector(TabConnectorSide::Right, theme))
         })
         .on_hover(cx.listener(move |app, is_hovered: &bool, _, cx| {
-            app.set_hovered_tab(tab_id, *is_hovered);
-            cx.notify();
+            if app.set_hovered_tab(tab_id, *is_hovered) {
+                cx.notify();
+            }
         }))
         .on_mouse_up(
             MouseButton::Right,
@@ -362,8 +363,10 @@ fn render_tab(
         .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
             if event.standard_click() {
                 cx.stop_propagation();
-                app.activate_tab_with_context(tab_id, cx);
-                cx.notify();
+                if app.active_tab_id != tab_id {
+                    app.activate_tab_with_context(tab_id, cx);
+                    cx.notify();
+                }
             }
         }))
 }

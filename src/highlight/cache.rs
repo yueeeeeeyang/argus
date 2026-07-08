@@ -59,16 +59,38 @@ impl HighlightCache {
             text_hash: stable_text_hash(line),
         };
 
-        let Ok(mut inner) = self.inner.lock() else {
+        let Ok(inner) = self.inner.lock() else {
             return SyntaxHighlighter::highlight(line, language);
         };
         if let Some(spans) = inner.entries.get(&key).cloned() {
             return spans;
         }
+        drop(inner);
 
         let spans = SyntaxHighlighter::highlight(line, language);
-        inner.insert(key, spans.clone());
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.insert(key, spans.clone());
+        }
         spans
+    }
+
+    /// 只读取缓存中的高亮结果；缓存缺失时不执行同步高亮计算。
+    pub fn cached_highlight_line(
+        &self,
+        line_number: usize,
+        language: HighlightLanguage,
+        line: &str,
+    ) -> Option<Vec<HighlightSpan>> {
+        let key = HighlightCacheKey {
+            line_number,
+            language,
+            text_hash: stable_text_hash(line),
+        };
+
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.entries.get(&key).cloned())
     }
 }
 

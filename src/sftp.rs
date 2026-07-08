@@ -9,7 +9,7 @@ use std::fs::File as LocalFile;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -73,6 +73,8 @@ pub struct SftpSessionState {
     pub address_input: SettingsTextInputState,
     /// 当前目录文件列表。
     pub entries: Vec<SftpEntry>,
+    /// 已按当前排序字段排序的文件列表快照，供 UI 切换页签时直接复用。
+    pub sorted_entries: Arc<Vec<SftpEntry>>,
     /// 当前选中的远程路径集合。
     pub selected_paths: BTreeSet<String>,
     /// 文件列表滚动句柄。
@@ -106,6 +108,7 @@ impl SftpSessionState {
             current_dir: String::new(),
             address_input: SettingsTextInputState::default(),
             entries: Vec::new(),
+            sorted_entries: Arc::new(Vec::new()),
             selected_paths: BTreeSet::new(),
             list_scroll: UniformListScrollHandle::new(),
             sort_field: SftpSortField::Name,
@@ -119,8 +122,16 @@ impl SftpSessionState {
         self.current_dir = current_dir.clone();
         self.address_input = SettingsTextInputState::from_value(current_dir);
         self.entries = entries;
+        self.rebuild_sorted_entries();
         self.selected_paths.clear();
         self.status = SftpStatus::Connected;
+    }
+
+    /// 根据当前排序字段重建 UI 使用的有序列表快照。
+    pub fn rebuild_sorted_entries(&mut self) {
+        let mut entries = self.entries.clone();
+        sort_sftp_entries(&mut entries, self.sort_field, self.sort_direction);
+        self.sorted_entries = Arc::new(entries);
     }
 
     /// 返回当前选中的文件条目。

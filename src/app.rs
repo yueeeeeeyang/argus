@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use crate::config::{AppConfig, ConfigManager};
 use crate::connections::ConnectionNodeId;
-use crate::highlight::HighlightCache;
+use crate::highlight::{HighlightCache, HighlightLanguage};
 use crate::jstack_analysis::{
     JstackAnalysisResult, JstackAnalysisTarget, JstackFrequencyRow, JstackThreadDetail,
     JstackThreadFilter, JstackThreadStackOccurrence, JstackThreadState, analyze_jstack_targets,
@@ -37,6 +37,7 @@ use crate::loader::{
     LoadReport, LogSourceLoader, SourceArchiveProbeRequest, SourceArchiveProbeResult, SourceId,
     SourceKind, SourceLocation, SourceRegistry, SourceTreeNode,
 };
+use crate::perf::PerfSpan;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
@@ -44,10 +45,11 @@ use crate::reader::log_file_reader::{
 use crate::reader::read_mode::ReadMode;
 use crate::runtime_analysis::{
     RuntimeAnalysisFilterRows, RuntimeAnalysisFilterSnapshot, RuntimeAnalysisResult,
-    RuntimeAnalysisTarget, RuntimeAnalysisTargetKind, RuntimeSlowSqlSummaryRow,
-    RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow, analyze_runtime_targets,
-    build_runtime_analysis_filter_rows, build_runtime_slow_sql_rows_for_filter,
-    build_runtime_sql_frequency_rows_for_filter, parse_runtime_analysis_filter_criteria,
+    RuntimeAnalysisTarget, RuntimeAnalysisTargetKind, RuntimeRequestSummary,
+    RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
+    analyze_runtime_targets, build_runtime_analysis_filter_rows,
+    build_runtime_slow_sql_rows_for_filter, build_runtime_sql_frequency_rows_for_filter,
+    parse_runtime_analysis_filter_criteria,
 };
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
@@ -59,11 +61,11 @@ use crate::text_selection::{
 };
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
-use crate::ui::custom_title_bar::TITLE_BAR_HEIGHT;
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
+use crate::ui::custom_title_bar::TITLE_BAR_HEIGHT;
+use crate::ui::file_preview_window::FilePreviewWindow;
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
-use crate::ui::file_preview_window::FilePreviewWindow;
 use crate::ui::log_search_window::LogSearchWindow;
 use crate::ui::main_window;
 use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
@@ -74,8 +76,8 @@ use crate::updater::{
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use gpui::{
     AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, IntoElement, Keystroke,
-    Pixels, Point, Render, Subscription, Timer, TitlebarOptions, Window, WindowBounds, WindowHandle,
-    WindowOptions, point, px, size,
+    Pixels, Point, Render, Subscription, Timer, TitlebarOptions, Window, WindowBounds,
+    WindowHandle, WindowOptions, point, px, size,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -116,7 +118,8 @@ pub const SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT: f32 = 60.0;
 ///
 /// 由 `TITLE_BAR_HEIGHT` 与 `SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT` 派生，
 /// 标题栏高度调整时无需同步修改此处的字面量。
-pub const SEARCH_RESULT_PANEL_RESERVED_HEIGHT: f32 = TITLE_BAR_HEIGHT + SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT;
+pub const SEARCH_RESULT_PANEL_RESERVED_HEIGHT: f32 =
+    TITLE_BAR_HEIGHT + SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT;
 /// 日志正文左侧内边距；命中测试和渲染必须保持一致。
 pub const LOG_VIEWER_TEXT_LEFT_PADDING: f32 = 16.0;
 /// 日志正文右侧内边距；横向滚动范围和渲染必须保持一致。
@@ -184,8 +187,13 @@ pub fn observe_app_theme<V: 'static>(
     app: &Entity<ArgusApp>,
     apply: impl Fn(&mut V, &AppTheme, &mut Context<V>) + 'static,
 ) -> Subscription {
+    let mut observed_theme = app.read(cx).theme.clone();
     cx.observe(app, move |view, app_entity, cx| {
         let theme = app_entity.read_with(cx, |app, _| app.theme.clone());
+        if theme == observed_theme {
+            return;
+        }
+        observed_theme = theme.clone();
         apply(view, &theme, cx);
         cx.notify();
     })
@@ -904,6 +912,10 @@ pub struct LogSearchState {
     pub is_quick_counting: bool,
     /// 全量搜索结果；不做数量截断，UI 通过虚拟列表渲染。
     pub results: Vec<SearchResult>,
+    /// 搜索结果已命中的关键字集合，用于增量维护标题栏摘要。
+    pub result_keywords: BTreeSet<String>,
+    /// 搜索结果标题栏关键字摘要缓存，避免 UI 渲染期遍历全量结果。
+    pub result_keyword_summary: Option<String>,
     /// 按文件聚合后的搜索结果分组。
     pub result_groups: Vec<SearchResultGroup>,
     /// 当前展开状态下虚拟列表需要渲染的行。
@@ -956,6 +968,8 @@ impl Default for LogSearchState {
             quick_match_message: None,
             is_quick_counting: false,
             results: Vec::new(),
+            result_keywords: BTreeSet::new(),
+            result_keyword_summary: None,
             result_groups: Vec::new(),
             visible_result_items: Vec::new(),
             collapsed_result_groups: BTreeSet::new(),
@@ -980,6 +994,30 @@ pub struct PagedLogScrollState {
     pub left_px: f64,
 }
 
+/// 分页日志后台预取请求标记，避免 UI 重绘期间重复启动同一范围读取。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PagedLogPrefetchRequest {
+    /// 预取所属的来源节点 ID。
+    pub source_id: SourceId,
+    /// 起始 0 基行号。
+    pub start_line: usize,
+    /// 预取行数。
+    pub max_lines: usize,
+}
+
+/// 分页日志可见行高亮后台预取请求标记。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogHighlightPrefetchRequest {
+    /// 预取所属的来源节点 ID。
+    pub source_id: SourceId,
+    /// 高亮语言。
+    pub language: HighlightLanguage,
+    /// 起始 0 基行号。
+    pub start_line: usize,
+    /// 预取行数。
+    pub max_lines: usize,
+}
+
 /// 单个日志 tab 的阅读区 UI 状态。
 #[derive(Clone, Debug)]
 pub struct LogTabViewState {
@@ -989,6 +1027,8 @@ pub struct LogTabViewState {
     pub paged_viewport_handle: ScrollHandle,
     /// 大日志分页滚动状态。
     pub paged_scroll: PagedLogScrollState,
+    /// 当前正在后台预取的分页行范围；完成后清空。
+    pub pending_paged_prefetch: Option<PagedLogPrefetchRequest>,
     /// 当前文本选区。
     pub selection: Option<LogTextSelection>,
     /// 鼠标拖拽选区状态；鼠标释放后清空。
@@ -997,6 +1037,8 @@ pub struct LogTabViewState {
     pub is_focused: bool,
     /// 当前 tab 的语法高亮缓存，避免滚动时重复扫描热点行。
     pub highlight_cache: HighlightCache,
+    /// 当前正在后台预取的分页日志高亮范围；完成后清空。
+    pub pending_highlight_prefetch: Option<LogHighlightPrefetchRequest>,
     /// 当前搜索结果激活后需要在正文中强调的命中行和片段。
     pub active_search_match: Option<ActiveSearchMatch>,
     /// 当前日志页签的行号打点集合，使用 0 基行号并按行号有序保存，便于 F2 循环跳转。
@@ -1147,6 +1189,49 @@ pub struct RuntimeSlowSqlRowsCache {
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
     /// 已过滤和排序的慢 SQL 聚合行。
     pub rows: Arc<Vec<RuntimeSlowSqlSummaryRow>>,
+}
+
+/// Runtime 总览表排序结果缓存。
+#[derive(Clone, Debug)]
+pub struct RuntimeSummaryRowsCache {
+    /// 生成缓存时使用的过滤输入快照。
+    pub filter: RuntimeSqlAnalysisFilterSnapshot,
+    /// 总览表排序字段。
+    pub sort_key: RuntimeSummarySortKey,
+    /// 总览表排序方向。
+    pub sort_direction: RuntimeSortDirection,
+    /// 已过滤和排序的总览行。
+    pub rows: Arc<Vec<RuntimeRequestSummary>>,
+}
+
+/// Runtime 请求明细表排序索引缓存。
+#[derive(Clone, Debug)]
+pub struct RuntimeRequestIndicesCache {
+    /// 生成缓存时使用的过滤输入快照。
+    pub filter: RuntimeSqlAnalysisFilterSnapshot,
+    /// 当前请求地址。
+    pub request_path: String,
+    /// 请求明细表排序字段。
+    pub sort_key: RuntimeRequestSortKey,
+    /// 请求明细表排序方向。
+    pub sort_direction: RuntimeSortDirection,
+    /// 已过滤和排序的请求索引。
+    pub indices: Arc<Vec<usize>>,
+}
+
+/// Runtime SQL 明细表排序索引缓存。
+#[derive(Clone, Debug)]
+pub struct RuntimeSqlIndicesCache {
+    /// 生成缓存时使用的过滤输入快照。
+    pub filter: RuntimeSqlAnalysisFilterSnapshot,
+    /// 当前请求在结果集中的稳定索引。
+    pub request_index: usize,
+    /// SQL 明细表排序字段。
+    pub sort_key: RuntimeSqlSortKey,
+    /// SQL 明细表排序方向。
+    pub sort_direction: RuntimeSortDirection,
+    /// 已过滤和排序的 SQL 索引。
+    pub indices: Arc<Vec<usize>>,
 }
 
 /// Runtime 表格排序方向。
@@ -1350,6 +1435,12 @@ pub struct RuntimeAnalysisState {
     pub sql_frequency_detail_rows_cache: RefCell<Option<RuntimeSqlFrequencyDetailRowsCache>>,
     /// 慢 SQL 分析过滤结果缓存，避免滚动重绘时重复全量排序。
     pub slow_sql_rows_cache: RefCell<Option<RuntimeSlowSqlRowsCache>>,
+    /// 总览表排序缓存，避免切换页签或重绘时重复排序。
+    pub summary_rows_cache: RefCell<Option<RuntimeSummaryRowsCache>>,
+    /// 请求明细表排序缓存，避免切换页签或重绘时重复排序。
+    pub request_indices_cache: RefCell<Option<RuntimeRequestIndicesCache>>,
+    /// SQL 明细表排序缓存，避免切换页签或重绘时重复排序。
+    pub sql_indices_cache: RefCell<Option<RuntimeSqlIndicesCache>>,
     /// 当前 Runtime 表格滚动条拖拽状态。
     pub scrollbar_drag: Option<RuntimeScrollbarDrag>,
     /// 完整 SQL 弹窗代码块滚动句柄，用于自定义可拖拽滚动条。
@@ -1549,10 +1640,12 @@ impl Default for LogTabViewState {
             scroll_handle: UniformListScrollHandle::new(),
             paged_viewport_handle: ScrollHandle::new(),
             paged_scroll: PagedLogScrollState::default(),
+            pending_paged_prefetch: None,
             selection: None,
             selection_drag: None,
             is_focused: false,
             highlight_cache: HighlightCache::default(),
+            pending_highlight_prefetch: None,
             active_search_match: None,
             line_markers: BTreeSet::new(),
             last_line_marker_jump: None,
@@ -1867,6 +1960,9 @@ fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysisState) {
     state.sql_frequency_rows_cache.borrow_mut().take();
     state.sql_frequency_detail_rows_cache.borrow_mut().take();
     state.slow_sql_rows_cache.borrow_mut().take();
+    state.summary_rows_cache.borrow_mut().take();
+    state.request_indices_cache.borrow_mut().take();
+    state.sql_indices_cache.borrow_mut().take();
     state.sql_frequency_rows_task_generation =
         state.sql_frequency_rows_task_generation.saturating_add(1);
     state.slow_sql_rows_task_generation = state.slow_sql_rows_task_generation.saturating_add(1);
@@ -3194,8 +3290,185 @@ impl ArgusApp {
         self.log_tab_view_states.get_mut(&tab_id)
     }
 
+    /// 为分页日志当前视口安排后台预取；UI 渲染期只登记请求，不同步读取文件。
+    ///
+    /// 参数说明：
+    /// - `tab_id`：当前日志标签页 ID。
+    /// - `source_id`：日志来源节点 ID，用于避免旧来源预取覆盖新状态。
+    /// - `handle`：日志读取句柄；内部分页缓存通过 `Arc` 共享给后台任务。
+    /// - `first_line_index`：当前视口首行 0 基行号。
+    /// - `visible_rows`：当前视口行容量。
+    /// - `cx`：应用上下文，用于调度后台读取并通知 UI 刷新。
+    pub fn request_paged_log_prefetch(
+        &mut self,
+        tab_id: usize,
+        source_id: SourceId,
+        handle: LogReaderHandle,
+        first_line_index: usize,
+        visible_rows: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let _span = PerfSpan::new("request_paged_log_prefetch");
+        if !matches!(
+            handle.document(),
+            crate::reader::log_file_reader::LogDocument::Paged(_)
+        ) || visible_rows == 0
+        {
+            return;
+        }
+
+        let line_count = handle.line_count();
+        if first_line_index >= line_count {
+            return;
+        }
+
+        let prefetch_start = first_line_index.saturating_sub(visible_rows);
+        let prefetch_end = first_line_index
+            .saturating_add(visible_rows.saturating_mul(2))
+            .min(line_count);
+        let prefetch_count = prefetch_end.saturating_sub(prefetch_start);
+        if prefetch_count == 0 || handle.has_cached_lines(prefetch_start, prefetch_count) {
+            if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
+                state.pending_paged_prefetch = None;
+            }
+            return;
+        }
+
+        let Some(state) = self.log_tab_view_states.get_mut(&tab_id) else {
+            return;
+        };
+        let requested_end = prefetch_start.saturating_add(prefetch_count);
+        if state
+            .pending_paged_prefetch
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.source_id == source_id
+                    && pending.start_line <= prefetch_start
+                    && pending.start_line.saturating_add(pending.max_lines) >= requested_end
+            })
+        {
+            return;
+        }
+
+        state.pending_paged_prefetch = Some(PagedLogPrefetchRequest {
+            source_id,
+            start_line: prefetch_start,
+            max_lines: prefetch_count,
+        });
+
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { handle.lines(prefetch_start, prefetch_count).map(|_| ()) })
+                .await;
+
+            view.update(cx, |app, cx| {
+                if let Some(state) = app.log_tab_view_states.get_mut(&tab_id)
+                    && state
+                        .pending_paged_prefetch
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.source_id == source_id
+                                && pending.start_line == prefetch_start
+                                && pending.max_lines == prefetch_count
+                        })
+                {
+                    state.pending_paged_prefetch = None;
+                }
+                if let Err(error) = result {
+                    app.placeholder_notice = format!("分页日志预取失败：{error}");
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 为分页日志可见文本安排后台语法高亮预取；UI 首帧只显示已有高亮缓存。
+    ///
+    /// 参数说明：
+    /// - `tab_id`：当前日志标签页 ID。
+    /// - `source_id`：日志来源节点 ID。
+    /// - `language`：当前日志识别出的语法高亮语言。
+    /// - `lines`：需要补算高亮的可见文本切片。
+    /// - `cx`：应用上下文，用于调度后台高亮并通知 UI 刷新。
+    pub fn request_log_highlight_prefetch(
+        &mut self,
+        tab_id: usize,
+        source_id: SourceId,
+        language: HighlightLanguage,
+        lines: Vec<(usize, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        if lines.is_empty() || language == HighlightLanguage::Plain {
+            return;
+        }
+
+        let Some(first_line) = lines.first().map(|(line_number, _)| *line_number) else {
+            return;
+        };
+        let Some(last_line) = lines.last().map(|(line_number, _)| *line_number) else {
+            return;
+        };
+        let request = LogHighlightPrefetchRequest {
+            source_id,
+            language,
+            start_line: first_line,
+            max_lines: last_line.saturating_sub(first_line).saturating_add(1),
+        };
+
+        let Some(state) = self.log_tab_view_states.get_mut(&tab_id) else {
+            return;
+        };
+        let requested_end = request.start_line.saturating_add(request.max_lines);
+        if state
+            .pending_highlight_prefetch
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.source_id == request.source_id
+                    && pending.language == request.language
+                    && pending.start_line <= request.start_line
+                    && pending.start_line.saturating_add(pending.max_lines) >= requested_end
+            })
+        {
+            return;
+        }
+
+        state.pending_highlight_prefetch = Some(request.clone());
+        let highlight_cache = state.highlight_cache.clone();
+
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    for (line_number, text) in lines {
+                        highlight_cache.highlight_line(line_number, language, &text);
+                    }
+                })
+                .await;
+
+            view.update(cx, |app, cx| {
+                if let Some(state) = app.log_tab_view_states.get_mut(&tab_id)
+                    && state
+                        .pending_highlight_prefetch
+                        .as_ref()
+                        .is_some_and(|pending| pending == &request)
+                {
+                    state.pending_highlight_prefetch = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// 切换到指定标签页。
     pub fn activate_tab(&mut self, tab_id: usize) {
+        let _span = PerfSpan::new("activate_tab");
+        if self.active_tab_id == tab_id {
+            return;
+        }
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = tab_id;
             self.sync_source_tree_selection_from_active_tab();
@@ -3218,15 +3491,22 @@ impl ArgusApp {
             return;
         };
 
-        self.source_registry.expand_ancestors(source_id);
-        let selected = self.source_registry.select(source_id).is_some();
+        let was_selected = self.source_registry.selected_id() == Some(source_id);
+        let expanded = self.source_registry.expand_ancestors(source_id);
+        let selected = if was_selected {
+            true
+        } else {
+            self.source_registry.select(source_id).is_some()
+        };
         if selected {
             if self.selected_search_source_ids.len() <= 1 {
                 self.selected_search_source_ids.clear();
                 self.selected_search_source_ids.insert(source_id);
                 self.last_source_selection_anchor = Some(source_id);
             }
-            self.scroll_source_into_view(source_id);
+            if !was_selected || expanded {
+                self.scroll_source_into_view(source_id);
+            }
         }
     }
 
@@ -3402,8 +3682,7 @@ impl ArgusApp {
                     MenuAction::RenameSftpSelection { session_id },
                 ));
                 entries.push(
-                    MenuEntry::new("删除", MenuAction::DeleteSftpSelection { session_id })
-                        .danger(),
+                    MenuEntry::new("删除", MenuAction::DeleteSftpSelection { session_id }).danger(),
                 );
                 entries
             }
@@ -3813,7 +4092,10 @@ impl ArgusApp {
         let app_entity = cx.entity();
         let bounds = Bounds::centered(
             None,
-            size(px(FILE_PREVIEW_WINDOW_WIDTH), px(FILE_PREVIEW_WINDOW_HEIGHT)),
+            size(
+                px(FILE_PREVIEW_WINDOW_WIDTH),
+                px(FILE_PREVIEW_WINDOW_HEIGHT),
+            ),
             cx,
         );
         let window_options = WindowOptions {
@@ -3827,9 +4109,7 @@ impl ArgusApp {
         };
 
         match cx.open_window(window_options, move |_, cx| {
-            cx.new(|cx| {
-                FilePreviewWindow::new(app_entity, initial_theme, file_name, content, cx)
-            })
+            cx.new(|cx| FilePreviewWindow::new(app_entity, initial_theme, file_name, content, cx))
         }) {
             Ok(_) => {
                 self.placeholder_notice = "已打开文件预览".to_string();
@@ -4343,6 +4623,9 @@ impl ArgusApp {
                 sql_frequency_rows_cache: RefCell::new(None),
                 sql_frequency_detail_rows_cache: RefCell::new(None),
                 slow_sql_rows_cache: RefCell::new(None),
+                summary_rows_cache: RefCell::new(None),
+                request_indices_cache: RefCell::new(None),
+                sql_indices_cache: RefCell::new(None),
                 scrollbar_drag: None,
                 sql_dialog_scroll: ScrollHandle::new(),
                 task_state: RuntimeAnalysisTaskState::Loading {
@@ -5972,11 +6255,18 @@ impl ArgusApp {
     }
 
     /// 更新鼠标悬停标签，仅影响标题栏标签视觉状态。
-    pub fn set_hovered_tab(&mut self, tab_id: usize, is_hovered: bool) {
+    pub fn set_hovered_tab(&mut self, tab_id: usize, is_hovered: bool) -> bool {
         if is_hovered {
+            if self.hovered_tab_id == Some(tab_id) {
+                return false;
+            }
             self.hovered_tab_id = Some(tab_id);
+            true
         } else if self.hovered_tab_id == Some(tab_id) {
             self.hovered_tab_id = None;
+            true
+        } else {
+            false
         }
     }
 

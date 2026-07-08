@@ -4,7 +4,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：按行虚拟渲染日志正文和 Jstack 分析页，大日志只读取当前可见页，避免整份日志进入 UI 文本节点。
 
-use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::app::{
@@ -17,6 +16,7 @@ use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
     HighlightCache, HighlightLanguage, HighlightSpan, HighlightTokenKind, detect_highlight_language,
 };
+use crate::perf::PerfSpan;
 use crate::reader::log_file_reader::{LogDocument, LogOpenState, LogReaderHandle};
 use crate::search::search_task::SearchTaskState;
 use crate::text_selection::{
@@ -104,7 +104,11 @@ struct LogVisibleText {
 /// - `cx`：应用上下文，用于内容区工具按钮和日志选择事件。
 ///
 /// 返回值：GPUI 元素树；真实来源会按读取状态展示加载、失败或逐行日志。
-pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub fn render(
+    app: &mut ArgusApp,
+    window: &mut Window,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
 
     div()
@@ -130,7 +134,7 @@ pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -
 
 /// 根据当前内容状态渲染主体区域。
 fn render_content_body(
-    app: &ArgusApp,
+    app: &mut ArgusApp,
     theme: &AppTheme,
     window: &mut Window,
     cx: &mut Context<ArgusApp>,
@@ -172,7 +176,7 @@ fn render_content_body(
 
 /// 渲染当前日志 tab 对应的读取状态或真实日志文本。
 fn render_log_source_content(
-    app: &ArgusApp,
+    app: &mut ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
     source_id: crate::loader::SourceId,
@@ -181,7 +185,8 @@ fn render_log_source_content(
 ) -> AnyElement {
     match app.log_read_state(source_id) {
         Some(LogOpenState::Ready(handle)) if !handle.is_empty() => {
-            render_log_document(app, theme, tab_id, source_id, handle, cx)
+            let handle = handle.clone();
+            render_log_document(app, theme, tab_id, source_id, &handle, cx)
         }
         Some(LogOpenState::Ready(handle)) => render_empty_state(
             "日志为空",
@@ -206,7 +211,7 @@ fn render_log_source_content(
 
 /// 渲染日志文档；小文件走 uniform_list，大文件走分页窗口。
 fn render_log_document(
-    app: &ArgusApp,
+    app: &mut ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
     source_id: crate::loader::SourceId,
@@ -234,16 +239,12 @@ fn render_in_memory_log(
     language: HighlightLanguage,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
+    let _span = PerfSpan::new("render_paged_log");
     let Some(state) = app.log_tab_view_state(tab_id) else {
         return render_empty_state("日志视图未初始化", "请重新选择该日志。", app, theme);
     };
     let line_count = handle.line_count();
     let line_number_width = log_viewer_line_number_width(line_count);
-    let measure_line = handle
-        .document()
-        .longest_line_text()
-        .map(|_| longest_line_index(handle.document()))
-        .unwrap_or(0);
 
     div()
         .id(SharedString::from(format!("log-viewer-{tab_id}")))
@@ -288,7 +289,7 @@ fn render_in_memory_log(
                     render_log_line_range(app, source_id, tab_id, range, language, cx)
                 }),
             )
-            .with_width_from_item(Some(measure_line))
+            .with_width_from_item(Some(0))
             .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
             .size_full()
             .track_scroll(state.scroll_handle.clone()),
@@ -305,7 +306,7 @@ fn render_in_memory_log(
 
 /// 渲染分页大日志；只读取当前视口附近的真实行。
 fn render_paged_log(
-    app: &ArgusApp,
+    app: &mut ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
     source_id: crate::loader::SourceId,
@@ -324,20 +325,46 @@ fn render_paged_log(
     let scroll_top = state.paged_scroll.top_px.clamp(0.0, max_scroll_top);
     let first_line_index = (scroll_top / LOG_VIEWER_ROW_HEIGHT as f64).floor() as usize;
     let fractional_top = (scroll_top % LOG_VIEWER_ROW_HEIGHT as f64) as f32;
-    let lines = handle
-        .lines(first_line_index, visible_rows)
-        .unwrap_or_default();
+    let horizontal_scroll_left = state.paged_scroll.left_px;
+    let highlight_cache = state.highlight_cache.clone();
+    let paged_viewport_handle = state.paged_viewport_handle.clone();
+    let cached_lines = handle.cached_lines(first_line_index, visible_rows);
+
+    app.request_paged_log_prefetch(
+        tab_id,
+        source_id,
+        handle.clone(),
+        first_line_index,
+        visible_rows,
+        cx,
+    );
+
     let line_number_width = log_viewer_line_number_width(line_count);
     let (visible_char_range, horizontal_offset) = paged_visible_text_range(
-        state.paged_scroll.left_px,
+        horizontal_scroll_left,
         viewport_bounds.size.width,
         line_number_width,
         app.log_content_font_size,
     );
-    let rows = lines
+    let highlight_prefetch_lines = cached_lines
+        .iter()
+        .filter_map(|line| {
+            let line = line.as_ref()?;
+            let visible_text = visible_log_text_from_raw(&line.text, Some(&visible_char_range));
+            highlight_cache
+                .cached_highlight_line(line.line_number, language, &visible_text.text)
+                .is_none()
+                .then_some((line.line_number, visible_text.text))
+        })
+        .collect::<Vec<_>>();
+    app.request_log_highlight_prefetch(tab_id, source_id, language, highlight_prefetch_lines, cx);
+
+    let rows = cached_lines
         .into_iter()
-        .map(|line| {
-            let row_offset = line.line_number.saturating_sub(first_line_index);
+        .enumerate()
+        .map(|(slot_offset, line)| {
+            let line_number = first_line_index.saturating_add(slot_offset);
+            let row_offset = line_number.saturating_sub(first_line_index);
             let top = row_offset as f32 * LOG_VIEWER_ROW_HEIGHT - fractional_top;
             div()
                 .absolute()
@@ -345,21 +372,30 @@ fn render_paged_log(
                 .right(px(0.0))
                 .top(px(top))
                 .h(px(LOG_VIEWER_ROW_HEIGHT))
-                .child(render_log_line(
-                    app,
-                    theme,
-                    tab_id,
-                    line.line_number,
-                    &line.text,
-                    language,
-                    &state.highlight_cache,
-                    horizontal_offset,
-                    px(0.0),
-                    line_number_width,
-                    Some(visible_char_range.clone()),
-                    true,
-                    cx,
-                ))
+                .child(match line {
+                    Some(line) => render_log_line(
+                        app,
+                        theme,
+                        tab_id,
+                        line.line_number,
+                        &line.text,
+                        language,
+                        &highlight_cache,
+                        horizontal_offset,
+                        px(0.0),
+                        line_number_width,
+                        None,
+                        Some(visible_char_range.clone()),
+                        true,
+                        false,
+                        cx,
+                    )
+                    .into_any_element(),
+                    None => {
+                        render_paged_log_placeholder_line(theme, line_number, line_number_width)
+                            .into_any_element()
+                    }
+                })
                 .into_any_element()
         })
         .collect::<Vec<_>>();
@@ -371,7 +407,7 @@ fn render_paged_log(
         .overflow_hidden()
         .bg(rgb(theme.content))
         .focusable()
-        .track_scroll(&state.paged_viewport_handle)
+        .track_scroll(&paged_viewport_handle)
         .on_click(cx.listener(move |app, _, _, cx| {
             app.focus_log_text_view(tab_id);
             cx.notify();
@@ -401,10 +437,40 @@ fn render_paged_log(
             }),
         )
         .children(rows)
-        .children(render_paged_scrollbars(
-            app, tab_id, source_id, handle, state, theme, cx,
-        ))
+        .children(
+            app.log_tab_view_state(tab_id)
+                .map(|state| {
+                    render_paged_scrollbars(app, tab_id, source_id, handle, state, theme, cx)
+                })
+                .unwrap_or_default(),
+        )
         .into_any_element()
+}
+
+/// 渲染分页日志缓存缺失行的轻量占位，避免首帧为了读取磁盘阻塞 UI。
+fn render_paged_log_placeholder_line(
+    theme: &AppTheme,
+    line_number: usize,
+    line_number_width: f32,
+) -> impl IntoElement + use<> {
+    div()
+        .h(px(LOG_VIEWER_ROW_HEIGHT))
+        .w_full()
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .line_height(px(LOG_VIEWER_ROW_HEIGHT))
+        .text_color(rgb(theme.foreground_muted))
+        .child(
+            div()
+                .w(px(line_number_width))
+                .flex_none()
+                .pr_2()
+                .flex()
+                .justify_end()
+                .child(format!("{}", line_number + 1)),
+        )
+        .child(div().flex_1().truncate().child("正在加载..."))
 }
 
 /// 通过当前 app 状态读取并渲染一个虚拟列表范围。
@@ -424,6 +490,8 @@ fn render_log_line_range(
         .lines(range.start, range.end.saturating_sub(range.start))
         .unwrap_or_default();
     let line_number_width = log_viewer_line_number_width(handle.line_count());
+    let row_min_width =
+        estimated_log_content_width(handle, line_number_width, app.log_content_font_size);
     let Some(state) = app.log_tab_view_state(tab_id) else {
         return Vec::new();
     };
@@ -457,7 +525,9 @@ fn render_log_line_range(
                 px(0.0),
                 line_number_offset,
                 line_number_width,
+                Some(row_min_width),
                 None,
+                true,
                 true,
                 cx,
             )
@@ -478,8 +548,10 @@ fn render_log_line(
     horizontal_offset: gpui::Pixels,
     line_number_offset: gpui::Pixels,
     line_number_width: f32,
+    row_min_width: Option<gpui::Pixels>,
     visible_char_range: Option<Range<usize>>,
     enable_syntax_highlight: bool,
+    allow_sync_highlight: bool,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let selection_range =
@@ -539,8 +611,12 @@ fn render_log_line(
             None,
         )
     };
-    let syntax_spans = if enable_syntax_highlight {
+    let syntax_spans = if enable_syntax_highlight && allow_sync_highlight {
         highlight_cache.highlight_line(line_number, language, &visible_text.text)
+    } else if enable_syntax_highlight {
+        highlight_cache
+            .cached_highlight_line(line_number, language, &visible_text.text)
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -583,6 +659,7 @@ fn render_log_line(
         )))
         .relative()
         .h(px(LOG_VIEWER_ROW_HEIGHT))
+        .when_some(row_min_width, |row, width| row.min_w(width))
         .text_size(px(app.log_content_font_size))
         .line_height(px(LOG_VIEWER_ROW_HEIGHT))
         .font_family(ARGUS_LOG_FONT_FAMILY)
@@ -710,6 +787,20 @@ fn paged_visible_text_range(
 /// 返回日志字体的横向宽度估算，供分页切片和横向滚动范围共用。
 fn estimated_log_char_width(font_size: f32) -> f32 {
     (font_size * 0.62).max(6.0)
+}
+
+/// 估算日志正文完整横向宽度，供虚拟列表测量和自绘横向滚动条共用。
+fn estimated_log_content_width(
+    handle: &LogReaderHandle,
+    line_number_width: f32,
+    font_size: f32,
+) -> gpui::Pixels {
+    px(
+        handle.estimated_longest_display_columns() as f32 * estimated_log_char_width(font_size)
+            + line_number_width
+            + LOG_VIEWER_TEXT_LEFT_PADDING
+            + LOG_VIEWER_TEXT_RIGHT_PADDING,
+    )
 }
 
 /// 从完整展示文本中截取本次真正需要渲染的片段。
@@ -1162,13 +1253,9 @@ fn render_paged_scrollbars(
         return Vec::new();
     }
 
-    let estimated_char_width = estimated_log_char_width(app.log_content_font_size);
     let line_number_width = log_viewer_line_number_width(handle.line_count());
-    let content_width = px(handle.estimated_longest_display_columns() as f32
-        * estimated_char_width
-        + line_number_width
-        + LOG_VIEWER_TEXT_LEFT_PADDING
-        + LOG_VIEWER_TEXT_RIGHT_PADDING);
+    let content_width =
+        estimated_log_content_width(handle, line_number_width, app.log_content_font_size);
     let content_height = px(handle.line_count() as f32 * LOG_VIEWER_ROW_HEIGHT);
     let mut scrollbars = Vec::new();
 
@@ -1437,7 +1524,7 @@ fn render_search_results_panel(
     } else {
         format!("共 {result_count} 条结果")
     };
-    let keyword_summary = search_result_keyword_summary(app);
+    let keyword_summary = app.log_search.result_keyword_summary.clone();
     let header_status_text = match keyword_summary {
         Some(summary) => format!("{status_text}，{summary}"),
         None => status_text,
@@ -1560,39 +1647,6 @@ fn render_search_results_panel(
         })
 }
 
-/// 汇总搜索结果命中的关键字，统一显示在结果面板标题栏，避免每一行重复渲染同一组徽标。
-fn search_result_keyword_summary(app: &ArgusApp) -> Option<String> {
-    let mut keywords = BTreeSet::new();
-    for result in &app.log_search.results {
-        for keyword in &result.matched_keywords {
-            if !keyword.trim().is_empty() {
-                keywords.insert(keyword.clone());
-            }
-        }
-    }
-
-    if keywords.is_empty() {
-        let keyword = app.log_search.keyword_input.value.trim();
-        if keyword.is_empty() {
-            return None;
-        }
-        return Some(format!("关键字：{keyword}"));
-    }
-
-    let keyword_count = keywords.len();
-    let visible_keywords = keywords.into_iter().take(6).collect::<Vec<_>>();
-    let overflow_text = keyword_count
-        .checked_sub(visible_keywords.len())
-        .filter(|count| *count > 0)
-        .map(|count| format!(" 等 {count} 个"))
-        .unwrap_or_default();
-    Some(format!(
-        "关键字：{}{}",
-        visible_keywords.join("、"),
-        overflow_text
-    ))
-}
-
 /// 渲染搜索结果面板顶部拖拽条，用于调整底部面板高度。
 fn render_search_results_resize_handle(
     theme: &AppTheme,
@@ -1646,23 +1700,26 @@ fn render_search_results_resize_handle(
                         }
                     });
 
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window: &mut Window, cx| {
-                        if !phase.bubble() || !event.dragging() {
-                            return;
-                        }
-                        // 按窗口视口高度动态计算面板上限，使其可近乎撑满窗口；
-                        // 预留上方标题栏与最小日志可见区，并保证不小于最小高度。
-                        let viewport_height = f32::from(window.viewport_size().height);
-                        let max_height = (viewport_height - SEARCH_RESULT_PANEL_RESERVED_HEIGHT)
-                            .max(SEARCH_RESULT_PANEL_HEIGHT_MIN);
-                        let handled = entity.update(cx, |app, _| {
-                            app.resize_search_result_panel(event.position.y, max_height)
-                        });
-                        if handled {
-                            cx.stop_propagation();
-                            cx.notify(entity.entity_id());
-                        }
-                    });
+                    window.on_mouse_event(
+                        move |event: &MouseMoveEvent, phase, window: &mut Window, cx| {
+                            if !phase.bubble() || !event.dragging() {
+                                return;
+                            }
+                            // 按窗口视口高度动态计算面板上限，使其可近乎撑满窗口；
+                            // 预留上方标题栏与最小日志可见区，并保证不小于最小高度。
+                            let viewport_height = f32::from(window.viewport_size().height);
+                            let max_height = (viewport_height
+                                - SEARCH_RESULT_PANEL_RESERVED_HEIGHT)
+                                .max(SEARCH_RESULT_PANEL_HEIGHT_MIN);
+                            let handled = entity.update(cx, |app, _| {
+                                app.resize_search_result_panel(event.position.y, max_height)
+                            });
+                            if handled {
+                                cx.stop_propagation();
+                                cx.notify(entity.entity_id());
+                            }
+                        },
+                    );
                 },
             )
             .size_full(),
@@ -2197,14 +2254,6 @@ fn paged_vertical_max_scroll(line_count: usize, viewport_height: gpui::Pixels) -
     let content_height = line_count as f64 * LOG_VIEWER_ROW_HEIGHT as f64;
     let viewport_height = f64::from(viewport_height).max(0.0);
     (content_height - viewport_height).max(0.0)
-}
-
-/// 返回用于横向测量的最长行索引。
-fn longest_line_index(document: &LogDocument) -> usize {
-    match document {
-        LogDocument::InMemory(document) => document.longest_line_index,
-        LogDocument::Paged(document) => document.longest_line_index(),
-    }
 }
 
 #[cfg(test)]

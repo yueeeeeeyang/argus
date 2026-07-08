@@ -322,11 +322,7 @@ impl ArgusApp {
     }
 
     /// 切换远程文件列表排序字段与方向；同列点击翻转方向，异列点击切到该列升序。
-    pub fn set_sftp_sort(
-        &mut self,
-        session_id: usize,
-        field: crate::sftp::SftpSortField,
-    ) {
+    pub fn set_sftp_sort(&mut self, session_id: usize, field: crate::sftp::SftpSortField) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
             return;
         };
@@ -339,6 +335,7 @@ impl ArgusApp {
             session.sort_field = field;
             session.sort_direction = crate::sftp::SftpSortDirection::Asc;
         }
+        session.rebuild_sorted_entries();
     }
 
     /// 打开本地文件选择器，并把选中的普通文件上传到当前远程目录。

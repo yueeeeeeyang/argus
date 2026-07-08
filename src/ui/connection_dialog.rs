@@ -8,8 +8,8 @@ use std::ops::Range;
 
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, FontWeight, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Render, Subscription, Window, div, prelude::*,
-    px, rgb,
+    KeyDownEvent, MouseButton, MouseDownEvent, Render, Subscription, Window, div, prelude::*, px,
+    rgb,
 };
 
 use crate::app::{
@@ -112,7 +112,11 @@ impl ConnectionDirectoryWindow {
     ) -> Self {
         focus_input_state(&mut form.name_input);
         let _app_observer = cx.observe(&app, |window_state, app_entity, cx| {
-            window_state.theme = app_entity.read_with(cx, |app, _| app.theme.clone());
+            let theme = app_entity.read_with(cx, |app, _| app.theme.clone());
+            if window_state.theme == theme {
+                return;
+            }
+            window_state.theme = theme;
             cx.notify();
         });
 
@@ -313,7 +317,11 @@ impl ConnectionLinkWindow {
     ) -> Self {
         focus_input_state(&mut form.name_input);
         let _app_observer = cx.observe(&app, |window_state, app_entity, cx| {
-            window_state.theme = app_entity.read_with(cx, |app, _| app.theme.clone());
+            let theme = app_entity.read_with(cx, |app, _| app.theme.clone());
+            if window_state.theme == theme {
+                return;
+            }
+            window_state.theme = theme;
             cx.notify();
         });
 
@@ -945,8 +953,7 @@ fn render_directory_input_row(
             move |event: &KeyDownEvent, window, cx| {
                 cx.stop_propagation();
                 let action = key_window.update(cx, |window_state, state_cx| {
-                    let action =
-                        window_state.handle_input_key(target, &event.keystroke, state_cx);
+                    let action = window_state.handle_input_key(target, &event.keystroke, state_cx);
                     state_cx.notify();
                     action
                 });
@@ -1037,8 +1044,7 @@ fn render_link_input_row(
             move |event: &KeyDownEvent, window, cx| {
                 cx.stop_propagation();
                 let action = key_window.update(cx, |window_state, state_cx| {
-                    let action =
-                        window_state.handle_input_key(target, &event.keystroke, state_cx);
+                    let action = window_state.handle_input_key(target, &event.keystroke, state_cx);
                     state_cx.notify();
                     action
                 });

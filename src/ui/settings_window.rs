@@ -103,8 +103,12 @@ impl SettingsWindow {
     ) -> Self {
         snapshot.theme = theme;
         let _app_observer = cx.observe(&app, |settings_window, app_entity, cx| {
-            settings_window.snapshot =
+            let next_snapshot =
                 app_entity.read_with(cx, |app, _| SettingsWindow::snapshot_from_app(app));
+            if settings_window.snapshot == next_snapshot {
+                return;
+            }
+            settings_window.snapshot = next_snapshot;
             cx.notify();
         });
 
@@ -166,7 +170,7 @@ impl Render for SettingsWindow {
 }
 
 /// 设置窗口快照，避免渲染时跨实体借用主应用状态。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SettingsWindowSnapshot {
     /// 当前主题令牌。
     pub theme: AppTheme,
@@ -255,9 +259,13 @@ impl JstackStackSegmentFilterEditorWindow {
     ) -> Self {
         snapshot.theme = theme;
         let _app_observer = cx.observe(&app, |editor, app_entity, cx| {
-            editor.snapshot = app_entity.read_with(cx, |app, _| {
+            let next_snapshot = app_entity.read_with(cx, |app, _| {
                 JstackStackSegmentFilterEditorWindow::snapshot_from_app(app)
             });
+            if editor.snapshot == next_snapshot {
+                return;
+            }
+            editor.snapshot = next_snapshot;
             cx.notify();
         });
 
@@ -297,7 +305,7 @@ impl Render for JstackStackSegmentFilterEditorWindow {
 }
 
 /// Jstack 线程段过滤编辑器快照。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct JstackStackSegmentFilterEditorSnapshot {
     /// 当前主题令牌。
     pub theme: AppTheme,

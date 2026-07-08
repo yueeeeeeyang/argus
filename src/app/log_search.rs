@@ -375,6 +375,8 @@ impl ArgusApp {
         };
         self.log_search.task_state = SearchTaskState::Running;
         self.log_search.results.clear();
+        self.log_search.result_keywords.clear();
+        self.log_search.result_keyword_summary = None;
         self.log_search.result_groups.clear();
         self.log_search.visible_result_items.clear();
         self.log_search.collapsed_result_groups.clear();
@@ -978,6 +980,8 @@ impl ArgusApp {
         self.log_search.task_state = SearchTaskState::Idle;
         self.clear_quick_log_search_state();
         self.log_search.results.clear();
+        self.log_search.result_keywords.clear();
+        self.log_search.result_keyword_summary = None;
         self.log_search.result_groups.clear();
         self.log_search.visible_result_items.clear();
         self.log_search.collapsed_result_groups.clear();
@@ -1000,6 +1004,8 @@ impl ArgusApp {
         self.log_search.task_state = SearchTaskState::Idle;
         self.log_search.run_kind = SearchRunKind::Normal;
         self.log_search.results.clear();
+        self.log_search.result_keywords.clear();
+        self.log_search.result_keyword_summary = None;
         self.log_search.result_groups.clear();
         self.log_search.visible_result_items.clear();
         self.log_search.collapsed_result_groups.clear();
@@ -1206,11 +1212,7 @@ impl ArgusApp {
             .map(|index| index as isize)
             .unwrap_or(-1);
         let next = if current == -1 {
-            if delta > 0 {
-                0
-            } else {
-                count as isize - 1
-            }
+            if delta > 0 { 0 } else { count as isize - 1 }
         } else {
             (current + delta).rem_euclid(count as isize)
         };
@@ -1504,7 +1506,50 @@ impl ArgusApp {
                 .result_list_content_width
                 .max(estimated_search_result_row_width(result));
         }
+        self.append_search_result_keywords(&results);
         self.log_search.results.append(&mut results);
+    }
+
+    /// 增量维护搜索结果标题栏关键字摘要，避免渲染期扫描全部结果。
+    fn append_search_result_keywords(&mut self, results: &[SearchResult]) {
+        for result in results {
+            for keyword in &result.matched_keywords {
+                let keyword = keyword.trim();
+                if !keyword.is_empty() {
+                    self.log_search.result_keywords.insert(keyword.to_string());
+                }
+            }
+        }
+        self.rebuild_search_result_keyword_summary();
+    }
+
+    /// 根据已缓存关键字集合生成搜索结果面板标题摘要。
+    fn rebuild_search_result_keyword_summary(&mut self) {
+        if self.log_search.result_keywords.is_empty() {
+            let keyword = self.log_search.keyword_input.value.trim();
+            self.log_search.result_keyword_summary =
+                (!keyword.is_empty()).then(|| format!("关键字：{keyword}"));
+            return;
+        }
+
+        let keyword_count = self.log_search.result_keywords.len();
+        let visible_keywords = self
+            .log_search
+            .result_keywords
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>();
+        let overflow_text = keyword_count
+            .checked_sub(visible_keywords.len())
+            .filter(|count| *count > 0)
+            .map(|count| format!(" 等 {count} 个"))
+            .unwrap_or_default();
+        self.log_search.result_keyword_summary = Some(format!(
+            "关键字：{}{}",
+            visible_keywords.join("、"),
+            overflow_text
+        ));
     }
 
     /// 切换搜索结果文件分组展开状态。
@@ -1570,8 +1615,7 @@ impl ArgusApp {
         };
         let delta = f32::from(drag.start_y - cursor_y);
         let upper = max_height.max(SEARCH_RESULT_PANEL_HEIGHT_MIN);
-        let next_height = (drag.start_height + delta)
-            .clamp(SEARCH_RESULT_PANEL_HEIGHT_MIN, upper);
+        let next_height = (drag.start_height + delta).clamp(SEARCH_RESULT_PANEL_HEIGHT_MIN, upper);
         if (next_height - self.log_search.result_panel_height).abs() < f32::EPSILON {
             return false;
         }
@@ -3221,20 +3265,14 @@ mod tests {
         let mut app = test_app();
 
         app.begin_search_result_panel_resize(gpui::px(300.0));
-        assert!(app.resize_search_result_panel(
-            gpui::px(-500.0),
-            SEARCH_RESULT_PANEL_HEIGHT_MAX
-        ));
+        assert!(app.resize_search_result_panel(gpui::px(-500.0), SEARCH_RESULT_PANEL_HEIGHT_MAX));
         assert_eq!(
             app.log_search.result_panel_height,
             SEARCH_RESULT_PANEL_HEIGHT_MAX
         );
 
         app.begin_search_result_panel_resize(gpui::px(300.0));
-        assert!(app.resize_search_result_panel(
-            gpui::px(900.0),
-            SEARCH_RESULT_PANEL_HEIGHT_MAX
-        ));
+        assert!(app.resize_search_result_panel(gpui::px(900.0), SEARCH_RESULT_PANEL_HEIGHT_MAX));
         assert_eq!(
             app.log_search.result_panel_height,
             SEARCH_RESULT_PANEL_HEIGHT_MIN
@@ -3304,13 +3342,16 @@ mod tests {
         );
         let expected_first = format!("kw-{}", SEARCH_RECENT_KEYWORDS_MAX + 2);
         assert_eq!(
-            app.config.log_search.recent_keywords.first().map(String::as_str),
+            app.config
+                .log_search
+                .recent_keywords
+                .first()
+                .map(String::as_str),
             Some(expected_first.as_str())
         );
 
         // 持久化：重新加载同一配置文件应得到相同历史。
-        let reloaded =
-            ConfigManager::new(app.config_manager.settings_path().to_path_buf()).load();
+        let reloaded = ConfigManager::new(app.config_manager.settings_path().to_path_buf()).load();
         assert_eq!(
             reloaded.log_search.recent_keywords,
             app.config.log_search.recent_keywords

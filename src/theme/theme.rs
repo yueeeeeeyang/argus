@@ -5,7 +5,7 @@
 //! 主要功能：提供运行期主题颜色、日志级别颜色和主题文件损坏时的紧急兜底令牌。
 
 /// 语法高亮主题令牌，供日志、配置文件和 Java 线程栈高亮复用。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntaxTheme {
     /// 注释颜色。
     pub comment: u32,
@@ -60,7 +60,7 @@ impl SyntaxTheme {
 }
 
 /// 应用主题令牌，正常运行时由主题管理器读取 TOML 后生成。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppTheme {
     /// 主窗口背景色。
     pub background: u32,

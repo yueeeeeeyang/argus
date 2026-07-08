@@ -5,19 +5,22 @@
 //! 主要功能：提供无标题栏搜索窗口、关键字/目录输入和搜索范围切换控件。
 
 use gpui::{
-    canvas, div, point, prelude::*, px, rgb, AnyElement, App, Bounds, ClickEvent, Context, Entity,
-    FocusHandle, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString, Subscription, Window,
+    AnyElement, App, Bounds, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
+    ScrollHandle, SharedString, Subscription, Window, canvas, div, point, prelude::*, px, rgb,
 };
 
-use crate::app::{AppTextInputTarget, ArgusApp, LogSearchInputKind, LogSearchState};
+use crate::app::{
+    AppTextInputTarget, ArgusApp, LogSearchInputKind, LogSearchInputState, LogSearchState,
+};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
-use crate::search::search_engine::SearchScope;
+use crate::search::search_engine::{SearchProgress, SearchScope};
+use crate::search::search_task::SearchTaskState;
 use crate::theme::AppTheme;
-use crate::ui::components::icon::{render_icon, ArgusIcon};
-use crate::ui::components::icon_button::{render_icon_button, IconButtonSize};
+use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
-    render_input, Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize,
+    Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::scrollbar::{scrollbar_metrics, scrollbar_scroll_for_drag};
@@ -71,13 +74,12 @@ impl LogSearchWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let _app_observer = cx.observe(&app, |window, app_entity, cx| {
-            let (window_open, history_open) =
-                app_entity.read_with(cx, |app, _| {
-                    (
-                        app.log_search.is_window_open,
-                        app.log_search.keyword_history_open,
-                    )
-                });
+            let (window_open, history_open) = app_entity.read_with(cx, |app, _| {
+                (
+                    app.log_search.is_window_open,
+                    app.log_search.keyword_history_open,
+                )
+            });
             // 窗口关闭时跳过快照重建：主窗口会频繁 notify 反复触发此回调，关闭态下克隆
             // 主题/状态/历史纯属浪费，且关闭态无需渲染。
             if !window_open {
@@ -90,12 +92,11 @@ impl LogSearchWindow {
                     .keyword_history_scroll
                     .set_offset(point(px(0.0), px(0.0)));
             }
-            window.snapshot = app_entity.read_with(cx, |app, _| LogSearchSnapshot {
-                theme: app.theme.clone(),
-                log_search: app.log_search.clone(),
-                keyword_history: app.keyword_history_items(),
-            });
-            cx.notify();
+            let next_snapshot = app_entity.read_with(cx, |app, _| LogSearchSnapshot::from_app(app));
+            if window.snapshot != next_snapshot {
+                window.snapshot = next_snapshot;
+                cx.notify();
+            }
         });
 
         Self {
@@ -106,11 +107,7 @@ impl LogSearchWindow {
             has_focused_root: false,
             // 初始历史快照留空：new() 可能在 ArgusApp 的 update 上下文中被调用，此处对同一
             // 实体 read_with 会触发借用 panic；observe 回调会在首次应用状态变化时补齐。
-            snapshot: LogSearchSnapshot {
-                theme,
-                log_search,
-                keyword_history: Vec::new(),
-            },
+            snapshot: LogSearchSnapshot::from_initial(theme, &log_search),
             keyword_input_bounds: None,
             keyword_history_scroll: ScrollHandle::new(),
             keyword_history_drag: None,
@@ -158,14 +155,86 @@ impl Render for LogSearchWindow {
 }
 
 /// 搜索窗口只读渲染快照。
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct LogSearchSnapshot {
     /// 当前主题。
     theme: AppTheme,
-    /// 当前搜索状态。
-    log_search: LogSearchState,
+    /// 当前搜索窗口渲染所需的轻量搜索状态。
+    log_search: LogSearchWindowStateSnapshot,
     /// 全部最近关键字历史（最新在前），用于下拉展示；不按当前输入过滤。
     keyword_history: Vec<String>,
+}
+
+impl LogSearchSnapshot {
+    /// 从主应用状态构造搜索窗口轻量快照；避免把完整搜索结果集合复制到独立窗口。
+    fn from_app(app: &ArgusApp) -> Self {
+        Self {
+            theme: app.theme.clone(),
+            log_search: LogSearchWindowStateSnapshot::from_search_state(&app.log_search),
+            keyword_history: app.keyword_history_items(),
+        }
+    }
+
+    /// 构造窗口创建首帧使用的快照；此时不能读取同一个 `ArgusApp` 实体，因此历史先留空。
+    fn from_initial(theme: AppTheme, search: &LogSearchState) -> Self {
+        Self {
+            theme,
+            log_search: LogSearchWindowStateSnapshot::from_search_state(search),
+            keyword_history: Vec::new(),
+        }
+    }
+}
+
+/// 搜索窗口实际渲染所需的轻量状态，避免携带全量搜索结果和快速匹配缓存。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LogSearchWindowStateSnapshot {
+    /// 当前搜索范围。
+    scope: SearchScope,
+    /// 关键字输入框状态。
+    keyword_input: LogSearchInputState,
+    /// 关键字历史下拉菜单是否展开。
+    keyword_history_open: bool,
+    /// 关键字历史下拉菜单当前高亮项索引。
+    keyword_history_highlight: Option<usize>,
+    /// 目录输入框状态。
+    directory_input: LogSearchInputState,
+    /// 是否区分大小写。
+    case_sensitive: bool,
+    /// 是否启用正则搜索。
+    regex_enabled: bool,
+    /// 当前搜索进度。
+    progress: SearchProgress,
+    /// 当前搜索任务状态。
+    task_state: SearchTaskState,
+    /// 当前日志快速查找提示。
+    quick_match_message: Option<String>,
+    /// 是否正在扫描当前日志用于计数或定位。
+    is_quick_counting: bool,
+    /// 全量搜索结果数量；窗口只展示数量，不需要复制结果明细。
+    result_count: usize,
+    /// 最近一次搜索错误或提示。
+    message: Option<String>,
+}
+
+impl LogSearchWindowStateSnapshot {
+    /// 从完整搜索状态抽取窗口需要的字段，过滤掉体积大的结果集合。
+    fn from_search_state(search: &LogSearchState) -> Self {
+        Self {
+            scope: search.scope,
+            keyword_input: search.keyword_input.clone(),
+            keyword_history_open: search.keyword_history_open,
+            keyword_history_highlight: search.keyword_history_highlight,
+            directory_input: search.directory_input.clone(),
+            case_sensitive: search.case_sensitive,
+            regex_enabled: search.regex_enabled,
+            progress: search.progress.clone(),
+            task_state: search.task_state.clone(),
+            quick_match_message: search.quick_match_message.clone(),
+            is_quick_counting: search.is_quick_counting,
+            result_count: search.results.len(),
+            message: search.message.clone(),
+        }
+    }
 }
 
 /// 渲染窗口主体。
@@ -317,7 +386,9 @@ fn render_window_content(
 }
 
 /// 返回当前搜索窗口逻辑聚焦的输入框；没有显式焦点时不接收文本输入。
-fn active_log_search_input_kind(search: &LogSearchState) -> Option<LogSearchInputKind> {
+fn active_log_search_input_kind(
+    search: &LogSearchWindowStateSnapshot,
+) -> Option<LogSearchInputKind> {
     if search.keyword_input.is_focused {
         Some(LogSearchInputKind::Keyword)
     } else if search.directory_input.is_focused {
@@ -682,12 +753,18 @@ fn render_keyword_history_overlay(
                 })
                 .on_hover(move |hovered, _, cx| {
                     hover_entity.update(cx, |window, wcx| {
-                        if *hovered {
+                        let changed = if *hovered && window.keyword_history_hover != Some(index) {
                             window.keyword_history_hover = Some(index);
-                        } else if window.keyword_history_hover == Some(index) {
+                            true
+                        } else if !*hovered && window.keyword_history_hover == Some(index) {
                             window.keyword_history_hover = None;
+                            true
+                        } else {
+                            false
+                        };
+                        if changed {
+                            wcx.notify();
                         }
-                        wcx.notify();
                     });
                 })
                 .child(keyword.clone())
@@ -870,7 +947,7 @@ fn render_progress_and_actions(
     app_handle: &Entity<ArgusApp>,
 ) -> impl IntoElement + use<> {
     let theme = snapshot.theme.clone();
-    let search = snapshot.log_search.clone();
+    let search = &snapshot.log_search;
     let start_app = app_handle.clone();
     let quick_app = app_handle.clone();
     let cancel_app = app_handle.clone();
@@ -1054,7 +1131,7 @@ fn selection_range_for_input(
 }
 
 /// 返回搜索进度文案。
-fn progress_label(search: &LogSearchState) -> String {
+fn progress_label(search: &LogSearchWindowStateSnapshot) -> String {
     let message = search.message.clone().unwrap_or_default();
     let prefix = match search.scope {
         SearchScope::CurrentFile => format!(
@@ -1068,9 +1145,9 @@ fn progress_label(search: &LogSearchState) -> String {
     };
 
     if message.is_empty() {
-        format!("{prefix}，结果 {} 条", search.results.len())
+        format!("{prefix}，结果 {} 条", search.result_count)
     } else {
-        format!("{prefix}，结果 {} 条，{message}", search.results.len())
+        format!("{prefix}，结果 {} 条，{message}", search.result_count)
     }
 }
 

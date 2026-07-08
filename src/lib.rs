@@ -12,6 +12,7 @@ pub mod fonts;
 pub mod highlight;
 pub mod jstack_analysis;
 pub mod loader;
+pub mod perf;
 pub mod platform;
 pub mod reader;
 pub mod runtime_analysis;

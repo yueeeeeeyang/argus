@@ -56,6 +56,8 @@ pub struct SourcePickerWindow {
     app: Entity<ArgusApp>,
     /// 当前窗口自己的渲染快照，避免首次打开窗口时读取正在更新的主应用实体。
     snapshot: SourcePickerSnapshot,
+    /// 当前渲染快照的轻量签名，用于跳过主应用无关通知。
+    snapshot_signature: SourcePickerSnapshotSignature,
     /// 来源选择器根区域焦点，用于点击非路径输入框区域时承接键盘焦点。
     root_focus_handle: FocusHandle,
     /// 路径输入框真实焦点句柄。
@@ -81,19 +83,29 @@ impl SourcePickerWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let _app_observer = cx.observe(&app, |picker, app_entity, cx| {
+            let next_signature = app_entity.read_with(cx, |app, _| {
+                SourcePickerSnapshotSignature::from_parts(&app.theme, &app.source_picker)
+            });
+            if picker.snapshot_signature == next_signature {
+                return;
+            }
+
             picker.snapshot = app_entity.read_with(cx, |app, _| SourcePickerSnapshot {
                 theme: app.theme.clone(),
                 source_picker: app.source_picker.clone(),
             });
+            picker.snapshot_signature = next_signature;
             cx.notify();
         });
 
+        let snapshot_signature = SourcePickerSnapshotSignature::from_parts(&theme, &source_picker);
         Self {
             app,
             snapshot: SourcePickerSnapshot {
                 theme,
                 source_picker,
             },
+            snapshot_signature,
             root_focus_handle: cx.focus_handle(),
             path_focus_handle: cx.focus_handle(),
             _app_observer,
@@ -124,6 +136,61 @@ struct SourcePickerSnapshot {
     theme: AppTheme,
     /// 当前选择器 UI 状态。
     source_picker: SourcePickerState,
+}
+
+/// 来源选择器快照轻量签名；用于避免每次主应用通知都深复制目录条目。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourcePickerSnapshotSignature {
+    /// 当前主题令牌。
+    theme: AppTheme,
+    /// 当前目录。
+    current_dir: PathBuf,
+    /// 当前目录父级。
+    parent_dir: Option<PathBuf>,
+    /// 当前目录条目数量。
+    entry_count: usize,
+    /// 已选择路径；通常数量较小，直接纳入签名以保持选中态及时刷新。
+    selected_paths: Vec<PathBuf>,
+    /// 是否正在读取目录。
+    is_loading: bool,
+    /// 最近一次错误提示。
+    error_message: Option<String>,
+    /// 浏览任务 generation。
+    browse_generation: usize,
+    /// 路径输入框文本。
+    path_input: String,
+    /// 路径输入框光标。
+    path_input_cursor: usize,
+    /// 路径输入框选区锚点。
+    path_input_selection_anchor: Option<usize>,
+    /// 路径输入框焦点态。
+    is_path_input_focused: bool,
+    /// 当前排序字段。
+    sort_key: SourcePickerSortKey,
+    /// 当前排序方向。
+    sort_direction: SourcePickerSortDirection,
+}
+
+impl SourcePickerSnapshotSignature {
+    /// 从主应用状态生成轻量签名，不复制 `entries` 详情。
+    fn from_parts(theme: &AppTheme, source_picker: &SourcePickerState) -> Self {
+        Self {
+            theme: theme.clone(),
+            current_dir: source_picker.current_dir.clone(),
+            parent_dir: source_picker.parent_dir.clone(),
+            entry_count: source_picker.entries.len(),
+            selected_paths: source_picker.selected_paths.clone(),
+            is_loading: source_picker.is_loading,
+            error_message: source_picker.error_message.clone(),
+            browse_generation: source_picker.browse_generation,
+            path_input: source_picker.path_input.clone(),
+            path_input_cursor: source_picker.path_input_cursor,
+            path_input_selection_anchor: source_picker.path_input_selection_anchor,
+            is_path_input_focused: source_picker.is_path_input_focused,
+            sort_key: source_picker.sort_key,
+            sort_direction: source_picker.sort_direction,
+        }
+    }
 }
 
 /// 渲染来源选择器窗口主体。

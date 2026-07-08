@@ -13,12 +13,14 @@ use chrono::{Datelike, Local, TimeZone, Timelike};
 use crate::app::{
     AppTextInputTarget, ArgusApp, RUNTIME_SQL_COLLAPSED_ROW_HEIGHT, RuntimeAnalysisResultType,
     RuntimeAnalysisState, RuntimeAnalysisTaskState, RuntimeAnalysisView, RuntimeFilterInputKind,
-    RuntimeRequestSortKey, RuntimeScrollbarDrag, RuntimeScrollbarTable, RuntimeSortDirection,
-    RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey, RuntimeSqlFrequencyDetailRowsCache,
-    RuntimeSqlSortKey, RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummarySortKey,
+    RuntimeRequestIndicesCache, RuntimeRequestSortKey, RuntimeScrollbarDrag, RuntimeScrollbarTable,
+    RuntimeSortDirection, RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey,
+    RuntimeSqlFrequencyDetailRowsCache, RuntimeSqlIndicesCache, RuntimeSqlSortKey,
+    RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummaryRowsCache, RuntimeSummarySortKey,
     RuntimeTableCellSelection, SettingsTextInputState,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
+use crate::perf::PerfSpan;
 use crate::runtime_analysis::{
     RuntimeAnalysisFilterCriteria, RuntimeAnalysisResult, RuntimeRequestRecord,
     RuntimeRequestSummary, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
@@ -662,7 +664,12 @@ fn render_sql_dialog_code_block(
                         })),
                 ),
         )
-        .child(render_sql_dialog_scrollbar(analysis_id, &scroll_handle, theme, cx))
+        .child(render_sql_dialog_scrollbar(
+            analysis_id,
+            &scroll_handle,
+            theme,
+            cx,
+        ))
 }
 
 /// 渲染完整 SQL 弹窗的可拖拽垂直滚动条滑块。
@@ -755,7 +762,11 @@ fn render_sql_dialog_line(
             div()
                 .min_w(px(0.0))
                 .w_full()
-                .child(render_runtime_cell_text(line.clone(), selection_range, theme)),
+                .child(render_runtime_cell_text(
+                    line.clone(),
+                    selection_range,
+                    theme,
+                )),
         )
         .child(render_sql_dialog_line_pointer_layer(
             analysis_id,
@@ -1139,7 +1150,7 @@ fn render_summary_table(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
-    let sorted_rows = Arc::new(sorted_summary_rows(result, state));
+    let sorted_rows = cached_sorted_summary_rows(result, state);
     let row_count = sorted_rows.len();
     let scroll_handle = state.summary_scroll.clone();
 
@@ -1215,7 +1226,7 @@ fn render_request_details_table(
     let Some(summary) = filtered_summary_for_request_path(result, request_path, state) else {
         return render_empty_message("未找到当前请求地址的详情。", theme);
     };
-    let sorted_indices = Arc::new(sorted_request_indices(result, &summary, state));
+    let sorted_indices = cached_sorted_request_indices(result, &summary, state);
     let row_count = sorted_indices.len();
     let scroll_handle = state.request_scroll.clone();
 
@@ -1304,9 +1315,8 @@ fn render_sql_table(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
-    let sorted_indices_vec = sorted_sql_indices(request, state);
-    let row_count = sorted_indices_vec.len();
-    let sorted_indices = Arc::new(sorted_indices_vec);
+    let sorted_indices = cached_sorted_sql_indices(request, state);
+    let row_count = sorted_indices.len();
     let uniform_scroll = state.sql_scroll.clone();
     let request_index = request.index;
     let table_body = div()
@@ -3759,6 +3769,34 @@ fn slow_sql_rows(
     Arc::new(Vec::new())
 }
 
+/// 返回总览表缓存后的排序结果，避免渲染期反复 clone 和排序全量行。
+fn cached_sorted_summary_rows(
+    result: &RuntimeAnalysisResult,
+    state: &RuntimeAnalysisState,
+) -> Arc<Vec<RuntimeRequestSummary>> {
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    if let Some(cache) = state.summary_rows_cache.borrow().as_ref()
+        && cache.filter == filter
+        && cache.sort_key == state.summary_sort_key
+        && cache.sort_direction == state.summary_sort_direction
+    {
+        return cache.rows.clone();
+    }
+
+    let _span = PerfSpan::new("runtime_sorted_summary_rows");
+    let rows = Arc::new(sorted_summary_rows(result, state));
+    state
+        .summary_rows_cache
+        .borrow_mut()
+        .replace(RuntimeSummaryRowsCache {
+            filter,
+            sort_key: state.summary_sort_key,
+            sort_direction: state.summary_sort_direction,
+            rows: rows.clone(),
+        });
+    rows
+}
+
 /// 返回总览表过滤并排序后的聚合行。
 fn sorted_summary_rows(
     result: &RuntimeAnalysisResult,
@@ -3837,6 +3875,37 @@ fn filtered_summary_from_indices(
     filtered_runtime_summary_from_indices(result, summary, criteria, apply_keyword)
 }
 
+/// 返回请求明细表缓存后的排序索引，避免切回详情页时重复排序。
+fn cached_sorted_request_indices(
+    result: &RuntimeAnalysisResult,
+    summary: &RuntimeRequestSummary,
+    state: &RuntimeAnalysisState,
+) -> Arc<Vec<usize>> {
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    if let Some(cache) = state.request_indices_cache.borrow().as_ref()
+        && cache.filter == filter
+        && cache.request_path == summary.request_path
+        && cache.sort_key == state.request_sort_key
+        && cache.sort_direction == state.request_sort_direction
+    {
+        return cache.indices.clone();
+    }
+
+    let _span = PerfSpan::new("runtime_sorted_request_indices");
+    let indices = Arc::new(sorted_request_indices(result, summary, state));
+    state
+        .request_indices_cache
+        .borrow_mut()
+        .replace(RuntimeRequestIndicesCache {
+            filter,
+            request_path: summary.request_path.clone(),
+            sort_key: state.request_sort_key,
+            sort_direction: state.request_sort_direction,
+            indices: indices.clone(),
+        });
+    indices
+}
+
 /// 返回请求明细表排序后的请求索引。
 fn sorted_request_indices(
     result: &RuntimeAnalysisResult,
@@ -3882,6 +3951,36 @@ fn sorted_request_indices(
             .then_with(|| right.request_timestamp_ms.cmp(&left.request_timestamp_ms))
             .then_with(|| left.label.cmp(&right.label))
     });
+    indices
+}
+
+/// 返回 SQL 明细表缓存后的排序索引，避免切回同一请求时重复排序。
+fn cached_sorted_sql_indices(
+    request: &RuntimeRequestRecord,
+    state: &RuntimeAnalysisState,
+) -> Arc<Vec<usize>> {
+    let filter = runtime_sql_analysis_filter_snapshot(state);
+    if let Some(cache) = state.sql_indices_cache.borrow().as_ref()
+        && cache.filter == filter
+        && cache.request_index == request.index
+        && cache.sort_key == state.sql_sort_key
+        && cache.sort_direction == state.sql_sort_direction
+    {
+        return cache.indices.clone();
+    }
+
+    let _span = PerfSpan::new("runtime_sorted_sql_indices");
+    let indices = Arc::new(sorted_sql_indices(request, state));
+    state
+        .sql_indices_cache
+        .borrow_mut()
+        .replace(RuntimeSqlIndicesCache {
+            filter,
+            request_index: request.index,
+            sort_key: state.sql_sort_key,
+            sort_direction: state.sql_sort_direction,
+            indices: indices.clone(),
+        });
     indices
 }
 
@@ -4266,11 +4365,8 @@ fn render_runtime_scrollbar_thumb(
                             }
 
                             let pointer = event.position.y - viewport_bounds.top();
-                            let scroll = scrollbar_scroll_for_drag(
-                                pointer,
-                                drag.cursor_offset,
-                                &metrics,
-                            );
+                            let scroll =
+                                scrollbar_scroll_for_drag(pointer, drag.cursor_offset, &metrics);
                             match &target {
                                 RuntimeScrollTarget::Uniform(scroll_handle) => {
                                     let current = scroll_handle.offset();
@@ -4361,6 +4457,9 @@ mod tests {
             sql_frequency_rows_cache: RefCell::new(None),
             sql_frequency_detail_rows_cache: RefCell::new(None),
             slow_sql_rows_cache: RefCell::new(None),
+            summary_rows_cache: RefCell::new(None),
+            request_indices_cache: RefCell::new(None),
+            sql_indices_cache: RefCell::new(None),
             scrollbar_drag: None,
             sql_dialog_scroll: ScrollHandle::new(),
             task_state: RuntimeAnalysisTaskState::Loading {
@@ -4763,8 +4862,7 @@ mod tests {
             RUNTIME_SCROLLBAR_MIN_THUMB,
         )
         .expect("应生成滚动条指标");
-        let scroll =
-            scrollbar_scroll_for_drag(metrics.track_start + px(40.0), px(10.0), &metrics);
+        let scroll = scrollbar_scroll_for_drag(metrics.track_start + px(40.0), px(10.0), &metrics);
 
         assert!(scroll > px(0.0));
         assert!(scroll < metrics.max_scroll);

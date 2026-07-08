@@ -148,6 +148,11 @@ impl SourceRegistry {
         self.visible_source_positions.get(&id).copied()
     }
 
+    /// 返回当前被来源树强选中的节点 ID。
+    pub fn selected_id(&self) -> Option<SourceId> {
+        self.selected_id
+    }
+
     /// 返回所有已加载节点的树形顺序 ID 列表，不受展开状态影响。
     pub fn tree_order_source_ids(&self) -> &[SourceId] {
         &self.tree_order_source_ids

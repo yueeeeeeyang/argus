@@ -5,6 +5,7 @@
 //! 主要功能：展示远程目录地址栏、文件操作工具栏和虚拟化文件列表。
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use chrono::{Local, TimeZone};
 use gpui::{
@@ -13,9 +14,9 @@ use gpui::{
 };
 
 use crate::app::{AppTextInputTarget, ArgusApp};
+use crate::perf::PerfSpan;
 use crate::sftp::{
     SftpEntry, SftpEntryKind, SftpSessionState, SftpSortDirection, SftpSortField, SftpStatus,
-    sort_sftp_entries,
 };
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -42,6 +43,7 @@ const SFTP_PERM_COLUMN_WIDTH: f32 = 96.0;
 
 /// 渲染远程文件管理页面。
 pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+    let _span = PerfSpan::new("render_sftp_file_manager");
     let theme = app.theme.clone();
     let Some(session) = app.sftp_sessions.get(&session_id) else {
         return div()
@@ -53,7 +55,7 @@ pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> 
             .child("文件管理会话不存在")
             .into_any_element();
     };
-    let entries = session.entries.clone();
+    let entries = session.sorted_entries.clone();
     let sort_field = session.sort_field;
     let sort_direction = session.sort_direction;
 
@@ -80,8 +82,7 @@ pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> 
                 .child(if entries.is_empty() {
                     render_empty_state(session, &theme).into_any_element()
                 } else {
-                    render_file_list(session, entries, sort_field, sort_direction, cx)
-                        .into_any_element()
+                    render_file_list(session, entries, cx).into_any_element()
                 }),
         )
         .into_any_element()
@@ -439,14 +440,11 @@ fn header_cell(
 /// 渲染远程文件列表。
 fn render_file_list(
     session: &SftpSessionState,
-    mut entries: Vec<SftpEntry>,
-    sort_field: SftpSortField,
-    sort_direction: SftpSortDirection,
+    entries: Arc<Vec<SftpEntry>>,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let session_id = session.id;
     let selected_paths = session.selected_paths.clone();
-    sort_sftp_entries(&mut entries, sort_field, sort_direction);
     let row_count = entries.len();
     uniform_list(
         "sftp-file-list",

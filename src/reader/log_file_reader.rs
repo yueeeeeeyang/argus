@@ -138,6 +138,29 @@ impl LogReaderHandle {
         self.document.lines(start_line, max_lines)
     }
 
+    /// 只读取已经命中的缓存行；分页日志缺失行不会触发文件 I/O。
+    ///
+    /// 参数说明：
+    /// - `start_line`：起始 0 基行号。
+    /// - `max_lines`：最大读取行数。
+    ///
+    /// 返回值：与请求范围等长的行槽位；`None` 表示该行尚未进入分页缓存。
+    pub fn cached_lines(
+        &self,
+        start_line: usize,
+        max_lines: usize,
+    ) -> Vec<Option<DisplayedLogLine>> {
+        self.document.cached_lines(start_line, max_lines)
+    }
+
+    /// 判断指定行范围是否已经完整进入缓存，供 UI 决定是否需要后台预取。
+    pub fn has_cached_lines(&self, start_line: usize, max_lines: usize) -> bool {
+        self.document
+            .cached_lines(start_line, max_lines)
+            .iter()
+            .all(Option::is_some)
+    }
+
     /// 返回用于横向滚动估算的最长行文本。
     pub fn longest_line_text(&self) -> Option<String> {
         self.document.longest_line_text()
@@ -205,6 +228,35 @@ impl LogDocument {
         }
     }
 
+    /// 只从现有缓存读取日志行；分页文档不会在 UI 渲染期访问文件。
+    fn cached_lines(&self, start_line: usize, max_lines: usize) -> Vec<Option<DisplayedLogLine>> {
+        match self {
+            Self::InMemory(document) => document
+                .lines
+                .iter()
+                .enumerate()
+                .skip(start_line)
+                .take(max_lines)
+                .map(|(line_number, text)| {
+                    Some(DisplayedLogLine {
+                        line_number,
+                        text: text.clone(),
+                    })
+                })
+                .collect(),
+            Self::Paged(document) => document
+                .cached_visible_lines(start_line, max_lines)
+                .into_iter()
+                .map(|line| {
+                    line.map(|line| DisplayedLogLine {
+                        line_number: line.line_number,
+                        text: line.text.to_string(),
+                    })
+                })
+                .collect(),
+        }
+    }
+
     /// 读取最长行文本，用于估算横向滚动范围。
     pub fn longest_line_text(&self) -> Option<String> {
         match self {
@@ -220,11 +272,7 @@ impl LogDocument {
     /// 返回最长显示列数估算；分页文档只使用索引元信息，避免 UI 渲染路径读取正文。
     pub fn estimated_longest_display_columns(&self) -> usize {
         match self {
-            Self::InMemory(document) => document
-                .lines
-                .get(document.longest_line_index)
-                .map(|line| display_column_count(line))
-                .unwrap_or_default(),
+            Self::InMemory(document) => document.longest_display_columns,
             Self::Paged(document) => document.estimated_longest_display_columns(),
         }
     }
@@ -239,6 +287,8 @@ pub struct InMemoryLogDocument {
     pub encoding: String,
     /// 最长行索引。
     pub longest_line_index: usize,
+    /// 最长展示列数，读取阶段预计算，避免 UI 切换页签时重新扫描长行。
+    pub longest_display_columns: usize,
 }
 
 impl InMemoryLogDocument {
@@ -407,6 +457,28 @@ impl PagedLogDocument {
         }
 
         Ok(ordered.into_iter().flatten().collect())
+    }
+
+    /// 只读取分页缓存中的连续可见行，缓存缺失时返回空槽位并且不访问文件。
+    pub fn cached_visible_lines(
+        &self,
+        start_line: usize,
+        max_lines: usize,
+    ) -> Vec<Option<PagedLine>> {
+        if max_lines == 0 || start_line >= self.line_index.len() {
+            return Vec::new();
+        }
+
+        let end_line = start_line
+            .saturating_add(max_lines)
+            .min(self.line_index.len());
+        let Ok(mut cache) = self.cache.lock() else {
+            return (start_line..end_line).map(|_| None).collect();
+        };
+
+        (start_line..end_line)
+            .map(|line_number| cache.get(line_number))
+            .collect()
     }
 
     /// 按行号升序遍历分页日志行，读取时按连续字节窗口合并 I/O。
@@ -915,10 +987,15 @@ fn build_memory_handle(
     let decoded = decode_log_bytes(&bytes, &request.default_encoding);
     let lines = split_decoded_lines(&decoded.text);
     let longest_line_index = longest_line_index(&lines);
+    let longest_display_columns = lines
+        .get(longest_line_index)
+        .map(|line| display_column_count(line))
+        .unwrap_or_default();
     let document = LogDocument::InMemory(InMemoryLogDocument {
         lines: Arc::new(lines),
         encoding: decoded.encoding_label,
         longest_line_index,
+        longest_display_columns,
     });
 
     Ok(LogReaderHandle {
