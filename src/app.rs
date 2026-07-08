@@ -4,15 +4,13 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、Jstack 分析、升级状态、未读取内容提示和保留的日志样例数据。
 
-mod connection_actions;
 mod log_search;
 mod log_text;
 mod placeholder_data;
-mod settings_window;
-mod sftp_actions;
-mod source_picker;
+mod remote;
+mod settings_actions;
+mod source_picker_actions;
 mod source_search;
-mod terminal_actions;
 mod text_input;
 
 mod constants;
@@ -99,7 +97,7 @@ use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 #[cfg(test)]
 use placeholder_data::{placeholder_logs, placeholder_source_registry};
-pub use source_picker::{
+pub use source_picker_actions::{
     ExternalSourceTrigger, SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState,
 };
 
