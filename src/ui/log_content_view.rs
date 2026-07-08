@@ -16,10 +16,10 @@ use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
     HighlightCache, HighlightLanguage, HighlightSpan, HighlightTokenKind, detect_highlight_language,
 };
-use crate::perf::PerfSpan;
+use crate::infra::perf::PerfSpan;
 use crate::reader::log_file_reader::{LogDocument, LogOpenState, LogReaderHandle};
 use crate::search::search_task::SearchTaskState;
-use crate::text_selection::{
+use crate::infra::text_selection::{
     byte_index_for_character, char_column_for_byte_index, character_count, slice_character_range,
 };
 use crate::theme::AppTheme;

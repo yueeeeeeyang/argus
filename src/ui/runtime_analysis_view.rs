@@ -20,8 +20,8 @@ use crate::app::{
     RuntimeTableCellSelection, SettingsTextInputState,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
-use crate::perf::PerfSpan;
-use crate::runtime_analysis::{
+use crate::infra::perf::PerfSpan;
+use crate::analysis::runtime::{
     RuntimeAnalysisFilterCriteria, RuntimeAnalysisResult, RuntimeRequestRecord,
     RuntimeRequestSummary, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
     RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord, filtered_runtime_summary_from_indices,
@@ -31,7 +31,7 @@ use crate::runtime_analysis::{
     runtime_sql_matches_keyword as domain_runtime_sql_matches_keyword,
     sort_runtime_sql_frequency_detail_rows,
 };
-use crate::text_selection::{
+use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index, character_count,
 };
 use crate::theme::AppTheme;
@@ -4400,7 +4400,7 @@ mod tests {
         RuntimeSqlSortKey, RuntimeSummarySortKey,
     };
     use crate::loader::SourceId;
-    use crate::runtime_analysis::{
+    use crate::analysis::runtime::{
         build_runtime_analysis_result, build_runtime_slow_sql_rows_for_filter,
         build_runtime_sql_frequency_rows_for_filter, parse_runtime_request_text,
     };

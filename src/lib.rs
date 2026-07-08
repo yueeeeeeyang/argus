@@ -4,23 +4,18 @@
 //! 作者：Argus 开发团队
 //! 主要功能：为二进制入口和后续测试暴露模块边界。
 
+pub mod analysis;
 pub mod app;
 pub mod assets;
 pub mod config;
-pub mod connections;
 pub mod fonts;
 pub mod highlight;
-pub mod jstack_analysis;
+pub mod infra;
 pub mod loader;
-pub mod perf;
 pub mod platform;
 pub mod reader;
-pub mod runtime_analysis;
+pub mod remote;
 pub mod search;
-pub mod sftp;
-pub mod terminal;
-pub mod text_selection;
 pub mod theme;
 pub mod ui;
-pub mod updater;
 pub mod utils;

@@ -15,7 +15,7 @@ use gpui::{
 
 use crate::app::{ArgusApp, InputTextSelectionDrag};
 use crate::loader::{BrowseEntry, BrowseLocation, BrowseResult, LogSourceLoader, PathBrowser};
-use crate::text_selection::{
+use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, word_range_at,
 };

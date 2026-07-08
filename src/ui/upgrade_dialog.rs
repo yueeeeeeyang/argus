@@ -50,7 +50,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
 
 /// 渲染发现新版本时的确认界面。
 fn render_available_upgrade(
-    upgrade: crate::updater::AvailableUpgrade,
+    upgrade: crate::infra::updater::AvailableUpgrade,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {

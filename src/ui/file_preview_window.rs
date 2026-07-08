@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::app::{ArgusApp, log_viewer_line_number_width, observe_app_theme};
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
-use crate::sftp::{FilePreviewContent, SFTP_PREVIEW_MAX_READ};
+use crate::remote::sftp::{FilePreviewContent, SFTP_PREVIEW_MAX_READ};
 use crate::theme::AppTheme;
 use crate::ui::components::centered_message::render_centered_message;
 use crate::ui::components::icon::{ArgusIcon, render_icon};

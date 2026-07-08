@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供外观、日志加载、日志搜索、链接、编码、缓存和升级设置的默认值、校验和 TOML 序列化结构。
 
-use crate::connections::ConnectionConfig;
+use crate::remote::connection::ConnectionConfig;
 use serde::{Deserialize, Serialize};
 
 /// 默认 Jstack 线程名过滤规则，隐藏常见编译线程和 JVM 附加监听线程。

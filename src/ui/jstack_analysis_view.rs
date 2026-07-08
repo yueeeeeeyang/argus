@@ -14,10 +14,10 @@ use crate::app::{
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{HighlightLanguage, HighlightTokenKind, SyntaxHighlighter};
-use crate::jstack_analysis::{
+use crate::analysis::jstack::{
     JstackAnalysisResult, JstackFrequencyCell, JstackFrequencyRow, JstackThreadState,
 };
-use crate::text_selection::{
+use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index, character_count,
 };
 use crate::theme::AppTheme;

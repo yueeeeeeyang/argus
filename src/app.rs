@@ -15,21 +15,36 @@ mod source_search;
 mod terminal_actions;
 mod text_input;
 
+mod constants;
+mod types;
+mod log_state;
+mod search_state;
+mod jstack_state;
+mod runtime_state;
+mod remote_state;
+
+pub use constants::*;
+pub use jstack_state::*;
+pub use log_state::*;
+pub use remote_state::*;
+pub use runtime_state::*;
+pub use search_state::*;
+pub use types::*;
+
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::ops::Range;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::{AppConfig, ConfigManager};
-use crate::connections::ConnectionNodeId;
-use crate::highlight::{HighlightCache, HighlightLanguage};
-use crate::jstack_analysis::{
-    JstackAnalysisResult, JstackAnalysisTarget, JstackFrequencyRow, JstackThreadDetail,
-    JstackThreadFilter, JstackThreadStackOccurrence, JstackThreadState, analyze_jstack_targets,
+use crate::remote::connection::ConnectionNodeId;
+use crate::highlight::HighlightLanguage;
+use crate::analysis::jstack::{
+    JstackAnalysisResult, JstackAnalysisTarget, JstackThreadDetail,
+    JstackThreadFilter, JstackThreadState, analyze_jstack_targets,
 };
 #[cfg(test)]
 use crate::loader::SourceMetadata;
@@ -37,45 +52,40 @@ use crate::loader::{
     LoadReport, LogSourceLoader, SourceArchiveProbeRequest, SourceArchiveProbeResult, SourceId,
     SourceKind, SourceLocation, SourceRegistry, SourceTreeNode,
 };
-use crate::perf::PerfSpan;
+use crate::infra::perf::PerfSpan;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
 use crate::reader::read_mode::ReadMode;
-use crate::runtime_analysis::{
-    RuntimeAnalysisFilterRows, RuntimeAnalysisFilterSnapshot, RuntimeAnalysisResult,
-    RuntimeAnalysisTarget, RuntimeAnalysisTargetKind, RuntimeRequestSummary,
-    RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
+use crate::analysis::runtime::{
+    RuntimeAnalysisFilterRows, RuntimeAnalysisResult,
+    RuntimeAnalysisTarget, RuntimeAnalysisTargetKind,
+    RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
     analyze_runtime_targets, build_runtime_analysis_filter_rows,
     build_runtime_slow_sql_rows_for_filter, build_runtime_sql_frequency_rows_for_filter,
     parse_runtime_analysis_filter_criteria,
 };
-use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
-use crate::search::search_task::SearchTaskState;
-use crate::sftp::SftpSessionState;
-use crate::terminal::TerminalSessionState;
-use crate::text_selection::{
+use crate::remote::sftp::SftpSessionState;
+use crate::remote::terminal::TerminalSessionState;
+use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range, slice_character_range,
-    word_range_at,
 };
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
-use crate::ui::custom_title_bar::TITLE_BAR_HEIGHT;
 use crate::ui::file_preview_window::FilePreviewWindow;
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
-use crate::ui::log_search_window::LogSearchWindow;
 use crate::ui::main_window;
 use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
-use crate::updater::{
-    AvailableUpgrade, UpgradeCheckOutcome, UpgradeService, current_platform_arch,
+use crate::infra::updater::{
+    UpgradeCheckOutcome, UpgradeService, current_platform_arch,
     current_platform_os,
 };
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use gpui::{
-    AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, IntoElement, Keystroke,
+    AppContext, Bounds, ClipboardItem, Context, Entity, IntoElement, Keystroke,
     Pixels, Point, Render, Subscription, Timer, TitlebarOptions, Window, WindowBounds,
     WindowHandle, WindowOptions, point, px, size,
 };
@@ -89,73 +99,7 @@ pub use source_picker::{
 };
 
 /// 兼容 UI 层既有命名：Runtime SQL 分析缓存使用的过滤快照。
-pub use crate::runtime_analysis::RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot;
-
-/// 来源侧栏默认宽度；主窗口默认宽度同步增加，避免挤占右侧日志阅读区。
-pub const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 350.0;
-/// 来源侧栏最小宽度，需保证标题栏左侧 4 个操作按钮和固定右侧间距完整展示。
-pub const SOURCE_PANEL_MIN_WIDTH: f32 = 244.0;
-/// 来源侧栏最大宽度，避免占位界面被侧栏挤压。
-pub const SOURCE_PANEL_MAX_WIDTH: f32 = 520.0;
-/// 日志内容字号最小值，避免主阅读区文字过小影响可读性。
-pub const LOG_CONTENT_FONT_SIZE_MIN: f32 = 12.0;
-/// 日志内容字号最大值，避免大字号破坏当前日志行布局。
-pub const LOG_CONTENT_FONT_SIZE_MAX: f32 = 20.0;
-/// 日志内容默认字号，匹配设计文档要求的高密度 12px 阅读区。
-pub const LOG_CONTENT_FONT_SIZE_DEFAULT: f32 = 12.0;
-/// 搜索结果面板默认高度。
-pub const SEARCH_RESULT_PANEL_HEIGHT_DEFAULT: f32 = 220.0;
-/// 搜索结果面板最小高度，保证标题和至少几行结果可见。
-pub const SEARCH_RESULT_PANEL_HEIGHT_MIN: f32 = 140.0;
-/// 搜索结果面板最大高度兜底值，主要用于单元测试验证 clamp 行为；运行时实际上限随窗口高度动态计算。
-pub const SEARCH_RESULT_PANEL_HEIGHT_MAX: f32 = 520.0;
-/// 搜索结果面板拖拽到最大高度时，为上方日志内容保留的最小可见高度。
-///
-/// 与自定义标题栏高度无关：仅约束日志正文最小可见区，确保面板近乎撑满时仍能看到几行日志。
-pub const SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT: f32 = 60.0;
-/// 搜索结果面板拖拽时为上方日志内容保留的最小高度（含自定义标题栏与最小日志可见区），
-/// 面板最大可拖至窗口视口高度减去此值，使其近乎撑满整个窗口。
-///
-/// 由 `TITLE_BAR_HEIGHT` 与 `SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT` 派生，
-/// 标题栏高度调整时无需同步修改此处的字面量。
-pub const SEARCH_RESULT_PANEL_RESERVED_HEIGHT: f32 =
-    TITLE_BAR_HEIGHT + SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT;
-/// 日志正文左侧内边距；命中测试和渲染必须保持一致。
-pub const LOG_VIEWER_TEXT_LEFT_PADDING: f32 = 16.0;
-/// 日志正文右侧内边距；横向滚动范围和渲染必须保持一致。
-pub const LOG_VIEWER_TEXT_RIGHT_PADDING: f32 = 16.0;
-/// Jstack 线程详情窗口默认宽度。
-const JSTACK_THREAD_DETAIL_WINDOW_WIDTH: f32 = 900.0;
-/// Jstack 线程详情窗口默认高度。
-const JSTACK_THREAD_DETAIL_WINDOW_HEIGHT: f32 = 640.0;
-/// Jstack 线程详情窗口最小宽度。
-const JSTACK_THREAD_DETAIL_WINDOW_MIN_WIDTH: f32 = 600.0;
-/// Jstack 线程详情窗口最小高度。
-const JSTACK_THREAD_DETAIL_WINDOW_MIN_HEIGHT: f32 = 420.0;
-/// 远程文件预览窗口默认宽度。
-const FILE_PREVIEW_WINDOW_WIDTH: f32 = 920.0;
-/// 远程文件预览窗口默认高度。
-const FILE_PREVIEW_WINDOW_HEIGHT: f32 = 640.0;
-/// 远程文件预览窗口最小宽度。
-const FILE_PREVIEW_WINDOW_MIN_WIDTH: f32 = 600.0;
-/// 远程文件预览窗口最小高度。
-const FILE_PREVIEW_WINDOW_MIN_HEIGHT: f32 = 420.0;
-/// 日志正文固定行高；分页滚动和 UI 渲染必须保持一致。
-pub const LOG_VIEWER_ROW_HEIGHT: f32 = 20.0;
-/// 行号栏最小宽度，保证小文件也有稳定的视觉留白。
-pub const LOG_VIEWER_LINE_NUMBER_MIN_WIDTH: f32 = 44.0;
-/// 行号栏最大宽度，避免超大文件行号挤占正文区域。
-pub const LOG_VIEWER_LINE_NUMBER_MAX_WIDTH: f32 = 96.0;
-/// 行号栏单个数字的估算宽度，用于无布局测量时的稳定宽度计算。
-pub const LOG_VIEWER_LINE_NUMBER_DIGIT_WIDTH: f32 = 7.0;
-/// 行号栏左右留白总和，保证行号和正文之间有清晰间隔。
-pub const LOG_VIEWER_LINE_NUMBER_PADDING: f32 = 18.0;
-/// 日志正文中的制表符展示为空格时的固定宽度。
-pub const LOG_VIEWER_TAB_DISPLAY_SPACES: &str = "    ";
-/// 后台压缩包探测每批最多处理 `并发数 * 该系数` 个节点，避免频繁重绘。
-const SOURCE_ARCHIVE_PROBE_BATCH_FACTOR: usize = 16;
-/// Runtime 过滤输入防抖时长，避免每个字符都触发大结果集重新过滤。
-const RUNTIME_FILTER_DEBOUNCE_MS: u64 = 260;
+pub use crate::analysis::runtime::RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot;
 
 /// 根据日志总行数计算行号栏宽度。
 ///
@@ -225,1958 +169,6 @@ fn frameless_resizable_titlebar() -> TitlebarOptions {
         appears_transparent: true,
         traffic_light_position: Some(point(px(-1000.0), px(0.0))),
     }
-}
-
-/// 当前界面工作区，驱动标题栏入口和左侧侧栏内容。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Workspace {
-    /// 日志分析工作区，用于展示来源侧栏和日志内容占位界面。
-    LogAnalysis,
-    /// 链接工作区，用于展示 SSH/SMB 链接目录树、终端和远程文件管理标签页。
-    Connections,
-    /// 设置工作区，用于展示主题、编码、缓存、快捷键等占位配置。
-    Settings,
-}
-
-/// 打开来源占位弹窗中的来源类型。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlaceholderSourceKind {
-    /// 本地日志文件。
-    File,
-    /// 本地目录。
-    Directory,
-    /// 压缩包来源。
-    Archive,
-}
-
-impl PlaceholderSourceKind {
-    /// 返回来源类型展示文案。
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::File => "日志文件",
-            Self::Directory => "目录",
-            Self::Archive => "压缩包",
-        }
-    }
-}
-
-/// 占位弹窗类型，当前仅用于打开来源。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlaceholderDialog {
-    /// 打开来源弹窗。
-    OpenSource,
-}
-
-/// 顶部标签页类型，决定主内容区渲染哪个页面。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TabKind {
-    /// 空标签页，用于启动或关闭最后一个标签后的占位状态。
-    Empty,
-    /// 日志来源标签页；本轮只保存来源身份和展示路径，不读取正文。
-    LogSource {
-        /// 对应来源树节点 ID，用于去重和重新选中来源树。
-        source_id: SourceId,
-        /// 来源展示路径，可能是本地路径或压缩包内虚拟路径。
-        path: String,
-    },
-    /// Jstack 线程日志分析标签页。
-    JstackAnalysis {
-        /// 分析状态 ID，用于从应用状态表中读取结果。
-        analysis_id: usize,
-    },
-    /// Runtime 请求日志分析标签页。
-    RuntimeAnalysis {
-        /// 分析状态 ID，用于从应用状态表中读取结果。
-        analysis_id: usize,
-    },
-    /// SSH 终端标签页。
-    SshTerminal {
-        /// 终端会话 ID，用于从应用状态表中读取终端输出和连接状态。
-        session_id: usize,
-    },
-    /// 远程文件管理标签页，可由 SSH SFTP 或 SMB 后端驱动。
-    SftpFileManager {
-        /// 远程文件会话 ID，用于从应用状态表中读取远程文件列表和操作状态。
-        session_id: usize,
-    },
-    /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
-    Settings,
-}
-
-/// 顶部标签页状态。
-#[derive(Clone, Debug)]
-pub struct ArgusTab {
-    /// 标签唯一 ID，用于选中、关闭和渲染。
-    pub id: usize,
-    /// 标签标题。
-    pub title: String,
-    /// 标签内容类型。
-    pub kind: TabKind,
-}
-
-/// 子级懒加载完成后需要自动续做的来源树分析动作。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PendingSourceAnalysisAction {
-    /// 加载完成后打开 Jstack 线程日志分析。
-    Jstack {
-        /// 触发右键菜单的来源目录 ID。
-        source_id: SourceId,
-    },
-    /// 加载完成后打开 Runtime 日志解析。
-    Runtime {
-        /// 触发右键菜单的来源目录 ID。
-        source_id: SourceId,
-    },
-}
-
-impl PendingSourceAnalysisAction {
-    /// 返回等待加载的来源目录 ID，便于子级加载回调精确匹配。
-    fn source_id(self) -> SourceId {
-        match self {
-            Self::Jstack { source_id } | Self::Runtime { source_id } => source_id,
-        }
-    }
-}
-
-/// 日志正文中的文本位置，使用行号和字符列表达。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LogTextPosition {
-    /// 0 基日志行号。
-    pub line_index: usize,
-    /// 行内字符列，按 Unicode 标量值计数，避免中文被字节下标截断。
-    pub column: usize,
-}
-
-/// 日志正文选区，支持跨行复制。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogTextSelection {
-    /// 鼠标按下时的选区锚点。
-    pub anchor: LogTextPosition,
-    /// 当前拖拽或键盘扩展到的焦点位置。
-    pub focus: LogTextPosition,
-}
-
-impl LogTextSelection {
-    /// 返回选区是否为空。
-    pub fn is_empty(&self) -> bool {
-        self.anchor == self.focus
-    }
-
-    /// 返回按文档顺序排列后的起止位置。
-    pub fn normalized(&self) -> (LogTextPosition, LogTextPosition) {
-        if log_text_position_le(self.anchor, self.focus) {
-            (self.anchor, self.focus)
-        } else {
-            (self.focus, self.anchor)
-        }
-    }
-}
-
-/// 日志正文拖拽选择状态，记录起始选区和当前拖拽粒度。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogTextSelectionDrag {
-    /// 鼠标按下时形成的基础选区；双击为词，三击为整行。
-    pub anchor_range: LogTextSelection,
-    /// 当前拖拽粒度，决定后续移动时如何扩展选区。
-    pub granularity: TextSelectionGranularity,
-}
-
-/// 单行输入框拖拽选择状态，记录起始字符范围和当前拖拽粒度。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InputTextSelectionDrag {
-    /// 鼠标按下时形成的基础字符范围。
-    pub anchor_range: std::ops::Range<usize>,
-    /// 当前拖拽粒度，决定移动时按字符、词或整行扩展。
-    pub granularity: TextSelectionGranularity,
-}
-
-/// 日志搜索窗口输入框类型，用于复用同一套输入状态处理。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LogSearchInputKind {
-    /// 关键字输入框。
-    Keyword,
-    /// 来源树目录输入框。
-    Directory,
-}
-
-/// Runtime 分析页过滤输入框类型。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeFilterInputKind {
-    /// 表格任意关键字过滤。
-    Keyword,
-    /// 用户名模糊过滤。
-    Username,
-    /// 请求开始时间过滤。
-    StartTime,
-    /// 请求结束时间过滤。
-    EndTime,
-}
-
-/// Runtime 日期时间选择器可调整的时间部分。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeDateTimePart {
-    /// 年。
-    Year,
-    /// 月。
-    Month,
-    /// 日。
-    Day,
-    /// 时。
-    Hour,
-    /// 分。
-    Minute,
-    /// 秒。
-    Second,
-}
-
-/// Runtime 日期时间选择器快捷动作。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeDateTimeQuickAction {
-    /// 设置为今天 00:00:00。
-    TodayStart,
-    /// 设置为当前本地时间。
-    Now,
-    /// 设置为今天 23:59:59。
-    TodayEnd,
-    /// 清空当前时间过滤条件。
-    Clear,
-}
-
-/// 应用内所有自绘单行输入框的原生文本输入目标。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AppTextInputTarget {
-    /// 来源树过滤输入框。
-    SourceTreeSearch,
-    /// 链接树过滤输入框。
-    ConnectionTreeSearch,
-    /// 新增目录表单中的目录名称输入框。
-    ConnectionDirectoryName,
-    /// 新增连接链接表单中的链接名称输入框。
-    ConnectionLinkName,
-    /// 新增连接链接表单中的主机输入框。
-    ConnectionLinkHost,
-    /// 新增连接链接表单中的端口输入框。
-    ConnectionLinkPort,
-    /// 新增连接链接表单中的用户名输入框。
-    ConnectionLinkUsername,
-    /// 新增连接链接表单中的密码输入框。
-    ConnectionLinkPassword,
-    /// 新增 SMB 链接表单中的共享名称输入框。
-    ConnectionLinkShare,
-    /// 新增 SMB 链接表单中的初始目录输入框。
-    ConnectionLinkInitialDir,
-    /// 新增 SMB 链接表单中的域或工作组输入框。
-    ConnectionLinkDomain,
-    /// 新增 SSH 链接表单中的私钥路径输入框。
-    ConnectionLinkPrivateKeyPath,
-    /// 新增 SSH 链接表单中的私钥口令输入框。
-    ConnectionLinkPrivateKeyPassphrase,
-    /// 远程文件管理地址栏输入框。
-    SftpAddress {
-        /// 远程文件管理会话 ID。
-        session_id: usize,
-    },
-    /// 远程文件管理重命名弹窗名称输入框。
-    SftpRenameName,
-    /// 来源选择器路径输入框。
-    SourcePickerPath,
-    /// 独立日志搜索窗口输入框。
-    LogSearch(LogSearchInputKind),
-    /// Runtime 分析页过滤输入框。
-    RuntimeFilter {
-        /// Runtime 分析页 ID。
-        analysis_id: usize,
-        /// 过滤输入框类型。
-        input_kind: RuntimeFilterInputKind,
-    },
-    /// 设置窗口快搜关键字输入框。
-    SettingsQuickKeywords,
-    /// 设置窗口 Jstack 线程名过滤输入框。
-    SettingsJstackThreadNameFilter,
-    /// 设置窗口 Jstack 完整线程段过滤输入框。
-    SettingsJstackStackSegmentFilter,
-    /// 设置窗口升级服务器输入框。
-    SettingsUpgradeServer,
-    /// 设置窗口升级验签公钥输入框。
-    SettingsUpgradePublicKey,
-}
-
-/// 日志搜索窗口中的单行输入框状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogSearchInputState {
-    /// 输入框当前文本。
-    pub value: String,
-    /// 光标字符位置。
-    pub cursor: usize,
-    /// 选区锚点；与光标不一致时表示存在选区。
-    pub selection_anchor: Option<usize>,
-    /// 输入法 marked text 字符范围，候选态替换时使用。
-    pub marked_range: Option<std::ops::Range<usize>>,
-    /// 鼠标拖拽选区状态。
-    pub selection_drag: Option<InputTextSelectionDrag>,
-    /// 是否处于焦点状态。
-    pub is_focused: bool,
-}
-
-impl Default for LogSearchInputState {
-    /// 创建空输入框状态。
-    fn default() -> Self {
-        Self {
-            value: String::new(),
-            cursor: 0,
-            selection_anchor: None,
-            marked_range: None,
-            selection_drag: None,
-            is_focused: false,
-        }
-    }
-}
-
-/// 设置窗口中的单行输入框状态；用于保存持久化设置项的编辑光标和选区。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SettingsTextInputState {
-    /// 输入框当前文本。
-    pub value: String,
-    /// 光标字符位置。
-    pub cursor: usize,
-    /// 选区锚点；与光标不一致时表示存在选区。
-    pub selection_anchor: Option<usize>,
-    /// 输入法 marked text 字符范围，候选态替换时使用。
-    pub marked_range: Option<std::ops::Range<usize>>,
-    /// 鼠标拖拽选区状态。
-    pub selection_drag: Option<InputTextSelectionDrag>,
-    /// 是否处于焦点状态。
-    pub is_focused: bool,
-}
-
-impl SettingsTextInputState {
-    /// 根据已有配置值构造设置输入框状态，光标默认位于文本末尾。
-    pub fn from_value(value: String) -> Self {
-        let cursor = character_count(&value);
-        Self {
-            value,
-            cursor,
-            selection_anchor: None,
-            marked_range: None,
-            selection_drag: None,
-            is_focused: false,
-        }
-    }
-}
-
-/// 主窗口内输入框真实焦点句柄集合。
-#[derive(Clone)]
-pub struct AppInputFocusHandles {
-    /// 主窗口根区域焦点，用于点击非输入区域时承接真实键盘焦点。
-    pub root: FocusHandle,
-    /// 来源树过滤输入框焦点。
-    pub source_tree_search: FocusHandle,
-    /// 链接树过滤输入框焦点。
-    pub connection_tree_search: FocusHandle,
-    /// 新增目录名称输入框焦点。
-    pub connection_directory_name: FocusHandle,
-    /// 新增连接链接名称输入框焦点。
-    pub connection_link_name: FocusHandle,
-    /// 新增连接链接主机输入框焦点。
-    pub connection_link_host: FocusHandle,
-    /// 新增连接链接端口输入框焦点。
-    pub connection_link_port: FocusHandle,
-    /// 新增连接链接用户名输入框焦点。
-    pub connection_link_username: FocusHandle,
-    /// 新增连接链接密码输入框焦点。
-    pub connection_link_password: FocusHandle,
-    /// 新增 SSH 链接私钥路径输入框焦点。
-    pub connection_link_private_key_path: FocusHandle,
-    /// 新增 SSH 链接私钥口令输入框焦点。
-    pub connection_link_private_key_passphrase: FocusHandle,
-    /// 远程文件管理地址栏焦点。
-    pub sftp_address: FocusHandle,
-    /// 远程文件管理重命名弹窗输入框焦点。
-    pub sftp_rename_name: FocusHandle,
-    /// 右侧终端面板焦点。
-    pub terminal: FocusHandle,
-    /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。
-    pub jstack_analysis: FocusHandle,
-    /// Runtime 分析页焦点，用于表格单元格拖选后稳定接收复制快捷键。
-    pub runtime_analysis: FocusHandle,
-    /// Runtime 关键字过滤输入框焦点。
-    pub runtime_filter_keyword: FocusHandle,
-    /// Runtime 用户名过滤输入框焦点。
-    pub runtime_filter_username: FocusHandle,
-    /// Runtime 开始时间过滤输入框焦点。
-    pub runtime_filter_start_time: FocusHandle,
-    /// Runtime 结束时间过滤输入框焦点。
-    pub runtime_filter_end_time: FocusHandle,
-}
-
-impl Default for SettingsTextInputState {
-    /// 创建空设置输入框状态。
-    fn default() -> Self {
-        Self::from_value(String::new())
-    }
-}
-
-/// 链接工作区当前打开的弹窗。
-#[derive(Clone, Debug)]
-pub enum ConnectionDialogState {
-    /// 新增目录表单。
-    NewDirectory(ConnectionDirectoryFormState),
-    /// 新增远程链接表单。
-    NewSshLink(ConnectionLinkFormState),
-    /// SSH 首次连接未知主机时的指纹确认弹窗。
-    ConfirmHostKey(ConnectionHostKeyPromptState),
-    /// 删除链接目录、SSH 链接或 SMB 链接前的二次确认弹窗。
-    ConfirmDelete(ConnectionDeletePromptState),
-}
-
-/// 新增目录表单状态。
-#[derive(Clone, Debug)]
-pub struct ConnectionDirectoryFormState {
-    /// 新目录的父目录 ID；为空表示创建在根层级。
-    pub parent_id: Option<ConnectionNodeId>,
-    /// 目录名称输入框。
-    pub name_input: SettingsTextInputState,
-    /// 最近一次校验错误。
-    pub error_message: Option<String>,
-}
-
-/// 新增远程链接表单状态。
-#[derive(Clone, Debug)]
-pub struct ConnectionLinkFormState {
-    /// 当前表单对应的链接协议。
-    pub link_kind: crate::connections::ConnectionLinkKind,
-    /// 新链接的父目录 ID；为空表示创建在根层级。
-    pub parent_id: Option<ConnectionNodeId>,
-    /// 链接名称输入框。
-    pub name_input: SettingsTextInputState,
-    /// SSH 主机输入框。
-    pub host_input: SettingsTextInputState,
-    /// SSH 端口输入框。
-    pub port_input: SettingsTextInputState,
-    /// SSH 用户名输入框。
-    pub username_input: SettingsTextInputState,
-    /// SSH 密码输入框。
-    pub password_input: SettingsTextInputState,
-    /// SMB 共享名称输入框。
-    pub share_input: SettingsTextInputState,
-    /// SMB 初始目录输入框。
-    pub initial_dir_input: SettingsTextInputState,
-    /// SMB 域或工作组输入框。
-    pub domain_input: SettingsTextInputState,
-    /// SSH 私钥路径输入框。
-    pub private_key_path_input: SettingsTextInputState,
-    /// SSH 私钥口令输入框。
-    pub private_key_passphrase_input: SettingsTextInputState,
-    /// 最近一次校验错误。
-    pub error_message: Option<String>,
-}
-
-/// SSH 主机指纹确认弹窗状态。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HostKeyPromptOwner {
-    /// 终端会话触发的主机指纹确认。
-    Terminal {
-        /// 终端会话 ID。
-        session_id: usize,
-    },
-    /// SSH SFTP 文件管理会话触发的主机指纹确认。
-    Sftp {
-        /// 远程文件管理会话 ID。
-        session_id: usize,
-    },
-}
-
-/// SSH 主机指纹确认弹窗状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionHostKeyPromptState {
-    /// 等待确认的会话 ID；具体类型由 `owner` 区分。
-    pub session_id: usize,
-    /// 触发确认的会话类型。
-    pub owner: HostKeyPromptOwner,
-    /// 关联链接节点 ID。
-    pub link_id: ConnectionNodeId,
-    /// 远程主机。
-    pub host: String,
-    /// 远程端口。
-    pub port: u16,
-    /// 待确认的 SHA256 指纹。
-    pub fingerprint: String,
-}
-
-/// 删除链接节点二次确认弹窗状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionDeletePromptState {
-    /// 待删除的连接节点 ID。
-    pub node_id: ConnectionNodeId,
-    /// 待删除节点展示名称。
-    pub label: String,
-    /// 是否为目录；目录删除前会额外要求为空。
-    pub is_directory: bool,
-}
-
-/// 远程文件管理内的应用弹窗。
-#[derive(Clone, Debug)]
-pub enum SftpDialogState {
-    /// 重命名远程文件或目录。
-    Rename(SftpRenameDialogState),
-    /// 删除远程普通文件或空目录前的二次确认。
-    ConfirmDelete(SftpDeletePromptState),
-}
-
-/// SFTP 重命名弹窗状态。
-#[derive(Clone, Debug)]
-pub struct SftpRenameDialogState {
-    /// 远程文件管理会话 ID。
-    pub session_id: usize,
-    /// 原始远程路径。
-    pub remote_path: String,
-    /// 原始名称。
-    pub original_name: String,
-    /// 名称输入框。
-    pub name_input: SettingsTextInputState,
-    /// 最近一次校验错误。
-    pub error_message: Option<String>,
-}
-
-/// SFTP 删除二次确认弹窗状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SftpDeletePromptState {
-    /// 远程文件管理会话 ID。
-    pub session_id: usize,
-    /// 待删除远程路径。
-    pub remote_path: String,
-    /// 待删除文件或目录名称。
-    pub name: String,
-    /// 是否为目录。
-    pub is_directory: bool,
-}
-
-/// 升级弹窗状态，覆盖发现版本、安装进度和失败提示三类用户可见流程。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UpgradeDialogState {
-    /// 发现可安装版本，等待用户确认升级、跳过或稍后。
-    Available {
-        /// 待安装的新版本信息。
-        upgrade: AvailableUpgrade,
-    },
-    /// 正在下载、校验、替换或重启。
-    Progress {
-        /// 正在处理的新版本号。
-        version: String,
-        /// 当前阶段说明。
-        message: String,
-    },
-    /// 升级失败，等待用户关闭后继续使用旧版本。
-    Failed {
-        /// 失败关联版本；手动检查失败时可能没有版本号。
-        version: Option<String>,
-        /// 失败原因。
-        message: String,
-    },
-}
-
-/// 日志正文中当前被搜索结果激活的命中位置。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ActiveSearchMatch {
-    /// 命中所在来源节点。
-    pub source_id: SourceId,
-    /// 0 基行号。
-    pub line_number: usize,
-    /// 命中关键字的字节范围。
-    pub match_ranges: Vec<Range<usize>>,
-    /// 当前通过上/下一个定位到的单个命中范围；为空时高亮整行所有命中。
-    pub active_range: Option<Range<usize>>,
-}
-
-/// 当前日志快速查找缓存键，避免关键字、选项或日志变化后复用过期结果。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QuickMatchKey {
-    /// 当前日志来源节点。
-    pub source_id: SourceId,
-    /// 当前关键字。
-    pub keyword: String,
-    /// 是否区分大小写。
-    pub case_sensitive: bool,
-    /// 是否启用正则。
-    pub regex_enabled: bool,
-}
-
-/// 搜索结果文件分组，记录结果在全量列表中的连续范围。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SearchResultGroup {
-    /// 分组对应的来源节点。
-    pub source_id: SourceId,
-    /// 文件展示名称。
-    pub label: String,
-    /// 文件展示路径。
-    pub path: String,
-    /// 分组内第一条结果的全量索引。
-    pub start_index: usize,
-    /// 分组内最后一条结果之后的位置。
-    pub end_index: usize,
-}
-
-/// 搜索结果面板虚拟列表中的可见行。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchResultListItem {
-    /// 文件分组标题行。
-    Group(usize),
-    /// 单条命中结果行。
-    Result(usize),
-}
-
-/// 日志搜索任务来源，用于结果面板区分普通搜索和快搜。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchRunKind {
-    /// 搜索窗口关键字输入框发起的普通搜索。
-    Normal,
-    /// 设置中的快搜关键字集合发起的一键搜索。
-    QuickKeywords,
-}
-
-/// 搜索结果面板自绘滚动条方向。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchResultScrollbarAxis {
-    /// 纵向结果滚动。
-    Vertical,
-    /// 横向预览滚动。
-    Horizontal,
-}
-
-/// 搜索结果面板滚动条拖拽状态。
-#[derive(Clone, Copy, Debug)]
-pub struct SearchResultScrollbarDrag {
-    /// 当前拖动方向。
-    pub axis: SearchResultScrollbarAxis,
-    /// 鼠标按下点在 thumb 内的相对偏移。
-    pub cursor_offset: Pixels,
-}
-
-/// 搜索结果面板高度拖拽状态。
-#[derive(Clone, Copy, Debug)]
-pub struct SearchResultPanelResizeDrag {
-    /// 鼠标按下时的窗口 y 坐标。
-    pub start_y: Pixels,
-    /// 鼠标按下时的面板高度。
-    pub start_height: f32,
-}
-
-/// 独立日志搜索窗口和结果面板共享的运行期状态。
-#[derive(Clone, Debug)]
-pub struct LogSearchState {
-    /// 搜索窗口是否已打开。
-    pub is_window_open: bool,
-    /// 搜索窗口句柄；再次打开时用于置前。
-    pub window_handle: Option<WindowHandle<LogSearchWindow>>,
-    /// 当前搜索范围。
-    pub scope: SearchScope,
-    /// 关键字输入框状态。
-    pub keyword_input: LogSearchInputState,
-    /// 关键字历史下拉菜单是否展开。
-    pub keyword_history_open: bool,
-    /// 关键字历史下拉菜单当前高亮项索引。
-    pub keyword_history_highlight: Option<usize>,
-    /// 目录输入框状态。
-    pub directory_input: LogSearchInputState,
-    /// 目录输入框对应的来源树目录节点。
-    pub directory_source_id: Option<SourceId>,
-    /// 是否区分大小写；同时影响普通关键字和正则搜索。
-    pub case_sensitive: bool,
-    /// 是否启用正则表达式搜索。
-    pub regex_enabled: bool,
-    /// 当前搜索进度。
-    pub progress: SearchProgress,
-    /// 当前任务状态。
-    pub task_state: SearchTaskState,
-    /// 当前搜索任务类型，用于结果面板文案和提示。
-    pub run_kind: SearchRunKind,
-    /// 搜索 generation，用于丢弃过期后台事件。
-    pub generation: usize,
-    /// 当前搜索取消令牌。
-    pub cancel_token: Option<Arc<AtomicBool>>,
-    /// 当前日志快速查找 generation，用于丢弃过期计数结果。
-    pub quick_match_generation: usize,
-    /// 当前日志快速查找缓存键。
-    pub quick_match_key: Option<QuickMatchKey>,
-    /// 当前日志快速查找取消令牌。
-    pub quick_cancel_token: Option<Arc<AtomicBool>>,
-    /// 当前日志按行缓存的快速查找结果。
-    pub quick_matches: Vec<SearchResult>,
-    /// 当前日志关键字出现总次数。
-    pub quick_match_count: usize,
-    /// 当前激活的快速查找命中序号，按出现次数计数。
-    pub active_quick_match_index: Option<usize>,
-    /// 当前日志快速查找提示。
-    pub quick_match_message: Option<String>,
-    /// 是否正在扫描当前日志用于计数或定位。
-    pub is_quick_counting: bool,
-    /// 全量搜索结果；不做数量截断，UI 通过虚拟列表渲染。
-    pub results: Vec<SearchResult>,
-    /// 搜索结果已命中的关键字集合，用于增量维护标题栏摘要。
-    pub result_keywords: BTreeSet<String>,
-    /// 搜索结果标题栏关键字摘要缓存，避免 UI 渲染期遍历全量结果。
-    pub result_keyword_summary: Option<String>,
-    /// 按文件聚合后的搜索结果分组。
-    pub result_groups: Vec<SearchResultGroup>,
-    /// 当前展开状态下虚拟列表需要渲染的行。
-    pub visible_result_items: Vec<SearchResultListItem>,
-    /// 已折叠的搜索结果文件分组。
-    pub collapsed_result_groups: BTreeSet<SourceId>,
-    /// 搜索结果列表估算内容宽度，用于横向滚动条。
-    pub result_list_content_width: f32,
-    /// 搜索结果面板当前高度。
-    pub result_panel_height: f32,
-    /// 搜索结果面板高度拖拽状态。
-    pub result_panel_resize_drag: Option<SearchResultPanelResizeDrag>,
-    /// 搜索结果面板滚动句柄。
-    pub result_scroll: UniformListScrollHandle,
-    /// 搜索结果面板自绘滚动条拖拽状态。
-    pub result_scrollbar_drag: Option<SearchResultScrollbarDrag>,
-    /// 当前激活的结果索引。
-    pub active_result_index: Option<usize>,
-    /// 点击结果但日志尚未读取完成时的待跳转结果。
-    pub pending_activation: Option<SearchResult>,
-    /// 最近一次搜索错误或提示。
-    pub message: Option<String>,
-}
-
-impl Default for LogSearchState {
-    /// 创建空闲搜索状态。
-    fn default() -> Self {
-        Self {
-            is_window_open: false,
-            window_handle: None,
-            scope: SearchScope::CurrentFile,
-            keyword_input: LogSearchInputState::default(),
-            keyword_history_open: false,
-            keyword_history_highlight: None,
-            directory_input: LogSearchInputState::default(),
-            directory_source_id: None,
-            case_sensitive: false,
-            regex_enabled: false,
-            progress: SearchProgress::default(),
-            task_state: SearchTaskState::Idle,
-            run_kind: SearchRunKind::Normal,
-            generation: 0,
-            cancel_token: None,
-            quick_match_generation: 0,
-            quick_match_key: None,
-            quick_cancel_token: None,
-            quick_matches: Vec::new(),
-            quick_match_count: 0,
-            active_quick_match_index: None,
-            quick_match_message: None,
-            is_quick_counting: false,
-            results: Vec::new(),
-            result_keywords: BTreeSet::new(),
-            result_keyword_summary: None,
-            result_groups: Vec::new(),
-            visible_result_items: Vec::new(),
-            collapsed_result_groups: BTreeSet::new(),
-            result_list_content_width: 0.0,
-            result_panel_height: SEARCH_RESULT_PANEL_HEIGHT_DEFAULT,
-            result_panel_resize_drag: None,
-            result_scroll: UniformListScrollHandle::new(),
-            result_scrollbar_drag: None,
-            active_result_index: None,
-            pending_activation: None,
-            message: None,
-        }
-    }
-}
-
-/// 分页日志滚动状态，使用 f64 避免超大行数下的像素精度丢失。
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PagedLogScrollState {
-    /// 纵向滚动像素。
-    pub top_px: f64,
-    /// 横向滚动像素。
-    pub left_px: f64,
-}
-
-/// 分页日志后台预取请求标记，避免 UI 重绘期间重复启动同一范围读取。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PagedLogPrefetchRequest {
-    /// 预取所属的来源节点 ID。
-    pub source_id: SourceId,
-    /// 起始 0 基行号。
-    pub start_line: usize,
-    /// 预取行数。
-    pub max_lines: usize,
-}
-
-/// 分页日志可见行高亮后台预取请求标记。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogHighlightPrefetchRequest {
-    /// 预取所属的来源节点 ID。
-    pub source_id: SourceId,
-    /// 高亮语言。
-    pub language: HighlightLanguage,
-    /// 起始 0 基行号。
-    pub start_line: usize,
-    /// 预取行数。
-    pub max_lines: usize,
-}
-
-/// 单个日志 tab 的阅读区 UI 状态。
-#[derive(Clone, Debug)]
-pub struct LogTabViewState {
-    /// 小日志 uniform_list 滚动句柄。
-    pub scroll_handle: UniformListScrollHandle,
-    /// 大日志分页视口测量句柄。
-    pub paged_viewport_handle: ScrollHandle,
-    /// 大日志分页滚动状态。
-    pub paged_scroll: PagedLogScrollState,
-    /// 当前正在后台预取的分页行范围；完成后清空。
-    pub pending_paged_prefetch: Option<PagedLogPrefetchRequest>,
-    /// 当前文本选区。
-    pub selection: Option<LogTextSelection>,
-    /// 鼠标拖拽选区状态；鼠标释放后清空。
-    pub selection_drag: Option<LogTextSelectionDrag>,
-    /// 当前 tab 日志正文是否接收键盘复制等快捷键。
-    pub is_focused: bool,
-    /// 当前 tab 的语法高亮缓存，避免滚动时重复扫描热点行。
-    pub highlight_cache: HighlightCache,
-    /// 当前正在后台预取的分页日志高亮范围；完成后清空。
-    pub pending_highlight_prefetch: Option<LogHighlightPrefetchRequest>,
-    /// 当前搜索结果激活后需要在正文中强调的命中行和片段。
-    pub active_search_match: Option<ActiveSearchMatch>,
-    /// 当前日志页签的行号打点集合，使用 0 基行号并按行号有序保存，便于 F2 循环跳转。
-    pub line_markers: BTreeSet<usize>,
-    /// 上一次 F2 跳转到的打点行，避免系统按键重复在同一渲染帧内反复命中同一打点。
-    pub last_line_marker_jump: Option<usize>,
-}
-
-/// 日志正文滚动条方向。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LogScrollbarAxis {
-    /// 纵向滚动条。
-    Vertical,
-    /// 横向滚动条。
-    Horizontal,
-}
-
-/// 日志正文滚动条拖拽状态。
-#[derive(Clone, Copy, Debug)]
-pub struct LogScrollbarDrag {
-    /// 被拖动的标签页 ID。
-    pub tab_id: usize,
-    /// 当前拖动方向。
-    pub axis: LogScrollbarAxis,
-    /// 鼠标按下点在 thumb 内的相对偏移。
-    pub cursor_offset: Pixels,
-}
-
-/// Jstack 分析任务状态，供内容区页签展示加载、结果或失败。
-#[derive(Clone, Debug)]
-pub enum JstackAnalysisTaskState {
-    /// 后台任务正在读取和聚合线程栈。
-    Loading {
-        /// 当前加载提示。
-        message: String,
-    },
-    /// 分析完成，可渲染频率矩阵。
-    Ready(JstackAnalysisResult),
-    /// 分析任务启动或后台执行失败。
-    Failed {
-        /// 用户可读失败原因。
-        message: String,
-    },
-}
-
-/// 单个 Jstack 分析页签的持久状态。
-#[derive(Clone, Debug)]
-pub struct JstackAnalysisState {
-    /// 分析 ID，与 `TabKind::JstackAnalysis` 对应。
-    pub id: usize,
-    /// 页签标题。
-    pub title: String,
-    /// 本次分析的来源目标快照，保持创建页签时的来源树顺序。
-    pub targets: Vec<JstackAnalysisTarget>,
-    /// 后台任务 generation，避免旧任务覆盖新结果。
-    pub generation: usize,
-    /// 当前启用的线程状态筛选项；默认仅展示 RUNNABLE。
-    pub active_states: BTreeSet<JstackThreadState>,
-    /// 是否启用设置页配置的线程堆栈过滤；新分析页默认开启。
-    pub is_thread_filter_enabled: bool,
-    /// 当前在分析矩阵左侧线程名列中选中的文本范围。
-    pub thread_name_selection: Option<JstackThreadNameSelection>,
-    /// 当前线程名列拖拽选择状态，用于持续扩展选区。
-    pub thread_name_selection_drag: Option<JstackThreadNameSelectionDrag>,
-    /// 当前点击过的线程方块 key，用于在矩阵中高亮具体快照格子。
-    pub selected_cell_key: Option<String>,
-    /// 当前筛选条件下可见的结果行索引，避免矩阵滚动渲染时重复扫描全部线程。
-    pub visible_row_indices: Vec<usize>,
-    /// 当前线程堆栈配置过滤隐藏的线程数量，用于标题统计展示。
-    pub filtered_row_count: usize,
-    /// 线程频率矩阵行虚拟列表滚动句柄。
-    pub row_scroll: UniformListScrollHandle,
-    /// 当前任务状态。
-    pub task_state: JstackAnalysisTaskState,
-}
-
-/// Runtime 分析任务状态，供内容区页签展示加载、结果或失败。
-#[derive(Clone, Debug)]
-pub enum RuntimeAnalysisTaskState {
-    /// 后台任务正在读取和聚合 Runtime 日志。
-    Loading {
-        /// 当前加载提示。
-        message: String,
-    },
-    /// 分析完成，可渲染三层统计表格。
-    Ready(Arc<RuntimeAnalysisResult>),
-    /// 分析任务启动或后台执行失败。
-    Failed {
-        /// 用户可读失败原因。
-        message: String,
-    },
-}
-
-/// Runtime 分析页当前显示层级。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RuntimeAnalysisView {
-    /// 总解析结果总览。
-    Summary,
-    /// 指定请求地址的请求明细表。
-    RequestDetails {
-        /// 请求地址。
-        request_path: String,
-    },
-    /// 指定请求日志的 SQL 明细表。
-    SqlList {
-        /// 请求地址，用于返回上一级详情页。
-        request_path: String,
-        /// 请求记录在结果集中的稳定索引。
-        request_index: usize,
-    },
-}
-
-/// Runtime 分析结果类型。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeAnalysisResultType {
-    /// 当前请求统计总览和下钻表格。
-    Statistics,
-    /// 按 SQL 结构聚合后的执行频率分析。
-    SqlFrequency,
-    /// 按 SQL 结构聚合后的平均执行耗时分析。
-    SlowSql,
-}
-
-/// Runtime SQL 频率分析缓存。
-#[derive(Clone, Debug)]
-pub struct RuntimeSqlFrequencyRowsCache {
-    /// 生成缓存时使用的过滤输入快照。
-    pub filter: RuntimeSqlAnalysisFilterSnapshot,
-    /// 已过滤和排序的 SQL 频率行。
-    pub rows: Arc<Vec<RuntimeSqlFrequencyAnalysisRow>>,
-}
-
-/// Runtime SQL 频率详情缓存。
-#[derive(Clone, Debug)]
-pub struct RuntimeSqlFrequencyDetailRowsCache {
-    /// 生成缓存时使用的过滤输入快照。
-    pub filter: RuntimeSqlAnalysisFilterSnapshot,
-    /// 当前详情页对应的 SQL 结构文本。
-    pub normalized_sql: String,
-    /// 已过滤和排序的 SQL 执行详情行。
-    pub rows: Arc<Vec<RuntimeSqlFrequencyDetailRow>>,
-}
-
-/// Runtime 慢 SQL 分析缓存。
-#[derive(Clone, Debug)]
-pub struct RuntimeSlowSqlRowsCache {
-    /// 生成缓存时使用的过滤输入快照。
-    pub filter: RuntimeSqlAnalysisFilterSnapshot,
-    /// 已过滤和排序的慢 SQL 聚合行。
-    pub rows: Arc<Vec<RuntimeSlowSqlSummaryRow>>,
-}
-
-/// Runtime 总览表排序结果缓存。
-#[derive(Clone, Debug)]
-pub struct RuntimeSummaryRowsCache {
-    /// 生成缓存时使用的过滤输入快照。
-    pub filter: RuntimeSqlAnalysisFilterSnapshot,
-    /// 总览表排序字段。
-    pub sort_key: RuntimeSummarySortKey,
-    /// 总览表排序方向。
-    pub sort_direction: RuntimeSortDirection,
-    /// 已过滤和排序的总览行。
-    pub rows: Arc<Vec<RuntimeRequestSummary>>,
-}
-
-/// Runtime 请求明细表排序索引缓存。
-#[derive(Clone, Debug)]
-pub struct RuntimeRequestIndicesCache {
-    /// 生成缓存时使用的过滤输入快照。
-    pub filter: RuntimeSqlAnalysisFilterSnapshot,
-    /// 当前请求地址。
-    pub request_path: String,
-    /// 请求明细表排序字段。
-    pub sort_key: RuntimeRequestSortKey,
-    /// 请求明细表排序方向。
-    pub sort_direction: RuntimeSortDirection,
-    /// 已过滤和排序的请求索引。
-    pub indices: Arc<Vec<usize>>,
-}
-
-/// Runtime SQL 明细表排序索引缓存。
-#[derive(Clone, Debug)]
-pub struct RuntimeSqlIndicesCache {
-    /// 生成缓存时使用的过滤输入快照。
-    pub filter: RuntimeSqlAnalysisFilterSnapshot,
-    /// 当前请求在结果集中的稳定索引。
-    pub request_index: usize,
-    /// SQL 明细表排序字段。
-    pub sort_key: RuntimeSqlSortKey,
-    /// SQL 明细表排序方向。
-    pub sort_direction: RuntimeSortDirection,
-    /// 已过滤和排序的 SQL 索引。
-    pub indices: Arc<Vec<usize>>,
-}
-
-/// Runtime 表格排序方向。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSortDirection {
-    /// 升序。
-    Ascending,
-    /// 降序。
-    Descending,
-}
-
-/// Runtime SQL 明细收起态固定行高。
-///
-/// 说明：Runtime SQL 表格已固定为单行展示，长 SQL 由单元格内部横向滚动承载；
-/// UI 层的 SQL 行高必须与这里保持一致，才能让虚拟列表滚动条稳定计算范围。
-pub const RUNTIME_SQL_COLLAPSED_ROW_HEIGHT: f32 = 36.0;
-
-/// Runtime 表格滚动条所属表格。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeScrollbarTable {
-    /// 总览表。
-    Summary,
-    /// 请求详情表。
-    Request,
-    /// SQL 明细表。
-    Sql,
-    /// SQL 频率分析表。
-    SqlFrequency,
-    /// SQL 频率详情表。
-    SqlFrequencyDetail,
-    /// 慢 SQL 分析表。
-    SlowSql,
-    /// 完整 SQL 弹窗代码块。
-    SqlDialog,
-}
-
-/// Runtime 表格滚动条拖拽状态。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RuntimeScrollbarDrag {
-    /// 当前被拖拽的表格。
-    pub table: RuntimeScrollbarTable,
-    /// 鼠标按下位置相对滑块顶部的偏移。
-    pub cursor_offset: Pixels,
-}
-
-impl RuntimeSortDirection {
-    /// 返回切换后的排序方向。
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::Ascending => Self::Descending,
-            Self::Descending => Self::Ascending,
-        }
-    }
-
-    /// 返回表头展示箭头。
-    pub fn indicator(self) -> &'static str {
-        match self {
-            Self::Ascending => " ↑",
-            Self::Descending => " ↓",
-        }
-    }
-}
-
-/// Runtime 总览表排序字段。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSummarySortKey {
-    /// 请求次数。
-    RequestCount,
-    /// 请求地址。
-    RequestPath,
-    /// 平均耗时。
-    AverageDuration,
-    /// 慢 SQL 比例。
-    SlowSqlRatio,
-}
-
-/// Runtime 请求明细表排序字段。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeRequestSortKey {
-    /// 请求时间。
-    RequestTime,
-    /// 用户名。
-    Username,
-    /// 请求耗时。
-    RequestDuration,
-    /// 请求地址。
-    RequestPath,
-}
-
-/// Runtime SQL 明细表排序字段。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSqlSortKey {
-    /// SQL 执行总耗时。
-    ExecuteDuration,
-    /// 获取连接耗时。
-    AcquireConnectionDuration,
-    /// 事务提交耗时。
-    CommitDuration,
-    /// 释放连接耗时。
-    ReleaseConnectionDuration,
-    /// 解析结果集耗时。
-    ParseResultDuration,
-    /// SQL 文本。
-    SqlText,
-}
-
-/// 单个 Runtime 分析页签的持久状态。
-#[derive(Clone, Debug)]
-pub struct RuntimeAnalysisState {
-    /// 分析 ID，与 `TabKind::RuntimeAnalysis` 对应。
-    pub id: usize,
-    /// 页签标题。
-    pub title: String,
-    /// 本次分析的来源目标快照，保持创建页签时的来源树顺序。
-    pub targets: Vec<RuntimeAnalysisTarget>,
-    /// 后台任务 generation，避免旧任务覆盖新结果。
-    pub generation: usize,
-    /// 当前三层 drill-down 视图。
-    pub view: RuntimeAnalysisView,
-    /// 当前展示的 Runtime 分析结果类型。
-    pub result_type: RuntimeAnalysisResultType,
-    /// 总览表排序字段。
-    pub summary_sort_key: RuntimeSummarySortKey,
-    /// 总览表排序方向。
-    pub summary_sort_direction: RuntimeSortDirection,
-    /// 请求明细表排序字段。
-    pub request_sort_key: RuntimeRequestSortKey,
-    /// 请求明细表排序方向。
-    pub request_sort_direction: RuntimeSortDirection,
-    /// SQL 明细表排序字段。
-    pub sql_sort_key: RuntimeSqlSortKey,
-    /// SQL 明细表排序方向。
-    pub sql_sort_direction: RuntimeSortDirection,
-    /// 任意关键字过滤输入框状态。
-    pub filter_keyword_input: SettingsTextInputState,
-    /// 用户名过滤输入框状态。
-    pub filter_username_input: SettingsTextInputState,
-    /// 请求开始时间过滤输入框状态。
-    pub filter_start_time_input: SettingsTextInputState,
-    /// 请求结束时间过滤输入框状态。
-    pub filter_end_time_input: SettingsTextInputState,
-    /// 已应用到结果缓存的关键字过滤值，输入防抖完成前仍保持旧值。
-    pub applied_filter_keyword: String,
-    /// 已应用到结果缓存的用户名过滤值。
-    pub applied_filter_username: String,
-    /// 已应用到结果缓存的开始时间过滤值。
-    pub applied_filter_start_time: String,
-    /// 已应用到结果缓存的结束时间过滤值。
-    pub applied_filter_end_time: String,
-    /// 过滤输入 generation，用于丢弃过期防抖任务。
-    pub filter_input_generation: usize,
-    /// 过滤后台任务 generation，用于丢弃过期计算结果。
-    pub filter_task_generation: usize,
-    /// 是否存在等待防抖应用的过滤输入。
-    pub is_filter_pending: bool,
-    /// 是否正在后台构建过滤结果缓存。
-    pub is_filter_computing: bool,
-    /// 当前展开的时间选择器输入框；为空表示没有打开时间面板。
-    pub open_time_picker: Option<RuntimeFilterInputKind>,
-    /// 当前 Runtime 表格单元格中的文本选区。
-    pub cell_selection: Option<RuntimeTableCellSelection>,
-    /// 当前 Runtime 表格单元格拖拽状态。
-    pub cell_selection_drag: Option<RuntimeTableCellSelectionDrag>,
-    /// 当前悬浮的 Runtime SQL 文本单元格；用于只在该单元格末尾展示更多入口。
-    pub hovered_sql_cell: Option<RuntimeSqlCellKey>,
-    /// 当前打开的 Runtime SQL 完整文本弹窗。
-    pub sql_text_dialog: Option<RuntimeSqlTextDialog>,
-    /// 总览表滚动句柄。
-    pub summary_scroll: UniformListScrollHandle,
-    /// 请求明细表滚动句柄。
-    pub request_scroll: UniformListScrollHandle,
-    /// SQL 明细表滚动句柄。
-    pub sql_scroll: UniformListScrollHandle,
-    /// SQL 频率分析表滚动句柄。
-    pub sql_frequency_scroll: UniformListScrollHandle,
-    /// SQL 频率详情表滚动句柄。
-    pub sql_frequency_detail_scroll: UniformListScrollHandle,
-    /// 慢 SQL 分析表滚动句柄。
-    pub slow_sql_scroll: UniformListScrollHandle,
-    /// SQL 频率分析当前打开的详情 SQL；为空时展示频率列表。
-    pub sql_frequency_detail_sql: Option<String>,
-    /// 慢 SQL 分析当前打开的详情 SQL；为空时展示慢 SQL 聚合列表。
-    pub slow_sql_detail_sql: Option<String>,
-    /// Runtime 三类结果共享的过滤行缓存，避免切换页面和滚动时重复全量扫描。
-    pub runtime_filter_rows_cache: Option<RuntimeAnalysisFilterRows>,
-    /// SQL 频率分析后台计算 generation，用于丢弃过期结果。
-    pub sql_frequency_rows_task_generation: usize,
-    /// 慢 SQL 分析后台计算 generation，用于丢弃过期结果。
-    pub slow_sql_rows_task_generation: usize,
-    /// SQL 频率分析是否正在后台计算。
-    pub is_sql_frequency_rows_computing: bool,
-    /// 慢 SQL 分析是否正在后台计算。
-    pub is_slow_sql_rows_computing: bool,
-    /// 当前正在计算的 SQL 频率过滤快照。
-    pub sql_frequency_rows_computing_filter: Option<RuntimeSqlAnalysisFilterSnapshot>,
-    /// 当前正在计算的慢 SQL 过滤快照。
-    pub slow_sql_rows_computing_filter: Option<RuntimeSqlAnalysisFilterSnapshot>,
-    /// SQL 频率分析过滤结果缓存，避免滚动重绘时重复全量聚合。
-    pub sql_frequency_rows_cache: RefCell<Option<RuntimeSqlFrequencyRowsCache>>,
-    /// SQL 频率详情过滤结果缓存，避免详情滚动重绘时重复全量扫描。
-    pub sql_frequency_detail_rows_cache: RefCell<Option<RuntimeSqlFrequencyDetailRowsCache>>,
-    /// 慢 SQL 分析过滤结果缓存，避免滚动重绘时重复全量排序。
-    pub slow_sql_rows_cache: RefCell<Option<RuntimeSlowSqlRowsCache>>,
-    /// 总览表排序缓存，避免切换页签或重绘时重复排序。
-    pub summary_rows_cache: RefCell<Option<RuntimeSummaryRowsCache>>,
-    /// 请求明细表排序缓存，避免切换页签或重绘时重复排序。
-    pub request_indices_cache: RefCell<Option<RuntimeRequestIndicesCache>>,
-    /// SQL 明细表排序缓存，避免切换页签或重绘时重复排序。
-    pub sql_indices_cache: RefCell<Option<RuntimeSqlIndicesCache>>,
-    /// 当前 Runtime 表格滚动条拖拽状态。
-    pub scrollbar_drag: Option<RuntimeScrollbarDrag>,
-    /// 完整 SQL 弹窗代码块滚动句柄，用于自定义可拖拽滚动条。
-    pub sql_dialog_scroll: ScrollHandle,
-    /// 当前任务状态。
-    pub task_state: RuntimeAnalysisTaskState,
-}
-
-/// Runtime SQL 文本单元格悬浮目标，用于在单元格末尾展示"更多"入口。
-///
-/// 统计分析、频率/慢 SQL 详情中的具体 SQL 记录使用 `Record`；
-/// 频率/慢 SQL 分析中的聚合行使用 `Summary`。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSqlCellKey {
-    /// 具体请求中的某条 SQL 记录。
-    Record {
-        /// 请求记录在分析结果中的稳定索引。
-        request_index: usize,
-        /// SQL 记录在当前请求中的稳定索引。
-        sql_index: usize,
-    },
-    /// 频率/慢 SQL 分析中的聚合行。
-    Summary {
-        /// 聚合行在当前结果列表中的索引。
-        row_index: usize,
-    },
-}
-
-/// Runtime SQL 完整文本弹窗状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextDialog {
-    /// 请求地址。
-    pub request_path: String,
-    /// 请求时间展示文本。
-    pub request_time_label: String,
-    /// 用户名展示文本。
-    pub username: String,
-    /// SQL 原文，保留解析结果中的换行和缩进。
-    pub sql_text: String,
-    /// 当前 SQL 弹窗正文选区。
-    pub selection: Option<RuntimeSqlTextSelection>,
-    /// 当前 SQL 弹窗正文拖拽状态。
-    pub selection_drag: Option<RuntimeSqlTextSelectionDrag>,
-}
-
-/// Runtime SQL 弹窗正文中的文本位置，使用行号和字符列表达。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextPosition {
-    /// 0 基 SQL 行号。
-    pub line_index: usize,
-    /// 行内字符列，按 Unicode 标量值计数。
-    pub column: usize,
-}
-
-/// Runtime SQL 弹窗正文选区，支持跨行复制。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextSelection {
-    /// 鼠标按下时的选区锚点。
-    pub anchor: RuntimeSqlTextPosition,
-    /// 当前拖拽到的焦点位置。
-    pub focus: RuntimeSqlTextPosition,
-}
-
-impl RuntimeSqlTextSelection {
-    /// 返回选区是否为空。
-    pub fn is_empty(&self) -> bool {
-        self.anchor == self.focus
-    }
-
-    /// 返回按文档顺序排列后的起止位置。
-    pub fn normalized(&self) -> (RuntimeSqlTextPosition, RuntimeSqlTextPosition) {
-        if runtime_sql_text_position_le(self.anchor, self.focus) {
-            (self.anchor, self.focus)
-        } else {
-            (self.focus, self.anchor)
-        }
-    }
-}
-
-/// Runtime SQL 弹窗正文拖拽选择状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextSelectionDrag {
-    /// 鼠标按下时形成的基础选区。
-    pub anchor_range: RuntimeSqlTextSelection,
-    /// 当前拖拽粒度，决定后续移动时按字符、词或整行扩展。
-    pub granularity: TextSelectionGranularity,
-}
-
-/// Runtime 表格单元格的单行文本选区。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeTableCellSelection {
-    /// 单元格稳定 key，包含当前分析页内的层级、行和列身份。
-    pub cell_key: String,
-    /// 当前单元格完整文本；复制时从该文本中截取选区。
-    pub text: String,
-    /// 选区锚点字符列。
-    pub anchor: usize,
-    /// 选区焦点字符列。
-    pub focus: usize,
-}
-
-impl RuntimeTableCellSelection {
-    /// 返回按字符顺序归一化后的非空选区。
-    pub fn normalized_range(&self) -> Option<Range<usize>> {
-        let text_length = character_count(&self.text);
-        let start = self.anchor.min(self.focus).min(text_length);
-        let end = self.anchor.max(self.focus).min(text_length);
-        (start < end).then_some(start..end)
-    }
-}
-
-/// Runtime 表格单元格拖拽选择状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeTableCellSelectionDrag {
-    /// 本次拖拽起始的单元格 key。
-    pub cell_key: String,
-    /// 本次拖拽起始的单元格完整文本。
-    pub text: String,
-    /// 鼠标按下时按点击次数扩展后的基础字符范围。
-    pub anchor_range: Range<usize>,
-    /// 当前选择粒度，单击按字符，双击及以上按整格内容。
-    pub granularity: TextSelectionGranularity,
-}
-
-/// Jstack 分析矩阵左侧线程名的单行文本选区。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadNameSelection {
-    /// 线程身份 key，包含线程名和线程 ID，用于区分同名线程。
-    pub thread_identity: String,
-    /// 当前显示的线程名文本；复制时只复制该文本的选中片段。
-    pub thread_name: String,
-    /// 选区锚点字符列。
-    pub anchor: usize,
-    /// 选区焦点字符列。
-    pub focus: usize,
-}
-
-impl JstackThreadNameSelection {
-    /// 返回按字符顺序归一化后的非空选区。
-    pub fn normalized_range(&self) -> Option<Range<usize>> {
-        let text_length = character_count(&self.thread_name);
-        let start = self.anchor.min(self.focus).min(text_length);
-        let end = self.anchor.max(self.focus).min(text_length);
-        (start < end).then_some(start..end)
-    }
-}
-
-/// Jstack 分析矩阵左侧线程名拖拽选择状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadNameSelectionDrag {
-    /// 本次拖拽起始的线程身份 key。
-    pub thread_identity: String,
-    /// 本次拖拽起始的线程名文本。
-    pub thread_name: String,
-    /// 鼠标按下时按点击次数扩展后的基础字符范围。
-    pub anchor_range: Range<usize>,
-    /// 当前选择粒度，支持单击字符、双击词和三击整行。
-    pub granularity: TextSelectionGranularity,
-}
-
-impl JstackAnalysisState {
-    /// 根据当前状态筛选和配置过滤规则重建可见行缓存。
-    ///
-    /// 参数说明：
-    /// - `thread_filter`：设置页当前配置的线程过滤器。
-    ///
-    /// 返回值：无；结果会写入 `visible_row_indices` 和 `filtered_row_count`。
-    pub fn rebuild_visible_row_cache(&mut self, thread_filter: &JstackThreadFilter) {
-        let JstackAnalysisTaskState::Ready(result) = &self.task_state else {
-            self.visible_row_indices.clear();
-            self.filtered_row_count = 0;
-            return;
-        };
-
-        let should_filter_threads = self.is_thread_filter_enabled && !thread_filter.is_empty();
-        self.filtered_row_count = if should_filter_threads {
-            result
-                .rows
-                .iter()
-                .filter(|row| thread_filter.matches_row(row))
-                .count()
-        } else {
-            0
-        };
-        self.visible_row_indices = visible_jstack_row_indices(
-            result,
-            &self.active_states,
-            should_filter_threads.then_some(thread_filter),
-        );
-    }
-}
-
-impl Default for LogTabViewState {
-    /// 创建默认阅读区状态。
-    fn default() -> Self {
-        Self {
-            scroll_handle: UniformListScrollHandle::new(),
-            paged_viewport_handle: ScrollHandle::new(),
-            paged_scroll: PagedLogScrollState::default(),
-            pending_paged_prefetch: None,
-            selection: None,
-            selection_drag: None,
-            is_focused: false,
-            highlight_cache: HighlightCache::default(),
-            pending_highlight_prefetch: None,
-            active_search_match: None,
-            line_markers: BTreeSet::new(),
-            last_line_marker_jump: None,
-        }
-    }
-}
-
-/// 返回当前 Jstack 筛选条件下需要渲染的结果行索引。
-fn visible_jstack_row_indices(
-    result: &JstackAnalysisResult,
-    active_states: &BTreeSet<JstackThreadState>,
-    thread_filter: Option<&JstackThreadFilter>,
-) -> Vec<usize> {
-    if active_states.is_empty() {
-        return Vec::new();
-    }
-
-    let mut visible_rows = result
-        .rows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| {
-            if thread_filter.is_some_and(|filter| filter.matches_row(row)) {
-                return None;
-            }
-
-            // 按当前状态筛选后的实际命中次数排序，避免隐藏状态的历史出现次数把低命中线程顶到前面。
-            let visible_hit_count = row
-                .cells
-                .iter()
-                .filter(|cell| {
-                    cell.count > 0
-                        && cell
-                            .state
-                            .is_some_and(|state| active_states.contains(&state))
-                })
-                .map(|cell| cell.count)
-                .sum::<usize>();
-
-            (visible_hit_count > 0).then_some((index, visible_hit_count))
-        })
-        .collect::<Vec<_>>();
-
-    visible_rows.sort_by(|(left_index, left_count), (right_index, right_count)| {
-        right_count.cmp(left_count).then_with(|| {
-            result.rows[*left_index]
-                .thread_name
-                .cmp(&result.rows[*right_index].thread_name)
-                .then_with(|| {
-                    result.rows[*left_index]
-                        .thread_id
-                        .cmp(&result.rows[*right_index].thread_id)
-                })
-        })
-    });
-    visible_rows.into_iter().map(|(index, _)| index).collect()
-}
-
-/// 为线程详情窗口收集当前可见状态下的代表堆栈记录。
-///
-/// 参数说明：
-/// - `row`：频率矩阵中的线程行。
-/// - `active_states`：当前启用的线程状态筛选。
-/// - `active_snapshot_index`：点击方块所在快照序号。
-/// - `active_occurrence_index`：点击方块在同一快照内选中的出现序号。
-///
-/// 返回值：按快照顺序排列的堆栈记录，每个快照最多一条。
-fn jstack_detail_occurrences_for_visible_cells(
-    row: &JstackFrequencyRow,
-    active_states: &BTreeSet<JstackThreadState>,
-    active_snapshot_index: usize,
-    active_occurrence_index: usize,
-) -> Vec<JstackThreadStackOccurrence> {
-    if active_states.is_empty() {
-        return Vec::new();
-    }
-
-    row.cells
-        .iter()
-        .filter_map(|cell| {
-            let cell_state = cell.state?;
-            if cell.count == 0 || !active_states.contains(&cell_state) {
-                return None;
-            }
-
-            if cell.snapshot_index == active_snapshot_index {
-                return cell
-                    .stack_occurrences
-                    .iter()
-                    .find(|occurrence| occurrence.occurrence_index == active_occurrence_index)
-                    .or_else(|| {
-                        cell.stack_occurrences
-                            .iter()
-                            .find(|occurrence| occurrence.state == cell_state)
-                    })
-                    .or_else(|| cell.stack_occurrences.first())
-                    .cloned();
-            }
-
-            cell.stack_occurrences
-                .iter()
-                .find(|occurrence| occurrence.state == cell_state)
-                .or_else(|| cell.stack_occurrences.first())
-                .cloned()
-        })
-        .collect()
-}
-
-/// 生成 Jstack 频率矩阵方块的稳定选择 key。
-///
-/// 参数说明：
-/// - `row_index`：分析结果中的线程行索引。
-/// - `snapshot_index`：快照列索引。
-///
-/// 返回值：可在状态和 UI 之间共享的方块标识。
-pub fn jstack_cell_selection_key(row_index: usize, snapshot_index: usize) -> String {
-    format!("{row_index}:{snapshot_index}")
-}
-
-/// 根据点击次数返回 Jstack 线程名文本的字符选区。
-///
-/// 参数说明：
-/// - `thread_name`：当前显示的线程名。
-/// - `character_index`：命中的字符列。
-/// - `granularity`：选择粒度。
-///
-/// 返回值：按字符索引表示的选区范围。
-fn jstack_thread_name_range_for_granularity(
-    thread_name: &str,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    let text_length = character_count(thread_name);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(thread_name, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
-}
-
-/// 根据点击次数返回 Runtime 表格单元格文本的字符选区。
-///
-/// 参数说明：
-/// - `text`：当前单元格完整文本。
-/// - `character_index`：命中的字符列。
-/// - `granularity`：选择粒度；Runtime 表格要求双击选中整格内容。
-///
-/// 返回值：按字符索引表示的选区范围。
-fn runtime_cell_range_for_granularity(
-    text: &str,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    let text_length = character_count(text);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word | TextSelectionGranularity::Line => 0..text_length,
-    }
-}
-
-/// 判断 Runtime SQL 弹窗文本位置是否按文档顺序不晚于另一个位置。
-fn runtime_sql_text_position_le(
-    left: RuntimeSqlTextPosition,
-    right: RuntimeSqlTextPosition,
-) -> bool {
-    left.line_index < right.line_index
-        || (left.line_index == right.line_index && left.column <= right.column)
-}
-
-/// 按点击粒度生成 Runtime SQL 弹窗正文选区。
-fn runtime_sql_text_range_for_granularity(
-    line_index: usize,
-    line: &str,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> RuntimeSqlTextSelection {
-    let line_length = character_count(line);
-    let cursor = character_index.min(line_length);
-    let range = match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => word_range_at(line, cursor).unwrap_or(cursor..cursor),
-        TextSelectionGranularity::Line => 0..line_length,
-    };
-
-    RuntimeSqlTextSelection {
-        anchor: RuntimeSqlTextPosition {
-            line_index,
-            column: range.start,
-        },
-        focus: RuntimeSqlTextPosition {
-            line_index,
-            column: range.end,
-        },
-    }
-}
-
-/// 将 SQL 原文按弹窗展示规则拆成行，保留空行和缩进。
-fn runtime_sql_text_lines(sql_text: &str) -> Vec<String> {
-    sql_text
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .split('\n')
-        .map(ToString::to_string)
-        .collect()
-}
-
-/// 从 Runtime SQL 弹窗行集合中提取当前选区文本，保留跨行换行符。
-fn selected_runtime_sql_text_from_lines(
-    lines: &[String],
-    selection: &RuntimeSqlTextSelection,
-) -> Option<String> {
-    if selection.is_empty() || lines.is_empty() {
-        return None;
-    }
-
-    let (start, end) = selection.normalized();
-    if start.line_index >= lines.len() {
-        return None;
-    }
-
-    let end_line = end.line_index.min(lines.len().saturating_sub(1));
-    let mut selected = String::new();
-    for line_index in start.line_index..=end_line {
-        if line_index > start.line_index {
-            selected.push('\n');
-        }
-        let line = &lines[line_index];
-        let line_character_count = character_count(line);
-        let start_column = if line_index == start.line_index {
-            start.column.min(line_character_count)
-        } else {
-            0
-        };
-        let end_column = if line_index == end.line_index {
-            end.column.min(line_character_count)
-        } else {
-            line_character_count
-        };
-        if start_column < end_column {
-            selected.push_str(&slice_character_range(line, start_column..end_column));
-        }
-    }
-
-    (!selected.is_empty()).then_some(selected)
-}
-
-/// 清理 Runtime 分析页所有过滤输入框焦点态。
-fn clear_runtime_filter_inputs_focus(state: &mut RuntimeAnalysisState) {
-    clear_runtime_filter_input_focus(&mut state.filter_keyword_input);
-    clear_runtime_filter_input_focus(&mut state.filter_username_input);
-    clear_runtime_filter_input_focus(&mut state.filter_start_time_input);
-    clear_runtime_filter_input_focus(&mut state.filter_end_time_input);
-    state.open_time_picker = None;
-}
-
-/// 从 Runtime 过滤输入框状态生成原始输入快照。
-fn runtime_filter_input_snapshot_from_state(
-    state: &RuntimeAnalysisState,
-) -> RuntimeAnalysisFilterSnapshot {
-    RuntimeAnalysisFilterSnapshot {
-        keyword: state.filter_keyword_input.value.clone(),
-        username: state.filter_username_input.value.clone(),
-        start_time: state.filter_start_time_input.value.clone(),
-        end_time: state.filter_end_time_input.value.clone(),
-    }
-}
-
-/// 从 Runtime 已应用过滤值生成快照。
-fn runtime_filter_applied_snapshot_from_state(
-    state: &RuntimeAnalysisState,
-) -> RuntimeAnalysisFilterSnapshot {
-    RuntimeAnalysisFilterSnapshot {
-        keyword: state.applied_filter_keyword.clone(),
-        username: state.applied_filter_username.clone(),
-        start_time: state.applied_filter_start_time.clone(),
-        end_time: state.applied_filter_end_time.clone(),
-    }
-}
-
-/// 将过滤快照写入 Runtime 已应用状态。
-fn apply_runtime_filter_snapshot_to_state(
-    state: &mut RuntimeAnalysisState,
-    filter: &RuntimeAnalysisFilterSnapshot,
-) {
-    state.applied_filter_keyword = filter.keyword.clone();
-    state.applied_filter_username = filter.username.clone();
-    state.applied_filter_start_time = filter.start_time.clone();
-    state.applied_filter_end_time = filter.end_time.clone();
-}
-
-/// 过滤结果真正生效后清理表格滚动、选区和旧的局部缓存。
-fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysisState) {
-    state.summary_scroll = UniformListScrollHandle::new();
-    state.request_scroll = UniformListScrollHandle::new();
-    state.sql_scroll = UniformListScrollHandle::new();
-    state.sql_frequency_scroll = UniformListScrollHandle::new();
-    state.sql_frequency_detail_scroll = UniformListScrollHandle::new();
-    state.slow_sql_scroll = UniformListScrollHandle::new();
-    state.cell_selection = None;
-    state.cell_selection_drag = None;
-    state.hovered_sql_cell = None;
-    state.sql_text_dialog = None;
-    state.sql_dialog_scroll = ScrollHandle::new();
-    // 弹窗关闭后清理可能残留的弹窗滚动条拖拽状态，避免影响表格滚动条。
-    state.scrollbar_drag = state
-        .scrollbar_drag
-        .filter(|drag| drag.table != RuntimeScrollbarTable::SqlDialog);
-    state.sql_frequency_rows_cache.borrow_mut().take();
-    state.sql_frequency_detail_rows_cache.borrow_mut().take();
-    state.slow_sql_rows_cache.borrow_mut().take();
-    state.summary_rows_cache.borrow_mut().take();
-    state.request_indices_cache.borrow_mut().take();
-    state.sql_indices_cache.borrow_mut().take();
-    state.sql_frequency_rows_task_generation =
-        state.sql_frequency_rows_task_generation.saturating_add(1);
-    state.slow_sql_rows_task_generation = state.slow_sql_rows_task_generation.saturating_add(1);
-    state.is_sql_frequency_rows_computing = false;
-    state.is_slow_sql_rows_computing = false;
-    state.sql_frequency_rows_computing_filter = None;
-    state.slow_sql_rows_computing_filter = None;
-    state.scrollbar_drag = None;
-}
-
-/// 清理单个 Runtime 过滤输入框焦点态，保留文本和光标位置。
-fn clear_runtime_filter_input_focus(input: &mut SettingsTextInputState) {
-    input.is_focused = false;
-    input.selection_anchor = None;
-    input.marked_range = None;
-    input.selection_drag = None;
-}
-
-/// 返回 Runtime 过滤输入框规范化后的非空选区。
-fn normalized_runtime_filter_input_selection_range(
-    input: &SettingsTextInputState,
-) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
-}
-
-/// 根据鼠标选择粒度返回 Runtime 过滤输入框目标字符范围。
-fn runtime_filter_input_range_for_granularity(
-    input: &SettingsTextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    let text_length = character_count(&input.value);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
-}
-
-/// 解析 Runtime 时间过滤输入，支持毫秒时间戳和常见本地日期时间格式。
-fn parse_runtime_filter_datetime_value(raw: &str, is_end: bool) -> Option<chrono::DateTime<Local>> {
-    let value = raw.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if let Ok(timestamp_ms) = value.parse::<i64>() {
-        return Local.timestamp_millis_opt(timestamp_ms).single();
-    }
-
-    for format in [
-        "%Y-%m-%d %H:%M:%S%.3f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-    ] {
-        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format)
-            && let Some(local_datetime) = Local.from_local_datetime(&datetime).single()
-        {
-            return Some(local_datetime);
-        }
-    }
-
-    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        let datetime = if is_end {
-            date.and_hms_milli_opt(23, 59, 59, 999)
-        } else {
-            date.and_hms_milli_opt(0, 0, 0, 0)
-        }?;
-        return Local.from_local_datetime(&datetime).single();
-    }
-
-    None
-}
-
-/// 把 Runtime 时间过滤值格式化为用户可读且可再次解析的本地时间。
-fn format_runtime_filter_datetime_value(datetime: chrono::DateTime<Local>) -> String {
-    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-}
-
-/// 返回指定年月的最大日期，用于调整年月时夹住当前日。
-fn runtime_days_in_month(year: i32, month: u32) -> u32 {
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    let Some(next_month_start) = NaiveDate::from_ymd_opt(next_year, next_month, 1) else {
-        return 28;
-    };
-    next_month_start
-        .pred_opt()
-        .map(|date| date.day())
-        .unwrap_or(28)
-}
-
-/// 按年月调整 Runtime 时间，保留当前时分秒并处理月末越界。
-fn adjust_runtime_datetime_year_month(
-    datetime: chrono::DateTime<Local>,
-    part: RuntimeDateTimePart,
-    delta: i32,
-) -> chrono::DateTime<Local> {
-    let mut year = datetime.year();
-    let mut month = datetime.month() as i32;
-    match part {
-        RuntimeDateTimePart::Year => year += delta,
-        RuntimeDateTimePart::Month => {
-            let month_index = year * 12 + (month - 1) + delta;
-            year = month_index.div_euclid(12);
-            month = month_index.rem_euclid(12) + 1;
-        }
-        RuntimeDateTimePart::Day
-        | RuntimeDateTimePart::Hour
-        | RuntimeDateTimePart::Minute
-        | RuntimeDateTimePart::Second => return datetime,
-    }
-
-    let month = month.clamp(1, 12) as u32;
-    let day = datetime.day().min(runtime_days_in_month(year, month));
-    let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
-        return datetime;
-    };
-    let Some(naive) = date.and_hms_opt(datetime.hour(), datetime.minute(), datetime.second())
-    else {
-        return datetime;
-    };
-    Local
-        .from_local_datetime(&naive)
-        .single()
-        .unwrap_or(datetime)
-}
-
-/// 按指定部分调整 Runtime 时间过滤值。
-fn adjust_runtime_datetime_part(
-    datetime: chrono::DateTime<Local>,
-    part: RuntimeDateTimePart,
-    delta: i32,
-) -> chrono::DateTime<Local> {
-    match part {
-        RuntimeDateTimePart::Year | RuntimeDateTimePart::Month => {
-            adjust_runtime_datetime_year_month(datetime, part, delta)
-        }
-        RuntimeDateTimePart::Day => datetime + chrono::Duration::days(delta as i64),
-        RuntimeDateTimePart::Hour => datetime + chrono::Duration::hours(delta as i64),
-        RuntimeDateTimePart::Minute => datetime + chrono::Duration::minutes(delta as i64),
-        RuntimeDateTimePart::Second => datetime + chrono::Duration::seconds(delta as i64),
-    }
-}
-
-/// 返回 Runtime 时间过滤输入框在空值时使用的默认时间。
-fn default_runtime_filter_datetime(is_end: bool) -> chrono::DateTime<Local> {
-    let now = Local::now();
-    if is_end {
-        let Some(naive) = now.date_naive().and_hms_opt(23, 59, 59) else {
-            return now;
-        };
-        Local.from_local_datetime(&naive).single().unwrap_or(now)
-    } else {
-        let Some(naive) = now.date_naive().and_hms_opt(0, 0, 0) else {
-            return now;
-        };
-        Local.from_local_datetime(&naive).single().unwrap_or(now)
-    }
-}
-
-/// 来源树占位节点，用于模拟文件、目录和压缩包结构。
-#[derive(Clone, Debug)]
-pub struct SourceNode {
-    /// 节点唯一 ID，用于本地选择与展开折叠。
-    pub id: usize,
-    /// 节点缩进层级，模拟目录树深度。
-    pub depth: usize,
-    /// 节点名称。
-    pub label: String,
-    /// 节点类型文案。
-    pub kind: String,
-    /// 是否为当前选中节点。
-    pub selected: bool,
-    /// 是否为已展开节点；叶子节点忽略该字段。
-    pub expanded: bool,
-}
-
-/// 日志行占位数据，用于模拟 INFO/WARN/ERROR 等等级日志。
-#[derive(Clone, Debug)]
-pub struct LogLine {
-    /// 行号。
-    pub number: usize,
-    /// 日志等级。
-    pub level: String,
-    /// 日志文本。
-    pub message: String,
-}
-
-/// 内容区显示状态；本阶段真实来源只显示未读取提示，不读取日志正文。
-#[derive(Clone, Debug)]
-pub enum ContentState {
-    /// 初始样例预览，用于空项目首次启动时展示界面密度。
-    PlaceholderPreview,
-    /// 已接入真实来源树，但尚未选择日志候选节点。
-    SourceNotSelected,
-    /// 已选择真实来源节点，正文读取状态由 `log_read_states` 继续描述。
-    SourceNotRead {
-        /// 被选择的来源 ID。
-        source_id: SourceId,
-        /// 标签展示名称。
-        label: String,
-        /// 状态栏和内容区展示路径。
-        path: String,
-    },
 }
 
 /// Argus 根视图状态，驱动界面、真实来源加载和本地 UI 行为。
@@ -4085,7 +2077,7 @@ impl ArgusApp {
     pub fn open_file_preview_window(
         &mut self,
         file_name: String,
-        content: crate::sftp::FilePreviewContent,
+        content: crate::remote::sftp::FilePreviewContent,
         cx: &mut Context<Self>,
     ) {
         let initial_theme = self.theme.clone();
@@ -7348,12 +5340,6 @@ impl Render for ArgusApp {
     }
 }
 
-/// 判断日志文本位置是否按文档顺序小于等于另一个位置。
-fn log_text_position_le(left: LogTextPosition, right: LogTextPosition) -> bool {
-    left.line_index < right.line_index
-        || (left.line_index == right.line_index && left.column <= right.column)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7383,7 +5369,7 @@ mod tests {
             .add_ssh_link(
                 None,
                 "测试服务器",
-                crate::connections::SshLinkConfig {
+                crate::remote::connection::SshLinkConfig {
                     host: "127.0.0.1".to_string(),
                     port: 22,
                     username: "tester".to_string(),
@@ -7409,8 +5395,8 @@ mod tests {
             .clone();
         let (sender, _) = std::sync::mpsc::channel();
         let mut session =
-            crate::terminal::TerminalSessionState::connecting(session_id, &link, sender);
-        session.status = crate::terminal::TerminalStatus::Connected;
+            crate::remote::terminal::TerminalSessionState::connecting(session_id, &link, sender);
+        session.status = crate::remote::terminal::TerminalStatus::Connected;
         app.terminal_sessions.insert(session_id, session);
     }
 
@@ -7419,7 +5405,7 @@ mod tests {
         app: &mut ArgusApp,
         session_id: usize,
         link_id: ConnectionNodeId,
-    ) -> std::sync::mpsc::Receiver<crate::sftp::SftpCommand> {
+    ) -> std::sync::mpsc::Receiver<crate::remote::sftp::SftpCommand> {
         let link = app
             .config
             .connections
@@ -7427,13 +5413,13 @@ mod tests {
             .expect("应存在测试链接")
             .clone();
         let (sender, receiver) = std::sync::mpsc::channel();
-        let mut session = crate::sftp::SftpSessionState::connecting(
+        let mut session = crate::remote::sftp::SftpSessionState::connecting(
             session_id,
             &link,
-            crate::sftp::RemoteFileBackend::Sftp,
+            crate::remote::sftp::RemoteFileBackend::Sftp,
             sender,
         );
-        session.status = crate::sftp::SftpStatus::Connected;
+        session.status = crate::remote::sftp::SftpStatus::Connected;
         session.current_dir = "/home/tester".to_string();
         session.address_input = SettingsTextInputState::from_value(session.current_dir.clone());
         app.sftp_sessions.insert(session_id, session);
@@ -7661,10 +5647,10 @@ mod tests {
         let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
         let remote_path = "/home/tester/app.log".to_string();
         if let Some(session) = app.sftp_sessions.get_mut(&1) {
-            session.entries = vec![crate::sftp::SftpEntry {
+            session.entries = vec![crate::remote::sftp::SftpEntry {
                 name: "app.log".to_string(),
                 path: remote_path.clone(),
-                kind: crate::sftp::SftpEntryKind::RegularFile,
+                kind: crate::remote::sftp::SftpEntryKind::RegularFile,
                 size: Some(128),
                 mtime: None,
                 permissions: Some(0o100644),
@@ -7722,18 +5708,18 @@ mod tests {
         let second_path = "/home/tester/error.log".to_string();
         if let Some(session) = app.sftp_sessions.get_mut(&1) {
             session.entries = vec![
-                crate::sftp::SftpEntry {
+                crate::remote::sftp::SftpEntry {
                     name: "app.log".to_string(),
                     path: first_path.clone(),
-                    kind: crate::sftp::SftpEntryKind::RegularFile,
+                    kind: crate::remote::sftp::SftpEntryKind::RegularFile,
                     size: Some(128),
                     mtime: None,
                     permissions: Some(0o100644),
                 },
-                crate::sftp::SftpEntry {
+                crate::remote::sftp::SftpEntry {
                     name: "error.log".to_string(),
                     path: second_path.clone(),
-                    kind: crate::sftp::SftpEntryKind::RegularFile,
+                    kind: crate::remote::sftp::SftpEntryKind::RegularFile,
                     size: Some(256),
                     mtime: None,
                     permissions: Some(0o100644),
@@ -7793,7 +5779,7 @@ mod tests {
         assert!(app.sftp_sessions.is_empty());
         assert!(matches!(
             receiver.try_recv(),
-            Ok(crate::sftp::SftpCommand::Disconnect)
+            Ok(crate::remote::sftp::SftpCommand::Disconnect)
         ));
         assert!(matches!(app.tabs[0].kind, TabKind::Empty));
     }
@@ -7806,10 +5792,10 @@ mod tests {
         let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
         let remote_path = "/home/tester/current".to_string();
         if let Some(session) = app.sftp_sessions.get_mut(&1) {
-            session.entries = vec![crate::sftp::SftpEntry {
+            session.entries = vec![crate::remote::sftp::SftpEntry {
                 name: "current".to_string(),
                 path: remote_path.clone(),
-                kind: crate::sftp::SftpEntryKind::Symlink,
+                kind: crate::remote::sftp::SftpEntryKind::Symlink,
                 size: None,
                 mtime: None,
                 permissions: None,
@@ -7835,16 +5821,16 @@ mod tests {
         let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
         let remote_path = "/home/tester/app.log".to_string();
         if let Some(session) = app.sftp_sessions.get_mut(&1) {
-            session.entries = vec![crate::sftp::SftpEntry {
+            session.entries = vec![crate::remote::sftp::SftpEntry {
                 name: "app.log".to_string(),
                 path: remote_path.clone(),
-                kind: crate::sftp::SftpEntryKind::RegularFile,
+                kind: crate::remote::sftp::SftpEntryKind::RegularFile,
                 size: Some(128),
                 mtime: None,
                 permissions: Some(0o100644),
             }];
             session.selected_paths.insert(remote_path);
-            session.status = crate::sftp::SftpStatus::Transferring;
+            session.status = crate::remote::sftp::SftpStatus::Transferring;
         }
 
         assert!(!app.can_download_sftp_selection(1));
@@ -8587,7 +6573,7 @@ mod tests {
     /// 验证 Jstack 可见行按当前状态筛选后的命中数量排序，而不是按隐藏状态参与的总频率排序。
     #[test]
     fn visible_jstack_rows_sort_by_filtered_hit_count() {
-        let first = crate::jstack_analysis::parse_jstack_snapshot(
+        let first = crate::analysis::jstack::parse_jstack_snapshot(
             SourceId(1),
             "001.log",
             "/tmp/001.log",
@@ -8599,7 +6585,7 @@ mod tests {
    java.lang.Thread.State: RUNNABLE
 "#,
         );
-        let second = crate::jstack_analysis::parse_jstack_snapshot(
+        let second = crate::analysis::jstack::parse_jstack_snapshot(
             SourceId(2),
             "002.log",
             "/tmp/002.log",
@@ -8618,7 +6604,7 @@ mod tests {
 "#,
         );
         let result =
-            crate::jstack_analysis::build_analysis_result(vec![first, second], Vec::new(), 2);
+            crate::analysis::jstack::build_analysis_result(vec![first, second], Vec::new(), 2);
         let active_states = BTreeSet::from([JstackThreadState::Runnable]);
 
         let row_names = visible_jstack_row_indices(&result, &active_states, None)
@@ -8635,7 +6621,7 @@ mod tests {
     /// 验证线程详情按可见快照收集代表堆栈，不把同一文件内重复出现展开成多条同源记录。
     #[test]
     fn jstack_detail_occurrences_keep_one_stack_per_visible_snapshot() {
-        let first = crate::jstack_analysis::parse_jstack_snapshot(
+        let first = crate::analysis::jstack::parse_jstack_snapshot(
             SourceId(1),
             "001.log",
             "/tmp/001.log",
@@ -8647,7 +6633,7 @@ mod tests {
         at app.First.two(First.java:2)
 "#,
         );
-        let second = crate::jstack_analysis::parse_jstack_snapshot(
+        let second = crate::analysis::jstack::parse_jstack_snapshot(
             SourceId(2),
             "002.log",
             "/tmp/002.log",
@@ -8657,7 +6643,7 @@ mod tests {
 "#,
         );
         let result =
-            crate::jstack_analysis::build_analysis_result(vec![first, second], Vec::new(), 2);
+            crate::analysis::jstack::build_analysis_result(vec![first, second], Vec::new(), 2);
         let row = result
             .rows
             .iter()

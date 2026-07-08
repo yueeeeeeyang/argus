@@ -18,8 +18,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use gpui::ScrollHandle;
 use ssh2::{HashType, Session};
 
-use crate::connections::{ConnectionLinkConfig, ConnectionNodeId, SshLinkConfig};
-use crate::text_selection::{
+use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId, SshLinkConfig};
+use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, word_range_at,
 };

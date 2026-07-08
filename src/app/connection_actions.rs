@@ -13,12 +13,12 @@ use crate::app::{
     ConnectionDirectoryFormState, ConnectionHostKeyPromptState, ConnectionLinkFormState,
     InputTextSelectionDrag, SettingsTextInputState,
 };
-use crate::connections::{
+use crate::remote::connection::{
     ConnectionDeletedNodeKind, ConnectionLinkKind, ConnectionNodeId, ConnectionTreeRow,
     SmbLinkConfig, SshLinkConfig,
 };
-use crate::terminal::PendingHostKey;
-use crate::text_selection::{
+use crate::remote::terminal::PendingHostKey;
+use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range, word_range_at,
 };
 use crate::ui::connection_dialog::{
@@ -1347,7 +1347,7 @@ fn smb_config_from_form(form: &ConnectionLinkFormState) -> Result<SmbLinkConfig,
     // 主机框若填了完整 UNC 地址（如 \\host\share\path），则从中拆出主机/共享名/初始目录，
     // 覆盖对应的共享名称、初始目录字段；纯主机名时回退到分字段填写，保持编辑已有链接兼容。
     let (host, share, initial_dir) =
-        match crate::connections::parse_smb_unc_address(&form.host_input.value) {
+        match crate::remote::connection::parse_smb_unc_address(&form.host_input.value) {
             Some((host, share, initial_dir)) => (host, share, initial_dir),
             None => (
                 form.host_input.value.clone(),

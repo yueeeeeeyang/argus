@@ -16,7 +16,7 @@ use gpui::{
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
-use crate::terminal::{
+use crate::remote::terminal::{
     TerminalCellStyle, TerminalColor, TerminalGridPosition, TerminalScreenLine,
     TerminalScreenSnapshot, TerminalSessionState, TerminalStatus, TerminalTextSelection,
 };

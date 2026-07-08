@@ -6,7 +6,7 @@
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
-use crate::perf::PerfSpan;
+use crate::infra::perf::PerfSpan;
 use crate::ui::{
     components::context_menu, connection_dialog, custom_title_bar, log_content_view,
     placeholder_dialog, sftp_dialog, source_panel, source_resizer, upgrade_dialog,

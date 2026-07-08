@@ -10,7 +10,7 @@ use crate::app::{
     AppTextInputTarget, ArgusApp, ConnectionDialogState, InputTextSelectionDrag,
     LogSearchInputKind, RuntimeFilterInputKind,
 };
-use crate::text_selection::{NativeTextEdit, character_count, replace_character_range};
+use crate::infra::text_selection::{NativeTextEdit, character_count, replace_character_range};
 
 /// 可被原生输入法编辑的单行输入框字段引用。
 struct NativeInputParts<'a> {
@@ -552,7 +552,7 @@ fn normalized_native_textarea_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::app::{AppTextInputTarget, ArgusApp};
-    use crate::text_selection::NativeTextEdit;
+    use crate::infra::text_selection::NativeTextEdit;
 
     /// 验证原生文本提交能写入中文并更新来源树搜索光标。
     #[test]

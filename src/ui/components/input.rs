@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：统一输入框和多行文本域尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
 
-use crate::text_selection::{
+use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, byte_index_for_character, character_count,
     character_range_for_utf16_range, replace_character_range, slice_character_range,
     utf16_range_for_character_range,

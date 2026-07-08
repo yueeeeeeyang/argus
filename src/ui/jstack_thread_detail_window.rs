@@ -9,8 +9,8 @@ use std::ops::Range;
 
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{HighlightLanguage, HighlightTokenKind, SyntaxHighlighter};
-use crate::jstack_analysis::{JstackThreadDetail, JstackThreadStackOccurrence};
-use crate::text_selection::{
+use crate::analysis::jstack::{JstackThreadDetail, JstackThreadStackOccurrence};
+use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, slice_character_range, word_range_at,
 };

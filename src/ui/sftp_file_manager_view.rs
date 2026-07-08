@@ -14,8 +14,8 @@ use gpui::{
 };
 
 use crate::app::{AppTextInputTarget, ArgusApp};
-use crate::perf::PerfSpan;
-use crate::sftp::{
+use crate::infra::perf::PerfSpan;
+use crate::remote::sftp::{
     SftpEntry, SftpEntryKind, SftpSessionState, SftpSortDirection, SftpSortField, SftpStatus,
 };
 use crate::theme::AppTheme;

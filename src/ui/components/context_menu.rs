@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use crate::app::ArgusApp;
-use crate::connections::ConnectionNodeId;
+use crate::remote::connection::ConnectionNodeId;
 use crate::loader::SourceId;
 use crate::theme::AppTheme;
 use gpui::{

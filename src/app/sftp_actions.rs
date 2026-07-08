@@ -15,13 +15,13 @@ use crate::app::{
     SftpRenameDialogState, TabKind, Workspace,
 };
 use crate::loader::PathBrowser;
-use crate::sftp::{
+use crate::remote::sftp::{
     RemoteFileBackend, RemoteFileWorkerBackend, SftpCommand, SftpEntry, SftpEntryKind, SftpEvent,
     SftpSessionState, SftpStatus, SftpWorkerRequest, is_sftp_entry_previewable, remote_parent_dir,
     spawn_sftp_worker, validate_sftp_rename_name,
 };
-use crate::terminal::PendingHostKey;
-use crate::text_selection::{
+use crate::remote::terminal::PendingHostKey;
+use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
     slice_character_range, word_range_at,
 };
@@ -105,7 +105,7 @@ impl ArgusApp {
     /// 从 SMB 链接树节点打开一个新的 SMB 文件管理标签页。
     pub fn open_smb_file_manager_from_link(
         &mut self,
-        link_id: crate::connections::ConnectionNodeId,
+        link_id: crate::remote::connection::ConnectionNodeId,
         cx: &mut Context<Self>,
     ) {
         self.create_sftp_file_manager_session(link_id, RemoteFileBackend::Smb, cx);
@@ -268,7 +268,7 @@ impl ArgusApp {
         size: Option<u64>,
     ) {
         if let Some(size) = size
-            && size > crate::sftp::SFTP_PREVIEW_MAX_FILE_SIZE
+            && size > crate::remote::sftp::SFTP_PREVIEW_MAX_FILE_SIZE
         {
             self.placeholder_notice = "文件过大，无法预览".to_string();
             return;
@@ -322,18 +322,18 @@ impl ArgusApp {
     }
 
     /// 切换远程文件列表排序字段与方向；同列点击翻转方向，异列点击切到该列升序。
-    pub fn set_sftp_sort(&mut self, session_id: usize, field: crate::sftp::SftpSortField) {
+    pub fn set_sftp_sort(&mut self, session_id: usize, field: crate::remote::sftp::SftpSortField) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
             return;
         };
         if session.sort_field == field {
             session.sort_direction = match session.sort_direction {
-                crate::sftp::SftpSortDirection::Asc => crate::sftp::SftpSortDirection::Desc,
-                crate::sftp::SftpSortDirection::Desc => crate::sftp::SftpSortDirection::Asc,
+                crate::remote::sftp::SftpSortDirection::Asc => crate::remote::sftp::SftpSortDirection::Desc,
+                crate::remote::sftp::SftpSortDirection::Desc => crate::remote::sftp::SftpSortDirection::Asc,
             };
         } else {
             session.sort_field = field;
-            session.sort_direction = crate::sftp::SftpSortDirection::Asc;
+            session.sort_direction = crate::remote::sftp::SftpSortDirection::Asc;
         }
         session.rebuild_sorted_entries();
     }
@@ -793,7 +793,7 @@ impl ArgusApp {
     /// 创建新的远程文件管理会话并启动后台 worker。
     fn create_sftp_file_manager_session(
         &mut self,
-        link_id: crate::connections::ConnectionNodeId,
+        link_id: crate::remote::connection::ConnectionNodeId,
         backend: RemoteFileBackend,
         cx: &mut Context<Self>,
     ) {
@@ -994,7 +994,7 @@ impl ArgusApp {
     fn open_sftp_host_key_prompt(
         &mut self,
         session_id: usize,
-        link_id: crate::connections::ConnectionNodeId,
+        link_id: crate::remote::connection::ConnectionNodeId,
         pending: PendingHostKey,
     ) {
         self.connection_dialog = Some(crate::app::ConnectionDialogState::ConfirmHostKey(

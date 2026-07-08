@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::ArgusApp;
-use crate::connections::{ConnectionTreeRow, ConnectionTreeRowKind};
+use crate::remote::connection::{ConnectionTreeRow, ConnectionTreeRowKind};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 

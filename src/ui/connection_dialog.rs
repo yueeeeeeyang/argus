@@ -17,9 +17,9 @@ use crate::app::{
     ConnectionHostKeyPromptState, ConnectionLinkFormState, InputTextSelectionDrag,
     SettingsTextInputState,
 };
-use crate::connections::ConnectionLinkKind;
+use crate::remote::connection::ConnectionLinkKind;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
-use crate::text_selection::{
+use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
     slice_character_range, word_range_at,
 };
@@ -52,7 +52,7 @@ pub enum ConnectionDirectoryWindowMode {
     /// 编辑已有目录。
     Edit {
         /// 正在编辑的目录节点 ID。
-        directory_id: crate::connections::ConnectionNodeId,
+        directory_id: crate::remote::connection::ConnectionNodeId,
     },
 }
 
@@ -64,7 +64,7 @@ pub enum ConnectionLinkWindowMode {
     /// 编辑已有 SSH 链接。
     Edit {
         /// 正在编辑的 SSH 链接节点 ID。
-        link_id: crate::connections::ConnectionNodeId,
+        link_id: crate::remote::connection::ConnectionNodeId,
     },
 }
 

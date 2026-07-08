@@ -132,7 +132,7 @@ mod tests {
         AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogDisplayConfig,
         LogSearchConfig, UpgradeConfig,
     };
-    use crate::connections::{
+    use crate::remote::connection::{
         ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SmbLinkConfig,
         SshLinkConfig, TrustedHostKeyConfig,
     };

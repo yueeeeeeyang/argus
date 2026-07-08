@@ -9,8 +9,8 @@ use std::borrow::Borrow;
 use gpui::{ClipboardItem, Context, Keystroke};
 
 use crate::app::{ArgusApp, ArgusTab, TabKind, Workspace};
-use crate::connections::ConnectionNodeId;
-use crate::terminal::{
+use crate::remote::connection::ConnectionNodeId;
+use crate::remote::terminal::{
     DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS, PendingHostKey, TerminalCommand, TerminalEvent,
     TerminalGridPosition, TerminalSessionState, TerminalStatus, TerminalWorkerRequest,
     spawn_ssh_worker, terminal_input_bytes,

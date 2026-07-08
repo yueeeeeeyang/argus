@@ -7,7 +7,7 @@
 use gpui::{App, Entity, FocusHandle, Window};
 
 use crate::app::{AppTextInputTarget, ArgusApp};
-use crate::text_selection::NativeTextEdit;
+use crate::infra::text_selection::NativeTextEdit;
 use crate::ui::components::input::NativeInput;
 
 /// 创建绑定到指定应用输入目标的原生文本输入桥。

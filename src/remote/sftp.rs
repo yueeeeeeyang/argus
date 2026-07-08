@@ -24,8 +24,8 @@ use smb2::{
 use ssh2::{HashType, Session};
 
 use crate::app::SettingsTextInputState;
-use crate::connections::{ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig};
-use crate::terminal::PendingHostKey;
+use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig};
+use crate::remote::terminal::PendingHostKey;
 
 /// 远程 Unix 文件类型掩码。
 const SFTP_MODE_TYPE_MASK: u32 = 0o170000;
@@ -658,7 +658,7 @@ async fn run_smb_worker_async(
     event_sender: Sender<SftpEvent>,
 ) -> Result<()> {
     let mut client = create_smb_client(&smb).await?;
-    let mut current_dir = crate::connections::normalized_smb_initial_dir(&smb.initial_dir);
+    let mut current_dir = crate::remote::connection::normalized_smb_initial_dir(&smb.initial_dir);
     let entries = read_smb_directory(&mut client, &current_dir).await?;
     send_event_blocking(
         &event_sender,
@@ -869,7 +869,7 @@ async fn load_smb_directory(
     current_dir: &str,
     input: &str,
 ) -> Result<(String, Vec<SftpEntry>)> {
-    let target = crate::connections::normalized_smb_initial_dir(&resolve_remote_path(current_dir, input)?);
+    let target = crate::remote::connection::normalized_smb_initial_dir(&resolve_remote_path(current_dir, input)?);
     let entries = read_smb_directory(client, &target).await?;
     Ok((target, entries))
 }
@@ -1424,7 +1424,7 @@ fn normalize_remote_path(path: PathBuf) -> String {
 
 /// 将共享内绝对路径转换为 SMB UNC 中的相对路径，不携带前导分隔符。
 fn smb_relative_path(path: &str) -> String {
-    crate::connections::normalized_smb_initial_dir(path)
+    crate::remote::connection::normalized_smb_initial_dir(path)
         .trim_start_matches('/')
         .replace('/', "\\")
 }
