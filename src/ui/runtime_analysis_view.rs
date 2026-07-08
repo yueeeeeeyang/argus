@@ -40,6 +40,9 @@ use crate::ui::components::input::{
 };
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
+use crate::ui::components::scrollbar::{
+    ScrollbarMetrics, scrollbar_metrics, scrollbar_scroll_for_drag,
+};
 use crate::ui::input_native::app_native_input;
 use gpui::{
     AnyElement, App, ClickEvent, Context, FocusHandle, FontWeight, HighlightStyle, IntoElement,
@@ -667,7 +670,7 @@ fn render_sql_dialog_code_block(
 /// 复用表格滚动条的度量与拖拽逻辑，但内容高度由 `ScrollHandle::max_offset` 推算
 /// （`viewport + max_offset`），以适配自动折行后动态变化的 SQL 正文高度。
 ///
-/// 首帧渲染时滚动句柄尚未布局，`bounds` 为零导致 `runtime_scrollbar_metrics` 返回 `None`，
+/// 首帧渲染时滚动句柄尚未布局，`bounds` 为零导致 `scrollbar_metrics` 返回 `None`，
 /// 此时返回一个透明哨兵元素：其 paint 回调在布局完成后执行，若检测到内容已溢出则触发一次重绘，
 /// 下一帧即可用有效 bounds 渲染真实滑块。滑块出现后哨兵不再渲染，自然收敛，不会无限重绘。
 fn render_sql_dialog_scrollbar(
@@ -680,7 +683,13 @@ fn render_sql_dialog_scrollbar(
     let max_offset = scroll_handle.max_offset();
     let offset = scroll_handle.offset();
     let content_height = bounds.size.height + max_offset.height;
-    match runtime_scrollbar_metrics(bounds.size.height, content_height, -offset.y) {
+    match scrollbar_metrics(
+        bounds.size.height,
+        content_height,
+        -offset.y,
+        RUNTIME_SCROLLBAR_PADDING,
+        RUNTIME_SCROLLBAR_MIN_THUMB,
+    ) {
         Some(metrics) => render_runtime_scrollbar_thumb(
             analysis_id,
             RuntimeScrollbarTable::SqlDialog,
@@ -4128,9 +4137,13 @@ fn render_table_scrollbars(
     // 它会随虚拟列表滚动测量范围变化，导致滚动条滑块长度动态变化。
     let content_height = runtime_fixed_table_content_height(row_count, row_height);
     // Runtime 表格不再暴露整体横向滚动；长字段由单元格内部横向滚动承载。
-    if let Some(metrics) =
-        runtime_scrollbar_metrics(bounds.size.height, content_height, -scroll_offset.y)
-    {
+    if let Some(metrics) = scrollbar_metrics(
+        bounds.size.height,
+        content_height,
+        -scroll_offset.y,
+        RUNTIME_SCROLLBAR_PADDING,
+        RUNTIME_SCROLLBAR_MIN_THUMB,
+    ) {
         scrollbars.push(render_runtime_scrollbar_thumb(
             analysis_id,
             table,
@@ -4158,68 +4171,12 @@ enum RuntimeScrollTarget {
     Uniform(ScrollHandle),
 }
 
-/// Runtime 滚动条滑块指标。
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct RuntimeScrollbarMetrics {
-    /// 滑块起始位置。
-    thumb_start: Pixels,
-    /// 滑块长度。
-    thumb_length: Pixels,
-    /// 轨道起始位置。
-    track_start: Pixels,
-    /// 轨道长度。
-    track_length: Pixels,
-    /// 最大滚动距离。
-    max_scroll: Pixels,
-}
-
-/// 根据视口、内容高度和当前滚动量计算 Runtime 滚动条滑块指标。
-fn runtime_scrollbar_metrics(
-    viewport_length: gpui::Pixels,
-    content_length: gpui::Pixels,
-    scroll_offset: gpui::Pixels,
-) -> Option<RuntimeScrollbarMetrics> {
-    if viewport_length == px(0.0) || content_length <= viewport_length {
-        return None;
-    }
-
-    let track_padding = px(RUNTIME_SCROLLBAR_PADDING);
-    let track_length = (viewport_length - track_padding * 2.0).max(px(1.0));
-    let thumb_length = ((viewport_length / content_length) * track_length)
-        .clamp(px(RUNTIME_SCROLLBAR_MIN_THUMB), track_length);
-    let max_scroll = (content_length - viewport_length).max(px(1.0));
-    let movable_length = (track_length - thumb_length).max(px(0.0));
-    let scroll_ratio = (scroll_offset / max_scroll).clamp(0.0, 1.0);
-    let thumb_start = track_padding + movable_length * scroll_ratio;
-
-    Some(RuntimeScrollbarMetrics {
-        thumb_start,
-        thumb_length,
-        track_start: track_padding,
-        track_length,
-        max_scroll,
-    })
-}
-
-/// 根据拖拽中的鼠标位置换算 Runtime 表格目标滚动距离。
-fn runtime_scroll_for_scrollbar_drag(
-    pointer: Pixels,
-    cursor_offset: Pixels,
-    metrics: RuntimeScrollbarMetrics,
-) -> Pixels {
-    let movable_length = (metrics.track_length - metrics.thumb_length).max(px(1.0));
-    let thumb_start =
-        (pointer - cursor_offset).clamp(metrics.track_start, metrics.track_start + movable_length);
-    let ratio = (thumb_start - metrics.track_start) / movable_length;
-    metrics.max_scroll * ratio
-}
-
 /// 绘制 Runtime 可拖拽滚动条滑块。
 fn render_runtime_scrollbar_thumb(
     analysis_id: usize,
     table: RuntimeScrollbarTable,
     target: RuntimeScrollTarget,
-    metrics: RuntimeScrollbarMetrics,
+    metrics: ScrollbarMetrics,
     track_top_offset: Pixels,
     viewport_bounds: gpui::Bounds<Pixels>,
     theme: &AppTheme,
@@ -4309,10 +4266,10 @@ fn render_runtime_scrollbar_thumb(
                             }
 
                             let pointer = event.position.y - viewport_bounds.top();
-                            let scroll = runtime_scroll_for_scrollbar_drag(
+                            let scroll = scrollbar_scroll_for_drag(
                                 pointer,
                                 drag.cursor_offset,
-                                metrics,
+                                &metrics,
                             );
                             match &target {
                                 RuntimeScrollTarget::Uniform(scroll_handle) => {
@@ -4774,10 +4731,22 @@ mod tests {
     /// 验证同一内容高度下，滚动条滑块长度不会因为向下滚动而变化。
     #[test]
     fn runtime_scrollbar_thumb_length_does_not_change_with_offset() {
-        let top = runtime_scrollbar_metrics(px(400.0), px(1200.0), px(0.0))
-            .expect("应生成顶部滚动条指标");
-        let middle = runtime_scrollbar_metrics(px(400.0), px(1200.0), px(360.0))
-            .expect("应生成中部滚动条指标");
+        let top = scrollbar_metrics(
+            px(400.0),
+            px(1200.0),
+            px(0.0),
+            RUNTIME_SCROLLBAR_PADDING,
+            RUNTIME_SCROLLBAR_MIN_THUMB,
+        )
+        .expect("应生成顶部滚动条指标");
+        let middle = scrollbar_metrics(
+            px(400.0),
+            px(1200.0),
+            px(360.0),
+            RUNTIME_SCROLLBAR_PADDING,
+            RUNTIME_SCROLLBAR_MIN_THUMB,
+        )
+        .expect("应生成中部滚动条指标");
 
         assert_eq!(top.thumb_length, middle.thumb_length);
         assert!(middle.thumb_start > top.thumb_start);
@@ -4786,10 +4755,16 @@ mod tests {
     /// 验证 Runtime 滚动条拖拽会按轨道比例换算为目标滚动距离。
     #[test]
     fn runtime_scrollbar_drag_converts_pointer_to_scroll() {
-        let metrics =
-            runtime_scrollbar_metrics(px(400.0), px(1200.0), px(0.0)).expect("应生成滚动条指标");
+        let metrics = scrollbar_metrics(
+            px(400.0),
+            px(1200.0),
+            px(0.0),
+            RUNTIME_SCROLLBAR_PADDING,
+            RUNTIME_SCROLLBAR_MIN_THUMB,
+        )
+        .expect("应生成滚动条指标");
         let scroll =
-            runtime_scroll_for_scrollbar_drag(metrics.track_start + px(40.0), px(10.0), metrics);
+            scrollbar_scroll_for_drag(metrics.track_start + px(40.0), px(10.0), &metrics);
 
         assert!(scroll > px(0.0));
         assert!(scroll < metrics.max_scroll);

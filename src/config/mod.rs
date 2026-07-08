@@ -10,6 +10,6 @@ pub mod paths;
 
 pub use app_config::{
     AppConfig, AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogDisplayConfig,
-    LogSearchConfig, UpgradeConfig,
+    LogSearchConfig, UpgradeConfig, SEARCH_RECENT_KEYWORDS_MAX,
 };
 pub use config_manager::{ConfigError, ConfigManager};

@@ -249,6 +249,7 @@ private_key_passphrase = " phrase "
             },
             log_search: LogSearchConfig {
                 quick_keywords: "ERROR,WARN".to_string(),
+                recent_keywords: Vec::new(),
             },
             log_display: LogDisplayConfig {
                 jstack_thread_name_filters: "Attach Listener,Signal Dispatcher".to_string(),

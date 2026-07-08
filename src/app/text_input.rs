@@ -59,6 +59,8 @@ impl ArgusApp {
         self.log_search.directory_input.selection_anchor = None;
         self.log_search.directory_input.marked_range = None;
         self.log_search.directory_input.selection_drag = None;
+        // 关键字历史下拉跟随关键字输入框的焦点：失焦时一并收起，避免下拉悬空残留。
+        self.close_keyword_history();
 
         for state in self.runtime_analyses.values_mut() {
             clear_settings_input_focus(&mut state.filter_keyword_input);
@@ -421,6 +423,8 @@ fn apply_native_log_search_edit(
     );
     if input_kind == LogSearchInputKind::Keyword {
         app.clear_quick_log_search_state();
+        // 输入变化后重置高亮避免错位；下拉保持展开，历史条目始终为全部最近关键字。
+        app.reset_keyword_history_highlight();
     }
 }
 

@@ -59,6 +59,7 @@ use crate::text_selection::{
 };
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
+use crate::ui::custom_title_bar::TITLE_BAR_HEIGHT;
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
@@ -104,8 +105,18 @@ pub const LOG_CONTENT_FONT_SIZE_DEFAULT: f32 = 12.0;
 pub const SEARCH_RESULT_PANEL_HEIGHT_DEFAULT: f32 = 220.0;
 /// 搜索结果面板最小高度，保证标题和至少几行结果可见。
 pub const SEARCH_RESULT_PANEL_HEIGHT_MIN: f32 = 140.0;
-/// 搜索结果面板最大高度，避免拖拽时挤掉主要日志阅读区。
+/// 搜索结果面板最大高度兜底值，主要用于单元测试验证 clamp 行为；运行时实际上限随窗口高度动态计算。
 pub const SEARCH_RESULT_PANEL_HEIGHT_MAX: f32 = 520.0;
+/// 搜索结果面板拖拽到最大高度时，为上方日志内容保留的最小可见高度。
+///
+/// 与自定义标题栏高度无关：仅约束日志正文最小可见区，确保面板近乎撑满时仍能看到几行日志。
+pub const SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT: f32 = 60.0;
+/// 搜索结果面板拖拽时为上方日志内容保留的最小高度（含自定义标题栏与最小日志可见区），
+/// 面板最大可拖至窗口视口高度减去此值，使其近乎撑满整个窗口。
+///
+/// 由 `TITLE_BAR_HEIGHT` 与 `SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT` 派生，
+/// 标题栏高度调整时无需同步修改此处的字面量。
+pub const SEARCH_RESULT_PANEL_RESERVED_HEIGHT: f32 = TITLE_BAR_HEIGHT + SEARCH_RESULT_PANEL_MIN_LOG_VIEW_HEIGHT;
 /// 日志正文左侧内边距；命中测试和渲染必须保持一致。
 pub const LOG_VIEWER_TEXT_LEFT_PADDING: f32 = 16.0;
 /// 日志正文右侧内边距；横向滚动范围和渲染必须保持一致。
@@ -191,6 +202,20 @@ pub fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
         Cow::Owned(text.replace('\t', LOG_VIEWER_TAB_DISPLAY_SPACES))
     } else {
         Cow::Borrowed(text)
+    }
+}
+
+/// 构建无系统标题栏但保留可缩放能力的窗口标题栏选项。
+///
+/// GPUI 在 `titlebar: Some` 时会强制添加关闭/缩放按钮（红绿灯），而 `titlebar: None`
+/// 又会忽略 `is_resizable` 导致窗口不可缩放。这里把红绿灯定位到窗口可视区外，既保留
+/// 可缩放能力，又不显示系统按钮，关闭操作改由标题栏右侧的自定义关闭按钮承担。
+/// 线程详情窗口与文件预览窗口共用此配置。
+fn frameless_resizable_titlebar() -> TitlebarOptions {
+    TitlebarOptions {
+        title: None,
+        appears_transparent: true,
+        traffic_light_position: Some(point(px(-1000.0), px(0.0))),
     }
 }
 
@@ -839,6 +864,10 @@ pub struct LogSearchState {
     pub scope: SearchScope,
     /// 关键字输入框状态。
     pub keyword_input: LogSearchInputState,
+    /// 关键字历史下拉菜单是否展开。
+    pub keyword_history_open: bool,
+    /// 关键字历史下拉菜单当前高亮项索引。
+    pub keyword_history_highlight: Option<usize>,
     /// 目录输入框状态。
     pub directory_input: LogSearchInputState,
     /// 目录输入框对应的来源树目录节点。
@@ -907,6 +936,8 @@ impl Default for LogSearchState {
             window_handle: None,
             scope: SearchScope::CurrentFile,
             keyword_input: LogSearchInputState::default(),
+            keyword_history_open: false,
+            keyword_history_highlight: None,
             directory_input: LogSearchInputState::default(),
             directory_source_id: None,
             case_sensitive: false,
@@ -3736,7 +3767,7 @@ impl ArgusApp {
             cx,
         );
         let window_options = WindowOptions {
-            titlebar: None,
+            titlebar: Some(frameless_resizable_titlebar()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(
                 px(JSTACK_THREAD_DETAIL_WINDOW_MIN_WIDTH),
@@ -3786,15 +3817,7 @@ impl ArgusApp {
             cx,
         );
         let window_options = WindowOptions {
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                // GPUI 在 `titlebar: Some` 时会强制添加关闭/缩放按钮（红绿灯），
-                // 而 `titlebar: None` 又会忽略 `is_resizable` 导致窗口不可缩放。
-                // 这里把红绿灯定位到窗口可视区外，既保留可缩放能力，又不显示系统按钮，
-                // 关闭操作改由标题栏右侧的自定义关闭按钮承担。
-                traffic_light_position: Some(point(px(-1000.0), px(0.0))),
-            }),
+            titlebar: Some(frameless_resizable_titlebar()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(
                 px(FILE_PREVIEW_WINDOW_MIN_WIDTH),

@@ -110,6 +110,7 @@ impl AppConfig {
         self.loader.max_archive_depth = self.loader.max_archive_depth.min(8);
         self.loader.archive_probe_concurrency = self.loader.archive_probe_concurrency.clamp(1, 16);
         self.log_search.quick_keywords = self.log_search.quick_keywords.trim().to_string();
+        self.log_search.recent_keywords.truncate(SEARCH_RECENT_KEYWORDS_MAX);
         self.log_display.jstack_thread_name_filters =
             normalized_inline_text(self.log_display.jstack_thread_name_filters);
         self.log_display.jstack_stack_segment_filters =
@@ -190,11 +191,17 @@ fn default_archive_probe_concurrency() -> usize {
     4
 }
 
-/// 日志搜索配置，当前用于保存快搜关键字。
+/// 搜索关键字历史最多保留条数；超出时丢弃最旧项。
+pub const SEARCH_RECENT_KEYWORDS_MAX: usize = 20;
+
+/// 日志搜索配置，保存快搜关键字与最近搜索历史。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LogSearchConfig {
     /// 快搜关键字原始输入，使用英文逗号分隔；解析和去重在搜索启动时执行。
     pub quick_keywords: String,
+    /// 最近搜索关键字历史，最新在前；保存最近 20 条，搜索窗口关键字输入框下拉展示。
+    #[serde(default)]
+    pub recent_keywords: Vec<String>,
 }
 
 /// 日志显示配置，保存阅读区和线程日志分析的展示偏好。
@@ -339,6 +346,7 @@ mod tests {
             },
             log_search: LogSearchConfig {
                 quick_keywords: " ERROR, WARN ".to_string(),
+                recent_keywords: Vec::new(),
             },
             log_display: LogDisplayConfig {
                 jstack_thread_name_filters: " main, Attach Listener ".to_string(),

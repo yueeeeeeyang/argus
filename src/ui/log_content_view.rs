@@ -9,8 +9,9 @@ use std::ops::Range;
 
 use crate::app::{
     ArgusApp, LOG_VIEWER_TEXT_LEFT_PADDING, LOG_VIEWER_TEXT_RIGHT_PADDING, LogScrollbarAxis,
-    LogScrollbarDrag, SearchResultListItem, SearchResultScrollbarAxis, SearchResultScrollbarDrag,
-    SearchRunKind, TabKind, log_viewer_display_text, log_viewer_line_number_width,
+    LogScrollbarDrag, SEARCH_RESULT_PANEL_HEIGHT_MIN, SEARCH_RESULT_PANEL_RESERVED_HEIGHT,
+    SearchResultListItem, SearchResultScrollbarAxis, SearchResultScrollbarDrag, SearchRunKind,
+    TabKind, log_viewer_display_text, log_viewer_line_number_width,
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
@@ -1645,12 +1646,17 @@ fn render_search_results_resize_handle(
                         }
                     });
 
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window: &mut Window, cx| {
                         if !phase.bubble() || !event.dragging() {
                             return;
                         }
+                        // 按窗口视口高度动态计算面板上限，使其可近乎撑满窗口；
+                        // 预留上方标题栏与最小日志可见区，并保证不小于最小高度。
+                        let viewport_height = f32::from(window.viewport_size().height);
+                        let max_height = (viewport_height - SEARCH_RESULT_PANEL_RESERVED_HEIGHT)
+                            .max(SEARCH_RESULT_PANEL_HEIGHT_MIN);
                         let handled = entity.update(cx, |app, _| {
-                            app.resize_search_result_panel(event.position.y)
+                            app.resize_search_result_panel(event.position.y, max_height)
                         });
                         if handled {
                             cx.stop_propagation();

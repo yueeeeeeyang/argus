@@ -17,6 +17,9 @@ use crate::text_selection::{
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
+use crate::ui::components::scrollbar::{
+    ScrollbarMetrics, scrollbar_metrics, scrollbar_scroll_for_drag,
+};
 use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, FocusHandle, FontWeight, HighlightStyle,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -25,9 +28,9 @@ use gpui::{
 };
 
 /// 详情窗口顶部标题栏高度。
-const DETAIL_TITLE_BAR_HEIGHT: f32 = 56.0;
+const DETAIL_TITLE_BAR_HEIGHT: f32 = 40.0;
 /// 详情窗口线程摘要区域高度。
-const DETAIL_SUMMARY_HEIGHT: f32 = 92.0;
+const DETAIL_SUMMARY_HEIGHT: f32 = 56.0;
 /// 详情窗口内容滚动条宽度。
 const DETAIL_SCROLLBAR_WIDTH: f32 = 8.0;
 /// 详情窗口滚动条轨道内边距。
@@ -65,21 +68,6 @@ struct DetailScrollbarDrag {
     axis: DetailScrollbarAxis,
     /// 鼠标按下位置到滑块起点的距离。
     cursor_offset: Pixels,
-}
-
-/// 详情窗口滚动条布局度量。
-#[derive(Clone, Copy, Debug)]
-struct DetailScrollbarMetrics {
-    /// 滑块起点。
-    thumb_start: Pixels,
-    /// 滑块长度。
-    thumb_length: Pixels,
-    /// 轨道起点。
-    track_start: Pixels,
-    /// 轨道长度。
-    track_length: Pixels,
-    /// 最大滚动距离。
-    max_scroll: Pixels,
 }
 
 /// 堆栈文本中的字符位置。
@@ -139,8 +127,6 @@ pub struct JstackThreadDetailWindow {
     stack_scroll: ScrollHandle,
     /// 当前正在拖拽的滚动条；为空表示没有拖拽。
     scrollbar_drag: Option<DetailScrollbarDrag>,
-    /// 是否已选中线程名，选中后支持复制快捷键并显示高亮反馈。
-    is_thread_name_selected: bool,
     /// 当前堆栈正文选区。
     stack_selection: Option<StackTextSelection>,
     /// 当前堆栈正文拖拽选择状态。
@@ -192,7 +178,6 @@ impl JstackThreadDetailWindow {
             highlighted_line,
             stack_scroll: ScrollHandle::new(),
             scrollbar_drag: None,
-            is_thread_name_selected: false,
             stack_selection: None,
             stack_selection_drag: None,
             focus_handle: cx.focus_handle(),
@@ -227,30 +212,12 @@ impl JstackThreadDetailWindow {
         self.stack_selection_drag = None;
     }
 
-    /// 选中并复制当前线程详情的线程名。
-    fn select_and_copy_thread_name(&mut self, cx: &mut Context<Self>) {
-        self.is_thread_name_selected = true;
-        self.stack_selection = None;
-        self.stack_selection_drag = None;
-        let thread_name = self.detail.display_label();
-        let app_context: &gpui::App = (&*cx).borrow();
-        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name));
-    }
-
-    /// 复制当前详情窗口选区；堆栈正文选区优先，没有正文选区时复制线程身份。
+    /// 复制当前详情窗口的堆栈正文选区；没有选区时不执行复制。
     fn copy_detail_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(stack_text) = self.selected_stack_text() {
             let app_context: &gpui::App = (&*cx).borrow();
             app_context.write_to_clipboard(ClipboardItem::new_string(stack_text));
-            return;
         }
-
-        if !self.is_thread_name_selected {
-            self.is_thread_name_selected = true;
-        }
-        let thread_name = self.detail.display_label();
-        let app_context: &gpui::App = (&*cx).borrow();
-        app_context.write_to_clipboard(ClipboardItem::new_string(thread_name));
     }
 
     /// 根据鼠标位置开始堆栈正文选择。
@@ -272,7 +239,6 @@ impl JstackThreadDetailWindow {
             anchor_range,
             granularity,
         });
-        self.is_thread_name_selected = false;
     }
 
     /// 拖拽过程中更新堆栈正文选择。
@@ -290,7 +256,6 @@ impl JstackThreadDetailWindow {
         let focus_range =
             stack_text_range_for_granularity(line_index, line, position.column, drag.granularity);
         self.stack_selection = Some(merge_stack_text_ranges(&drag.anchor_range, &focus_range));
-        self.is_thread_name_selected = false;
     }
 
     /// 结束堆栈正文选择；没有选中字符时清理选区。
@@ -400,9 +365,7 @@ impl Render for JstackThreadDetailWindow {
             }))
             .child(render_detail_title_bar(
                 &theme,
-                &self.detail.display_label(),
-                self.is_thread_name_selected,
-                cx,
+                &self.detail.thread_name,
             ))
             .child(render_detail_body(
                 &theme,
@@ -410,7 +373,6 @@ impl Render for JstackThreadDetailWindow {
                 active_occurrence,
                 self.active_index,
                 self.highlighted_line,
-                self.is_thread_name_selected,
                 self.stack_selection.as_ref(),
                 &self.stack_scroll,
                 window,
@@ -419,15 +381,12 @@ impl Render for JstackThreadDetailWindow {
     }
 }
 
-/// 渲染窗口顶部标题和关闭按钮。
+/// 渲染窗口顶部标题和关闭按钮；标题仅显示线程名，过长截断。
 fn render_detail_title_bar(
     theme: &AppTheme,
     thread_name: &str,
-    is_thread_name_selected: bool,
-    cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let close_theme = theme.clone();
-    let display_title = format!("线程堆栈 - {thread_name}");
     div()
         .h(px(DETAIL_TITLE_BAR_HEIGHT))
         .px_5()
@@ -436,24 +395,14 @@ fn render_detail_title_bar(
         .justify_between()
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap_2()
+                .flex_1()
+                .min_w(px(0.0))
                 .text_size(px(14.0))
                 .line_height(px(18.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(theme.foreground))
                 .truncate()
-                .child(render_icon(ArgusIcon::Logs, theme.foreground_muted, 16.0))
-                .child(render_copyable_detail_thread_name(
-                    "jstack-thread-detail-title-name",
-                    display_title,
-                    is_thread_name_selected,
-                    14.0,
-                    true,
-                    theme,
-                    cx,
-                )),
+                .child(thread_name.to_string()),
         )
         .child(render_icon_button(
             "jstack-thread-detail-close",
@@ -468,47 +417,6 @@ fn render_detail_title_bar(
         ))
 }
 
-/// 渲染可选中复制的线程名文本。
-fn render_copyable_detail_thread_name(
-    id: &'static str,
-    label: String,
-    is_selected: bool,
-    font_size: f32,
-    is_bold: bool,
-    theme: &AppTheme,
-    cx: &mut Context<JstackThreadDetailWindow>,
-) -> impl IntoElement + use<> {
-    let tooltip_theme = theme.clone();
-    div()
-        .id(id)
-        .min_w(px(0.0))
-        .px_1()
-        .rounded_sm()
-        .cursor_pointer()
-        .bg(rgb(if is_selected {
-            theme.selection
-        } else {
-            theme.content
-        }))
-        .text_size(px(font_size))
-        .line_height(px(font_size + 6.0))
-        .text_color(rgb(theme.foreground))
-        .truncate()
-        .when(is_bold, |this| this.font_weight(FontWeight::SEMIBOLD))
-        .child(label.clone())
-        .tooltip(move |_, cx| {
-            cx.new(|_| DetailTooltip {
-                label: "点击复制线程名".to_string(),
-                theme: tooltip_theme.clone(),
-            })
-            .into()
-        })
-        .on_click(cx.listener(|view, _, _, cx| {
-            view.select_and_copy_thread_name(cx);
-            cx.notify();
-        }))
-}
-
 /// 渲染详情主体区域，包括快照切换栏、元信息和完整堆栈。
 fn render_detail_body(
     theme: &AppTheme,
@@ -516,7 +424,6 @@ fn render_detail_body(
     active_occurrence: Option<JstackThreadStackOccurrence>,
     active_index: usize,
     highlighted_line: Option<usize>,
-    is_thread_name_selected: bool,
     stack_selection: Option<&StackTextSelection>,
     stack_scroll: &ScrollHandle,
     window: &mut Window,
@@ -544,7 +451,6 @@ fn render_detail_body(
             detail,
             &active_occurrence,
             active_index,
-            is_thread_name_selected,
             cx,
         ))
         .child(render_stack_content(
@@ -565,7 +471,6 @@ fn render_occurrence_summary(
     detail: &JstackThreadDetail,
     occurrence: &JstackThreadStackOccurrence,
     active_index: usize,
-    is_thread_name_selected: bool,
     cx: &mut Context<JstackThreadDetailWindow>,
 ) -> impl IntoElement + use<> {
     let total_count = detail.occurrences.len().max(1);
@@ -584,7 +489,7 @@ fn render_occurrence_summary(
         .id("jstack-thread-detail-summary")
         .h(px(DETAIL_SUMMARY_HEIGHT))
         .px_5()
-        .py_3()
+        .py_2()
         .flex()
         .items_center()
         .justify_between()
@@ -598,15 +503,6 @@ fn render_occurrence_summary(
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(render_copyable_detail_thread_name(
-                    "jstack-thread-detail-summary-name",
-                    detail.display_label(),
-                    is_thread_name_selected,
-                    14.0,
-                    true,
-                    theme,
-                    cx,
-                ))
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -759,10 +655,12 @@ fn render_detail_scrollbars(
     let offset = scroll_handle.offset();
     let mut scrollbars = Vec::new();
 
-    if let Some(metrics) = detail_scrollbar_metrics(
+    if let Some(metrics) = scrollbar_metrics(
         bounds.size.height,
         bounds.size.height + max_offset.height,
         -offset.y,
+        DETAIL_SCROLLBAR_PADDING,
+        DETAIL_SCROLLBAR_MIN_THUMB,
     ) {
         scrollbars.push(render_detail_scrollbar_thumb(
             DetailScrollbarAxis::Vertical,
@@ -773,10 +671,12 @@ fn render_detail_scrollbars(
             cx,
         ));
     }
-    if let Some(metrics) = detail_scrollbar_metrics(
+    if let Some(metrics) = scrollbar_metrics(
         bounds.size.width,
         bounds.size.width + max_offset.width,
         -offset.x,
+        DETAIL_SCROLLBAR_PADDING,
+        DETAIL_SCROLLBAR_MIN_THUMB,
     ) {
         scrollbars.push(render_detail_scrollbar_thumb(
             DetailScrollbarAxis::Horizontal,
@@ -791,37 +691,10 @@ fn render_detail_scrollbars(
     scrollbars
 }
 
-/// 计算滚动条滑块位置和拖拽换算所需的度量。
-fn detail_scrollbar_metrics(
-    viewport_length: gpui::Pixels,
-    content_length: gpui::Pixels,
-    scroll_offset: gpui::Pixels,
-) -> Option<DetailScrollbarMetrics> {
-    if viewport_length == px(0.0) || content_length <= viewport_length {
-        return None;
-    }
-
-    let track_padding = px(DETAIL_SCROLLBAR_PADDING);
-    let track_length = (viewport_length - track_padding * 2.0).max(px(1.0));
-    let thumb_length = ((viewport_length / content_length) * track_length)
-        .clamp(px(DETAIL_SCROLLBAR_MIN_THUMB), track_length);
-    let max_scroll = (content_length - viewport_length).max(px(1.0));
-    let scroll_ratio = (scroll_offset / max_scroll).clamp(0.0, 1.0);
-    let thumb_start = track_padding + (track_length - thumb_length) * scroll_ratio;
-
-    Some(DetailScrollbarMetrics {
-        thumb_start,
-        thumb_length,
-        track_start: track_padding,
-        track_length,
-        max_scroll,
-    })
-}
-
 /// 渲染可拖拽的详情窗口滚动条滑块。
 fn render_detail_scrollbar_thumb(
     axis: DetailScrollbarAxis,
-    metrics: DetailScrollbarMetrics,
+    metrics: ScrollbarMetrics,
     viewport_bounds: Bounds<Pixels>,
     scroll_handle: ScrollHandle,
     theme: &AppTheme,
@@ -928,12 +801,8 @@ fn render_detail_scrollbar_thumb(
                             } else {
                                 event.position.y - viewport_bounds.top()
                             };
-                            let movable =
-                                (metrics.track_length - metrics.thumb_length).max(px(1.0));
-                            let thumb_start = (pointer - drag.cursor_offset)
-                                .clamp(metrics.track_start, metrics.track_start + movable);
-                            let ratio = (thumb_start - metrics.track_start) / movable;
-                            let scroll = metrics.max_scroll * ratio;
+                            let scroll =
+                                scrollbar_scroll_for_drag(pointer, drag.cursor_offset, &metrics);
                             let current = scroll_handle.offset();
                             if is_horizontal {
                                 scroll_handle.set_offset(point(-scroll, current.y));

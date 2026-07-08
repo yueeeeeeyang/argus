@@ -12,7 +12,10 @@ use crate::ui::tab_bar;
 use gpui::{ClickEvent, Context, IntoElement, Window, WindowControlArea, div, prelude::*, px, rgb};
 
 /// 自定义标题栏高度，保持紧凑 Obsidian 风格。
-const TITLE_BAR_HEIGHT: f32 = 40.0;
+///
+/// 公开供依赖标题栏高度的计算（如搜索结果面板保留高度）派生使用，避免各自维护
+/// 易漂移的字面量。
+pub const TITLE_BAR_HEIGHT: f32 = 40.0;
 /// 标签页与来源侧栏分割线之间的视觉留白。
 const TAB_LEFT_GAP: f32 = 16.0;
 /// 标签栏右侧固定按钮与窗口右边缘的间距。

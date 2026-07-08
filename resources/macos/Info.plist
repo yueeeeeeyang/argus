@@ -2,7 +2,7 @@
 <!--
   文件职责：macOS Argus.app 打包用 Info.plist 模板。
   创建日期：2026-06-15
-  修改日期：2026-06-15
+  修改日期：2026-07-07
   作者：Argus 开发团队
   主要功能：声明应用基础信息、URL 打开能力和 Finder Open With 可识别的文档类型。
 -->
@@ -65,6 +65,12 @@
 				<string>org.tukaani.xz-archive</string>
 				<string>org.7-zip.7-zip-archive</string>
 				<string>com.rarlab.rar-archive</string>
+				<!-- .log 文件的具体 UTI 为 com.apple.log（conforms to public.log/public.plain-text）。
+				     public.data 虽是基类但过于抽象，LaunchServices 不会据此把 Argus 列入 .log 的“打开方式”，
+				     故需显式声明具体 UTI，否则右键无法用 Argus 打开 .log。 -->
+				<string>com.apple.log</string>
+				<string>public.log</string>
+				<string>public.plain-text</string>
 			</array>
 		</dict>
 	</array>

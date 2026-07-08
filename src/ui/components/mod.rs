@@ -13,6 +13,7 @@ pub mod icon_button;
 pub mod input;
 pub mod loading_spinner;
 pub mod modal_dialog;
+pub mod scrollbar;
 pub mod search_box;
 pub mod split_pane;
 pub mod tree_view;

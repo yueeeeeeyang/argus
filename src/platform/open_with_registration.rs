@@ -465,4 +465,23 @@ mod tests {
             );
         }
     }
+
+    /// 验证 macOS 打包模板 Info.plist 显式声明了 .log 文件的具体 UTI，避免回归导致
+    /// .log 文件无法出现在 Finder“打开方式”中。
+    #[test]
+    fn macos_info_plist_declares_log_document_type() {
+        #[cfg(target_os = "macos")]
+        {
+            let plist_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("macos")
+                .join("Info.plist");
+            let plist = std::fs::read_to_string(&plist_path)
+                .unwrap_or_else(|error| panic!("无法读取 {}: {error}", plist_path.display()));
+            assert!(
+                plist.contains("com.apple.log"),
+                "Info.plist 必须声明 com.apple.log，否则 .log 文件无法右键用 Argus 打开"
+            );
+        }
+    }
 }

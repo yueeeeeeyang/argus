@@ -21,10 +21,11 @@ use gpui::{
 
 use super::{
     ArgusApp, InputTextSelectionDrag, LogSearchInputKind, LogSearchInputState, QuickMatchKey,
-    SEARCH_RESULT_PANEL_HEIGHT_MAX, SEARCH_RESULT_PANEL_HEIGHT_MIN, SearchResultGroup,
-    SearchResultListItem, SearchResultPanelResizeDrag, SearchRunKind, TabKind,
+    SEARCH_RESULT_PANEL_HEIGHT_MIN, SearchResultGroup, SearchResultListItem,
+    SearchResultPanelResizeDrag, SearchRunKind, TabKind,
 };
 use crate::app::LOG_VIEWER_ROW_HEIGHT;
+use crate::config::SEARCH_RECENT_KEYWORDS_MAX;
 use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceKind, SourceRegistry};
 use crate::search::search_engine::{
     CurrentLogMatchCount, CurrentLogMatchDirection, CurrentLogMatchNavigation,
@@ -41,11 +42,14 @@ use crate::ui::log_search_window::LogSearchWindow;
 /// 搜索窗口默认宽度。
 const LOG_SEARCH_WINDOW_WIDTH: f32 = 560.0;
 /// 搜索窗口默认高度。
-const LOG_SEARCH_WINDOW_HEIGHT: f32 = 220.0;
+///
+/// 内容（标题 + 关键字 + 目录 + 模式行 + 操作行 + 内外边距）约需 244px；底部用 flex_1 占位
+/// 把操作行顶到底部，280px 既容下完整内容与按钮上方留白，也为关键字历史下拉留出展开空间。
+const LOG_SEARCH_WINDOW_HEIGHT: f32 = 280.0;
 /// 搜索窗口最小宽度。
 const LOG_SEARCH_WINDOW_MIN_WIDTH: f32 = 460.0;
 /// 搜索窗口最小高度。
-const LOG_SEARCH_WINDOW_MIN_HEIGHT: f32 = 190.0;
+const LOG_SEARCH_WINDOW_MIN_HEIGHT: f32 = 250.0;
 /// 搜索后台事件合并刷新间隔；降低大量结果时主窗口重绘频率。
 const LOG_SEARCH_UI_POLL_INTERVAL_MS: u64 = 80;
 /// 单次 UI tick 最多处理的后台事件数，避免一次性追加过多结果造成滚动卡顿。
@@ -266,6 +270,10 @@ impl ArgusApp {
             self.placeholder_notice = message;
             return;
         }
+
+        // 关键字校验通过，记录到搜索历史用于下次输入框下拉展示，并关闭历史下拉。
+        self.record_search_keyword(&query.keyword);
+        self.log_search.keyword_history_open = false;
 
         self.start_log_search_with_queries(scope, vec![query], SearchRunKind::Normal, cx);
     }
@@ -1118,6 +1126,12 @@ impl ArgusApp {
         input.selection_anchor = None;
         input.marked_range = None;
         input.selection_drag = None;
+        // 聚焦关键字输入框时展开历史下拉（历史非空才展开），便于复用近期搜索。
+        if input_kind == LogSearchInputKind::Keyword
+            && !self.config.log_search.recent_keywords.is_empty()
+        {
+            self.open_keyword_history();
+        }
     }
 
     /// 清空指定搜索输入框，并保持输入焦点。
@@ -1125,6 +1139,97 @@ impl ArgusApp {
         let input = self.log_search_input_mut(input_kind);
         input.value.clear();
         input.cursor = 0;
+        input.selection_anchor = None;
+        input.marked_range = None;
+        input.selection_drag = None;
+        input.is_focused = true;
+        if input_kind == LogSearchInputKind::Keyword {
+            self.clear_quick_log_search_state();
+        }
+    }
+
+    /// 记录一次成功搜索的关键字到历史：去重后置于最前、截断到上限并持久化。
+    pub fn record_search_keyword(&mut self, keyword: &str) {
+        let keyword = keyword.trim();
+        if keyword.is_empty() {
+            return;
+        }
+        let recent = &mut self.config.log_search.recent_keywords;
+        recent.retain(|item| item != keyword);
+        recent.insert(0, keyword.to_string());
+        recent.truncate(SEARCH_RECENT_KEYWORDS_MAX);
+        self.persist_config_or_report();
+    }
+
+    /// 返回用于下拉展示的关键字历史条目，保持历史原始顺序（最新在前）。
+    ///
+    /// 历史下拉始终展示全部最近关键字：输入框可能残留上次搜索的关键字，若按其做子串
+    /// 过滤，下拉会只剩"当前关键字"一项，无法起到挑选其它历史关键字的作用。
+    pub fn keyword_history_items(&self) -> Vec<String> {
+        self.config.log_search.recent_keywords.clone()
+    }
+
+    /// 打开关键字历史下拉菜单并重置高亮。
+    pub fn open_keyword_history(&mut self) {
+        self.log_search.keyword_history_open = true;
+        self.log_search.keyword_history_highlight = None;
+    }
+
+    /// 关闭关键字历史下拉菜单并清空高亮。
+    pub fn close_keyword_history(&mut self) {
+        self.log_search.keyword_history_open = false;
+        self.log_search.keyword_history_highlight = None;
+    }
+
+    /// 重置关键字历史下拉高亮索引，但保持下拉展开状态。
+    ///
+    /// 输入文本变化或选区改变后历史条目集合随之变化，原高亮索引会错位；此时清空高亮，
+    /// 下拉仍展开以便实时过滤，下一次方向键会重新落到首/末项。
+    pub fn reset_keyword_history_highlight(&mut self) {
+        self.log_search.keyword_history_highlight = None;
+    }
+
+    /// 在关键字历史下拉中按 `delta` 移动高亮项；越过边界时循环到对端。
+    pub fn move_keyword_history_highlight(&mut self, delta: isize) {
+        if !self.log_search.keyword_history_open {
+            return;
+        }
+        let count = self.config.log_search.recent_keywords.len();
+        if count == 0 {
+            self.log_search.keyword_history_highlight = None;
+            return;
+        }
+        // 未选中时按向下落到首项、按向上落到末项；已选中则循环移动。
+        let current = self
+            .log_search
+            .keyword_history_highlight
+            .map(|index| index as isize)
+            .unwrap_or(-1);
+        let next = if current == -1 {
+            if delta > 0 {
+                0
+            } else {
+                count as isize - 1
+            }
+        } else {
+            (current + delta).rem_euclid(count as isize)
+        };
+        self.log_search.keyword_history_highlight = Some(next as usize);
+    }
+
+    /// 选中历史下拉中指定索引的关键字：填入输入框并立即触发搜索。
+    pub fn select_keyword_history(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(keyword) = self.config.log_search.recent_keywords.get(index).cloned() {
+            self.set_log_search_input_value(LogSearchInputKind::Keyword, &keyword);
+            self.start_log_search(self.log_search.scope, cx);
+        }
+    }
+
+    /// 将指定搜索输入框的值整体替换为 `text`，光标置于末尾并保持焦点。
+    fn set_log_search_input_value(&mut self, input_kind: LogSearchInputKind, text: &str) {
+        let input = self.log_search_input_mut(input_kind);
+        input.value = text.to_string();
+        input.cursor = character_count(&input.value);
         input.selection_anchor = None;
         input.marked_range = None;
         input.selection_drag = None;
@@ -1158,6 +1263,33 @@ impl ArgusApp {
                 _ => {}
             }
             return;
+        }
+
+        // 关键字历史下拉展开时，优先消费导航键，避免方向键移动光标或 Esc 误关窗口。
+        if input_kind == LogSearchInputKind::Keyword && self.log_search.keyword_history_open {
+            match key.as_str() {
+                "up" | "arrowup" => {
+                    self.move_keyword_history_highlight(-1);
+                    return;
+                }
+                "down" | "arrowdown" => {
+                    self.move_keyword_history_highlight(1);
+                    return;
+                }
+                "enter" => {
+                    if let Some(index) = self.log_search.keyword_history_highlight {
+                        self.select_keyword_history(index, cx);
+                        return;
+                    }
+                    self.start_log_search(self.log_search.scope, cx);
+                    return;
+                }
+                "escape" => {
+                    self.close_keyword_history();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match key.as_str() {
@@ -1429,15 +1561,17 @@ impl ArgusApp {
     }
 
     /// 拖拽更新搜索结果面板高度。
-    pub fn resize_search_result_panel(&mut self, cursor_y: Pixels) -> bool {
+    ///
+    /// `max_height` 为当前允许的面板最大高度，由调用方按窗口视口高度动态计算，
+    /// 使面板可近乎撑满窗口；传入值小于最小高度时回退到最小高度，避免 clamp 区间反转。
+    pub fn resize_search_result_panel(&mut self, cursor_y: Pixels, max_height: f32) -> bool {
         let Some(drag) = self.log_search.result_panel_resize_drag else {
             return false;
         };
         let delta = f32::from(drag.start_y - cursor_y);
-        let next_height = (drag.start_height + delta).clamp(
-            SEARCH_RESULT_PANEL_HEIGHT_MIN,
-            SEARCH_RESULT_PANEL_HEIGHT_MAX,
-        );
+        let upper = max_height.max(SEARCH_RESULT_PANEL_HEIGHT_MIN);
+        let next_height = (drag.start_height + delta)
+            .clamp(SEARCH_RESULT_PANEL_HEIGHT_MIN, upper);
         if (next_height - self.log_search.result_panel_height).abs() < f32::EPSILON {
             return false;
         }
@@ -1912,6 +2046,7 @@ impl ArgusApp {
 
     /// 清理所有搜索输入框焦点。
     fn clear_log_search_input_focus(&mut self) {
+        self.close_keyword_history();
         self.log_search.keyword_input.is_focused = false;
         self.log_search.keyword_input.marked_range = None;
         self.log_search.keyword_input.selection_drag = None;
@@ -2019,6 +2154,7 @@ impl ArgusApp {
         input.selection_drag = None;
         if input_kind == LogSearchInputKind::Keyword {
             self.clear_quick_log_search_state();
+            self.reset_keyword_history_highlight();
         }
     }
 
@@ -2553,8 +2689,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
-    use crate::app::{ArgusTab, LogTextPosition, LogTextSelection};
-    use crate::config::{ConfigManager, LoaderConfig};
+    use crate::app::{ArgusTab, LogTextPosition, LogTextSelection, SEARCH_RESULT_PANEL_HEIGHT_MAX};
+    use crate::config::{ConfigManager, LoaderConfig, SEARCH_RECENT_KEYWORDS_MAX};
     use crate::loader::{
         LogSourceLoader, SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode,
     };
@@ -3085,14 +3221,20 @@ mod tests {
         let mut app = test_app();
 
         app.begin_search_result_panel_resize(gpui::px(300.0));
-        assert!(app.resize_search_result_panel(gpui::px(-500.0)));
+        assert!(app.resize_search_result_panel(
+            gpui::px(-500.0),
+            SEARCH_RESULT_PANEL_HEIGHT_MAX
+        ));
         assert_eq!(
             app.log_search.result_panel_height,
             SEARCH_RESULT_PANEL_HEIGHT_MAX
         );
 
         app.begin_search_result_panel_resize(gpui::px(300.0));
-        assert!(app.resize_search_result_panel(gpui::px(900.0)));
+        assert!(app.resize_search_result_panel(
+            gpui::px(900.0),
+            SEARCH_RESULT_PANEL_HEIGHT_MAX
+        ));
         assert_eq!(
             app.log_search.result_panel_height,
             SEARCH_RESULT_PANEL_HEIGHT_MIN
@@ -3119,5 +3261,140 @@ mod tests {
             BTreeSet::from([first_id, second_id, third_id])
         );
         assert_eq!(app.last_source_selection_anchor, Some(first_id));
+    }
+
+    /// 验证关键字历史去重、置顶、截断到上限，并确认持久化写入配置文件后可原样读回。
+    #[test]
+    fn keyword_history_dedup_unshift_truncate_and_persist() {
+        let mut app = test_app();
+        app.record_search_keyword("error");
+        assert_eq!(
+            app.config.log_search.recent_keywords,
+            vec!["error".to_string()]
+        );
+
+        // 新关键字置顶。
+        app.record_search_keyword("timeout");
+        assert_eq!(
+            app.config.log_search.recent_keywords,
+            vec!["timeout".to_string(), "error".to_string()]
+        );
+
+        // 重复关键字去重并重新置顶，保持相对顺序。
+        app.record_search_keyword("error");
+        assert_eq!(
+            app.config.log_search.recent_keywords,
+            vec!["error".to_string(), "timeout".to_string()]
+        );
+
+        // 空白关键字忽略。
+        app.record_search_keyword("   ");
+        assert_eq!(
+            app.config.log_search.recent_keywords,
+            vec!["error".to_string(), "timeout".to_string()]
+        );
+
+        // 超过上限时丢弃最旧项，最新项置顶。
+        for index in 0..(SEARCH_RECENT_KEYWORDS_MAX + 3) {
+            app.record_search_keyword(&format!("kw-{index}"));
+        }
+        assert_eq!(
+            app.config.log_search.recent_keywords.len(),
+            SEARCH_RECENT_KEYWORDS_MAX
+        );
+        let expected_first = format!("kw-{}", SEARCH_RECENT_KEYWORDS_MAX + 2);
+        assert_eq!(
+            app.config.log_search.recent_keywords.first().map(String::as_str),
+            Some(expected_first.as_str())
+        );
+
+        // 持久化：重新加载同一配置文件应得到相同历史。
+        let reloaded =
+            ConfigManager::new(app.config_manager.settings_path().to_path_buf()).load();
+        assert_eq!(
+            reloaded.log_search.recent_keywords,
+            app.config.log_search.recent_keywords
+        );
+    }
+
+    /// 验证历史过滤为大小写不敏感的子串匹配，空输入返回全部（最新在前）。
+    #[test]
+    fn keyword_history_items_returns_all_recent() {
+        let mut app = test_app();
+        app.record_search_keyword("ERROR");
+        app.record_search_keyword("ConnectionTimeout");
+        app.record_search_keyword("warn");
+        app.record_search_keyword("disk full");
+
+        // 始终返回全部历史，最新在前；输入框残留关键字不再过滤（否则下拉只剩当前关键字）。
+        app.log_search.keyword_input.value = String::new();
+        assert_eq!(
+            app.keyword_history_items(),
+            vec![
+                "disk full".to_string(),
+                "warn".to_string(),
+                "ConnectionTimeout".to_string(),
+                "ERROR".to_string(),
+            ]
+        );
+
+        // 输入框已有上次搜索的关键字时，仍返回全部历史。
+        app.log_search.keyword_input.value = "ERROR".to_string();
+        assert_eq!(
+            app.keyword_history_items(),
+            vec![
+                "disk full".to_string(),
+                "warn".to_string(),
+                "ConnectionTimeout".to_string(),
+                "ERROR".to_string(),
+            ]
+        );
+
+        // 纯空白输入同样返回全部。
+        app.log_search.keyword_input.value = "   ".to_string();
+        assert_eq!(app.keyword_history_items().len(), 4);
+    }
+
+    /// 验证历史下拉高亮在列表内循环移动，关闭后不再响应。
+    #[test]
+    fn keyword_history_highlight_cycles_within_list() {
+        let mut app = test_app();
+        app.record_search_keyword("error");
+        app.record_search_keyword("timeout");
+        app.record_search_keyword("warn");
+
+        app.log_search.keyword_input.value = String::new();
+        app.open_keyword_history();
+        assert!(app.log_search.keyword_history_open);
+        assert_eq!(app.log_search.keyword_history_highlight, None);
+
+        // 向下：None -> 0 -> 1 -> 2 -> 0（循环）。
+        app.move_keyword_history_highlight(1);
+        assert_eq!(app.log_search.keyword_history_highlight, Some(0));
+        app.move_keyword_history_highlight(1);
+        assert_eq!(app.log_search.keyword_history_highlight, Some(1));
+        app.move_keyword_history_highlight(1);
+        assert_eq!(app.log_search.keyword_history_highlight, Some(2));
+        app.move_keyword_history_highlight(1);
+        assert_eq!(app.log_search.keyword_history_highlight, Some(0));
+
+        // 向上从 0 循环回末尾。
+        app.move_keyword_history_highlight(-1);
+        assert_eq!(app.log_search.keyword_history_highlight, Some(2));
+
+        // 输入框残留关键字不影响列表长度，高亮仍按完整列表循环。
+        app.log_search.keyword_input.value = "err".to_string();
+        app.log_search.keyword_history_highlight = None;
+        app.move_keyword_history_highlight(1);
+        assert_eq!(app.log_search.keyword_history_highlight, Some(0));
+        app.move_keyword_history_highlight(-1);
+        assert_eq!(app.log_search.keyword_history_highlight, Some(2));
+
+        // 关闭后清空高亮且不再响应移动。
+        app.close_keyword_history();
+        assert!(!app.log_search.keyword_history_open);
+        assert_eq!(app.log_search.keyword_history_highlight, None);
+        app.move_keyword_history_highlight(1);
+        assert_eq!(app.log_search.keyword_history_highlight, None);
     }
 }
