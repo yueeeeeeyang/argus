@@ -17,12 +17,12 @@ use super::{
     log_viewer_display_text, log_viewer_line_number_width,
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
-use crate::loader::SourceId;
-use crate::reader::log_file_reader::{LogDocument, LogOpenState};
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, slice_character_range, word_range_at,
 };
+use crate::loader::SourceId;
+use crate::reader::log_file_reader::{LogDocument, LogOpenState};
 
 impl ArgusApp {
     /// 返回当前是否存在可搜索的日志标签页。

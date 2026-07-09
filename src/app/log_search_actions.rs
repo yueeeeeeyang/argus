@@ -26,6 +26,10 @@ use super::{
 };
 use crate::app::LOG_VIEWER_ROW_HEIGHT;
 use crate::config::SEARCH_RECENT_KEYWORDS_MAX;
+use crate::infra::text_selection::{
+    TextSelectionGranularity, character_count, insert_text_at_character_index,
+    remove_character_range, slice_character_range, word_range_at,
+};
 use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceKind, SourceRegistry};
 use crate::search::search_engine::{
     CurrentLogMatchCount, CurrentLogMatchDirection, CurrentLogMatchNavigation,
@@ -33,10 +37,6 @@ use crate::search::search_engine::{
     SearchResult, SearchScope, SearchTarget, SearchTaskSummary,
 };
 use crate::search::search_task::SearchTaskState;
-use crate::infra::text_selection::{
-    TextSelectionGranularity, character_count, insert_text_at_character_index,
-    remove_character_range, slice_character_range, word_range_at,
-};
 use crate::ui::log_search_window::LogSearchWindow;
 
 /// 搜索窗口默认宽度。
@@ -392,30 +392,32 @@ impl ArgusApp {
         let cancel_token = Arc::new(AtomicBool::new(false));
         self.log_search.cancel_token = Some(cancel_token.clone());
         let default_encoding = self.selected_encoding.clone();
+        let archive_passwords = self.archive_passwords.clone();
         let (sender, receiver) = mpsc::channel::<SearchWorkerEvent>();
 
         if let Some((directory_id, registry, loader_config)) = directory_prepare {
             self.log_search.progress.current_path = Some("正在发现目录搜索目标".to_string());
+            let request = SearchRequest::with_queries(
+                generation,
+                scope,
+                queries,
+                Vec::new(),
+                default_encoding,
+            )
+            .with_archive_passwords(archive_passwords);
             spawn_directory_search_worker(
                 directory_id,
                 registry,
                 loader_config,
-                SearchRequest::with_queries(
-                    generation,
-                    scope,
-                    queries,
-                    Vec::new(),
-                    default_encoding,
-                ),
+                request,
                 cancel_token,
                 sender,
             );
         } else {
-            spawn_search_worker(
-                SearchRequest::with_queries(generation, scope, queries, targets, default_encoding),
-                cancel_token,
-                sender,
-            );
+            let request =
+                SearchRequest::with_queries(generation, scope, queries, targets, default_encoding)
+                    .with_archive_passwords(archive_passwords);
+            spawn_search_worker(request, cancel_token, sender);
         }
 
         Self::poll_log_search_worker_events(generation, receiver, cx);
@@ -2373,7 +2375,9 @@ fn spawn_directory_search_worker(
             return;
         }
 
-        let loader = LogSourceLoader::new(loader_config).with_deferred_archive_probe();
+        let loader = LogSourceLoader::new(loader_config)
+            .with_archive_passwords(request.archive_passwords.clone())
+            .with_deferred_archive_probe();
         let mut pending_ids = vec![directory_id];
         let mut visited_ids = BTreeSet::new();
         let mut target_batch = Vec::with_capacity(DIRECTORY_SEARCH_TARGET_BATCH_SIZE);
@@ -2735,6 +2739,7 @@ mod tests {
     use super::*;
     use crate::app::{ArgusTab, LogTextPosition, LogTextSelection, SEARCH_RESULT_PANEL_HEIGHT_MAX};
     use crate::config::{ConfigManager, LoaderConfig, SEARCH_RECENT_KEYWORDS_MAX};
+    use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{
         LogSourceLoader, SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode,
     };
@@ -3072,6 +3077,7 @@ mod tests {
             location: SourceLocation::LocalPath(log_path.clone()),
             label: "app.log".to_string(),
             default_encoding: "utf-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 

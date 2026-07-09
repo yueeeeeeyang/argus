@@ -176,8 +176,13 @@ impl FilePreviewWindow {
                             .enumerate()
                             .map(|(offset, line)| {
                                 let line_number = start + offset + 1;
-                                render_preview_line(line_number, line, line_number_width, &this.theme)
-                                    .into_any_element()
+                                render_preview_line(
+                                    line_number,
+                                    line,
+                                    line_number_width,
+                                    &this.theme,
+                                )
+                                .into_any_element()
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -186,7 +191,9 @@ impl FilePreviewWindow {
                 .track_scroll(self.scroll.clone())
                 .into_any_element()
             }
-            FilePreviewBody::Binary => render_centered_message("二进制文件无法预览", &self.theme, true),
+            FilePreviewBody::Binary => {
+                render_centered_message("二进制文件无法预览", &self.theme, true)
+            }
             FilePreviewBody::Error(message) => render_centered_message(message, &self.theme, true),
         }
     }

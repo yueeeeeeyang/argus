@@ -3,9 +3,9 @@
 //! 作者：Argus 开发团队
 //! 主要功能：定义连接目录表单、SSH/SMB 链接表单、主机指纹确认、SFTP 弹窗和升级弹窗状态。
 
+use super::types::SettingsTextInputState;
 use crate::infra::updater::AvailableUpgrade;
 use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
-use super::types::SettingsTextInputState;
 
 /// 链接工作区当前打开的弹窗。
 #[derive(Clone, Debug)]

@@ -410,4 +410,3 @@ pub fn render_sql_dialog_line_pointer_layer(
             .size_full(),
         )
 }
-

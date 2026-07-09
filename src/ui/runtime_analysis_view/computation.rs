@@ -17,7 +17,9 @@ pub fn runtime_sql_analysis_filter_snapshot(
 }
 
 /// 从 Runtime 过滤输入框提取当前输入快照，供状态栏展示待应用状态。
-pub fn runtime_filter_input_snapshot(state: &RuntimeAnalysisState) -> RuntimeSqlAnalysisFilterSnapshot {
+pub fn runtime_filter_input_snapshot(
+    state: &RuntimeAnalysisState,
+) -> RuntimeSqlAnalysisFilterSnapshot {
     RuntimeSqlAnalysisFilterSnapshot {
         keyword: state.filter_keyword_input.value.clone(),
         username: state.filter_username_input.value.clone(),
@@ -342,7 +344,10 @@ pub fn cached_sorted_sql_indices(
 }
 
 /// 返回 SQL 明细表排序后的 SQL 索引。
-pub fn sorted_sql_indices(request: &RuntimeRequestRecord, state: &RuntimeAnalysisState) -> Vec<usize> {
+pub fn sorted_sql_indices(
+    request: &RuntimeRequestRecord,
+    state: &RuntimeAnalysisState,
+) -> Vec<usize> {
     let criteria = runtime_filter_criteria(state);
     if !runtime_request_matches_cross_filters(request, &criteria) {
         return Vec::new();
@@ -571,4 +576,3 @@ pub fn display_username(username: &str) -> String {
         username.to_string()
     }
 }
-

@@ -14,16 +14,16 @@ mod source_search_actions;
 mod text_input_actions;
 
 mod constants;
-mod types;
-mod log_state;
-mod search_state;
-mod jstack_state;
-mod runtime_state;
-mod remote_state;
 mod jstack_actions;
+mod jstack_state;
+mod log_state;
 mod menu_actions;
+mod remote_state;
 mod runtime_actions;
+mod runtime_state;
+mod search_state;
 mod source_tree_actions;
+mod types;
 mod upgrade_actions;
 
 pub use constants::*;
@@ -37,43 +37,49 @@ pub use types::*;
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{AppConfig, ConfigManager};
-use crate::remote::connection::ConnectionNodeId;
-use crate::highlight::HighlightLanguage;
 use crate::analysis::jstack::{
-    JstackAnalysisResult, JstackAnalysisTarget, JstackThreadDetail,
-    JstackThreadFilter, JstackThreadState, analyze_jstack_targets,
+    JstackAnalysisResult, JstackAnalysisTarget, JstackThreadDetail, JstackThreadFilter,
+    JstackThreadState, analyze_jstack_targets,
+};
+use crate::analysis::runtime::{
+    RuntimeAnalysisFilterRows, RuntimeAnalysisResult, RuntimeAnalysisTarget,
+    RuntimeAnalysisTargetKind, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
+    analyze_runtime_targets, build_runtime_analysis_filter_rows,
+    build_runtime_slow_sql_rows_for_filter, build_runtime_sql_frequency_rows_for_filter,
+    parse_runtime_analysis_filter_criteria,
+};
+use crate::config::{AppConfig, ConfigManager};
+use crate::highlight::HighlightLanguage;
+use crate::infra::perf::PerfSpan;
+use crate::infra::text_selection::{
+    TextSelectionGranularity, character_count, insert_text_at_character_index,
+    remove_character_range, replace_character_range, slice_character_range, word_range_at,
+};
+use crate::infra::updater::{
+    UpgradeCheckOutcome, UpgradeService, current_platform_arch, current_platform_os,
 };
 #[cfg(test)]
 use crate::loader::SourceMetadata;
+use crate::loader::archive::{
+    ArchivePasswordError, ArchivePasswordErrorKind, ArchivePasswordStore,
+    find_archive_password_error,
+};
 use crate::loader::{
     LoadReport, LogSourceLoader, SourceArchiveProbeRequest, SourceArchiveProbeResult, SourceId,
     SourceKind, SourceLocation, SourceRegistry, SourceTreeNode,
 };
-use crate::infra::perf::PerfSpan;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
 use crate::reader::read_mode::ReadMode;
-use crate::analysis::runtime::{
-    RuntimeAnalysisFilterRows, RuntimeAnalysisResult,
-    RuntimeAnalysisTarget, RuntimeAnalysisTargetKind,
-    RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
-    analyze_runtime_targets, build_runtime_analysis_filter_rows,
-    build_runtime_slow_sql_rows_for_filter, build_runtime_sql_frequency_rows_for_filter,
-    parse_runtime_analysis_filter_criteria,
-};
+use crate::remote::connection::ConnectionNodeId;
 use crate::remote::sftp::SftpSessionState;
 use crate::remote::terminal::TerminalSessionState;
-use crate::infra::text_selection::{
-    TextSelectionGranularity, character_count, replace_character_range, slice_character_range,
-};
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
@@ -82,15 +88,11 @@ use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
 use crate::ui::main_window;
 use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
-use crate::infra::updater::{
-    UpgradeCheckOutcome, UpgradeService, current_platform_arch,
-    current_platform_os,
-};
 use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use gpui::{
-    AppContext, Bounds, ClipboardItem, Context, Entity, IntoElement, Keystroke,
-    Pixels, Point, Render, Subscription, Timer, TitlebarOptions, Window, WindowBounds,
-    WindowHandle, WindowOptions, point, px, size,
+    AppContext, Bounds, ClipboardItem, Context, Entity, IntoElement, Keystroke, Pixels, Point,
+    Render, Subscription, Timer, TitlebarOptions, Window, WindowBounds, WindowHandle,
+    WindowOptions, point, px, size,
 };
 use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
@@ -158,6 +160,49 @@ pub fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(text)
     }
+}
+
+/// 压缩包密码提交后需要重试的用户动作。
+#[derive(Clone, Debug)]
+pub enum ArchivePasswordRetryAction {
+    /// 重试根来源加载。
+    LoadPaths {
+        /// 原始来源路径列表。
+        paths: Vec<PathBuf>,
+        /// 原始触发入口，用于沿用状态提示。
+        trigger: ExternalSourceTrigger,
+    },
+    /// 重试来源树子级展开。
+    LoadChildren {
+        /// 需要重新展开的来源节点 ID。
+        source_id: SourceId,
+    },
+    /// 重试日志正文打开。
+    OpenLog {
+        /// 需要重新打开的日志来源节点 ID。
+        source_id: SourceId,
+    },
+}
+
+/// 压缩包密码输入弹窗状态；密码只保存在进程内缓存，不写入配置。
+#[derive(Clone, Debug)]
+pub struct ArchivePasswordPromptState {
+    /// 底层压缩包适配器报告的密码错误。
+    pub error: ArchivePasswordError,
+    /// 密码输入框状态。
+    pub input: SettingsTextInputState,
+    /// 用户提交密码后需要重试的原始动作。
+    pub retry_action: ArchivePasswordRetryAction,
+    /// 弹窗中的额外错误提示。
+    pub message: Option<String>,
+}
+
+/// 返回单行输入框当前选区；无有效选区时返回 `None`。
+fn input_selection_range(input: &SettingsTextInputState) -> Option<std::ops::Range<usize>> {
+    let anchor = input.selection_anchor?;
+    let start = anchor.min(input.cursor);
+    let end = anchor.max(input.cursor);
+    (start < end).then_some(start..end)
 }
 
 /// 构建无系统标题栏但保留可缩放能力的窗口标题栏选项。
@@ -252,6 +297,10 @@ pub struct ArgusApp {
     pub source_archive_probe_generation: usize,
     /// 压缩包内目录子级加载完成后需要自动继续的分析动作。
     pub pending_source_analysis_after_load: Option<PendingSourceAnalysisAction>,
+    /// 当前进程内已输入的压缩包密码；只保存在内存，不写入配置文件。
+    pub archive_passwords: ArchivePasswordStore,
+    /// 压缩包密码输入弹窗状态；为空表示当前不需要用户输入密码。
+    pub archive_password_prompt: Option<ArchivePasswordPromptState>,
     /// 自定义日志来源选择器状态，用于替代系统路径选择器。
     pub source_picker: SourcePickerState,
     /// 当前内容区状态。
@@ -457,6 +506,8 @@ impl ArgusApp {
             source_archive_probe_click_intents: BTreeSet::new(),
             source_archive_probe_generation: 0,
             pending_source_analysis_after_load: None,
+            archive_passwords: ArchivePasswordStore::default(),
+            archive_password_prompt: None,
             source_picker: SourcePickerState::default(),
             content_state: ContentState::SourceNotSelected,
             logs: Vec::new(),
@@ -558,6 +609,7 @@ impl ArgusApp {
                 connection_link_private_key_passphrase: cx.focus_handle(),
                 sftp_address: cx.focus_handle(),
                 sftp_rename_name: cx.focus_handle(),
+                archive_password: cx.focus_handle(),
                 terminal: cx.focus_handle(),
                 jstack_analysis: cx.focus_handle(),
                 runtime_analysis: cx.focus_handle(),
@@ -865,6 +917,7 @@ impl ArgusApp {
             location: source_node.location.clone(),
             label: source_node.label.clone(),
             default_encoding: self.selected_encoding.clone(),
+            archive_passwords: self.archive_passwords.clone(),
         };
         let generation = self.next_log_reader_generation(source_id);
         self.log_read_states.insert(
@@ -912,6 +965,13 @@ impl ArgusApp {
                 self.finish_pending_search_activation(source_id);
             }
             Err(error) => {
+                if self.request_archive_password_from_error(
+                    &error,
+                    ArchivePasswordRetryAction::OpenLog { source_id },
+                ) {
+                    self.log_read_states.insert(source_id, LogOpenState::Idle);
+                    return;
+                }
                 let read_mode = self
                     .source_registry
                     .node(source_id)
@@ -926,6 +986,281 @@ impl ArgusApp {
                 self.placeholder_notice = format!("日志读取失败：{error}");
             }
         }
+    }
+
+    /// 根据错误链展示压缩包密码弹窗；返回值表示错误是否已被密码流程接管。
+    fn request_archive_password_from_error(
+        &mut self,
+        error: &anyhow::Error,
+        retry_action: ArchivePasswordRetryAction,
+    ) -> bool {
+        let Some(password_error) = find_archive_password_error(error) else {
+            return false;
+        };
+        self.present_archive_password_prompt(password_error, retry_action)
+    }
+
+    /// 展示压缩包密码弹窗，缺少具体容器键或不支持加密算法时退化为普通错误提示。
+    fn present_archive_password_prompt(
+        &mut self,
+        password_error: ArchivePasswordError,
+        retry_action: ArchivePasswordRetryAction,
+    ) -> bool {
+        if password_error.kind == ArchivePasswordErrorKind::Unsupported {
+            self.placeholder_notice = password_error.to_string();
+            return false;
+        }
+        let Some(key) = password_error.key.clone() else {
+            self.placeholder_notice = password_error.to_string();
+            return false;
+        };
+        if password_error.is_invalid_password() {
+            self.archive_passwords.remove(&key);
+        }
+
+        let mut input = SettingsTextInputState::default();
+        input.is_focused = true;
+        self.archive_password_prompt = Some(ArchivePasswordPromptState {
+            message: password_error
+                .is_invalid_password()
+                .then(|| "密码错误，请重新输入".to_string()),
+            error: password_error,
+            input,
+            retry_action,
+        });
+        self.placeholder_notice = "请输入压缩包密码后继续".to_string();
+        true
+    }
+
+    /// 关闭压缩包密码弹窗，不保存输入内容。
+    pub fn cancel_archive_password_prompt(&mut self) {
+        self.archive_password_prompt = None;
+        self.placeholder_notice = "已取消压缩包密码输入".to_string();
+    }
+
+    /// 提交压缩包密码并重试原始用户动作。
+    pub fn submit_archive_password_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(mut prompt) = self.archive_password_prompt.take() else {
+            return;
+        };
+        let password = prompt.input.value.clone();
+        if password.is_empty() {
+            prompt.message = Some("请输入压缩包密码".to_string());
+            prompt.input.is_focused = true;
+            self.archive_password_prompt = Some(prompt);
+            return;
+        }
+        let Some(key) = prompt.error.key.clone() else {
+            self.placeholder_notice = prompt.error.to_string();
+            return;
+        };
+
+        self.archive_passwords.insert(key, password);
+        self.placeholder_notice = "已保存本次会话密码，正在重试操作".to_string();
+        self.retry_archive_password_action(prompt.retry_action, cx);
+    }
+
+    /// 按弹窗记录的用户动作重新执行来源加载、目录展开或日志打开。
+    fn retry_archive_password_action(
+        &mut self,
+        retry_action: ArchivePasswordRetryAction,
+        cx: &mut Context<Self>,
+    ) {
+        match retry_action {
+            ArchivePasswordRetryAction::LoadPaths { paths, trigger } => {
+                self.load_sources_from_paths(paths, trigger, cx);
+            }
+            ArchivePasswordRetryAction::LoadChildren { source_id } => {
+                if let Some(node) = self.source_registry.node(source_id).cloned() {
+                    self.start_source_child_load(source_id, node, cx);
+                }
+            }
+            ArchivePasswordRetryAction::OpenLog { source_id } => {
+                self.request_open_log_content(source_id, cx);
+            }
+        }
+    }
+
+    /// 聚焦压缩包密码输入框。
+    pub fn focus_archive_password_input(&mut self) {
+        if let Some(prompt) = self.archive_password_prompt.as_mut() {
+            prompt.input.is_focused = true;
+            prompt.input.marked_range = None;
+        }
+    }
+
+    /// 返回压缩包密码输入框选区。
+    pub fn archive_password_input_selection_range(&self) -> Option<std::ops::Range<usize>> {
+        let prompt = self.archive_password_prompt.as_ref()?;
+        input_selection_range(&prompt.input)
+    }
+
+    /// 处理压缩包密码输入框键盘操作。
+    pub fn handle_archive_password_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        match keystroke.key.as_str() {
+            "enter" => self.submit_archive_password_prompt(cx),
+            "escape" => self.cancel_archive_password_prompt(),
+            "backspace" => self.delete_archive_password_backward(),
+            "delete" => self.delete_archive_password_forward(),
+            "left" => self.move_archive_password_cursor_left(),
+            "right" => self.move_archive_password_cursor_right(),
+            "home" => self.move_archive_password_cursor_to_start(),
+            "end" => self.move_archive_password_cursor_to_end(),
+            _ => {
+                if let Some(key_char) = keystroke.key_char.as_ref()
+                    && !keystroke.modifiers.platform
+                    && !key_char.chars().any(char::is_control)
+                {
+                    self.replace_archive_password_selection(key_char);
+                }
+            }
+        }
+    }
+
+    /// 开始密码输入框鼠标选择。
+    pub fn begin_archive_password_pointer_selection(
+        &mut self,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        let Some(prompt) = self.archive_password_prompt.as_mut() else {
+            return;
+        };
+        let text_len = character_count(&prompt.input.value);
+        let character_index = character_index.min(text_len);
+        let range = match granularity {
+            TextSelectionGranularity::Character => character_index..character_index,
+            TextSelectionGranularity::Word => word_range_at(&prompt.input.value, character_index)
+                .unwrap_or(character_index..character_index),
+            TextSelectionGranularity::Line => 0..text_len,
+        };
+        prompt.input.cursor = range.end;
+        prompt.input.selection_anchor = Some(range.start);
+        prompt.input.marked_range = None;
+        prompt.input.selection_drag = Some(InputTextSelectionDrag {
+            anchor_range: range,
+            granularity,
+        });
+        prompt.input.is_focused = true;
+    }
+
+    /// 更新密码输入框鼠标拖拽选择。
+    pub fn update_archive_password_pointer_selection(&mut self, character_index: usize) {
+        let Some(prompt) = self.archive_password_prompt.as_mut() else {
+            return;
+        };
+        let Some(selection_drag) = prompt.input.selection_drag.clone() else {
+            return;
+        };
+        let text_len = character_count(&prompt.input.value);
+        let character_index = character_index.min(text_len);
+        let next_range = match selection_drag.granularity {
+            TextSelectionGranularity::Character => character_index..character_index,
+            TextSelectionGranularity::Word => word_range_at(&prompt.input.value, character_index)
+                .unwrap_or(character_index..character_index),
+            TextSelectionGranularity::Line => 0..text_len,
+        };
+        prompt.input.selection_anchor =
+            Some(selection_drag.anchor_range.start.min(next_range.start));
+        prompt.input.cursor = selection_drag.anchor_range.end.max(next_range.end);
+        prompt.input.marked_range = None;
+    }
+
+    /// 结束密码输入框鼠标选择。
+    pub fn finish_archive_password_pointer_selection(&mut self) {
+        if let Some(prompt) = self.archive_password_prompt.as_mut() {
+            prompt.input.selection_drag = None;
+        }
+    }
+
+    /// 删除密码输入框光标前的字符或当前选区。
+    fn delete_archive_password_backward(&mut self) {
+        if self.archive_password_input_selection_range().is_some() {
+            self.replace_archive_password_selection("");
+            return;
+        }
+        let Some(prompt) = self.archive_password_prompt.as_mut() else {
+            return;
+        };
+        if prompt.input.cursor == 0 {
+            return;
+        }
+        let cursor = prompt.input.cursor;
+        prompt.input.value = remove_character_range(&prompt.input.value, cursor - 1..cursor);
+        prompt.input.cursor -= 1;
+        prompt.input.marked_range = None;
+        prompt.message = None;
+    }
+
+    /// 删除密码输入框光标后的字符或当前选区。
+    fn delete_archive_password_forward(&mut self) {
+        if self.archive_password_input_selection_range().is_some() {
+            self.replace_archive_password_selection("");
+            return;
+        }
+        let Some(prompt) = self.archive_password_prompt.as_mut() else {
+            return;
+        };
+        let cursor = prompt.input.cursor;
+        if cursor >= character_count(&prompt.input.value) {
+            return;
+        }
+        prompt.input.value = remove_character_range(&prompt.input.value, cursor..cursor + 1);
+        prompt.input.marked_range = None;
+        prompt.message = None;
+    }
+
+    /// 左移密码输入框光标。
+    fn move_archive_password_cursor_left(&mut self) {
+        if let Some(prompt) = self.archive_password_prompt.as_mut() {
+            prompt.input.cursor = prompt.input.cursor.saturating_sub(1);
+            prompt.input.selection_anchor = None;
+            prompt.input.marked_range = None;
+        }
+    }
+
+    /// 右移密码输入框光标。
+    fn move_archive_password_cursor_right(&mut self) {
+        if let Some(prompt) = self.archive_password_prompt.as_mut() {
+            prompt.input.cursor =
+                (prompt.input.cursor + 1).min(character_count(&prompt.input.value));
+            prompt.input.selection_anchor = None;
+            prompt.input.marked_range = None;
+        }
+    }
+
+    /// 将密码输入框光标移动到开头。
+    fn move_archive_password_cursor_to_start(&mut self) {
+        if let Some(prompt) = self.archive_password_prompt.as_mut() {
+            prompt.input.cursor = 0;
+            prompt.input.selection_anchor = None;
+            prompt.input.marked_range = None;
+        }
+    }
+
+    /// 将密码输入框光标移动到末尾。
+    fn move_archive_password_cursor_to_end(&mut self) {
+        if let Some(prompt) = self.archive_password_prompt.as_mut() {
+            prompt.input.cursor = character_count(&prompt.input.value);
+            prompt.input.selection_anchor = None;
+            prompt.input.marked_range = None;
+        }
+    }
+
+    /// 替换密码输入框选区或在光标处插入文本。
+    fn replace_archive_password_selection(&mut self, replacement: &str) {
+        let Some(prompt) = self.archive_password_prompt.as_mut() else {
+            return;
+        };
+        let selection_range = input_selection_range(&prompt.input)
+            .unwrap_or(prompt.input.cursor..prompt.input.cursor);
+        let mut next_text = remove_character_range(&prompt.input.value, selection_range.clone());
+        next_text = insert_text_at_character_index(&next_text, selection_range.start, replacement);
+        prompt.input.value = next_text;
+        prompt.input.cursor = selection_range.start + character_count(replacement);
+        prompt.input.selection_anchor = None;
+        prompt.input.marked_range = None;
+        prompt.message = None;
     }
 
     /// 为指定日志来源生成下一次读取 generation。
@@ -1785,7 +2120,6 @@ impl Render for ArgusApp {
         main_window::render(self, window, cx)
     }
 }
-
 
 #[cfg(test)]
 mod tests;

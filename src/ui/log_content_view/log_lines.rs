@@ -402,4 +402,3 @@ pub fn render_log_line_range(
         })
         .collect()
 }
-

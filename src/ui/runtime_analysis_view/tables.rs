@@ -1143,4 +1143,3 @@ pub fn render_slow_sql_detail_row(
             cx,
         ))
 }
-

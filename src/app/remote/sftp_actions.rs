@@ -14,6 +14,10 @@ use crate::app::{
     InputTextSelectionDrag, SettingsTextInputState, SftpDeletePromptState, SftpDialogState,
     SftpRenameDialogState, TabKind, Workspace,
 };
+use crate::infra::text_selection::{
+    NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
+    slice_character_range, word_range_at,
+};
 use crate::loader::PathBrowser;
 use crate::remote::sftp::{
     RemoteFileBackend, RemoteFileWorkerBackend, SftpCommand, SftpEntry, SftpEntryKind, SftpEvent,
@@ -21,10 +25,6 @@ use crate::remote::sftp::{
     spawn_sftp_worker, validate_sftp_rename_name,
 };
 use crate::remote::terminal::PendingHostKey;
-use crate::infra::text_selection::{
-    NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
-    slice_character_range, word_range_at,
-};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind};
 
 /// 远程文件管理输入框的可变部件引用。
@@ -328,8 +328,12 @@ impl ArgusApp {
         };
         if session.sort_field == field {
             session.sort_direction = match session.sort_direction {
-                crate::remote::sftp::SftpSortDirection::Asc => crate::remote::sftp::SftpSortDirection::Desc,
-                crate::remote::sftp::SftpSortDirection::Desc => crate::remote::sftp::SftpSortDirection::Asc,
+                crate::remote::sftp::SftpSortDirection::Asc => {
+                    crate::remote::sftp::SftpSortDirection::Desc
+                }
+                crate::remote::sftp::SftpSortDirection::Desc => {
+                    crate::remote::sftp::SftpSortDirection::Asc
+                }
             };
         } else {
             session.sort_field = field;

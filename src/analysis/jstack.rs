@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 
 use crate::config::LoaderConfig;
-use crate::loader::archive::detect_archive_format;
+use crate::loader::archive::{ArchivePasswordStore, detect_archive_format};
 use crate::loader::{
     LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceKind, SourceLocation,
     SourceMetadata, SourceTreeNode,
@@ -150,6 +150,8 @@ pub struct JstackAnalysisTarget {
     pub label: String,
     /// 路径展示文本。
     pub path: String,
+    /// 当前会话中已输入的压缩包密码快照。
+    pub archive_passwords: ArchivePasswordStore,
 }
 
 /// 频率矩阵中单个线程在单个快照中的聚合格子。
@@ -544,6 +546,7 @@ fn jstack_target_for_local_file(
         archive_probe_node,
         label,
         path: path.display().to_string(),
+        archive_passwords: ArchivePasswordStore::default(),
     })
 }
 
@@ -677,6 +680,7 @@ fn read_jstack_snapshot(
         location,
         label: target.label.clone(),
         default_encoding: default_encoding.to_string(),
+        archive_passwords: target.archive_passwords.clone(),
     })?;
     let samples = parse_jstack_document(handle.document())?;
     Ok(JstackSnapshot {
@@ -697,6 +701,7 @@ fn resolve_jstack_target_location(
     };
 
     let probe_result = LogSourceLoader::new(loader_config.clone())
+        .with_archive_passwords(target.archive_passwords.clone())
         .probe_archive_nodes(vec![SourceArchiveProbeRequest {
             source_id: target.source_id,
             node,
@@ -1368,6 +1373,7 @@ mod tests {
                     archive_probe_node: None,
                     label: "ok.log".to_string(),
                     path: path.display().to_string(),
+                    archive_passwords: ArchivePasswordStore::default(),
                 },
                 JstackAnalysisTarget {
                     source_id: SourceId(2),
@@ -1375,6 +1381,7 @@ mod tests {
                     archive_probe_node: None,
                     label: "missing.log".to_string(),
                     path: "missing.log".to_string(),
+                    archive_passwords: ArchivePasswordStore::default(),
                 },
             ],
             "UTF-8".to_string(),
@@ -1414,6 +1421,7 @@ mod tests {
                 archive_probe_node: None,
                 label: "thread-dir".to_string(),
                 path: dir.display().to_string(),
+                archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),
@@ -1452,6 +1460,7 @@ mod tests {
                 archive_probe_node: None,
                 label: "thread-dir".to_string(),
                 path: dir.display().to_string(),
+                archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
             config,
@@ -1510,6 +1519,7 @@ mod tests {
                 archive_probe_node: Some(archive_node),
                 label: "thread.zip".to_string(),
                 path: zip_path.display().to_string(),
+                archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),

@@ -45,6 +45,13 @@ impl ArgusApp {
         self.source_picker.path_input_marked_range = None;
         self.source_picker.path_input_selection_drag = None;
 
+        if let Some(prompt) = self.archive_password_prompt.as_mut() {
+            prompt.input.is_focused = false;
+            prompt.input.selection_anchor = None;
+            prompt.input.marked_range = None;
+            prompt.input.selection_drag = None;
+        }
+
         clear_settings_input_focus(&mut self.settings_quick_keywords_input);
         clear_settings_input_focus(&mut self.settings_jstack_thread_name_filter_input);
         clear_settings_input_focus(&mut self.settings_jstack_stack_segment_filter_input);
@@ -122,6 +129,21 @@ impl ArgusApp {
             }
             AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
                 self.apply_native_sftp_edit(target, &edit);
+            }
+            AppTextInputTarget::ArchivePassword => {
+                if let Some(prompt) = self.archive_password_prompt.as_mut() {
+                    apply_native_edit_to_parts(
+                        NativeInputParts {
+                            value: &mut prompt.input.value,
+                            cursor: &mut prompt.input.cursor,
+                            selection_anchor: &mut prompt.input.selection_anchor,
+                            marked_range: &mut prompt.input.marked_range,
+                            selection_drag: &mut prompt.input.selection_drag,
+                        },
+                        &edit,
+                    );
+                    prompt.message = None;
+                }
             }
             AppTextInputTarget::SourcePickerPath => {
                 apply_native_edit_to_parts(
@@ -284,6 +306,11 @@ impl ArgusApp {
             }
             AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
                 self.focus_sftp_text_input_target(target);
+            }
+            AppTextInputTarget::ArchivePassword => {
+                if let Some(prompt) = self.archive_password_prompt.as_mut() {
+                    prompt.input.is_focused = true;
+                }
             }
             AppTextInputTarget::SourcePickerPath => {
                 self.source_picker.is_path_input_focused = true;

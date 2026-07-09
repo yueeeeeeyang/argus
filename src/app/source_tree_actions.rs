@@ -167,12 +167,14 @@ impl ArgusApp {
         self.placeholder_notice = format!("正在加载 {} 的子级", node.label);
 
         let loader_config = self.config.loader.clone();
+        let archive_passwords = self.archive_passwords.clone();
         let load_generation = self.next_source_child_load_generation(source_id);
         cx.spawn(async move |view, cx| {
             let report = cx
                 .background_executor()
                 .spawn(async move {
                     LogSourceLoader::new(loader_config)
+                        .with_archive_passwords(archive_passwords)
                         .with_deferred_archive_probe()
                         .load_children(&node)
                 })
@@ -288,8 +290,20 @@ impl ArgusApp {
     }
 
     /// 在 UI 事件中应用根来源加载报告，并同步清理 Jstack 方块悬浮气泡。
-    pub fn apply_load_report_with_context(&mut self, report: LoadReport, _cx: &mut Context<Self>) {
+    pub fn apply_load_report_with_context(
+        &mut self,
+        report: LoadReport,
+        retry_action: Option<crate::app::ArchivePasswordRetryAction>,
+        _cx: &mut Context<Self>,
+    ) {
         self.clear_jstack_cell_hover_preview();
+        if let Some(password_error) = report.password_request.clone()
+            && let Some(retry_action) = retry_action
+            && self.present_archive_password_prompt(password_error, retry_action)
+        {
+            self.is_source_loading = false;
+            return;
+        }
         self.apply_load_report(report);
     }
 
@@ -326,6 +340,23 @@ impl ArgusApp {
         if self.source_child_load_generations.get(&parent_id).copied() != Some(load_generation) {
             return false;
         }
+
+        if let Some(password_error) = report.password_request.clone()
+            && self.present_archive_password_prompt(
+                password_error,
+                crate::app::ArchivePasswordRetryAction::LoadChildren {
+                    source_id: parent_id,
+                },
+            )
+        {
+            self.source_child_load_generations.remove(&parent_id);
+            if let Some(parent) = self.source_registry.node_mut(parent_id) {
+                parent.metadata.is_loading = false;
+                parent.metadata.message = Some("等待输入压缩包密码".to_string());
+            }
+            self.rebuild_filtered_source_ids();
+            return true;
+        }
         self.source_child_load_generations.remove(&parent_id);
 
         if report.registry.is_empty() && !report.errors.is_empty() {
@@ -348,10 +379,12 @@ impl ArgusApp {
             should_keep_expanded,
         );
 
-        if let Some(parent) = self.source_registry.node_mut(parent_id)
-            && !report.errors.is_empty()
-        {
-            parent.metadata.message = Some(report.errors.join("；"));
+        if let Some(parent) = self.source_registry.node_mut(parent_id) {
+            if report.errors.is_empty() {
+                parent.metadata.message = None;
+            } else {
+                parent.metadata.message = Some(report.errors.join("；"));
+            }
         }
         self.rebuild_filtered_source_ids();
         let child_ids = self.source_registry.child_ids(parent_id).to_vec();
@@ -372,7 +405,11 @@ impl ArgusApp {
     }
 
     /// 子级加载成功返回后续做被挂起的分析动作，避免用户二次右键。
-    pub(super) fn resume_pending_source_analysis(&mut self, parent_id: SourceId, cx: &mut Context<Self>) {
+    pub(super) fn resume_pending_source_analysis(
+        &mut self,
+        parent_id: SourceId,
+        cx: &mut Context<Self>,
+    ) {
         let Some(action) = self.pending_source_analysis_after_load else {
             return;
         };
@@ -512,6 +549,7 @@ impl ArgusApp {
         self.source_archive_probe_direct_inflight_ids
             .insert(source_id);
         let loader_config = self.config.loader.clone();
+        let archive_passwords = self.archive_passwords.clone();
         let generation = self.source_archive_probe_generation;
         let request = SourceArchiveProbeRequest { source_id, node };
 
@@ -519,7 +557,9 @@ impl ArgusApp {
             let results = cx
                 .background_executor()
                 .spawn(async move {
-                    LogSourceLoader::new(loader_config).probe_archive_nodes(vec![request])
+                    LogSourceLoader::new(loader_config)
+                        .with_archive_passwords(archive_passwords)
+                        .probe_archive_nodes(vec![request])
                 })
                 .await;
 
@@ -582,14 +622,17 @@ impl ArgusApp {
         }
 
         let loader_config = self.config.loader.clone();
+        let archive_passwords = self.archive_passwords.clone();
         let generation = self.source_archive_probe_generation;
         cx.spawn(async move |view, cx| {
-            let results =
-                cx.background_executor()
-                    .spawn(async move {
-                        LogSourceLoader::new(loader_config).probe_archive_nodes(requests)
-                    })
-                    .await;
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    LogSourceLoader::new(loader_config)
+                        .with_archive_passwords(archive_passwords)
+                        .probe_archive_nodes(requests)
+                })
+                .await;
 
             view.update(cx, |app, cx| {
                 app.apply_source_archive_probe_results(generation, results, cx);
@@ -680,5 +723,4 @@ impl ArgusApp {
         *generation = generation.wrapping_add(1);
         *generation
     }
-
 }

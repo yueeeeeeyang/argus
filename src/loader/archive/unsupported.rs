@@ -36,7 +36,7 @@ impl ArchiveAdapter for UnsupportedArchiveAdapter {
     }
 
     /// 返回不支持错误，调用方会将其展示到状态栏或错误节点中。
-    fn list_entries(&self, path: &Path) -> Result<Vec<ArchiveEntryInfo>> {
+    fn list_entries(&self, path: &Path, _password: Option<&str>) -> Result<Vec<ArchiveEntryInfo>> {
         bail!("{} 暂不支持展开：{}", self.format.label(), path.display())
     }
 
@@ -46,12 +46,18 @@ impl ArchiveAdapter for UnsupportedArchiveAdapter {
         _reader: &mut dyn ArchiveReadSeek,
         _reader_len: u64,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         bail!("{} 暂不支持展开：{source_label}", self.format.label())
     }
 
     /// 不支持格式无法读取本地压缩包条目。
-    fn read_entry_bytes(&self, path: &Path, entry_path: &str) -> Result<Vec<u8>> {
+    fn read_entry_bytes(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        _password: Option<&str>,
+    ) -> Result<Vec<u8>> {
         bail!(
             "{} 暂不支持读取条目：{}!/{entry_path}",
             self.format.label(),
@@ -66,6 +72,7 @@ impl ArchiveAdapter for UnsupportedArchiveAdapter {
         _reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<Vec<u8>> {
         bail!(
             "{} 暂不支持读取条目：{source_label}!/{entry_path}",

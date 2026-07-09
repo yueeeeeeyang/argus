@@ -42,7 +42,7 @@ impl ArchiveAdapter for TarArchiveAdapter {
     }
 
     /// 枚举 TAR 条目并转换为统一条目模型。
-    fn list_entries(&self, path: &Path) -> Result<Vec<ArchiveEntryInfo>> {
+    fn list_entries(&self, path: &Path, _password: Option<&str>) -> Result<Vec<ArchiveEntryInfo>> {
         let file =
             File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
         list_tar_entries(file, &path.display().to_string())
@@ -54,12 +54,17 @@ impl ArchiveAdapter for TarArchiveAdapter {
         reader: &mut dyn ArchiveReadSeek,
         _reader_len: u64,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         list_tar_entries(reader, source_label)
     }
 
     /// 轻量探测 TAR 根层单文件，读取到足以判定后即停止。
-    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+    fn probe_single_file_root(
+        &self,
+        path: &Path,
+        _password: Option<&str>,
+    ) -> Result<ArchiveRootProbe> {
         let file =
             File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
         probe_tar_single_file_root(file, &path.display().to_string())
@@ -71,12 +76,18 @@ impl ArchiveAdapter for TarArchiveAdapter {
         reader: &mut dyn ArchiveReadSeek,
         _reader_len: u64,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<ArchiveRootProbe> {
         probe_tar_single_file_root(reader, source_label)
     }
 
     /// 从本地 TAR 读取指定条目字节。
-    fn read_entry_bytes(&self, path: &Path, entry_path: &str) -> Result<Vec<u8>> {
+    fn read_entry_bytes(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        _password: Option<&str>,
+    ) -> Result<Vec<u8>> {
         let file =
             File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
         read_tar_entry_bytes(file, entry_path, &path.display().to_string())
@@ -89,6 +100,7 @@ impl ArchiveAdapter for TarArchiveAdapter {
         _reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<Vec<u8>> {
         read_tar_entry_bytes(reader, entry_path, source_label)
     }
@@ -98,6 +110,7 @@ impl ArchiveAdapter for TarArchiveAdapter {
         &self,
         path: &Path,
         entry_path: &str,
+        _password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         let file =
@@ -112,6 +125,7 @@ impl ArchiveAdapter for TarArchiveAdapter {
         _reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        _password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         stream_tar_entry(reader, entry_path, source_label, consumer)

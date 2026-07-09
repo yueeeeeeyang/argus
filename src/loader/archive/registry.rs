@@ -18,6 +18,7 @@ use crate::loader::archive::adapter::{
 use crate::loader::archive::compressed_tar::CompressedTarArchiveAdapter;
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::gzip_adapter::GzipArchiveAdapter;
+use crate::loader::archive::password::{ArchivePasswordKey, annotate_archive_password_error};
 use crate::loader::archive::rar_adapter::RarArchiveAdapter;
 use crate::loader::archive::sevenz_adapter::SevenzArchiveAdapter;
 use crate::loader::archive::tar_adapter::TarArchiveAdapter;
@@ -134,12 +135,26 @@ impl ArchiveAdapterRegistry {
         &self,
         format: ArchiveFormat,
         path: &Path,
+        password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .list_entries(path)
+            .list_entries(path, password)
             .with_context(|| format!("{label} 条目枚举失败：{}", path.display()))
+    }
+
+    /// 枚举本地压缩包条目，并在密码失败时补充具体容器键。
+    pub fn list_entries_with_password_context(
+        &self,
+        format: ArchiveFormat,
+        path: &Path,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
+        source_label: String,
+    ) -> Result<Vec<ArchiveEntryInfo>> {
+        self.list_entries(format, path, password)
+            .map_err(|error| annotate_archive_password_error(error, password_key, source_label))
     }
 
     /// 枚举内存压缩包条目并统一补充错误上下文。
@@ -149,12 +164,29 @@ impl ArchiveAdapterRegistry {
         reader: &mut dyn ArchiveReadSeek,
         reader_len: u64,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .list_entries_from_reader(reader, reader_len, source_label)
+            .list_entries_from_reader(reader, reader_len, source_label, password)
             .with_context(|| format!("{label} 内存条目枚举失败：{source_label}"))
+    }
+
+    /// 枚举内存压缩包条目，并在密码失败时补充具体容器键。
+    pub fn list_entries_from_reader_with_password_context(
+        &self,
+        format: ArchiveFormat,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        source_label: &str,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
+    ) -> Result<Vec<ArchiveEntryInfo>> {
+        self.list_entries_from_reader(format, reader, reader_len, source_label, password)
+            .map_err(|error| {
+                annotate_archive_password_error(error, password_key, source_label.to_string())
+            })
     }
 
     /// 轻量探测本地压缩包根层是否恰好只有一个普通文件。
@@ -162,12 +194,26 @@ impl ArchiveAdapterRegistry {
         &self,
         format: ArchiveFormat,
         path: &Path,
+        password: Option<&str>,
     ) -> Result<ArchiveRootProbe> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .probe_single_file_root(path)
+            .probe_single_file_root(path, password)
             .with_context(|| format!("{label} 根层单文件探测失败：{}", path.display()))
+    }
+
+    /// 轻量探测本地压缩包根层是否恰好只有一个普通文件，并补充密码上下文。
+    pub fn probe_single_file_root_with_password_context(
+        &self,
+        format: ArchiveFormat,
+        path: &Path,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
+        source_label: String,
+    ) -> Result<ArchiveRootProbe> {
+        self.probe_single_file_root(format, path, password)
+            .map_err(|error| annotate_archive_password_error(error, password_key, source_label))
     }
 
     /// 轻量探测内存压缩包根层是否恰好只有一个普通文件。
@@ -177,12 +223,29 @@ impl ArchiveAdapterRegistry {
         reader: &mut dyn ArchiveReadSeek,
         reader_len: u64,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<ArchiveRootProbe> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .probe_single_file_root_from_reader(reader, reader_len, source_label)
+            .probe_single_file_root_from_reader(reader, reader_len, source_label, password)
             .with_context(|| format!("{label} 内存根层单文件探测失败：{source_label}"))
+    }
+
+    /// 轻量探测内存压缩包根层是否恰好只有一个普通文件，并补充密码上下文。
+    pub fn probe_single_file_root_from_reader_with_password_context(
+        &self,
+        format: ArchiveFormat,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        source_label: &str,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
+    ) -> Result<ArchiveRootProbe> {
+        self.probe_single_file_root_from_reader(format, reader, reader_len, source_label, password)
+            .map_err(|error| {
+                annotate_archive_password_error(error, password_key, source_label.to_string())
+            })
     }
 
     /// 从本地压缩包读取指定条目并统一补充错误上下文。
@@ -191,12 +254,16 @@ impl ArchiveAdapterRegistry {
         format: ArchiveFormat,
         path: &Path,
         entry_path: &str,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
+        source_label: String,
     ) -> Result<Vec<u8>> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .read_entry_bytes(path, entry_path)
+            .read_entry_bytes(path, entry_path, password)
             .with_context(|| format!("{label} 条目读取失败：{}!/{entry_path}", path.display()))
+            .map_err(|error| annotate_archive_password_error(error, password_key, source_label))
     }
 
     /// 从内存压缩包读取指定条目并统一补充错误上下文。
@@ -207,12 +274,17 @@ impl ArchiveAdapterRegistry {
         reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
     ) -> Result<Vec<u8>> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .read_entry_bytes_from_reader(reader, reader_len, entry_path, source_label)
+            .read_entry_bytes_from_reader(reader, reader_len, entry_path, source_label, password)
             .with_context(|| format!("{label} 内存条目读取失败：{source_label}!/{entry_path}"))
+            .map_err(|error| {
+                annotate_archive_password_error(error, password_key, source_label.to_string())
+            })
     }
 
     /// 从本地压缩包流式读取指定条目并统一补充错误上下文。
@@ -221,13 +293,17 @@ impl ArchiveAdapterRegistry {
         format: ArchiveFormat,
         path: &Path,
         entry_path: &str,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
+        source_label: String,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .stream_entry(path, entry_path, consumer)
+            .stream_entry(path, entry_path, password, consumer)
             .with_context(|| format!("{label} 条目流式读取失败：{}!/{entry_path}", path.display()))
+            .map_err(|error| annotate_archive_password_error(error, password_key, source_label))
     }
 
     /// 从内存压缩包流式读取指定条目并统一补充错误上下文。
@@ -238,13 +314,25 @@ impl ArchiveAdapterRegistry {
         reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        password: Option<&str>,
+        password_key: ArchivePasswordKey,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         let adapter = self.require_adapter(format)?;
         let label = adapter.capabilities().label;
         adapter
-            .stream_entry_from_reader(reader, reader_len, entry_path, source_label, consumer)
+            .stream_entry_from_reader(
+                reader,
+                reader_len,
+                entry_path,
+                source_label,
+                password,
+                consumer,
+            )
             .with_context(|| format!("{label} 内存条目流式读取失败：{source_label}!/{entry_path}"))
+            .map_err(|error| {
+                annotate_archive_password_error(error, password_key, source_label.to_string())
+            })
     }
 
     /// 通过文件头识别本地压缩包格式。
@@ -329,7 +417,7 @@ mod tests {
         assert!(capabilities.supports_listing);
         assert!(capabilities.supports_entry_reading);
         assert!(capabilities.supports_nested_archives);
-        assert!(!capabilities.supports_passwords);
+        assert!(capabilities.supports_passwords);
     }
 
     /// 验证普通 gzip 文件不会只因 gzip 魔数被误判成 tar.gz 目录树。

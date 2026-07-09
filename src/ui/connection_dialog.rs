@@ -17,12 +17,12 @@ use crate::app::{
     ConnectionHostKeyPromptState, ConnectionLinkFormState, InputTextSelectionDrag,
     SettingsTextInputState,
 };
-use crate::remote::connection::ConnectionLinkKind;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
     slice_character_range, word_range_at,
 };
+use crate::remote::connection::ConnectionLinkKind;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};

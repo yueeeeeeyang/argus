@@ -294,5 +294,4 @@ impl ArgusApp {
             other => self.handle_menu_action(other),
         }
     }
-
 }

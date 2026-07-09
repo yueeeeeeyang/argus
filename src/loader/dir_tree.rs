@@ -17,13 +17,15 @@ use thiserror::Error;
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::adapter::{
-    ArchiveEntryInfo, ArchiveRootProbe, list_archive_entries, list_archive_entries_from_bytes,
-    read_archive_entry_bytes,
+    ArchiveEntryInfo, ArchiveRootProbe, read_archive_entry_bytes_with_passwords,
 };
 use crate::loader::archive::detector::{
     ArchiveFormat, detect_archive_format, detect_archive_format_by_name,
 };
 use crate::loader::archive::registry::archive_registry;
+use crate::loader::archive::{
+    ArchivePasswordError, ArchivePasswordKey, ArchivePasswordStore, find_archive_password_error,
+};
 use crate::loader::log_source::{
     SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode,
 };
@@ -37,6 +39,8 @@ pub struct LogSourceLoader {
     config: LoaderConfig,
     /// 是否延迟执行单文件压缩包探测；目录展开的快速路径只读缓存，不新增耗时探测。
     defer_archive_probe: bool,
+    /// 当前进程内已输入的压缩包密码；后台加载任务只读取快照，不负责持久化。
+    archive_passwords: ArchivePasswordStore,
 }
 
 /// 加载报告，记录本次新增节点、跳过项和错误说明。
@@ -50,6 +54,8 @@ pub struct LoadReport {
     pub skipped_count: usize,
     /// 用户可理解的错误或警告文案。
     pub errors: Vec<String>,
+    /// 本次加载遇到的第一个压缩包密码请求，供 UI 弹窗后重试原操作。
+    pub password_request: Option<ArchivePasswordError>,
 }
 
 /// 来源树压缩包节点探测请求，由 UI 后台队列按优先级提交。
@@ -157,6 +163,9 @@ struct ArchiveProbeCacheKey {
     root_fingerprint: Option<ArchiveRootFingerprint>,
     /// 当前压缩包条目大小；用于内嵌条目发生变化时辅助失效。
     entry_size: Option<u64>,
+    /// 探测时是否携带了已缓存的压缩包密码；无密码和有密码的探测结果需分开缓存，
+    /// 避免无密码探测返回 None 后阻止后续带密码重试。
+    has_passwords: bool,
 }
 
 /// 本地目录层压缩包探测任务。
@@ -201,7 +210,14 @@ impl LogSourceLoader {
         Self {
             config,
             defer_archive_probe: false,
+            archive_passwords: ArchivePasswordStore::default(),
         }
+    }
+
+    /// 为加载器附加当前会话已输入的压缩包密码快照。
+    pub fn with_archive_passwords(mut self, archive_passwords: ArchivePasswordStore) -> Self {
+        self.archive_passwords = archive_passwords;
+        self
     }
 
     /// 创建只使用缓存、不新增同步探测的加载器。
@@ -221,8 +237,9 @@ impl LogSourceLoader {
 
         self.run_bounded_probe_jobs(requests, {
             let results = Arc::clone(&results);
+            let archive_passwords = self.archive_passwords.clone();
             move |request| {
-                let patch = probe_source_archive_node(&request.node);
+                let patch = probe_source_archive_node(&request.node, &archive_passwords);
                 results
                     .lock()
                     .expect("来源压缩包探测结果锁不应被污染")
@@ -258,6 +275,7 @@ impl LogSourceLoader {
             match self.add_local_path(&mut registry, None, path.as_path(), 0, true) {
                 Ok(count) => report.added_count += count,
                 Err(error) => {
+                    report.record_password_error(&error);
                     report.skipped_count += 1;
                     report.errors.push(error.to_string());
                 }
@@ -336,6 +354,7 @@ impl LogSourceLoader {
         match result {
             Ok(count) => report.added_count += count,
             Err(error) => {
+                report.record_password_error(&error);
                 report.skipped_count += 1;
                 report.errors.push(error.to_string());
             }
@@ -401,7 +420,9 @@ impl LogSourceLoader {
 
         let kind = match detect_archive_format(path) {
             Some(format) if format.is_supported() => {
-                if let Some(target) = self.single_file_target_for_local_archive(path, format) {
+                if let Some(target) =
+                    self.single_file_target_for_local_archive(path, format, load_first_level)?
+                {
                     let location = SourceLocation::ArchiveEntry {
                         archive_path: path.to_path_buf(),
                         root_format: format,
@@ -535,10 +556,13 @@ impl LogSourceLoader {
             })
             .collect::<Vec<_>>();
 
-        self.run_bounded_probe_jobs(jobs, |job| {
-            let key = local_archive_probe_cache_key(&job.path, job.format, job.entry_size);
+        let archive_passwords = self.archive_passwords.clone();
+        let has_passwords = !archive_passwords.is_empty();
+        self.run_bounded_probe_jobs(jobs, move |job| {
+            let key =
+                local_archive_probe_cache_key(&job.path, job.format, job.entry_size, has_passwords);
             let _ = cached_archive_probe_target(key, || {
-                probe_local_single_file_target(&job.path, job.format)
+                probe_local_single_file_target(&job.path, job.format, &archive_passwords)
             });
         });
     }
@@ -553,7 +577,14 @@ impl LogSourceLoader {
         depth: usize,
         archive_depth: usize,
     ) -> Result<usize> {
-        let entries = list_archive_entries(archive_path, format)?;
+        let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+        let entries = archive_registry().list_entries_with_password_context(
+            format,
+            archive_path,
+            self.archive_passwords.get(&key),
+            key,
+            archive_path.display().to_string(),
+        )?;
         Ok(self.add_archive_directory_children_from_entries(
             registry,
             parent_id,
@@ -589,20 +620,31 @@ impl LogSourceLoader {
             .into());
         }
 
-        let nested_bytes = read_archive_entry_bytes(
+        let nested_bytes = read_archive_entry_bytes_with_passwords(
             archive_path,
             root_format,
             container_entries,
             nested_entry_path,
+            &self.archive_passwords,
         )?;
         let source_label = crate::utils::path::archive_virtual_path(
             archive_path,
             container_entries,
             nested_entry_path,
         );
-        let entries = list_archive_entries_from_bytes(nested_bytes, nested_format, &source_label)?;
         let mut nested_container_entries = container_entries.to_vec();
         nested_container_entries.push(normalize_archive_entry_path(nested_entry_path));
+        let key = ArchivePasswordKey::new(archive_path.to_path_buf(), &nested_container_entries);
+        let reader_len = nested_bytes.len() as u64;
+        let mut reader = Cursor::new(nested_bytes);
+        let entries = archive_registry().list_entries_from_reader_with_password_context(
+            nested_format,
+            &mut reader,
+            reader_len,
+            &source_label,
+            self.archive_passwords.get(&key),
+            key,
+        )?;
 
         Ok(self.add_archive_directory_children_from_entries(
             registry,
@@ -660,24 +702,49 @@ impl LogSourceLoader {
         format: ArchiveFormat,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         if container_entries.is_empty() {
-            return list_archive_entries(archive_path, format);
+            let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+            return archive_registry().list_entries_with_password_context(
+                format,
+                archive_path,
+                self.archive_passwords.get(&key),
+                key,
+                archive_path.display().to_string(),
+            );
         }
 
         let Some((current_container, parent_containers)) = container_entries.split_last() else {
-            return list_archive_entries(archive_path, format);
+            let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+            return archive_registry().list_entries_with_password_context(
+                format,
+                archive_path,
+                self.archive_passwords.get(&key),
+                key,
+                archive_path.display().to_string(),
+            );
         };
-        let bytes = read_archive_entry_bytes(
+        let bytes = read_archive_entry_bytes_with_passwords(
             archive_path,
             root_format,
             parent_containers,
             current_container,
+            &self.archive_passwords,
         )?;
         let source_label = crate::utils::path::archive_virtual_path(
             archive_path,
             parent_containers,
             current_container,
         );
-        list_archive_entries_from_bytes(bytes, format, &source_label)
+        let key = ArchivePasswordKey::new(archive_path.to_path_buf(), container_entries);
+        let reader_len = bytes.len() as u64;
+        let mut reader = Cursor::new(bytes);
+        archive_registry().list_entries_from_reader_with_password_context(
+            format,
+            &mut reader,
+            reader_len,
+            &source_label,
+            self.archive_passwords.get(&key),
+            key,
+        )
     }
 
     /// 返回本地压缩包是否可以折叠为单文件叶子节点。
@@ -687,18 +754,22 @@ impl LogSourceLoader {
         &self,
         archive_path: &Path,
         format: ArchiveFormat,
-    ) -> Option<SingleFileArchiveTarget> {
+        force_probe: bool,
+    ) -> Result<Option<SingleFileArchiveTarget>> {
         let entry_size = fs::metadata(archive_path)
             .ok()
             .map(|metadata| metadata.len());
-        let key = local_archive_probe_cache_key(archive_path, format, entry_size);
+        let has_passwords = !self.archive_passwords.is_empty();
+        let key = local_archive_probe_cache_key(archive_path, format, entry_size, has_passwords);
         if let Some(cached) = cached_archive_probe_target_if_present(&key) {
-            return cached;
+            return Ok(cached);
         }
-        if self.defer_archive_probe {
-            return None;
+        if self.defer_archive_probe && !force_probe {
+            return Ok(None);
         }
-        cached_archive_probe_target(key, || probe_local_single_file_target(archive_path, format))
+        Ok(cached_archive_probe_target(key, || {
+            probe_local_single_file_target(archive_path, format, &self.archive_passwords)
+        }))
     }
 
     /// 将压缩包扁平条目转换成指定目录层的直接子节点。
@@ -827,6 +898,8 @@ impl LogSourceLoader {
         let results = Arc::new(Mutex::new(HashMap::new()));
         self.run_bounded_probe_jobs(jobs, {
             let results = Arc::clone(&results);
+            let archive_passwords = self.archive_passwords.clone();
+            let has_passwords = !archive_passwords.is_empty();
             move |job| {
                 let key = nested_archive_probe_cache_key(
                     &job.archive_path,
@@ -835,6 +908,7 @@ impl LogSourceLoader {
                     &job.entry_path,
                     job.format,
                     job.entry_size,
+                    has_passwords,
                 );
                 let target = cached_archive_probe_target(key, || {
                     probe_nested_single_file_target(
@@ -843,6 +917,7 @@ impl LogSourceLoader {
                         &job.container_entries,
                         &job.entry_path,
                         job.format,
+                        &archive_passwords,
                     )
                 });
                 results
@@ -887,6 +962,7 @@ impl LogSourceLoader {
                     &child.entry_path,
                     format,
                     child.size,
+                    !self.archive_passwords.is_empty(),
                 );
                 cached_archive_probe_target_if_present(&key)
                     .map(|target| (child.entry_path.clone(), target))
@@ -957,14 +1033,16 @@ impl LogSourceLoader {
 
         let target = match precomputed_probe {
             Some(target) => target,
-            None => self.single_file_target_for_archive_entry(
-                archive_path,
-                root_format,
-                container_entries,
-                &child.entry_path,
-                nested_format,
-                child.size,
-            ),
+            None => self
+                .single_file_target_for_archive_entry(
+                    archive_path,
+                    root_format,
+                    container_entries,
+                    &child.entry_path,
+                    nested_format,
+                    child.size,
+                )
+                .unwrap_or(None),
         };
 
         if let Some(target) = target {
@@ -1011,7 +1089,8 @@ impl LogSourceLoader {
         entry_path: &str,
         nested_format: ArchiveFormat,
         entry_size: Option<u64>,
-    ) -> Option<SingleFileArchiveTarget> {
+    ) -> Result<Option<SingleFileArchiveTarget>> {
+        let has_passwords = !self.archive_passwords.is_empty();
         let key = nested_archive_probe_cache_key(
             archive_path,
             root_format,
@@ -1019,22 +1098,24 @@ impl LogSourceLoader {
             entry_path,
             nested_format,
             entry_size,
+            has_passwords,
         );
         if let Some(cached) = cached_archive_probe_target_if_present(&key) {
-            return cached;
+            return Ok(cached);
         }
         if self.defer_archive_probe {
-            return None;
+            return Ok(None);
         }
-        cached_archive_probe_target(key, || {
+        Ok(cached_archive_probe_target(key, || {
             probe_nested_single_file_target(
                 archive_path,
                 root_format,
                 container_entries,
                 entry_path,
                 nested_format,
+                &self.archive_passwords,
             )
-        })
+        }))
     }
 
     /// 使用固定并发数执行压缩包探测任务，避免大目录一次性创建过多线程或阻塞 UI。
@@ -1214,7 +1295,7 @@ fn archive_probe_cache()
 /// 返回值：可折叠的内部日志目标；不可折叠或探测失败时返回 `None`。
 fn cached_archive_probe_target(
     key: ArchiveProbeCacheKey,
-    probe: impl FnOnce() -> Option<SingleFileArchiveTarget>,
+    probe: impl FnOnce() -> Result<Option<SingleFileArchiveTarget>>,
 ) -> Option<SingleFileArchiveTarget> {
     if let Some(cached) = archive_probe_cache()
         .lock()
@@ -1225,7 +1306,11 @@ fn cached_archive_probe_target(
         return cached;
     }
 
-    let target = probe();
+    let target = match probe() {
+        Ok(target) => target,
+        Err(error) if find_archive_password_error(&error).is_some() => return None,
+        Err(_) => None,
+    };
     let mut cache = archive_probe_cache()
         .lock()
         .expect("单文件压缩包探测缓存锁不应被污染");
@@ -1252,6 +1337,7 @@ fn local_archive_probe_cache_key(
     archive_path: &Path,
     format: ArchiveFormat,
     entry_size: Option<u64>,
+    has_passwords: bool,
 ) -> ArchiveProbeCacheKey {
     ArchiveProbeCacheKey {
         archive_path: archive_path.to_path_buf(),
@@ -1261,6 +1347,7 @@ fn local_archive_probe_cache_key(
         format,
         root_fingerprint: archive_root_fingerprint(archive_path),
         entry_size,
+        has_passwords,
     }
 }
 
@@ -1272,6 +1359,7 @@ fn nested_archive_probe_cache_key(
     entry_path: &str,
     format: ArchiveFormat,
     entry_size: Option<u64>,
+    has_passwords: bool,
 ) -> ArchiveProbeCacheKey {
     ArchiveProbeCacheKey {
         archive_path: archive_path.to_path_buf(),
@@ -1281,6 +1369,7 @@ fn nested_archive_probe_cache_key(
         format,
         root_fingerprint: archive_root_fingerprint(archive_path),
         entry_size,
+        has_passwords,
     }
 }
 
@@ -1304,15 +1393,24 @@ fn archive_root_fingerprint(path: &Path) -> Option<ArchiveRootFingerprint> {
 fn probe_local_single_file_target(
     archive_path: &Path,
     format: ArchiveFormat,
-) -> Option<SingleFileArchiveTarget> {
-    let probe = archive_registry()
-        .probe_single_file_root(format, archive_path)
-        .ok()?;
-    single_file_target_from_probe(probe)
+    passwords: &ArchivePasswordStore,
+) -> Result<Option<SingleFileArchiveTarget>> {
+    let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+    let probe = archive_registry().probe_single_file_root_with_password_context(
+        format,
+        archive_path,
+        passwords.get(&key),
+        key,
+        archive_path.display().to_string(),
+    )?;
+    Ok(single_file_target_from_probe(probe))
 }
 
 /// 对来源树中的可展开压缩包节点执行一次单文件探测，并生成 UI 节点补丁。
-fn probe_source_archive_node(node: &SourceTreeNode) -> Option<SourceArchiveProbePatch> {
+fn probe_source_archive_node(
+    node: &SourceTreeNode,
+    passwords: &ArchivePasswordStore,
+) -> Option<SourceArchiveProbePatch> {
     let SourceKind::Archive(format) = node.kind else {
         return None;
     };
@@ -1323,9 +1421,15 @@ fn probe_source_archive_node(node: &SourceTreeNode) -> Option<SourceArchiveProbe
                 .ok()
                 .map(|metadata| metadata.len())
                 .or(node.metadata.size);
-            let key = local_archive_probe_cache_key(path, format, entry_size);
-            let target =
-                cached_archive_probe_target(key, || probe_local_single_file_target(path, format))?;
+            let key = local_archive_probe_cache_key(
+                path,
+                format,
+                entry_size,
+                !passwords.is_empty(),
+            );
+            let target = cached_archive_probe_target(key, || {
+                probe_local_single_file_target(path, format, passwords)
+            })?;
             let location = SourceLocation::ArchiveEntry {
                 archive_path: path.clone(),
                 root_format: format,
@@ -1360,6 +1464,7 @@ fn probe_source_archive_node(node: &SourceTreeNode) -> Option<SourceArchiveProbe
                 entry_path,
                 format,
                 node.metadata.size,
+                !passwords.is_empty(),
             );
             let target = cached_archive_probe_target(key, || {
                 probe_nested_single_file_target(
@@ -1368,6 +1473,7 @@ fn probe_source_archive_node(node: &SourceTreeNode) -> Option<SourceArchiveProbe
                     container_entries,
                     entry_path,
                     format,
+                    passwords,
                 )
             })?;
             let mut nested_container_entries = container_entries.clone();
@@ -1401,17 +1507,31 @@ fn probe_nested_single_file_target(
     container_entries: &[String],
     entry_path: &str,
     format: ArchiveFormat,
-) -> Option<SingleFileArchiveTarget> {
-    let bytes =
-        read_archive_entry_bytes(archive_path, root_format, container_entries, entry_path).ok()?;
+    passwords: &ArchivePasswordStore,
+) -> Result<Option<SingleFileArchiveTarget>> {
+    let bytes = read_archive_entry_bytes_with_passwords(
+        archive_path,
+        root_format,
+        container_entries,
+        entry_path,
+        passwords,
+    )?;
     let source_label =
         crate::utils::path::archive_virtual_path(archive_path, container_entries, entry_path);
     let reader_len = bytes.len() as u64;
     let mut probe_reader = Cursor::new(bytes.as_slice());
-    let probe = archive_registry()
-        .probe_single_file_root_from_reader(format, &mut probe_reader, reader_len, &source_label)
-        .ok()?;
-    single_file_target_from_probe(probe)
+    let mut nested_container_entries = container_entries.to_vec();
+    nested_container_entries.push(normalize_archive_entry_path(entry_path));
+    let key = ArchivePasswordKey::new(archive_path.to_path_buf(), &nested_container_entries);
+    let probe = archive_registry().probe_single_file_root_from_reader_with_password_context(
+        format,
+        &mut probe_reader,
+        reader_len,
+        &source_label,
+        passwords.get(&key),
+        key,
+    )?;
+    Ok(single_file_target_from_probe(probe))
 }
 
 /// 将统一探测结果转换为来源树可直接打开的内部日志目标。
@@ -1434,6 +1554,14 @@ impl LoadReport {
             added_count: 0,
             skipped_count: 0,
             errors: Vec::new(),
+            password_request: None,
+        }
+    }
+
+    /// 记录本次加载遇到的首个压缩包密码错误，供 UI 弹窗收集密码后重试。
+    fn record_password_error(&mut self, error: &anyhow::Error) {
+        if self.password_request.is_none() {
+            self.password_request = find_archive_password_error(error);
         }
     }
 }
@@ -1951,7 +2079,7 @@ mod tests {
 
         let deferred_loader =
             LogSourceLoader::new(LoaderConfig::default()).with_deferred_archive_probe();
-        let deferred_report = deferred_loader.load_paths(vec![archive_path.clone()]);
+        let deferred_report = deferred_loader.load_paths(vec![root.clone()]);
         let archive_node = deferred_report
             .registry
             .tree_order_source_ids()
@@ -1977,7 +2105,7 @@ mod tests {
             "后台探测应识别单文件 ZIP"
         );
 
-        let cached_report = deferred_loader.load_paths(vec![archive_path.clone()]);
+        let cached_report = deferred_loader.load_paths(vec![root.clone()]);
         let cached_node = cached_report
             .registry
             .tree_order_source_ids()
@@ -2116,24 +2244,25 @@ mod tests {
             format: ArchiveFormat::Zip,
             root_fingerprint: None,
             entry_size: Some(42),
+            has_passwords: false,
         };
         let calls = Arc::new(AtomicUsize::new(0));
 
         let first_calls = Arc::clone(&calls);
         let first = super::cached_archive_probe_target(key.clone(), || {
             first_calls.fetch_add(1, Ordering::SeqCst);
-            Some(super::SingleFileArchiveTarget {
+            Ok(Some(super::SingleFileArchiveTarget {
                 entry_path: "app.log".to_string(),
                 size: Some(42),
-            })
+            }))
         });
         let second_calls = Arc::clone(&calls);
         let second = super::cached_archive_probe_target(key, || {
             second_calls.fetch_add(1, Ordering::SeqCst);
-            Some(super::SingleFileArchiveTarget {
+            Ok(Some(super::SingleFileArchiveTarget {
                 entry_path: "other.log".to_string(),
                 size: Some(1),
-            })
+            }))
         });
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);

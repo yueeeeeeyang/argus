@@ -249,4 +249,3 @@ pub fn render_runtime_filter_input(
     )
     .into_any_element()
 }
-

@@ -11,9 +11,9 @@ use gpui::{
     SharedString, Subscription, Window, div, prelude::*, px, rgb,
 };
 
+use crate::analysis::jstack::split_stack_segment_filter_blocks;
 use crate::app::{AppTextInputTarget, ArgusApp, SettingsTextInputState};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
-use crate::analysis::jstack::split_stack_segment_filter_blocks;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::theme::{AppTheme, ThemeOption};
 use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};

@@ -14,11 +14,11 @@ use gpui::{
 };
 
 use crate::app::{ArgusApp, InputTextSelectionDrag};
-use crate::loader::{BrowseEntry, BrowseLocation, BrowseResult, LogSourceLoader, PathBrowser};
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, word_range_at,
 };
+use crate::loader::{BrowseEntry, BrowseLocation, BrowseResult, LogSourceLoader, PathBrowser};
 use crate::ui::source_picker::SourcePickerWindow;
 use crate::utils::path::display_path;
 
@@ -442,19 +442,29 @@ impl ArgusApp {
         self.is_source_loading = true;
         self.placeholder_notice = format!("正在加载 {} 个{}", paths.len(), trigger.loading_label());
         let loader_config = self.config.loader.clone();
+        let archive_passwords = self.archive_passwords.clone();
+        let retry_paths = paths.clone();
 
         cx.spawn(async move |view, cx| {
             let report = cx
                 .background_executor()
                 .spawn(async move {
                     LogSourceLoader::new(loader_config)
+                        .with_archive_passwords(archive_passwords)
                         .with_deferred_archive_probe()
                         .load_paths(paths)
                 })
                 .await;
 
             view.update(cx, |app, cx| {
-                app.apply_load_report_with_context(report, cx);
+                app.apply_load_report_with_context(
+                    report,
+                    Some(crate::app::ArchivePasswordRetryAction::LoadPaths {
+                        paths: retry_paths,
+                        trigger,
+                    }),
+                    cx,
+                );
                 cx.notify();
             })
             .ok();

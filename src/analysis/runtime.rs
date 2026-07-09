@@ -15,12 +15,12 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::config::LoaderConfig;
-use crate::loader::archive::ArchiveFormat;
+use crate::loader::archive::{ArchiveFormat, ArchivePasswordKey, ArchivePasswordStore};
 use crate::loader::{
     LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceLocation, SourceTreeNode,
 };
-use crate::reader::backend::ReadBackend;
 use crate::reader::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
+use crate::reader::stream_backend::ArchiveStreamBackend;
 use crate::utils::path::normalize_archive_entry_path;
 use zip::ZipArchive;
 
@@ -55,6 +55,8 @@ pub struct RuntimeAnalysisTarget {
     pub path: String,
     /// 当前目标是文件还是目录。
     pub kind: RuntimeAnalysisTargetKind,
+    /// 当前会话中已输入的压缩包密码快照。
+    pub archive_passwords: ArchivePasswordStore,
 }
 
 /// 单条 SQL 明细记录。
@@ -1136,6 +1138,7 @@ fn collect_runtime_log_files(
                 label,
                 path: path.display().to_string(),
                 kind: RuntimeAnalysisTargetKind::File,
+                archive_passwords: ArchivePasswordStore::default(),
             })
         })
         .collect())
@@ -1212,6 +1215,8 @@ struct PreparedRuntimeTarget {
     metadata: RuntimeFileMetadata,
     /// 实际读取位置；单文件压缩包会在准备阶段解析为内部日志条目。
     location: SourceLocation,
+    /// 当前会话中已输入的压缩包密码快照。
+    archive_passwords: ArchivePasswordStore,
 }
 
 /// 并行读取并解析 Runtime 文件，返回顺序仍保持来源树展开后的文件顺序。
@@ -1239,7 +1244,12 @@ fn read_runtime_requests_parallel(
     let mut top_level_zip_groups = HashMap::<PathBuf, Vec<PreparedRuntimeTarget>>::new();
     let mut generic_targets = Vec::new();
     for prepared in prepared_targets {
-        if let Some(archive_path) = top_level_zip_archive_path(&prepared.location) {
+        if let Some(archive_path) = top_level_zip_archive_path(&prepared.location)
+            && prepared
+                .archive_passwords
+                .get(&ArchivePasswordKey::root(archive_path.clone()))
+                .is_none()
+        {
             top_level_zip_groups
                 .entry(archive_path)
                 .or_default()
@@ -1294,6 +1304,7 @@ fn prepare_runtime_target(
         path: target.path,
         metadata,
         location,
+        archive_passwords: target.archive_passwords,
     })
 }
 
@@ -1624,9 +1635,13 @@ fn read_prepared_runtime_request(
     default_encoding: &str,
     encoding_hint: &mut Option<String>,
 ) -> Result<RuntimeRequestRecord> {
-    let sql_records =
-        read_runtime_sql_records_from_location(&target.location, default_encoding, encoding_hint)
-            .with_context(|| format!("读取 Runtime 日志失败：{}", target.location.display_path()))?;
+    let sql_records = read_runtime_sql_records_from_location(
+        &target.location,
+        default_encoding,
+        encoding_hint,
+        &target.archive_passwords,
+    )
+    .with_context(|| format!("读取 Runtime 日志失败：{}", target.location.display_path()))?;
 
     Ok(build_request_record(
         0,
@@ -1643,6 +1658,7 @@ fn read_runtime_sql_records_from_location(
     location: &SourceLocation,
     default_encoding: &str,
     encoding_hint: &mut Option<String>,
+    archive_passwords: &ArchivePasswordStore,
 ) -> Result<Vec<RuntimeSqlRecord>> {
     let bytes = match location {
         SourceLocation::LocalPath(path) => {
@@ -1656,7 +1672,7 @@ fn read_runtime_sql_records_from_location(
                 .with_context(|| format!("无法读取 Runtime 日志文件：{}", path.display()))?
         }
         SourceLocation::ArchiveEntry { .. } => {
-            ReadBackend::for_location(location).read_to_bytes(location)?
+            ArchiveStreamBackend::read_to_bytes(location, archive_passwords)?
         }
     };
     Ok(parse_runtime_sql_records_from_bytes(
@@ -1732,6 +1748,7 @@ fn resolve_runtime_target_location(
     };
 
     let probe_result = LogSourceLoader::new(loader_config.clone())
+        .with_archive_passwords(target.archive_passwords.clone())
         .probe_archive_nodes(vec![SourceArchiveProbeRequest {
             source_id: target.source_id,
             node,
@@ -2238,6 +2255,7 @@ mod tests {
             &SourceLocation::LocalPath(path),
             "UTF-8",
             &mut encoding_hint,
+            &ArchivePasswordStore::default(),
         )
         .expect("应能流式读取 Runtime 日志");
 
@@ -2315,6 +2333,7 @@ mod tests {
                 label: path.file_name().unwrap().to_string_lossy().to_string(),
                 path: path.display().to_string(),
                 kind: RuntimeAnalysisTargetKind::File,
+                archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),
@@ -2343,6 +2362,7 @@ mod tests {
                     label: second.file_name().unwrap().to_string_lossy().to_string(),
                     path: second.display().to_string(),
                     kind: RuntimeAnalysisTargetKind::File,
+                    archive_passwords: ArchivePasswordStore::default(),
                 },
                 RuntimeAnalysisTarget {
                     source_id: SourceId(2),
@@ -2351,6 +2371,7 @@ mod tests {
                     label: first.file_name().unwrap().to_string_lossy().to_string(),
                     path: first.display().to_string(),
                     kind: RuntimeAnalysisTargetKind::File,
+                    archive_passwords: ArchivePasswordStore::default(),
                 },
             ],
             "UTF-8".to_string(),
@@ -2409,6 +2430,7 @@ mod tests {
                     .to_string(),
                 path: format!("{}!/{entry_path}", zip_path.display()),
                 kind: RuntimeAnalysisTargetKind::File,
+                archive_passwords: ArchivePasswordStore::default(),
             })
             .collect::<Vec<_>>();
 
@@ -2468,6 +2490,7 @@ mod tests {
                     .to_string(),
                 path: format!("{}!/{entry_path}", zip_path.display()),
                 kind: RuntimeAnalysisTargetKind::File,
+                archive_passwords: ArchivePasswordStore::default(),
             })
             .collect::<Vec<_>>();
 

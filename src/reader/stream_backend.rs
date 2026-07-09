@@ -7,7 +7,9 @@
 use anyhow::{Result, bail};
 
 use crate::loader::SourceLocation;
-use crate::loader::archive::{ArchiveEntryConsumer, stream_archive_entry};
+use crate::loader::archive::{
+    ArchiveEntryConsumer, ArchivePasswordStore, stream_archive_entry_with_passwords,
+};
 
 /// 压缩包条目顺序流后端；当前将流式输出汇聚为解码缓冲。
 #[derive(Clone, Copy, Debug, Default)]
@@ -20,7 +22,10 @@ impl ArchiveStreamBackend {
     /// - `location`：必须是 `SourceLocation::ArchiveEntry`。
     ///
     /// 返回值：目标条目解压后字节；读取过程中不创建临时文件。
-    pub fn read_to_bytes(location: &SourceLocation) -> Result<Vec<u8>> {
+    pub fn read_to_bytes(
+        location: &SourceLocation,
+        archive_passwords: &ArchivePasswordStore,
+    ) -> Result<Vec<u8>> {
         let SourceLocation::ArchiveEntry {
             archive_path,
             root_format,
@@ -33,11 +38,12 @@ impl ArchiveStreamBackend {
         };
 
         let mut bytes = Vec::new();
-        stream_archive_entry(
+        stream_archive_entry_with_passwords(
             archive_path,
             *root_format,
             container_entries,
             entry_path,
+            archive_passwords,
             &mut |chunk| {
                 bytes.extend_from_slice(chunk);
                 Ok(())
@@ -56,6 +62,7 @@ impl ArchiveStreamBackend {
     /// 返回值：读取成功返回 `Ok(())`；调用方可在回调内决定继续保存在内存或物化到分页文件。
     pub fn stream_to_consumer(
         location: &SourceLocation,
+        archive_passwords: &ArchivePasswordStore,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         let SourceLocation::ArchiveEntry {
@@ -69,11 +76,12 @@ impl ArchiveStreamBackend {
             bail!("压缩流后端收到非压缩来源：{}", location.display_path());
         };
 
-        stream_archive_entry(
+        stream_archive_entry_with_passwords(
             archive_path,
             *root_format,
             container_entries,
             entry_path,
+            archive_passwords,
             consumer,
         )
     }

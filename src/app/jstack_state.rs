@@ -9,8 +9,8 @@ use std::ops::Range;
 use gpui::UniformListScrollHandle;
 
 use crate::analysis::jstack::{
-    JstackAnalysisResult, JstackAnalysisTarget, JstackFrequencyRow,
-    JstackThreadFilter, JstackThreadStackOccurrence, JstackThreadState,
+    JstackAnalysisResult, JstackAnalysisTarget, JstackFrequencyRow, JstackThreadFilter,
+    JstackThreadStackOccurrence, JstackThreadState,
 };
 use crate::infra::text_selection::{TextSelectionGranularity, character_count, word_range_at};
 

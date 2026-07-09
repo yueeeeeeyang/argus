@@ -209,6 +209,8 @@ pub enum AppTextInputTarget {
     },
     /// 远程文件管理重命名弹窗名称输入框。
     SftpRenameName,
+    /// 压缩包密码弹窗输入框。
+    ArchivePassword,
     /// 来源选择器路径输入框。
     SourcePickerPath,
     /// 独立日志搜索窗口输入框。
@@ -292,6 +294,8 @@ pub struct AppInputFocusHandles {
     pub sftp_address: FocusHandle,
     /// 远程文件管理重命名弹窗输入框焦点。
     pub sftp_rename_name: FocusHandle,
+    /// 压缩包密码弹窗输入框焦点。
+    pub archive_password: FocusHandle,
     /// 右侧终端面板焦点。
     pub terminal: FocusHandle,
     /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。

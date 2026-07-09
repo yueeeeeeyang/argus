@@ -267,7 +267,10 @@ pub fn estimated_log_content_width(
 }
 
 /// 从完整展示文本中截取本次真正需要渲染的片段。
-pub fn visible_log_text(full_text: &str, visible_char_range: Option<&Range<usize>>) -> LogVisibleText {
+pub fn visible_log_text(
+    full_text: &str,
+    visible_char_range: Option<&Range<usize>>,
+) -> LogVisibleText {
     let full_char_count = character_count(full_text);
     let Some(range) = visible_char_range else {
         return LogVisibleText {
@@ -496,7 +499,10 @@ pub fn push_non_overlapping_highlight(
 }
 
 /// 从基础范围中扣除保护范围，返回可以继续使用语法色的非重叠片段。
-pub fn subtract_ranges(range: Range<usize>, protected_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+pub fn subtract_ranges(
+    range: Range<usize>,
+    protected_ranges: &[Range<usize>],
+) -> Vec<Range<usize>> {
     let mut pieces = vec![range];
     for protected in protected_ranges {
         pieces = pieces
@@ -641,4 +647,3 @@ pub fn display_column_for_raw_column(raw_text: &str, raw_column: usize) -> usize
         .map(|ch| if ch == '\t' { 4 } else { 1 })
         .sum()
 }
-

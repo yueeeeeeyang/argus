@@ -54,7 +54,9 @@ pub fn runtime_sql_dialog_selection_range_for_line(
 }
 
 /// 根据点击次数转换 SQL 弹窗文本选择粒度。
-pub fn runtime_sql_dialog_granularity_for_click_count(click_count: usize) -> TextSelectionGranularity {
+pub fn runtime_sql_dialog_granularity_for_click_count(
+    click_count: usize,
+) -> TextSelectionGranularity {
     match click_count {
         0 | 1 => TextSelectionGranularity::Character,
         2 => TextSelectionGranularity::Word,
@@ -386,4 +388,3 @@ pub fn render_empty_message(message: &str, theme: &AppTheme) -> AnyElement {
 
 /// Runtime 三层表格当前过滤条件类型，具体解析逻辑复用领域层实现。
 pub type RuntimeFilterCriteria = RuntimeAnalysisFilterCriteria;
-

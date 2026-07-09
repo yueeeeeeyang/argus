@@ -13,14 +13,14 @@ use crate::app::{
     ConnectionDirectoryFormState, ConnectionHostKeyPromptState, ConnectionLinkFormState,
     InputTextSelectionDrag, SettingsTextInputState,
 };
+use crate::infra::text_selection::{
+    TextSelectionGranularity, character_count, replace_character_range, word_range_at,
+};
 use crate::remote::connection::{
     ConnectionDeletedNodeKind, ConnectionLinkKind, ConnectionNodeId, ConnectionTreeRow,
     SmbLinkConfig, SshLinkConfig,
 };
 use crate::remote::terminal::PendingHostKey;
-use crate::infra::text_selection::{
-    TextSelectionGranularity, character_count, replace_character_range, word_range_at,
-};
 use crate::ui::connection_dialog::{
     ConnectionDirectoryWindow, ConnectionDirectoryWindowMode, ConnectionLinkWindow,
     ConnectionLinkWindowMode,

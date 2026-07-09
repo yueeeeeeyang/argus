@@ -8,15 +8,15 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::analysis::jstack::{
+    JstackAnalysisResult, JstackFrequencyCell, JstackFrequencyRow, JstackThreadState,
+};
 use crate::app::{
     ArgusApp, JstackAnalysisState, JstackAnalysisTaskState, JstackThreadNameSelection,
     jstack_cell_selection_key,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{HighlightLanguage, HighlightTokenKind, SyntaxHighlighter};
-use crate::analysis::jstack::{
-    JstackAnalysisResult, JstackFrequencyCell, JstackFrequencyRow, JstackThreadState,
-};
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index, character_count,
 };

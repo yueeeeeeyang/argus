@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use crate::app::ArgusApp;
-use crate::remote::connection::ConnectionNodeId;
 use crate::loader::SourceId;
+use crate::remote::connection::ConnectionNodeId;
 use crate::theme::AppTheme;
 use gpui::{
     Context, Corner, IntoElement, Pixels, Point, SharedString, UniformListScrollHandle, anchored,

@@ -10,6 +10,16 @@ use std::sync::Arc;
 
 use chrono::{Datelike, Local, TimeZone, Timelike};
 
+use crate::analysis::runtime::{
+    RuntimeAnalysisFilterCriteria, RuntimeAnalysisResult, RuntimeRequestRecord,
+    RuntimeRequestSummary, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
+    RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord, filtered_runtime_summary_from_indices,
+    parse_runtime_analysis_filter_criteria, parse_runtime_filter_time_value,
+    runtime_request_matches_cross_filters as domain_runtime_request_matches_cross_filters,
+    runtime_request_matches_keyword as domain_runtime_request_matches_keyword,
+    runtime_sql_matches_keyword as domain_runtime_sql_matches_keyword,
+    sort_runtime_sql_frequency_detail_rows,
+};
 use crate::app::{
     AppTextInputTarget, ArgusApp, RUNTIME_SQL_COLLAPSED_ROW_HEIGHT, RuntimeAnalysisResultType,
     RuntimeAnalysisState, RuntimeAnalysisTaskState, RuntimeAnalysisView, RuntimeFilterInputKind,
@@ -21,16 +31,6 @@ use crate::app::{
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::infra::perf::PerfSpan;
-use crate::analysis::runtime::{
-    RuntimeAnalysisFilterCriteria, RuntimeAnalysisResult, RuntimeRequestRecord,
-    RuntimeRequestSummary, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
-    RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord, filtered_runtime_summary_from_indices,
-    parse_runtime_analysis_filter_criteria, parse_runtime_filter_time_value,
-    runtime_request_matches_cross_filters as domain_runtime_request_matches_cross_filters,
-    runtime_request_matches_keyword as domain_runtime_request_matches_keyword,
-    runtime_sql_matches_keyword as domain_runtime_sql_matches_keyword,
-    sort_runtime_sql_frequency_detail_rows,
-};
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index, character_count,
 };
@@ -671,16 +671,16 @@ mod tests {
 
     use gpui::UniformListScrollHandle;
 
+    use crate::analysis::runtime::{
+        build_runtime_analysis_result, build_runtime_slow_sql_rows_for_filter,
+        build_runtime_sql_frequency_rows_for_filter, parse_runtime_request_text,
+    };
     use crate::app::{
         RuntimeAnalysisResultType, RuntimeAnalysisTaskState, RuntimeAnalysisView,
         RuntimeSlowSqlRowsCache, RuntimeSortDirection, RuntimeSqlFrequencyRowsCache,
         RuntimeSqlSortKey, RuntimeSummarySortKey,
     };
     use crate::loader::SourceId;
-    use crate::analysis::runtime::{
-        build_runtime_analysis_result, build_runtime_slow_sql_rows_for_filter,
-        build_runtime_sql_frequency_rows_for_filter, parse_runtime_request_text,
-    };
 
     use super::*;
 

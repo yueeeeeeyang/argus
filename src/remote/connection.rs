@@ -1419,10 +1419,7 @@ mod tests {
         .expect("完整 UNC 应能解析");
         assert_eq!(host, "192.168.7.173");
         assert_eq!(share, "ecology-customer2");
-        assert_eq!(
-            initial_dir,
-            "/Z/Z中国机械工业集团有限公司/历史文件/ecology"
-        );
+        assert_eq!(initial_dir, "/Z/Z中国机械工业集团有限公司/历史文件/ecology");
     }
 
     /// 验证正斜杠和 `smb://` 前缀的 UNC 地址同样能解析。

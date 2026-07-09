@@ -12,8 +12,8 @@ use gpui::{Pixels, ScrollHandle, UniformListScrollHandle};
 
 use crate::analysis::runtime::{
     RuntimeAnalysisFilterRows, RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot,
-    RuntimeAnalysisResult, RuntimeAnalysisTarget, RuntimeRequestSummary,
-    RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
+    RuntimeAnalysisResult, RuntimeAnalysisTarget, RuntimeRequestSummary, RuntimeSlowSqlSummaryRow,
+    RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
 };
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, slice_character_range, word_range_at,

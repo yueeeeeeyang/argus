@@ -7,9 +7,9 @@
 use std::borrow::Borrow;
 use std::ops::Range;
 
+use crate::analysis::jstack::{JstackThreadDetail, JstackThreadStackOccurrence};
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{HighlightLanguage, HighlightTokenKind, SyntaxHighlighter};
-use crate::analysis::jstack::{JstackThreadDetail, JstackThreadStackOccurrence};
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, slice_character_range, word_range_at,
@@ -363,10 +363,7 @@ impl Render for JstackThreadDetailWindow {
                     cx.notify();
                 }
             }))
-            .child(render_detail_title_bar(
-                &theme,
-                &self.detail.thread_name,
-            ))
+            .child(render_detail_title_bar(&theme, &self.detail.thread_name))
             .child(render_detail_body(
                 &theme,
                 &self.detail,
@@ -382,10 +379,7 @@ impl Render for JstackThreadDetailWindow {
 }
 
 /// 渲染窗口顶部标题和关闭按钮；标题仅显示线程名，过长截断。
-fn render_detail_title_bar(
-    theme: &AppTheme,
-    thread_name: &str,
-) -> impl IntoElement + use<> {
+fn render_detail_title_bar(theme: &AppTheme, thread_name: &str) -> impl IntoElement + use<> {
     let close_theme = theme.clone();
     div()
         .h(px(DETAIL_TITLE_BAR_HEIGHT))

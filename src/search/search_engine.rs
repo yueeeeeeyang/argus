@@ -12,6 +12,7 @@ use std::sync::{
 
 use regex::{Regex, RegexBuilder};
 
+use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::{SourceId, SourceLocation};
 use crate::reader::log_file_reader::{
     DisplayedLogLine, LogDocument, LogFileReader, LogReaderHandle, OpenLogRequest, PagedLogDocument,
@@ -92,6 +93,8 @@ pub struct SearchRequest {
     pub targets: Vec<SearchTarget>,
     /// 用户设置的默认编码名称。
     pub default_encoding: String,
+    /// 当前会话中已输入的压缩包密码快照。
+    pub archive_passwords: ArchivePasswordStore,
 }
 
 impl SearchRequest {
@@ -120,7 +123,14 @@ impl SearchRequest {
             queries,
             targets,
             default_encoding,
+            archive_passwords: ArchivePasswordStore::default(),
         }
+    }
+
+    /// 为搜索请求附加当前会话的压缩包密码快照。
+    pub fn with_archive_passwords(mut self, archive_passwords: ArchivePasswordStore) -> Self {
+        self.archive_passwords = archive_passwords;
+        self
     }
 }
 
@@ -453,6 +463,7 @@ impl SearchEngine {
                 location: target.location.clone(),
                 label: target.label.clone(),
                 default_encoding: request.default_encoding.clone(),
+                archive_passwords: request.archive_passwords.clone(),
             }) {
                 Ok(handle) => handle,
                 Err(error) => {
@@ -1625,6 +1636,7 @@ mod tests {
         CurrentLogMatchDirection, CurrentLogMatchPosition, SearchEngine, SearchQuery,
         SearchRequest, SearchScope, SearchTarget, find_match_ranges,
     };
+    use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
     use crate::reader::log_file_reader::{LogFileReader, OpenLogRequest};
 
@@ -1735,6 +1747,7 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "count.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1772,6 +1785,7 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "count-only.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1806,6 +1820,7 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "next.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1856,6 +1871,7 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "inline.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1904,6 +1920,7 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "prev.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 

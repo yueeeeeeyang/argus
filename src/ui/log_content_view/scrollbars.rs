@@ -310,4 +310,3 @@ pub fn render_scrollbar_thumb(
         )
         .into_any_element()
 }
-

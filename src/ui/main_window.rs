@@ -8,8 +8,9 @@ use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::ui::{
-    components::context_menu, connection_dialog, custom_title_bar, log_content_view,
-    placeholder_dialog, sftp_dialog, source_panel, source_resizer, upgrade_dialog,
+    archive_password_dialog, components::context_menu, connection_dialog, custom_title_bar,
+    log_content_view, placeholder_dialog, sftp_dialog, source_panel, source_resizer,
+    upgrade_dialog,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
@@ -111,6 +112,9 @@ pub fn render(
         })
         .when(app.sftp_dialog.is_some(), |this| {
             this.child(sftp_dialog::render(app, cx))
+        })
+        .when(app.archive_password_prompt.is_some(), |this| {
+            this.child(archive_password_dialog::render(app, cx))
         })
         .when(app.upgrade_dialog.is_some(), |this| {
             this.child(upgrade_dialog::render(app, cx))

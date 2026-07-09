@@ -9,13 +9,14 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use sevenz_rust::{Error as SevenzError, Password, SevenZReader};
+use sevenz_rust::{Error as SevenzError, Password, SevenZMethod, SevenZReader};
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
     ArchiveRootProbe, ArchiveRootProbeState,
 };
 use crate::loader::archive::detector::ArchiveFormat;
+use crate::loader::archive::password::ArchivePasswordError;
 use crate::utils::path::normalize_archive_entry_path;
 
 /// 7Z 适配器，当前只做条目枚举；加密压缩包会由底层库返回错误。
@@ -33,7 +34,7 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: false,
+            supports_passwords: true,
         }
     }
 
@@ -43,14 +44,14 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
     }
 
     /// 枚举 7Z 条目并转换为统一条目模型。
-    fn list_entries(&self, path: &Path) -> Result<Vec<ArchiveEntryInfo>> {
+    fn list_entries(&self, path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntryInfo>> {
         let file =
             File::open(path).with_context(|| format!("无法打开 7Z 压缩包：{}", path.display()))?;
         let reader_len = file
             .metadata()
             .with_context(|| format!("无法读取 7Z 文件大小：{}", path.display()))?
             .len();
-        list_sevenz_entries_from_reader(file, reader_len, &path.display().to_string())
+        list_sevenz_entries_from_reader(file, reader_len, &path.display().to_string(), password)
     }
 
     /// 从内存 7Z 数据源枚举条目。
@@ -59,19 +60,29 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
         reader: &mut dyn ArchiveReadSeek,
         reader_len: u64,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
-        list_sevenz_entries_from_reader(reader, reader_len, source_label)
+        list_sevenz_entries_from_reader(reader, reader_len, source_label, password)
     }
 
     /// 轻量探测 7Z 根层单文件；只读取 7Z 元数据，不解压正文。
-    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+    fn probe_single_file_root(
+        &self,
+        path: &Path,
+        password: Option<&str>,
+    ) -> Result<ArchiveRootProbe> {
         let file =
             File::open(path).with_context(|| format!("无法打开 7Z 压缩包：{}", path.display()))?;
         let reader_len = file
             .metadata()
             .with_context(|| format!("无法读取 7Z 文件大小：{}", path.display()))?
             .len();
-        probe_sevenz_single_file_root_from_reader(file, reader_len, &path.display().to_string())
+        probe_sevenz_single_file_root_from_reader(
+            file,
+            reader_len,
+            &path.display().to_string(),
+            password,
+        )
     }
 
     /// 从内存 7Z 数据源轻量探测根层单文件。
@@ -80,12 +91,18 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
         reader: &mut dyn ArchiveReadSeek,
         reader_len: u64,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<ArchiveRootProbe> {
-        probe_sevenz_single_file_root_from_reader(reader, reader_len, source_label)
+        probe_sevenz_single_file_root_from_reader(reader, reader_len, source_label, password)
     }
 
     /// 从本地 7Z 读取指定条目字节。
-    fn read_entry_bytes(&self, path: &Path, entry_path: &str) -> Result<Vec<u8>> {
+    fn read_entry_bytes(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        password: Option<&str>,
+    ) -> Result<Vec<u8>> {
         let file =
             File::open(path).with_context(|| format!("无法打开 7Z 压缩包：{}", path.display()))?;
         let reader_len = file
@@ -97,6 +114,7 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
             reader_len,
             entry_path,
             &path.display().to_string(),
+            password,
         )
     }
 
@@ -107,8 +125,9 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
         reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<Vec<u8>> {
-        read_sevenz_entry_bytes_from_reader(reader, reader_len, entry_path, source_label)
+        read_sevenz_entry_bytes_from_reader(reader, reader_len, entry_path, source_label, password)
     }
 
     /// 从本地 7Z 流式读取指定条目内容。
@@ -116,6 +135,7 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
         &self,
         path: &Path,
         entry_path: &str,
+        password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         let file =
@@ -129,6 +149,7 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
             reader_len,
             entry_path,
             &path.display().to_string(),
+            password,
             consumer,
         )
     }
@@ -140,9 +161,17 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
         reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
-        stream_sevenz_entry_from_reader(reader, reader_len, entry_path, source_label, consumer)
+        stream_sevenz_entry_from_reader(
+            reader,
+            reader_len,
+            entry_path,
+            source_label,
+            password,
+            consumer,
+        )
     }
 }
 
@@ -151,12 +180,13 @@ pub fn probe_sevenz_single_file_root_from_reader<R>(
     reader: R,
     reader_len: u64,
     source_label: &str,
+    password: Option<&str>,
 ) -> Result<ArchiveRootProbe>
 where
     R: Read + Seek,
 {
-    let reader = SevenZReader::new(reader, reader_len, Password::empty())
-        .with_context(|| format!("无法解析 7Z 压缩包：{source_label}"))?;
+    let reader = open_sevenz_reader(reader, reader_len, password, source_label)?;
+    ensure_sevenz_password_if_encrypted(reader.archive(), password, source_label)?;
     let mut state = ArchiveRootProbeState::default();
 
     for entry in reader.archive().files.iter() {
@@ -189,12 +219,13 @@ pub fn list_sevenz_entries_from_reader<R>(
     reader: R,
     reader_len: u64,
     source_label: &str,
+    password: Option<&str>,
 ) -> Result<Vec<ArchiveEntryInfo>>
 where
     R: Read + Seek,
 {
-    let reader = SevenZReader::new(reader, reader_len, Password::empty())
-        .with_context(|| format!("无法解析 7Z 压缩包：{source_label}"))?;
+    let reader = open_sevenz_reader(reader, reader_len, password, source_label)?;
+    ensure_sevenz_password_if_encrypted(reader.archive(), password, source_label)?;
     let mut entries = Vec::new();
 
     for entry in reader.archive().files.iter() {
@@ -225,15 +256,23 @@ pub fn read_sevenz_entry_bytes_from_reader<R>(
     reader_len: u64,
     entry_path: &str,
     source_label: &str,
+    password: Option<&str>,
 ) -> Result<Vec<u8>>
 where
     R: Read + Seek,
 {
     let mut bytes = Vec::new();
-    stream_sevenz_entry_from_reader(reader, reader_len, entry_path, source_label, &mut |chunk| {
-        bytes.extend_from_slice(chunk);
-        Ok(())
-    })?;
+    stream_sevenz_entry_from_reader(
+        reader,
+        reader_len,
+        entry_path,
+        source_label,
+        password,
+        &mut |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        },
+    )?;
     Ok(bytes)
 }
 
@@ -243,14 +282,15 @@ pub fn stream_sevenz_entry_from_reader<R>(
     reader_len: u64,
     entry_path: &str,
     source_label: &str,
+    password: Option<&str>,
     consumer: &mut ArchiveEntryConsumer<'_>,
 ) -> Result<()>
 where
     R: Read + Seek,
 {
     let normalized_entry_path = normalize_archive_entry_path(entry_path);
-    let mut reader = SevenZReader::new(reader, reader_len, Password::empty())
-        .with_context(|| format!("无法解析 7Z 压缩包：{source_label}"))?;
+    let mut reader = open_sevenz_reader(reader, reader_len, password, source_label)?;
+    ensure_sevenz_password_if_encrypted(reader.archive(), password, source_label)?;
     let mut found_entry = false;
     let mut found_directory = false;
     let mut callback_error = None;
@@ -280,6 +320,7 @@ where
             }
             Ok(false)
         })
+        .map_err(|error| map_sevenz_error(error, source_label))
         .with_context(|| format!("无法读取 7Z 条目：{normalized_entry_path}"))?;
 
     if let Some(error) = callback_error {
@@ -295,4 +336,77 @@ where
     }
 
     Ok(())
+}
+
+/// 使用可选密码打开 7Z 读取器，并转换底层密码错误。
+fn open_sevenz_reader<R>(
+    reader: R,
+    reader_len: u64,
+    password: Option<&str>,
+    source_label: &str,
+) -> Result<SevenZReader<R>>
+where
+    R: Read + Seek,
+{
+    SevenZReader::new(reader, reader_len, sevenz_password(password))
+        .map_err(|error| map_sevenz_error(error, source_label))
+        .with_context(|| format!("无法解析 7Z 压缩包：{source_label}"))
+}
+
+/// 将普通字符串密码转换为 sevenz-rust 使用的 UTF-16LE 密码格式。
+fn sevenz_password(password: Option<&str>) -> Password {
+    password.map(Password::from).unwrap_or_else(Password::empty)
+}
+
+/// 如果 7Z 文件包含 AES 加密方法，则没有密码时立即返回需要密码，避免展示不可打开的子级。
+fn ensure_sevenz_password_if_encrypted(
+    archive: &sevenz_rust::Archive,
+    password: Option<&str>,
+    source_label: &str,
+) -> Result<()> {
+    if password.is_some() || !archive_contains_encrypted_folder(archive) {
+        return Ok(());
+    }
+
+    Err(ArchivePasswordError::required(source_label).into())
+}
+
+/// 判断 7Z 归档中是否存在 AES256-SHA256 加密 coder。
+fn archive_contains_encrypted_folder(archive: &sevenz_rust::Archive) -> bool {
+    archive.folders.iter().any(|folder| {
+        folder
+            .coders
+            .iter()
+            .any(|coder| coder.decompression_method_id() == SevenZMethod::ID_AES256SHA256)
+    })
+}
+
+/// 将 sevenz-rust 的密码错误转换为 Argus 统一错误。
+fn map_sevenz_error(error: SevenzError, source_label: &str) -> anyhow::Error {
+    match error {
+        SevenzError::PasswordRequired => ArchivePasswordError::required(source_label).into(),
+        SevenzError::MaybeBadPassword(_) | SevenzError::ChecksumVerificationFailed => {
+            ArchivePasswordError::invalid(source_label).into()
+        }
+        SevenzError::Unsupported(message) => {
+            let detail = message.to_string();
+            if detail.to_ascii_lowercase().contains("aes")
+                || detail.to_ascii_lowercase().contains("password")
+            {
+                ArchivePasswordError::unsupported(source_label, detail).into()
+            } else {
+                SevenzError::Unsupported(message).into()
+            }
+        }
+        SevenzError::UnsupportedCompressionMethod(message) => {
+            if message.to_ascii_lowercase().contains("aes")
+                || message.to_ascii_lowercase().contains("password")
+            {
+                ArchivePasswordError::unsupported(source_label, message).into()
+            } else {
+                SevenzError::UnsupportedCompressionMethod(message).into()
+            }
+        }
+        other => other.into(),
+    }
 }

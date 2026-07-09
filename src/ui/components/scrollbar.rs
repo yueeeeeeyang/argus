@@ -42,8 +42,8 @@ pub fn scrollbar_metrics(
 
     let track_padding = px(padding);
     let track_length = (viewport_length - track_padding * 2.0).max(px(1.0));
-    let thumb_length = ((viewport_length / content_length) * track_length)
-        .clamp(px(min_thumb), track_length);
+    let thumb_length =
+        ((viewport_length / content_length) * track_length).clamp(px(min_thumb), track_length);
     let max_scroll = (content_length - viewport_length).max(px(1.0));
     let movable_length = (track_length - thumb_length).max(px(0.0));
     let scroll_ratio = (scroll_offset / max_scroll).clamp(0.0, 1.0);

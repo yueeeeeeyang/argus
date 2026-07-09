@@ -210,5 +210,4 @@ impl ArgusApp {
     pub fn upgrade_platform_label(&self) -> String {
         format!("{}/{}", current_platform_os(), current_platform_arch())
     }
-
 }

@@ -12,12 +12,12 @@ use gpui::{
 };
 
 use crate::app::{ArgusApp, InputTextSelectionDrag, SettingsTextInputState};
-use crate::platform::open_with_registration::{
-    register_open_with, registration_status, unregister_open_with,
-};
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, slice_character_range, word_range_at,
+};
+use crate::platform::open_with_registration::{
+    register_open_with, registration_status, unregister_open_with,
 };
 use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
 

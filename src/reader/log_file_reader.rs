@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::{SourceId, SourceLocation};
 use crate::reader::encoding_detector::{
     DecodedText, decode_log_bytes, decode_log_bytes_with_known_encoding,
@@ -45,6 +46,8 @@ pub struct OpenLogRequest {
     pub label: String,
     /// 用户设置的默认编码名称。
     pub default_encoding: String,
+    /// 当前会话中已输入的压缩包密码快照；仅用于本次后台读取，不持久化。
+    pub archive_passwords: ArchivePasswordStore,
 }
 
 /// 日志读取生命周期状态，存入应用状态供内容区和状态栏展示。
@@ -929,25 +932,29 @@ fn open_archive_log(request: OpenLogRequest) -> Result<LogReaderHandle> {
     let mut total_bytes = 0_u64;
     let label = request.label.clone();
 
-    let stream_result = ArchiveStreamBackend::stream_to_consumer(&request.location, &mut |chunk| {
-        total_bytes = total_bytes.saturating_add(chunk.len() as u64);
-        if spooled_file.is_none() && total_bytes > LARGE_LOG_THRESHOLD_BYTES {
-            let (mut file, path) = create_spool_file(&label)?;
-            file.write_all(&bytes)
-                .with_context(|| format!("无法写入日志分页缓存：{}", path.display()))?;
-            bytes.clear();
-            spooled_file = Some(file);
-            spooled_path = Some(path);
-        }
+    let stream_result = ArchiveStreamBackend::stream_to_consumer(
+        &request.location,
+        &request.archive_passwords,
+        &mut |chunk| {
+            total_bytes = total_bytes.saturating_add(chunk.len() as u64);
+            if spooled_file.is_none() && total_bytes > LARGE_LOG_THRESHOLD_BYTES {
+                let (mut file, path) = create_spool_file(&label)?;
+                file.write_all(&bytes)
+                    .with_context(|| format!("无法写入日志分页缓存：{}", path.display()))?;
+                bytes.clear();
+                spooled_file = Some(file);
+                spooled_path = Some(path);
+            }
 
-        if let Some(file) = spooled_file.as_mut() {
-            file.write_all(chunk).context("无法写入压缩日志分页缓存")?;
-        } else {
-            bytes.extend_from_slice(chunk);
-        }
+            if let Some(file) = spooled_file.as_mut() {
+                file.write_all(chunk).context("无法写入压缩日志分页缓存")?;
+            } else {
+                bytes.extend_from_slice(chunk);
+            }
 
-        Ok(())
-    });
+            Ok(())
+        },
+    );
 
     if let Err(error) = stream_result {
         drop(spooled_file.take());
@@ -1100,7 +1107,7 @@ mod tests {
         LARGE_LOG_THRESHOLD_BYTES, LogDocument, LogFileReader, LogOpenState, OpenLogRequest,
         PagedLogDocument, split_decoded_lines,
     };
-    use crate::loader::archive::ArchiveFormat;
+    use crate::loader::archive::{ArchiveFormat, ArchivePasswordStore};
     use crate::loader::{SourceId, SourceLocation};
     use crate::reader::read_mode::ReadMode;
     use std::fs;
@@ -1135,6 +1142,7 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "empty.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .expect("空日志文件应能打开");
 
@@ -1161,6 +1169,7 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "large.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .expect("大日志应能以分页模式打开");
 
@@ -1259,6 +1268,7 @@ mod tests {
             },
             label: "app.log".to_string(),
             default_encoding: "UTF-8".to_string(),
+            archive_passwords: ArchivePasswordStore::default(),
         })
         .expect("ZIP 内日志应能直接读取");
 

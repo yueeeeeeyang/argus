@@ -522,7 +522,10 @@ impl ArgusApp {
     }
 
     /// 收集已加载目录下所有可分析文件来源，保持来源树展示顺序。
-    pub(super) fn loaded_descendant_analysis_source_ids(&self, parent_id: SourceId) -> Vec<SourceId> {
+    pub(super) fn loaded_descendant_analysis_source_ids(
+        &self,
+        parent_id: SourceId,
+    ) -> Vec<SourceId> {
         let mut source_ids = Vec::new();
         self.collect_loaded_descendant_analysis_source_ids(parent_id, &mut source_ids);
         source_ids
@@ -552,7 +555,10 @@ impl ArgusApp {
     }
 
     /// 将来源树节点转换为 Jstack 分析目标。
-    pub(super) fn jstack_targets_from_source_ids(&self, source_ids: &[SourceId]) -> Vec<JstackAnalysisTarget> {
+    pub(super) fn jstack_targets_from_source_ids(
+        &self,
+        source_ids: &[SourceId],
+    ) -> Vec<JstackAnalysisTarget> {
         source_ids
             .iter()
             .filter_map(|source_id| {
@@ -566,6 +572,7 @@ impl ArgusApp {
                     archive_probe_node: self.jstack_archive_probe_node(*source_id),
                     label: node.label.clone(),
                     path: node.location.display_path(),
+                    archive_passwords: self.archive_passwords.clone(),
                 })
             })
             .collect()
@@ -605,5 +612,4 @@ impl ArgusApp {
             "Jstack 分析完成：{snapshot_count} 个快照，{thread_count} 个线程，跳过 {skipped_count} 个文件"
         );
     }
-
 }

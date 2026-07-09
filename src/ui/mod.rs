@@ -5,6 +5,7 @@
 //! 主要功能：组织主窗口、自定义标题栏、活动栏、来源侧栏、内容区、Jstack 分析页、升级弹窗和可复用组件。
 
 pub mod activity_bar;
+pub mod archive_password_dialog;
 pub mod components;
 pub mod connection_dialog;
 pub mod connection_tree_panel;

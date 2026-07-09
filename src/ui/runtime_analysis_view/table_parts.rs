@@ -5,7 +5,10 @@ pub fn render_sql_analysis_column_gap() -> impl IntoElement {
 }
 
 /// 渲染固定表格无数据时覆盖在表体区域的空态。
-pub fn render_table_empty_overlay(message: &'static str, theme: &AppTheme) -> impl IntoElement + use<> {
+pub fn render_table_empty_overlay(
+    message: &'static str,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
     div()
         .absolute()
         .top(px(TABLE_HEADER_HEIGHT))

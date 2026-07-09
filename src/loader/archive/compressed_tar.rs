@@ -71,7 +71,7 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
     }
 
     /// 枚举压缩 TAR 内部条目。
-    fn list_entries(&self, path: &Path) -> Result<Vec<ArchiveEntryInfo>> {
+    fn list_entries(&self, path: &Path, _password: Option<&str>) -> Result<Vec<ArchiveEntryInfo>> {
         let file = File::open(path)
             .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
 
@@ -95,12 +95,17 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         reader: &mut dyn ArchiveReadSeek,
         _reader_len: u64,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         list_compressed_tar_entries(reader, self.format, source_label)
     }
 
     /// 轻量探测压缩 TAR 根层单文件，外层解压后复用 TAR 短路探测。
-    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+    fn probe_single_file_root(
+        &self,
+        path: &Path,
+        _password: Option<&str>,
+    ) -> Result<ArchiveRootProbe> {
         let file = File::open(path)
             .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
         probe_compressed_tar_single_file_root(file, self.format, &path.display().to_string())
@@ -112,12 +117,18 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         reader: &mut dyn ArchiveReadSeek,
         _reader_len: u64,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<ArchiveRootProbe> {
         probe_compressed_tar_single_file_root(reader, self.format, source_label)
     }
 
     /// 从本地压缩 TAR 读取指定条目字节。
-    fn read_entry_bytes(&self, path: &Path, entry_path: &str) -> Result<Vec<u8>> {
+    fn read_entry_bytes(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        _password: Option<&str>,
+    ) -> Result<Vec<u8>> {
         let file = File::open(path)
             .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
         read_compressed_tar_entry_bytes(file, self.format, entry_path, &path.display().to_string())
@@ -130,6 +141,7 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         _reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        _password: Option<&str>,
     ) -> Result<Vec<u8>> {
         read_compressed_tar_entry_bytes(reader, self.format, entry_path, source_label)
     }
@@ -139,6 +151,7 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         &self,
         path: &Path,
         entry_path: &str,
+        _password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         let file = File::open(path)
@@ -159,6 +172,7 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         _reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        _password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         stream_compressed_tar_entry(reader, self.format, entry_path, source_label, consumer)

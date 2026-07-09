@@ -641,4 +641,3 @@ pub fn render_search_result_scrollbar_thumb(
         )
         .into_any_element()
 }
-

@@ -10,6 +10,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 
 use crate::loader::archive::detector::ArchiveFormat;
+use crate::loader::archive::password::{ArchivePasswordKey, ArchivePasswordStore};
 use crate::loader::archive::registry::archive_registry;
 use crate::utils::path::normalize_archive_entry_path;
 
@@ -111,7 +112,7 @@ pub struct ArchiveCapabilities {
     pub supports_entry_reading: bool,
     /// 是否支持作为嵌套压缩包继续展开。
     pub supports_nested_archives: bool,
-    /// 是否支持密码或加密压缩包；当前内置适配器均暂不提供密码输入。
+    /// 是否支持密码或加密压缩包；无密码格式会忽略调用方传入的密码。
     pub supports_passwords: bool,
 }
 
@@ -147,7 +148,7 @@ pub trait ArchiveAdapter: Sync {
     /// - `path`：本地压缩包路径。
     ///
     /// 返回值：压缩包内条目列表；不执行正文读取或解压到磁盘。
-    fn list_entries(&self, path: &Path) -> Result<Vec<ArchiveEntryInfo>>;
+    fn list_entries(&self, path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntryInfo>>;
 
     /// 枚举内存或其他可 seek 数据源中的压缩包条目。
     ///
@@ -160,15 +161,20 @@ pub trait ArchiveAdapter: Sync {
         reader: &mut dyn ArchiveReadSeek,
         reader_len: u64,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>>;
 
     /// 轻量探测根层是否恰好只有一个普通文件。
     ///
     /// 默认实现复用完整枚举，保证新增格式无需立即实现短路探测也能保持正确性；
     /// 核心内置格式会覆盖该方法，只枚举到足以判定的条目后立即返回。
-    fn probe_single_file_root(&self, path: &Path) -> Result<ArchiveRootProbe> {
+    fn probe_single_file_root(
+        &self,
+        path: &Path,
+        password: Option<&str>,
+    ) -> Result<ArchiveRootProbe> {
         Ok(probe_single_file_root_from_entries(
-            self.list_entries(path)?,
+            self.list_entries(path, password)?,
         ))
     }
 
@@ -178,16 +184,22 @@ pub trait ArchiveAdapter: Sync {
         reader: &mut dyn ArchiveReadSeek,
         reader_len: u64,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<ArchiveRootProbe> {
         Ok(probe_single_file_root_from_entries(
-            self.list_entries_from_reader(reader, reader_len, source_label)?,
+            self.list_entries_from_reader(reader, reader_len, source_label, password)?,
         ))
     }
 
     /// 从本地压缩包读取指定条目的完整字节。
     ///
     /// 返回值：目标条目原始字节；用于嵌套压缩包继续解析。
-    fn read_entry_bytes(&self, path: &Path, entry_path: &str) -> Result<Vec<u8>>;
+    fn read_entry_bytes(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        password: Option<&str>,
+    ) -> Result<Vec<u8>>;
 
     /// 从内存或其他可 seek 数据源读取指定条目的完整字节。
     fn read_entry_bytes_from_reader(
@@ -196,6 +208,7 @@ pub trait ArchiveAdapter: Sync {
         reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        password: Option<&str>,
     ) -> Result<Vec<u8>>;
 
     /// 从本地压缩包流式输出指定条目内容。
@@ -206,9 +219,10 @@ pub trait ArchiveAdapter: Sync {
         &self,
         path: &Path,
         entry_path: &str,
+        password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
-        let bytes = self.read_entry_bytes(path, entry_path)?;
+        let bytes = self.read_entry_bytes(path, entry_path, password)?;
         consumer(&bytes)
     }
 
@@ -219,10 +233,16 @@ pub trait ArchiveAdapter: Sync {
         reader_len: u64,
         entry_path: &str,
         source_label: &str,
+        password: Option<&str>,
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
-        let bytes =
-            self.read_entry_bytes_from_reader(reader, reader_len, entry_path, source_label)?;
+        let bytes = self.read_entry_bytes_from_reader(
+            reader,
+            reader_len,
+            entry_path,
+            source_label,
+            password,
+        )?;
         consumer(&bytes)
     }
 }
@@ -240,7 +260,16 @@ pub fn probe_single_file_root_from_entries(entries: Vec<ArchiveEntryInfo>) -> Ar
 
 /// 根据注册表中的压缩适配器枚举压缩包条目。
 pub fn list_archive_entries(path: &Path, format: ArchiveFormat) -> Result<Vec<ArchiveEntryInfo>> {
-    archive_registry().list_entries(format, path)
+    archive_registry().list_entries(format, path, None)
+}
+
+/// 根据注册表中的压缩适配器和密码枚举压缩包条目。
+pub fn list_archive_entries_with_password(
+    path: &Path,
+    format: ArchiveFormat,
+    password: Option<&str>,
+) -> Result<Vec<ArchiveEntryInfo>> {
+    archive_registry().list_entries(format, path, password)
 }
 
 /// 从内存字节枚举压缩包条目。
@@ -259,6 +288,21 @@ pub fn list_archive_entries_from_bytes(
     list_archive_entries_from_reader(Cursor::new(bytes), format, source_label)
 }
 
+/// 从内存字节和可选密码枚举压缩包条目。
+pub fn list_archive_entries_from_bytes_with_password(
+    bytes: Vec<u8>,
+    format: ArchiveFormat,
+    source_label: &str,
+    password: Option<&str>,
+) -> Result<Vec<ArchiveEntryInfo>> {
+    list_archive_entries_from_reader_with_password(
+        Cursor::new(bytes),
+        format,
+        source_label,
+        password,
+    )
+}
+
 /// 从任意可读可 seek 的输入枚举压缩包条目。
 ///
 /// 参数说明：
@@ -268,9 +312,22 @@ pub fn list_archive_entries_from_bytes(
 ///
 /// 返回值：压缩包内条目列表；用于嵌套压缩包的统一内存枚举。
 pub fn list_archive_entries_from_reader<R>(
+    reader: R,
+    format: ArchiveFormat,
+    source_label: &str,
+) -> Result<Vec<ArchiveEntryInfo>>
+where
+    R: Read + Seek,
+{
+    list_archive_entries_from_reader_with_password(reader, format, source_label, None)
+}
+
+/// 从任意可读可 seek 的输入和可选密码枚举压缩包条目。
+pub fn list_archive_entries_from_reader_with_password<R>(
     mut reader: R,
     format: ArchiveFormat,
     source_label: &str,
+    password: Option<&str>,
 ) -> Result<Vec<ArchiveEntryInfo>>
 where
     R: Read + Seek,
@@ -282,7 +339,13 @@ where
         .seek(std::io::SeekFrom::Start(0))
         .with_context(|| format!("无法重置压缩包读取位置：{source_label}"))?;
 
-    archive_registry().list_entries_from_reader(format, &mut reader, reader_len, source_label)
+    archive_registry().list_entries_from_reader(
+        format,
+        &mut reader,
+        reader_len,
+        source_label,
+        password,
+    )
 }
 
 /// 从本地压缩包及其嵌套容器链路读取指定条目的完整字节。
@@ -300,34 +363,75 @@ pub fn read_archive_entry_bytes(
     container_entries: &[String],
     entry_path: &str,
 ) -> Result<Vec<u8>> {
+    read_archive_entry_bytes_with_passwords(
+        archive_path,
+        root_format,
+        container_entries,
+        entry_path,
+        &ArchivePasswordStore::default(),
+    )
+}
+
+/// 从本地压缩包及其嵌套容器链路读取指定条目的完整字节，并按容器链路应用密码。
+pub fn read_archive_entry_bytes_with_passwords(
+    archive_path: &Path,
+    root_format: ArchiveFormat,
+    container_entries: &[String],
+    entry_path: &str,
+    passwords: &ArchivePasswordStore,
+) -> Result<Vec<u8>> {
     if container_entries.is_empty() {
-        return archive_registry().read_entry_bytes(root_format, archive_path, entry_path);
+        let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+        return archive_registry().read_entry_bytes(
+            root_format,
+            archive_path,
+            entry_path,
+            passwords.get(&key),
+            key,
+            archive_path.display().to_string(),
+        );
     }
 
     let first_container = &container_entries[0];
     let mut current_format = root_format;
-    let mut bytes =
-        archive_registry().read_entry_bytes(current_format, archive_path, first_container)?;
+    let mut current_container_entries: Vec<String> = Vec::new();
+    let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+    let mut bytes = archive_registry().read_entry_bytes(
+        current_format,
+        archive_path,
+        first_container,
+        passwords.get(&key),
+        key,
+        archive_path.display().to_string(),
+    )?;
     let mut current_label = format!("{}!/{first_container}", archive_path.display());
     current_format = detect_container_format(first_container)?;
+    current_container_entries.push(first_container.clone());
 
     for container_entry in &container_entries[1..] {
+        let key = ArchivePasswordKey::new(archive_path.to_path_buf(), &current_container_entries);
         bytes = read_archive_entry_bytes_from_reader(
             Cursor::new(bytes),
             current_format,
             container_entry,
             &current_label,
+            passwords.get(&key),
+            key,
         )?;
         current_label.push_str("!/");
         current_label.push_str(container_entry);
         current_format = detect_container_format(container_entry)?;
+        current_container_entries.push(container_entry.clone());
     }
 
+    let key = ArchivePasswordKey::new(archive_path.to_path_buf(), &current_container_entries);
     read_archive_entry_bytes_from_reader(
         Cursor::new(bytes),
         current_format,
         entry_path,
         &current_label,
+        passwords.get(&key),
+        key,
     )
 }
 
@@ -348,34 +452,78 @@ pub fn stream_archive_entry(
     entry_path: &str,
     consumer: &mut ArchiveEntryConsumer<'_>,
 ) -> Result<()> {
+    stream_archive_entry_with_passwords(
+        archive_path,
+        root_format,
+        container_entries,
+        entry_path,
+        &ArchivePasswordStore::default(),
+        consumer,
+    )
+}
+
+/// 从本地压缩包及其嵌套容器链路流式读取目标日志条目，并按容器链路应用密码。
+pub fn stream_archive_entry_with_passwords(
+    archive_path: &Path,
+    root_format: ArchiveFormat,
+    container_entries: &[String],
+    entry_path: &str,
+    passwords: &ArchivePasswordStore,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()> {
     if container_entries.is_empty() {
-        return archive_registry().stream_entry(root_format, archive_path, entry_path, consumer);
+        let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+        return archive_registry().stream_entry(
+            root_format,
+            archive_path,
+            entry_path,
+            passwords.get(&key),
+            key,
+            archive_path.display().to_string(),
+            consumer,
+        );
     }
 
     let first_container = &container_entries[0];
     let mut current_format = root_format;
-    let mut bytes =
-        archive_registry().read_entry_bytes(current_format, archive_path, first_container)?;
+    let mut current_container_entries: Vec<String> = Vec::new();
+    let key = ArchivePasswordKey::root(archive_path.to_path_buf());
+    let mut bytes = archive_registry().read_entry_bytes(
+        current_format,
+        archive_path,
+        first_container,
+        passwords.get(&key),
+        key,
+        archive_path.display().to_string(),
+    )?;
     let mut current_label = format!("{}!/{first_container}", archive_path.display());
     current_format = detect_container_format(first_container)?;
+    current_container_entries.push(first_container.clone());
 
     for container_entry in &container_entries[1..] {
+        let key = ArchivePasswordKey::new(archive_path.to_path_buf(), &current_container_entries);
         bytes = read_archive_entry_bytes_from_reader(
             Cursor::new(bytes),
             current_format,
             container_entry,
             &current_label,
+            passwords.get(&key),
+            key,
         )?;
         current_label.push_str("!/");
         current_label.push_str(container_entry);
         current_format = detect_container_format(container_entry)?;
+        current_container_entries.push(container_entry.clone());
     }
 
+    let key = ArchivePasswordKey::new(archive_path.to_path_buf(), &current_container_entries);
     stream_archive_entry_from_reader(
         Cursor::new(bytes),
         current_format,
         entry_path,
         &current_label,
+        passwords.get(&key),
+        key,
         consumer,
     )
 }
@@ -386,6 +534,8 @@ fn read_archive_entry_bytes_from_reader<R>(
     format: ArchiveFormat,
     entry_path: &str,
     source_label: &str,
+    password: Option<&str>,
+    password_key: ArchivePasswordKey,
 ) -> Result<Vec<u8>>
 where
     R: Read + Seek,
@@ -403,6 +553,8 @@ where
         reader_len,
         entry_path,
         source_label,
+        password,
+        password_key,
     )
 }
 
@@ -412,6 +564,8 @@ fn stream_archive_entry_from_reader<R>(
     format: ArchiveFormat,
     entry_path: &str,
     source_label: &str,
+    password: Option<&str>,
+    password_key: ArchivePasswordKey,
     consumer: &mut ArchiveEntryConsumer<'_>,
 ) -> Result<()>
 where
@@ -430,6 +584,8 @@ where
         reader_len,
         entry_path,
         source_label,
+        password,
+        password_key,
         consumer,
     )
 }

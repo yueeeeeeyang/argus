@@ -160,7 +160,10 @@ impl ArgusApp {
     }
 
     /// 根据右键来源节点生成 Runtime 分析输入；文件多选命中时沿用多选，目录直接递归解析。
-    pub(super) fn runtime_targets_for_context(&mut self, source_id: SourceId) -> Vec<RuntimeAnalysisTarget> {
+    pub(super) fn runtime_targets_for_context(
+        &mut self,
+        source_id: SourceId,
+    ) -> Vec<RuntimeAnalysisTarget> {
         let Some(node) = self.source_registry.node(source_id) else {
             return Vec::new();
         };
@@ -243,6 +246,7 @@ impl ArgusApp {
                     label: node.label.clone(),
                     path: node.location.display_path(),
                     kind,
+                    archive_passwords: self.archive_passwords.clone(),
                 })
             })
             .collect()
@@ -289,7 +293,11 @@ impl ArgusApp {
     }
 
     /// 标记 Runtime 过滤输入发生变化，并通过防抖任务延后应用。
-    pub(super) fn queue_runtime_filter_refresh(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+    pub(super) fn queue_runtime_filter_refresh(
+        &mut self,
+        analysis_id: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.trigger_runtime_filter_refresh(analysis_id, Some(cx));
     }
 
@@ -442,7 +450,11 @@ impl ArgusApp {
     }
 
     /// 启动 SQL 频率分析行数据的后台懒计算。
-    pub(super) fn ensure_runtime_sql_frequency_rows(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+    pub(super) fn ensure_runtime_sql_frequency_rows(
+        &mut self,
+        analysis_id: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return;
         };
@@ -521,7 +533,11 @@ impl ArgusApp {
     }
 
     /// 启动慢 SQL 分析行数据的后台懒计算。
-    pub(super) fn ensure_runtime_slow_sql_rows(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+    pub(super) fn ensure_runtime_slow_sql_rows(
+        &mut self,
+        analysis_id: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return;
         };
@@ -1774,5 +1790,4 @@ impl ArgusApp {
         input.marked_range = None;
         input.selection_drag = None;
     }
-
 }

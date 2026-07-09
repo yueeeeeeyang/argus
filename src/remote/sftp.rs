@@ -23,9 +23,11 @@ use smb2::{
 };
 use ssh2::{HashType, Session};
 
-use crate::types::SettingsTextInputState;
-use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig};
+use crate::remote::connection::{
+    ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig,
+};
 use crate::remote::terminal::PendingHostKey;
+use crate::types::SettingsTextInputState;
 
 /// 远程 Unix 文件类型掩码。
 const SFTP_MODE_TYPE_MASK: u32 = 0o170000;
@@ -591,7 +593,12 @@ fn run_ssh_sftp_worker(
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
             SftpCommand::ReadFileContent { remote_path } => {
-                send_file_preview_loaded(session_id, &remote_path, read_sftp_file_preview(&sftp, &remote_path), &event_sender);
+                send_file_preview_loaded(
+                    session_id,
+                    &remote_path,
+                    read_sftp_file_preview(&sftp, &remote_path),
+                    &event_sender,
+                );
             }
             SftpCommand::Rename {
                 remote_path,
@@ -869,7 +876,10 @@ async fn load_smb_directory(
     current_dir: &str,
     input: &str,
 ) -> Result<(String, Vec<SftpEntry>)> {
-    let target = crate::remote::connection::normalized_smb_initial_dir(&resolve_remote_path(current_dir, input)?);
+    let target = crate::remote::connection::normalized_smb_initial_dir(&resolve_remote_path(
+        current_dir,
+        input,
+    )?);
     let entries = read_smb_directory(client, &target).await?;
     Ok((target, entries))
 }
@@ -1454,10 +1464,22 @@ fn sort_remote_entries(entries: &mut [SftpEntry]) {
 }
 
 /// 按指定字段和方向排序远程文件条目；目录始终分组靠前，方向只在各自分组内生效。
-pub fn sort_sftp_entries(entries: &mut [SftpEntry], field: SftpSortField, direction: SftpSortDirection) {
+pub fn sort_sftp_entries(
+    entries: &mut [SftpEntry],
+    field: SftpSortField,
+    direction: SftpSortDirection,
+) {
     entries.sort_by(|a, b| {
-        let group_a = if a.kind == SftpEntryKind::Directory { 0_u8 } else { 1_u8 };
-        let group_b = if b.kind == SftpEntryKind::Directory { 0_u8 } else { 1_u8 };
+        let group_a = if a.kind == SftpEntryKind::Directory {
+            0_u8
+        } else {
+            1_u8
+        };
+        let group_b = if b.kind == SftpEntryKind::Directory {
+            0_u8
+        } else {
+            1_u8
+        };
         group_a.cmp(&group_b).then_with(|| {
             let order = compare_sftp_entries(a, b, field);
             if direction == SftpSortDirection::Desc {
@@ -1477,25 +1499,34 @@ fn compare_sftp_entries(a: &SftpEntry, b: &SftpEntry, field: SftpSortField) -> s
             .to_ascii_lowercase()
             .cmp(&b.name.to_ascii_lowercase())
             .then_with(|| a.name.cmp(&b.name)),
-        SftpSortField::Type => a
-            .kind
-            .cmp(&b.kind)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
-        SftpSortField::Size => a
-            .size
-            .unwrap_or(0)
-            .cmp(&b.size.unwrap_or(0))
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
+        SftpSortField::Type => a.kind.cmp(&b.kind).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        }),
+        SftpSortField::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        }),
         SftpSortField::Mtime => a
             .mtime
             .unwrap_or(0)
             .cmp(&b.mtime.unwrap_or(0))
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
+            .then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            }),
         SftpSortField::Permissions => a
             .permissions
             .unwrap_or(0)
             .cmp(&b.permissions.unwrap_or(0))
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
+            .then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            }),
     }
 }
 
@@ -1628,7 +1659,12 @@ mod tests {
     }
 
     /// 构造一个最小可用的远程文件条目用于排序测试。
-    fn make_entry(name: &str, kind: SftpEntryKind, size: Option<u64>, mtime: Option<u64>) -> SftpEntry {
+    fn make_entry(
+        name: &str,
+        kind: SftpEntryKind,
+        size: Option<u64>,
+        mtime: Option<u64>,
+    ) -> SftpEntry {
         SftpEntry {
             name: name.to_string(),
             path: format!("/{name}"),

@@ -110,7 +110,9 @@ impl AppConfig {
         self.loader.max_archive_depth = self.loader.max_archive_depth.min(8);
         self.loader.archive_probe_concurrency = self.loader.archive_probe_concurrency.clamp(1, 16);
         self.log_search.quick_keywords = self.log_search.quick_keywords.trim().to_string();
-        self.log_search.recent_keywords.truncate(SEARCH_RECENT_KEYWORDS_MAX);
+        self.log_search
+            .recent_keywords
+            .truncate(SEARCH_RECENT_KEYWORDS_MAX);
         self.log_display.jstack_thread_name_filters =
             normalized_inline_text(self.log_display.jstack_thread_name_filters);
         self.log_display.jstack_stack_segment_filters =
