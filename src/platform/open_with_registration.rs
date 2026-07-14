@@ -1,6 +1,6 @@
 //! 文件职责：封装系统“用 Argus 打开”右键入口的注册与卸载。
 //! 创建日期：2026-06-15
-//! 修改日期：2026-06-15
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
 //! 主要功能：为 Windows 当前用户注册表和 macOS LaunchServices 提供统一接口。
 
@@ -156,7 +156,7 @@ mod platform_impl {
 
     /// 创建或打开注册表键。
     fn create_key(path: &str) -> Result<HKEY> {
-        let mut handle = 0;
+        let mut handle: HKEY = null_mut();
         let result = unsafe {
             RegCreateKeyExW(
                 HKEY_CURRENT_USER,
@@ -176,7 +176,7 @@ mod platform_impl {
 
     /// 只读打开注册表键，不存在时返回 `Ok(None)`。
     fn open_key(path: &str) -> Result<Option<HKEY>> {
-        let mut handle = 0;
+        let mut handle: HKEY = null_mut();
         let result = unsafe {
             RegOpenKeyExW(
                 HKEY_CURRENT_USER,

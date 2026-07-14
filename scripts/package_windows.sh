@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 文件职责：在类 Unix 环境中交叉构建 Windows Argus 包。
 # 创建日期：2026-06-15
-# 修改日期：2026-06-15
+# 修改日期：2026-07-14
 # 作者：Argus 开发团队
 # 主要功能：使用 Rust Windows target 构建 argus.exe，并输出可分发 zip 包。
 
@@ -21,7 +21,8 @@ if [[ "$TARGET" == *"-windows-msvc" && "$HOST_TRIPLE" != *"-windows-msvc" && "${
 
 推荐方式：
   1. 在 Windows 本机运行：powershell -ExecutionPolicy Bypass -File scripts/package_windows.ps1
-  2. 或在当前机器配置完整 Windows 交叉编译工具链后，设置 ARGUS_ALLOW_CROSS_WINDOWS=1 再运行本脚本。
+  2. 在 macOS/Linux 交叉编译 Windows x64 可执行文件：scripts/build_windows_x64.sh
+  3. 如已自行配置完整 Windows 交叉编译工具链，可设置 ARGUS_ALLOW_CROSS_WINDOWS=1 再运行本脚本。
 
 EOF
   exit 1

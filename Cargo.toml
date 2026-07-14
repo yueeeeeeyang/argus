@@ -1,6 +1,6 @@
 # 文件职责：定义 Argus 桌面客户端的 Cargo 包信息与依赖版本。
 # 创建日期：2026-06-09
-# 修改日期：2026-06-16
+# 修改日期：2026-07-14
 # 作者：Argus 开发团队
 # 主要功能：配置 Rust 版本、包元信息以及 GPUI 界面依赖。
 
@@ -35,7 +35,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"
 smb2 = "0.11.4"
-ssh2 = { version = "0.9.5", features = ["vendored-openssl"] }
 tar = "0.4.46"
 thiserror = "2.0.18"
 toml = "0.8.23"
@@ -48,7 +47,14 @@ xz2 = "0.1.7"
 zip = { version = "8.6.0", default-features = false, features = ["aes-crypto", "bzip2", "deflate64", "deflate", "lzma", "ppmd", "time", "zstd", "xz"] }
 
 [target.'cfg(windows)'.dependencies]
+# libssh2 在 Windows 默认使用系统 WinCNG。避免启用 vendored-openssl，才能从非 Windows
+# 主机交叉编译 MSVC 目标，同时无需随应用分发额外的 OpenSSL 动态库。
+ssh2 = "0.9.5"
 windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry"] }
+
+[target.'cfg(not(windows))'.dependencies]
+# macOS/Linux 延续原有的 vendored OpenSSL 策略，避免依赖开发机预装的 OpenSSL 版本。
+ssh2 = { version = "0.9.5", features = ["vendored-openssl"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 主窗口使用透明原生标题栏，需要按视图区分可拖拽空白与标签等交互元素。
@@ -66,6 +72,9 @@ embed-resource = "3.0.9"
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
 
 [patch.crates-io]
+# GPUI 0.2.2 的 Windows release shader 构建仅能在 Windows 主机运行；本地补丁复用
+# runtime_shaders 特性，将内嵌 HLSL 交给 Windows D3DCompiler，支持 macOS/Linux 交叉编译。
+gpui = { path = "third_party/gpui" }
 # smb2 固定依赖 aes 0.9.0-rc.4；本地补丁让 rars-crypto 复用同一 aes 版本，避免同一 0.9 系列的
 # 稳定版与预发布版在 Cargo 解析时冲突，同时保留现有 RAR 解密能力。
 rars-crypto = { path = "third_party/rars-crypto" }
