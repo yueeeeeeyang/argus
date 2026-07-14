@@ -840,8 +840,20 @@ impl ArgusApp {
             return;
         }
 
-        let tab_id = if self.tabs.len() == 1 && matches!(self.tabs[0].kind, TabKind::Empty) {
-            self.tabs[0].id
+        // 日志来源替换后可能同时保留连接页签和一个空日志页签；优先复用当前空页签，
+        // 避免首次打开日志时把“未选择日志”占位永久留在混合标签栏中。
+        let reusable_empty_tab_id = self
+            .active_tab()
+            .filter(|tab| matches!(tab.kind, TabKind::Empty))
+            .map(|tab| tab.id)
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .find(|tab| matches!(tab.kind, TabKind::Empty))
+                    .map(|tab| tab.id)
+            });
+        let tab_id = if let Some(empty_tab_id) = reusable_empty_tab_id {
+            empty_tab_id
         } else {
             let next_id = self.next_tab_id;
             self.next_tab_id += 1;

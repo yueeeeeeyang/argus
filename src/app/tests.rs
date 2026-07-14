@@ -2027,6 +2027,89 @@ fn applying_new_load_report_replaces_old_log_workspace() {
     assert!(app.filtered_source_ids.is_empty());
 }
 
+/// 验证替换日志来源只清理日志页签，已打开的终端和远程文件管理页签继续保留。
+#[test]
+fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
+    let mut app = test_app();
+    let link_id = add_test_ssh_link(&mut app);
+    insert_test_terminal_session(&mut app, 7, link_id);
+    let _sftp_receiver = insert_test_sftp_session(&mut app, 9, link_id);
+    app.tabs = vec![
+        ArgusTab {
+            id: 4,
+            title: "SSH 测试服务器".to_string(),
+            kind: TabKind::SshTerminal { session_id: 7 },
+        },
+        ArgusTab {
+            id: 5,
+            title: "SFTP 测试服务器".to_string(),
+            kind: TabKind::SftpFileManager { session_id: 9 },
+        },
+        ArgusTab {
+            id: 8,
+            title: "old.log".to_string(),
+            kind: TabKind::LogSource {
+                source_id: SourceId(999),
+                path: "old.log".to_string(),
+            },
+        },
+    ];
+    app.active_tab_id = 5;
+    app.next_tab_id = 10;
+
+    app.apply_load_report(LoadReport {
+        registry: placeholder_source_registry(),
+        added_count: 1,
+        skipped_count: 0,
+        errors: Vec::new(),
+        password_request: None,
+    });
+
+    assert_eq!(app.tabs.len(), 3);
+    assert!(
+        app.tabs.iter().any(|tab| {
+            tab.id == 4 && matches!(tab.kind, TabKind::SshTerminal { session_id: 7 })
+        })
+    );
+    assert!(app.tabs.iter().any(|tab| {
+        tab.id == 5 && matches!(tab.kind, TabKind::SftpFileManager { session_id: 9 })
+    }));
+    assert!(!app.tabs.iter().any(|tab| tab.id == 8));
+    assert!(matches!(app.active_tab_kind(), TabKind::Empty));
+    assert_eq!(app.active_tab_id, 10);
+    assert_eq!(app.next_tab_id, 11);
+    assert!(app.terminal_sessions.contains_key(&7));
+    assert!(app.sftp_sessions.contains_key(&9));
+
+    let app_log_id = app
+        .source_registry
+        .tree_order_source_ids()
+        .iter()
+        .copied()
+        .find(|source_id| {
+            app.source_registry
+                .node(*source_id)
+                .is_some_and(|node| node.label == "app.log")
+        })
+        .expect("样例来源中应存在 app.log");
+    app.open_or_focus_log_tab(app_log_id);
+
+    assert_eq!(app.tabs.len(), 3);
+    assert!(
+        !app.tabs
+            .iter()
+            .any(|tab| matches!(tab.kind, TabKind::Empty))
+    );
+    assert!(matches!(
+        app.active_tab_kind(),
+        TabKind::LogSource { source_id, .. } if source_id == app_log_id
+    ));
+    assert_eq!(app.active_tab_id, 10);
+    assert_eq!(app.next_tab_id, 11);
+    assert!(app.terminal_sessions.contains_key(&7));
+    assert!(app.sftp_sessions.contains_key(&9));
+}
+
 /// 验证来源树搜索只匹配日志候选节点，并保留其祖先目录上下文。
 #[test]
 fn source_tree_filter_matches_logs_and_keeps_ancestors() {

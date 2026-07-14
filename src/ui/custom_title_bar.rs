@@ -5,17 +5,27 @@
 //! 主要功能：为原生 macOS 交通灯预留安全区，并展示左侧操作组、当前标签和贯通分割线。
 
 use crate::app::{ArgusApp, Workspace};
+use crate::platform::custom_titlebar;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::tab_bar;
-use gpui::{ClickEvent, Context, IntoElement, Window, WindowControlArea, div, prelude::*, px, rgb};
+use gpui::{
+    Context, IntoElement, MouseButton, MouseDownEvent, Window, WindowControlArea, div, prelude::*,
+    px, rgb,
+};
 
 /// 自定义标题栏高度，保持紧凑 Obsidian 风格。
 ///
 /// 公开供依赖标题栏高度的计算（如搜索结果面板保留高度）派生使用，避免各自维护
 /// 易漂移的字面量。
 pub const TITLE_BAR_HEIGHT: f32 = 40.0;
+/// 原生交通灯及其周围不可接管连续点击的横向安全宽度。
+///
+/// 该值覆盖窗口左侧内边距、交通灯实际按钮和视觉占位，供原生事件命中判断复用。
+pub const NATIVE_TRAFFIC_LIGHT_SAFE_WIDTH: f32 = 96.0;
+/// 标题栏布局为原生交通灯保留的固定占位宽度。
+const NATIVE_TRAFFIC_LIGHT_SPACER_WIDTH: f32 = 76.0;
 /// 标签页与来源侧栏分割线之间的视觉留白。
 const TAB_LEFT_GAP: f32 = 16.0;
 /// 标签栏右侧固定按钮与窗口右边缘的间距。
@@ -127,16 +137,22 @@ fn title_drag_area(id: &'static str, cx: &mut Context<ArgusApp>) -> impl IntoEle
         .h_full()
         .flex_1()
         .window_control_area(WindowControlArea::Drag)
-        .on_click(cx.listener(|app, event: &ClickEvent, window, cx| {
-            if let ClickEvent::Mouse(mouse_event) = event
-                && mouse_event.up.click_count >= 2
-            {
-                window.zoom_window();
-                app.placeholder_notice = "已切换窗口最大化状态".to_string();
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, event: &MouseDownEvent, window, cx| {
+                match event.click_count {
+                    1 => custom_titlebar::start_window_drag(window),
+                    2 => {
+                        window.zoom_window();
+                        app.placeholder_notice = "已切换窗口最大化状态".to_string();
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+                // 空白区域独占本次按下，避免根标题栏的清焦点击处理重复消费事件。
                 cx.stop_propagation();
-                cx.notify();
-            }
-        }))
+            }),
+        )
 }
 
 /// 渲染左侧标题栏操作组。
@@ -209,7 +225,7 @@ fn collapsed_title_control_group(theme: &AppTheme, cx: &mut Context<ArgusApp>) -
 
 /// 渲染原生 macOS 交通灯按钮的安全占位区。
 fn native_traffic_light_spacer() -> impl IntoElement {
-    div().w(px(76.0)).h_full()
+    div().w(px(NATIVE_TRAFFIC_LIGHT_SPACER_WIDTH)).h_full()
 }
 
 /// 渲染标题栏占位操作按钮，点击后只更新占位提示。

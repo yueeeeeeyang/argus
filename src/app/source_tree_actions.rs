@@ -232,14 +232,35 @@ impl ArgusApp {
         self.log_scrollbar_drag = None;
         self.tab_menu_scroll = UniformListScrollHandle::new();
 
-        self.tabs = vec![ArgusTab {
-            id: 1,
+        // 日志来源替换只影响日志分析域；SSH 终端和远程文件管理会话继续保留，
+        // 方便用户加载日志后仍能通过原页签返回正在进行的连接工作。
+        let mut retained_connection_tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                matches!(
+                    tab.kind,
+                    TabKind::SshTerminal { .. } | TabKind::SftpFileManager { .. }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let empty_tab_id = if retained_connection_tabs.is_empty() {
+            self.next_tab_id = 2;
+            1
+        } else {
+            let tab_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            tab_id
+        };
+        retained_connection_tabs.push(ArgusTab {
+            id: empty_tab_id,
             title: "未选择日志".to_string(),
             kind: TabKind::Empty,
-        }];
-        self.active_tab_id = 1;
-        self.next_tab_id = 2;
-        self.ensure_log_tab_view_state(1);
+        });
+        self.tabs = retained_connection_tabs;
+        self.active_tab_id = empty_tab_id;
+        self.ensure_log_tab_view_state(empty_tab_id);
 
         self.is_source_tree_search_open = false;
         self.source_tree_search_query.clear();

@@ -50,8 +50,20 @@ zip = { version = "8.6.0", default-features = false, features = ["aes-crypto", "
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# 主窗口使用透明原生标题栏，需要按视图区分可拖拽空白与标签等交互元素。
+block = "0.1.6"
+objc = "0.2.7"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry"] }
+raw-window-handle = "0.6.2"
+
 [build-dependencies]
 embed-resource = "3.0.9"
+
+[dev-dependencies]
+# 标题栏和模态框等 GPUI 交互需要真实 hitbox/input 回归测试，测试构建开启官方测试上下文。
+gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
 
 [patch.crates-io]
 # smb2 固定依赖 aes 0.9.0-rc.4；本地补丁让 rars-crypto 复用同一 aes 版本，避免同一 0.9 系列的

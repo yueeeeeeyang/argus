@@ -1,12 +1,13 @@
 //! 文件职责：渲染自定义标题栏中的日志标签区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
 //! 主要功能：展示可切换标签、右键菜单和多标签溢出下拉入口。
 
 use std::ops::Range;
 
 use crate::app::{ArgusApp, JstackAnalysisTaskState, RuntimeAnalysisTaskState, TabKind};
+use crate::platform::custom_titlebar;
 use crate::reader::log_file_reader::LogOpenState;
 use crate::theme::AppTheme;
 use crate::ui::components::context_menu::ActiveMenuKind;
@@ -14,8 +15,8 @@ use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use gpui::{
-    ClickEvent, Context, IntoElement, MouseButton, MouseUpEvent, SharedString, Window,
-    WindowControlArea, div, prelude::*, px, rgb, svg,
+    ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, SharedString,
+    Window, WindowControlArea, div, prelude::*, px, rgb, svg,
 };
 
 /// 激活标签底部凹弧连接遮罩尺寸。
@@ -303,12 +304,14 @@ fn render_tab(
 
     div()
         .id(SharedString::from(format!("tab-{tab_id}")))
+        .debug_selector(move || format!("tab-{tab_id}"))
         .w(px(tab_width))
         .h(px(height))
         .flex_none()
         .flex()
         .items_end()
         .cursor_pointer()
+        .occlude()
         .when(is_active, |this| {
             this.child(active_tab_connector(TabConnectorSide::Left, theme))
         })
@@ -352,6 +355,13 @@ fn render_tab(
                 cx.notify();
             }
         }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                // 标签页属于交互区域，按下阶段即阻止事件落到标题栏拖拽层。
+                cx.stop_propagation();
+            }),
+        )
         .on_mouse_up(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseUpEvent, _, cx| {
@@ -361,12 +371,10 @@ fn render_tab(
             }),
         )
         .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
-            if event.standard_click() {
-                cx.stop_propagation();
-                if app.active_tab_id != tab_id {
-                    app.activate_tab_with_context(tab_id, cx);
-                    cx.notify();
-                }
+            cx.stop_propagation();
+            if event.standard_click() && app.active_tab_id != tab_id {
+                app.activate_tab_with_context(tab_id, cx);
+                cx.notify();
             }
         }))
 }
@@ -427,20 +435,27 @@ fn render_tab_close_slot(
 fn tab_drag_area(cx: &mut Context<ArgusApp>) -> impl IntoElement {
     div()
         .id("tab-bar-drag-area")
+        .debug_selector(|| "tab-bar-drag-area".to_string())
         .h_full()
         .min_w(px(TITLE_RIGHT_DRAG_MIN_WIDTH))
         .flex_1()
         .window_control_area(WindowControlArea::Drag)
-        .on_click(cx.listener(|app, event: &ClickEvent, window, cx| {
-            if let ClickEvent::Mouse(mouse_event) = event
-                && mouse_event.up.click_count >= 2
-            {
-                window.zoom_window();
-                app.placeholder_notice = "已切换窗口最大化状态".to_string();
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, event: &MouseDownEvent, window, cx| {
+                match event.click_count {
+                    1 => custom_titlebar::start_window_drag(window),
+                    2 => {
+                        window.zoom_window();
+                        app.placeholder_notice = "已切换窗口最大化状态".to_string();
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+                // 该 hitbox 只覆盖标签右侧空白，拖动或缩放后不再向其他标题栏元素传播。
                 cx.stop_propagation();
-                cx.notify();
-            }
-        }))
+            }),
+        )
 }
 
 /// 渲染标签溢出下拉按钮。
@@ -498,10 +513,82 @@ fn active_tab_connector(side: TabConnectorSide, theme: &AppTheme) -> impl IntoEl
 #[cfg(test)]
 mod tests {
     use crate::app::{ArgusTab, TabKind};
+    use crate::config::ConfigManager;
     use crate::loader::SourceId;
     use crate::reader::read_mode::ReadMode;
+    use gpui::{Modifiers, MouseDownEvent, MouseUpEvent, TestAppContext, point, px};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    /// 测试配置路径计数器，避免视觉测试读取真实用户配置。
+    static NEXT_VISUAL_TEST_CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+
+    /// 构造使用进程临时目录的应用状态，避免视觉测试污染真实设置文件。
+    fn visual_test_app() -> ArgusApp {
+        let id = NEXT_VISUAL_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed);
+        let config_dir = std::env::temp_dir().join(format!(
+            "argus-tab-bar-visual-test-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
+    }
+
+    /// 在指定位置模拟连续点击，确保测试覆盖 GPUI 的按下、释放和点击合成链路。
+    fn simulate_repeated_clicks(
+        position: gpui::Point<gpui::Pixels>,
+        repeat_count: usize,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        for click_count in 1..=repeat_count {
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count,
+            });
+        }
+    }
+
+    /// 验证标签与空白拖拽区没有重叠，且连续点击标签不会进入 GPUI 窗口缩放处理器。
+    #[gpui::test]
+    fn repeated_clicking_tab_does_not_zoom_window(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, _| visual_test_app());
+        let tab_bounds = cx.debug_bounds("tab-1").expect("应渲染默认标签");
+        let drag_bounds = cx
+            .debug_bounds("tab-bar-drag-area")
+            .expect("应渲染标签栏空白拖拽区");
+        let window_bounds_before = cx.update(|window, _| window.bounds());
+        let notice_before = cx.update(|_, cx| app.read(cx).placeholder_notice.clone());
+
+        assert!(
+            tab_bounds.right() <= drag_bounds.left(),
+            "标签边界不应覆盖空白拖拽区：tab={tab_bounds:?}, drag={drag_bounds:?}"
+        );
+
+        simulate_repeated_clicks(
+            point(
+                tab_bounds.left() + tab_bounds.size.width / 2.0,
+                tab_bounds.top() + px(8.0),
+            ),
+            3,
+            cx,
+        );
+
+        assert_eq!(cx.update(|window, _| window.bounds()), window_bounds_before);
+        assert_eq!(
+            cx.update(|_, cx| app.read(cx).placeholder_notice.clone()),
+            notice_before
+        );
+    }
 
     /// 构造仅用于布局测试的空标签集合。
     fn tabs_from_titles(titles: &[&str]) -> Vec<ArgusTab> {

@@ -8,7 +8,9 @@ use argus::app::ArgusApp;
 use argus::app::ExternalSourceTrigger;
 use argus::assets::ArgusAssetSource;
 use argus::fonts::register_argus_fonts;
+use argus::platform::custom_titlebar as native_titlebar;
 use argus::platform::external_sources::{paths_from_open_urls, paths_from_startup_args};
+use argus::ui::custom_title_bar::{NATIVE_TRAFFIC_LIGHT_SAFE_WIDTH, TITLE_BAR_HEIGHT};
 use gpui::{
     App, AppContext, Application, Bounds, Keystroke, TitlebarOptions, WindowBounds, WindowHandle,
     WindowOptions, point, px, size,
@@ -102,7 +104,16 @@ fn open_argus_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<ArgusApp>
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             ..Default::default()
         },
-        |_, cx| cx.new(|_| ArgusApp::new()),
+        |window, cx| {
+            if let Err(error) = native_titlebar::configure_main_window(
+                window,
+                TITLE_BAR_HEIGHT,
+                NATIVE_TRAFFIC_LIGHT_SAFE_WIDTH,
+            ) {
+                eprintln!("配置 Argus 主窗口自定义标题栏失败：{error}");
+            }
+            cx.new(|_| ArgusApp::new())
+        },
     )?;
     observe_log_view_shortcuts(cx, window_handle);
 
