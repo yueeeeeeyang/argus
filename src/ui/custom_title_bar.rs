@@ -1,6 +1,6 @@
 //! 文件职责：渲染替代系统默认标题栏的 Obsidian 风格自定义标题栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
 //! 主要功能：为原生 macOS 交通灯预留安全区，并展示左侧操作组、当前标签和贯通分割线。
 
@@ -246,13 +246,13 @@ fn title_action_button(
     )
 }
 
-/// 渲染标题栏右侧设置入口，点击后打开或聚焦独立设置窗口。
+/// 渲染标题栏右侧设置入口，点击后打开主窗口设置模态框。
 fn settings_button(
     app: &ArgusApp,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
-    let is_selected = app.is_settings_window_open;
+    let is_selected = app.is_settings_modal_open;
     div().h_full().flex().items_center().child(
         div()
             .when(!is_selected, |this| {
@@ -266,7 +266,7 @@ fn settings_button(
                 IconButtonSize::Small,
                 theme,
                 cx.listener(|app, _, _, cx| {
-                    app.open_settings_window(cx);
+                    app.open_settings_modal(cx);
                     cx.notify();
                 }),
             )),

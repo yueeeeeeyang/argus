@@ -1,8 +1,8 @@
-//! 文件职责：维护独立设置窗口的打开、置前和关闭状态。
+//! 文件职责：维护设置模态框和设置编辑器窗口的交互状态。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-25
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
-//! 主要功能：维护设置窗口和 Jstack 线程段过滤编辑器窗口，同时复用主应用配置、日志搜索和升级偏好持久化逻辑。
+//! 主要功能：维护设置模态框、分类导航和 Jstack 线程段过滤编辑器窗口，同时复用主应用配置、日志搜索和升级偏好持久化逻辑。
 
 use std::borrow::Borrow;
 use std::ops::Range;
@@ -11,7 +11,7 @@ use gpui::{
     AppContext, Bounds, ClipboardItem, Context, Keystroke, WindowBounds, WindowOptions, px, size,
 };
 
-use crate::app::{ArgusApp, InputTextSelectionDrag, SettingsTextInputState};
+use crate::app::{ArgusApp, InputTextSelectionDrag, SettingsSection, SettingsTextInputState};
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, slice_character_range, word_range_at,
@@ -19,16 +19,8 @@ use crate::infra::text_selection::{
 use crate::platform::open_with_registration::{
     register_open_with, registration_status, unregister_open_with,
 };
-use crate::ui::settings_window::{JstackStackSegmentFilterEditorWindow, SettingsWindow};
+use crate::ui::settings_window::JstackStackSegmentFilterEditorWindow;
 
-/// 设置窗口默认宽度，保证单页设置内容不过度拉伸。
-const SETTINGS_WINDOW_WIDTH: f32 = 760.0;
-/// 设置窗口默认高度。
-const SETTINGS_WINDOW_HEIGHT: f32 = 560.0;
-/// 设置窗口最小宽度。
-const SETTINGS_WINDOW_MIN_WIDTH: f32 = 560.0;
-/// 设置窗口最小高度。
-const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 420.0;
 /// Jstack 线程段过滤编辑器默认宽度，给长堆栈保留横向阅读空间。
 const JSTACK_STACK_SEGMENT_EDITOR_WIDTH: f32 = 920.0;
 /// Jstack 线程段过滤编辑器默认高度，避免大段过滤配置挤在设置页小区域内。
@@ -39,69 +31,39 @@ const JSTACK_STACK_SEGMENT_EDITOR_MIN_WIDTH: f32 = 680.0;
 const JSTACK_STACK_SEGMENT_EDITOR_MIN_HEIGHT: f32 = 520.0;
 
 impl ArgusApp {
-    /// 打开设置独立窗口；若窗口已存在，则直接激活并显示到最前。
+    /// 打开主窗口内的设置模态框，并刷新依赖系统能力的设置状态。
     ///
     /// 参数说明：
-    /// - `cx`：主应用上下文，用于创建或激活独立窗口。
-    pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
+    /// - `cx`：主应用上下文，用于刷新系统右键菜单注册状态。
+    pub fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
         self.refresh_open_with_registration_status(cx);
-
-        if self.is_settings_window_open {
-            if let Some(window_handle) = self.settings_window_handle.clone()
-                && window_handle
-                    .update(cx, |_, window, _| window.activate_window())
-                    .is_ok()
-            {
-                self.placeholder_notice = "设置窗口已显示到最前".to_string();
-                return;
-            }
-
-            self.is_settings_window_open = false;
-            self.settings_window_handle = None;
-        }
-
-        let app_entity = cx.entity();
-        let initial_theme = self.theme.clone();
-        let initial_snapshot = SettingsWindow::snapshot_from_app(self);
-        let bounds = Bounds::centered(
-            None,
-            size(px(SETTINGS_WINDOW_WIDTH), px(SETTINGS_WINDOW_HEIGHT)),
-            cx,
-        );
-        let window_options = WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(
-                px(SETTINGS_WINDOW_MIN_WIDTH),
-                px(SETTINGS_WINDOW_MIN_HEIGHT),
-            )),
-            ..Default::default()
-        };
-
-        self.is_settings_window_open = true;
+        self.is_settings_modal_open = true;
         self.is_theme_dropdown_open = false;
-        self.placeholder_notice = "已打开设置窗口".to_string();
-
-        match cx.open_window(window_options, move |_, cx| {
-            cx.new(|cx| SettingsWindow::new(app_entity, initial_theme, initial_snapshot, cx))
-        }) {
-            Ok(window_handle) => {
-                self.settings_window_handle = Some(window_handle);
-            }
-            Err(error) => {
-                self.is_settings_window_open = false;
-                self.settings_window_handle = None;
-                self.placeholder_notice = format!("打开设置窗口失败：{error}");
-            }
-        }
+        self.clear_all_text_input_focus();
+        self.placeholder_notice = "已打开设置".to_string();
     }
 
-    /// 清理设置窗口打开状态；窗口关闭按钮和系统关闭事件都走该入口。
-    pub fn close_settings_window(&mut self) {
-        self.is_settings_window_open = false;
-        self.settings_window_handle = None;
+    /// 关闭设置模态框，并清理下拉菜单和输入框临时焦点状态。
+    pub fn close_settings_modal(&mut self) {
+        self.is_settings_modal_open = false;
         self.is_theme_dropdown_open = false;
-        self.placeholder_notice = "已关闭设置窗口".to_string();
+        self.clear_all_text_input_focus();
+        self.placeholder_notice = "已关闭设置".to_string();
+    }
+
+    /// 切换设置模态框右侧展示的分类内容。
+    ///
+    /// 参数说明：
+    /// - `section`：用户从左侧导航选择的目标分类。
+    pub fn select_settings_section(&mut self, section: SettingsSection) {
+        if self.selected_settings_section == section {
+            return;
+        }
+
+        self.selected_settings_section = section;
+        self.is_theme_dropdown_open = false;
+        self.clear_all_text_input_focus();
+        self.placeholder_notice = format!("已切换到{}设置", section.label());
     }
 
     /// 打开 Jstack 线程段过滤大编辑器；若编辑器已存在，则直接激活已有窗口。
@@ -183,7 +145,7 @@ impl ArgusApp {
 
     /// 刷新系统“用 Argus 打开”右键菜单注册状态。
     ///
-    /// 说明：状态查询应保持轻量，打开设置窗口和注册/卸载完成后都会调用；忙碌时跳过，
+    /// 说明：状态查询应保持轻量，打开设置模态框和注册/卸载完成后都会调用；忙碌时跳过，
     /// 避免执行中状态被同步查询覆盖。
     pub fn refresh_open_with_registration_status(&mut self, _cx: &mut Context<Self>) {
         if self.is_open_with_registration_busy {
@@ -231,7 +193,7 @@ impl ArgusApp {
         .detach();
     }
 
-    /// 卸载系统右键菜单；完成后重新查询系统状态并更新设置窗口提示。
+    /// 卸载系统右键菜单；完成后重新查询系统状态并更新设置模态框提示。
     pub fn unregister_open_with_menu(&mut self, cx: &mut Context<Self>) {
         if self.is_open_with_registration_busy {
             self.open_with_registration_message = Some("系统右键菜单操作正在执行".to_string());
@@ -269,7 +231,7 @@ impl ArgusApp {
         .detach();
     }
 
-    /// 聚焦设置窗口快搜关键字输入框，并关闭设置页的其它浮层。
+    /// 聚焦设置模态框快搜关键字输入框，并关闭设置页的其它浮层。
     pub fn focus_settings_quick_keywords_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_jstack_thread_name_filter_input.is_focused = false;
@@ -284,14 +246,14 @@ impl ArgusApp {
         self.settings_quick_keywords_input.marked_range = None;
     }
 
-    /// 返回设置窗口快搜关键字输入框当前选区范围。
+    /// 返回设置模态框快搜关键字输入框当前选区范围。
     ///
     /// 返回值：存在非空选区时返回字符范围；无选区或空选区返回 `None`。
     pub fn settings_quick_keywords_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_quick_keywords_input)
     }
 
-    /// 清空设置窗口快搜关键字输入框，并立即持久化配置。
+    /// 清空设置模态框快搜关键字输入框，并立即持久化配置。
     pub fn clear_settings_quick_keywords_input(&mut self) {
         self.settings_quick_keywords_input.value.clear();
         self.settings_quick_keywords_input.cursor = 0;
@@ -307,7 +269,7 @@ impl ArgusApp {
         self.commit_settings_quick_keywords_input();
     }
 
-    /// 处理设置窗口快搜关键字输入框键盘事件。
+    /// 处理设置模态框快搜关键字输入框键盘事件。
     ///
     /// 参数说明：
     /// - `keystroke`：GPUI 归一化按键事件。
@@ -355,7 +317,7 @@ impl ArgusApp {
         }
     }
 
-    /// 开始设置窗口快搜关键字输入框鼠标选择。
+    /// 开始设置模态框快搜关键字输入框鼠标选择。
     pub fn begin_settings_quick_keywords_pointer_selection(
         &mut self,
         character_index: usize,
@@ -376,7 +338,7 @@ impl ArgusApp {
         });
     }
 
-    /// 更新设置窗口快搜关键字输入框鼠标拖拽选择。
+    /// 更新设置模态框快搜关键字输入框鼠标拖拽选择。
     pub fn update_settings_quick_keywords_pointer_selection(&mut self, character_index: usize) {
         let Some(drag) = self.settings_quick_keywords_input.selection_drag.clone() else {
             return;
@@ -393,7 +355,7 @@ impl ArgusApp {
         self.settings_quick_keywords_input.cursor = end;
     }
 
-    /// 结束设置窗口快搜关键字输入框鼠标选择。
+    /// 结束设置模态框快搜关键字输入框鼠标选择。
     pub fn finish_settings_quick_keywords_pointer_selection(&mut self) {
         self.settings_quick_keywords_input.selection_drag = None;
     }
@@ -537,7 +499,7 @@ impl ArgusApp {
         ))
     }
 
-    /// 聚焦设置窗口 Jstack 线程名过滤输入框。
+    /// 聚焦设置模态框 Jstack 线程名过滤输入框。
     pub fn focus_settings_jstack_thread_name_filter_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
@@ -552,7 +514,7 @@ impl ArgusApp {
         self.settings_jstack_thread_name_filter_input.marked_range = None;
     }
 
-    /// 返回设置窗口 Jstack 线程名过滤输入框当前选区范围。
+    /// 返回设置模态框 Jstack 线程名过滤输入框当前选区范围。
     pub fn settings_jstack_thread_name_filter_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_jstack_thread_name_filter_input)
     }
@@ -574,7 +536,7 @@ impl ArgusApp {
         self.commit_settings_jstack_thread_name_filter_input();
     }
 
-    /// 处理设置窗口 Jstack 线程名过滤输入框键盘事件。
+    /// 处理设置模态框 Jstack 线程名过滤输入框键盘事件。
     pub fn handle_settings_jstack_thread_name_filter_key(
         &mut self,
         keystroke: &Keystroke,
@@ -622,7 +584,7 @@ impl ArgusApp {
         }
     }
 
-    /// 开始设置窗口 Jstack 线程名过滤输入框鼠标选择。
+    /// 开始设置模态框 Jstack 线程名过滤输入框鼠标选择。
     pub fn begin_settings_jstack_thread_name_filter_pointer_selection(
         &mut self,
         character_index: usize,
@@ -645,7 +607,7 @@ impl ArgusApp {
             });
     }
 
-    /// 更新设置窗口 Jstack 线程名过滤输入框鼠标拖拽选择。
+    /// 更新设置模态框 Jstack 线程名过滤输入框鼠标拖拽选择。
     pub fn update_settings_jstack_thread_name_filter_pointer_selection(
         &mut self,
         character_index: usize,
@@ -670,7 +632,7 @@ impl ArgusApp {
         self.settings_jstack_thread_name_filter_input.cursor = end;
     }
 
-    /// 结束设置窗口 Jstack 线程名过滤输入框鼠标选择。
+    /// 结束设置模态框 Jstack 线程名过滤输入框鼠标选择。
     pub fn finish_settings_jstack_thread_name_filter_pointer_selection(&mut self) {
         self.settings_jstack_thread_name_filter_input.selection_drag = None;
     }
@@ -827,7 +789,7 @@ impl ArgusApp {
         ))
     }
 
-    /// 聚焦设置窗口 Jstack 完整线程段过滤输入框。
+    /// 聚焦设置模态框 Jstack 完整线程段过滤输入框。
     pub fn focus_settings_jstack_stack_segment_filter_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
@@ -842,7 +804,7 @@ impl ArgusApp {
         self.settings_jstack_stack_segment_filter_input.marked_range = None;
     }
 
-    /// 返回设置窗口 Jstack 完整线程段过滤输入框当前选区范围。
+    /// 返回设置模态框 Jstack 完整线程段过滤输入框当前选区范围。
     pub fn settings_jstack_stack_segment_filter_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_jstack_stack_segment_filter_input)
     }
@@ -867,7 +829,7 @@ impl ArgusApp {
         self.commit_settings_jstack_stack_segment_filter_input();
     }
 
-    /// 处理设置窗口 Jstack 完整线程段过滤输入框键盘事件。
+    /// 处理设置模态框 Jstack 完整线程段过滤输入框键盘事件。
     pub fn handle_settings_jstack_stack_segment_filter_key(
         &mut self,
         keystroke: &Keystroke,
@@ -937,7 +899,7 @@ impl ArgusApp {
         }
     }
 
-    /// 开始设置窗口 Jstack 完整线程段过滤输入框鼠标选择。
+    /// 开始设置模态框 Jstack 完整线程段过滤输入框鼠标选择。
     pub fn begin_settings_jstack_stack_segment_filter_pointer_selection(
         &mut self,
         character_index: usize,
@@ -960,7 +922,7 @@ impl ArgusApp {
         });
     }
 
-    /// 更新设置窗口 Jstack 完整线程段过滤输入框鼠标拖拽选择。
+    /// 更新设置模态框 Jstack 完整线程段过滤输入框鼠标拖拽选择。
     pub fn update_settings_jstack_stack_segment_filter_pointer_selection(
         &mut self,
         character_index: usize,
@@ -985,7 +947,7 @@ impl ArgusApp {
         self.settings_jstack_stack_segment_filter_input.cursor = end;
     }
 
-    /// 结束设置窗口 Jstack 完整线程段过滤输入框鼠标选择。
+    /// 结束设置模态框 Jstack 完整线程段过滤输入框鼠标选择。
     pub fn finish_settings_jstack_stack_segment_filter_pointer_selection(&mut self) {
         self.settings_jstack_stack_segment_filter_input
             .selection_drag = None;
@@ -1156,7 +1118,7 @@ impl ArgusApp {
         ))
     }
 
-    /// 聚焦设置窗口升级服务器输入框，并关闭设置页的其它浮层。
+    /// 聚焦设置模态框升级服务器输入框，并关闭设置页的其它浮层。
     pub fn focus_settings_upgrade_server_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
@@ -1171,7 +1133,7 @@ impl ArgusApp {
         self.settings_upgrade_server_input.marked_range = None;
     }
 
-    /// 返回设置窗口升级服务器输入框当前选区范围。
+    /// 返回设置模态框升级服务器输入框当前选区范围。
     pub fn settings_upgrade_server_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_upgrade_server_input)
     }
@@ -1192,7 +1154,7 @@ impl ArgusApp {
         self.commit_settings_upgrade_server_input();
     }
 
-    /// 处理设置窗口升级服务器输入框键盘事件。
+    /// 处理设置模态框升级服务器输入框键盘事件。
     pub fn handle_settings_upgrade_server_key(
         &mut self,
         keystroke: &Keystroke,
@@ -1236,7 +1198,7 @@ impl ArgusApp {
         }
     }
 
-    /// 开始设置窗口升级服务器输入框鼠标选择。
+    /// 开始设置模态框升级服务器输入框鼠标选择。
     pub fn begin_settings_upgrade_server_pointer_selection(
         &mut self,
         character_index: usize,
@@ -1257,7 +1219,7 @@ impl ArgusApp {
         });
     }
 
-    /// 更新设置窗口升级服务器输入框鼠标拖拽选择。
+    /// 更新设置模态框升级服务器输入框鼠标拖拽选择。
     pub fn update_settings_upgrade_server_pointer_selection(&mut self, character_index: usize) {
         let Some(drag) = self.settings_upgrade_server_input.selection_drag.clone() else {
             return;
@@ -1274,7 +1236,7 @@ impl ArgusApp {
         self.settings_upgrade_server_input.cursor = end;
     }
 
-    /// 结束设置窗口升级服务器输入框鼠标选择。
+    /// 结束设置模态框升级服务器输入框鼠标选择。
     pub fn finish_settings_upgrade_server_pointer_selection(&mut self) {
         self.settings_upgrade_server_input.selection_drag = None;
     }
@@ -1419,7 +1381,7 @@ impl ArgusApp {
         ))
     }
 
-    /// 聚焦设置窗口升级验签公钥输入框，并关闭设置页的其它浮层。
+    /// 聚焦设置模态框升级验签公钥输入框，并关闭设置页的其它浮层。
     pub fn focus_settings_upgrade_public_key_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
@@ -1434,7 +1396,7 @@ impl ArgusApp {
         self.settings_upgrade_public_key_input.marked_range = None;
     }
 
-    /// 返回设置窗口升级验签公钥输入框当前选区范围。
+    /// 返回设置模态框升级验签公钥输入框当前选区范围。
     pub fn settings_upgrade_public_key_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_upgrade_public_key_input)
     }
@@ -1455,7 +1417,7 @@ impl ArgusApp {
         self.commit_settings_upgrade_public_key_input();
     }
 
-    /// 处理设置窗口升级验签公钥输入框键盘事件。
+    /// 处理设置模态框升级验签公钥输入框键盘事件。
     ///
     /// 参数说明：
     /// - `keystroke`：GPUI 归一化按键事件。
@@ -1503,7 +1465,7 @@ impl ArgusApp {
         }
     }
 
-    /// 开始设置窗口升级验签公钥输入框鼠标选择。
+    /// 开始设置模态框升级验签公钥输入框鼠标选择。
     pub fn begin_settings_upgrade_public_key_pointer_selection(
         &mut self,
         character_index: usize,
@@ -1524,7 +1486,7 @@ impl ArgusApp {
         });
     }
 
-    /// 更新设置窗口升级验签公钥输入框鼠标拖拽选择。
+    /// 更新设置模态框升级验签公钥输入框鼠标拖拽选择。
     pub fn update_settings_upgrade_public_key_pointer_selection(&mut self, character_index: usize) {
         let Some(drag) = self
             .settings_upgrade_public_key_input
@@ -1545,7 +1507,7 @@ impl ArgusApp {
         self.settings_upgrade_public_key_input.cursor = end;
     }
 
-    /// 结束设置窗口升级验签公钥输入框鼠标选择。
+    /// 结束设置模态框升级验签公钥输入框鼠标选择。
     pub fn finish_settings_upgrade_public_key_pointer_selection(&mut self) {
         self.settings_upgrade_public_key_input.selection_drag = None;
     }

@@ -1572,7 +1572,34 @@ fn legacy_settings_tab_entry_does_not_create_tab() {
 
     assert_eq!(app.tabs.len(), 1);
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert!(app.placeholder_notice.contains("独立窗口"));
+    assert!(app.placeholder_notice.contains("模态框"));
+}
+
+/// 验证设置分类切换会更新右侧内容状态，并关闭上一分类的临时交互状态。
+#[test]
+fn selecting_settings_section_clears_transient_input_state() {
+    let mut app = test_app();
+    app.is_theme_dropdown_open = true;
+    app.settings_quick_keywords_input.is_focused = true;
+
+    app.select_settings_section(SettingsSection::LogSearch);
+
+    assert_eq!(app.selected_settings_section, SettingsSection::LogSearch);
+    assert!(!app.is_theme_dropdown_open);
+    assert!(!app.settings_quick_keywords_input.is_focused);
+}
+
+/// 验证关闭设置模态框会同步清理模态状态和输入焦点。
+#[test]
+fn closing_settings_modal_clears_modal_state() {
+    let mut app = test_app();
+    app.is_settings_modal_open = true;
+    app.settings_jstack_thread_name_filter_input.is_focused = true;
+
+    app.close_settings_modal();
+
+    assert!(!app.is_settings_modal_open);
+    assert!(!app.settings_jstack_thread_name_filter_input.is_focused);
 }
 
 /// 验证旧设置标签入口不会影响当前日志标签。

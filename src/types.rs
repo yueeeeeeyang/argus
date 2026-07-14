@@ -1,5 +1,6 @@
 //! 文件职责：定义跨模块共享的基础类型，避免底层模块反向依赖应用层。
 //! 创建日期：2026-07-08
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
 //! 主要功能：提供通用的文本输入框状态和拖拽选区类型，供 app、ui 和 remote 模块共同使用。
 
@@ -14,7 +15,7 @@ pub struct InputTextSelectionDrag {
     pub granularity: TextSelectionGranularity,
 }
 
-/// 设置窗口中的单行输入框状态；用于保存持久化设置项的编辑光标和选区。
+/// 设置模态框中的单行输入框状态；用于保存持久化设置项的编辑光标和选区。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettingsTextInputState {
     /// 输入框当前文本。

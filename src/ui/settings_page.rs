@@ -1,8 +1,8 @@
 //! 文件职责：保留旧设置标签页的兼容渲染入口。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-12
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
-//! 主要功能：提示设置页已迁移到独立窗口，避免历史标签状态导致空白内容。
+//! 主要功能：提示设置页已迁移到主窗口模态框，避免历史标签状态导致空白内容。
 
 use crate::app::ArgusApp;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -14,7 +14,7 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 /// - `app`：应用状态，提供当前主题。
 /// - `_cx`：保留上下文参数以兼容旧调用签名。
 ///
-/// 返回值：只读提示元素；真实设置从标题栏设置按钮打开独立窗口。
+/// 返回值：只读提示元素；真实设置从标题栏设置按钮打开模态框。
 pub fn render(app: &ArgusApp, _cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
 
@@ -36,6 +36,6 @@ pub fn render(app: &ArgusApp, _cx: &mut Context<ArgusApp>) -> impl IntoElement {
                     theme.foreground_muted,
                     16.0,
                 ))
-                .child("设置已迁移到独立窗口，请点击标题栏设置按钮打开。"),
+                .child("设置已迁移到模态框，请点击标题栏设置按钮打开。"),
         )
 }

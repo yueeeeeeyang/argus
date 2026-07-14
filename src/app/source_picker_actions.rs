@@ -1,6 +1,6 @@
 //! 文件职责：维护自定义日志来源选择器的应用状态与业务动作。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-23
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
 //! 主要功能：替代系统文件选择器，提供跨平台目录浏览、多选和确认加载流程。
 
@@ -8,12 +8,9 @@ use std::cmp::Ordering;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use gpui::{
-    AppContext, Bounds, Context, Keystroke, ScrollStrategy, UniformListScrollHandle, WindowBounds,
-    WindowHandle, WindowOptions, px, size,
-};
+use gpui::{AppContext, Context, Keystroke, ScrollStrategy, UniformListScrollHandle};
 
-use crate::app::{ArgusApp, InputTextSelectionDrag};
+use crate::app::{ArgusApp, InputTextSelectionDrag, Workspace};
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, word_range_at,
@@ -21,15 +18,6 @@ use crate::infra::text_selection::{
 use crate::loader::{BrowseEntry, BrowseLocation, BrowseResult, LogSourceLoader, PathBrowser};
 use crate::ui::source_picker::SourcePickerWindow;
 use crate::utils::path::display_path;
-
-/// 来源选择器独立窗口默认宽度。
-const SOURCE_PICKER_WINDOW_WIDTH: f32 = 900.0;
-/// 来源选择器独立窗口默认高度。
-const SOURCE_PICKER_WINDOW_HEIGHT: f32 = 620.0;
-/// 来源选择器独立窗口最小宽度，保证主要控件不会拥挤。
-const SOURCE_PICKER_WINDOW_MIN_WIDTH: f32 = 680.0;
-/// 来源选择器独立窗口最小高度，保证列表和底部操作区可用。
-const SOURCE_PICKER_WINDOW_MIN_HEIGHT: f32 = 460.0;
 
 /// 来源选择器列表支持的排序字段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,8 +77,6 @@ impl ExternalSourceTrigger {
 pub struct SourcePickerState {
     /// 选择器是否打开。
     pub is_open: bool,
-    /// 当前选择器独立窗口句柄，用于重复点击加载入口时把已有窗口置前。
-    pub window_handle: Option<WindowHandle<SourcePickerWindow>>,
     /// 当前正在浏览的目录。
     pub current_dir: PathBuf,
     /// 当前目录父级，根目录或盘符根为空。
@@ -136,7 +122,6 @@ impl Default for SourcePickerState {
 
         Self {
             is_open: false,
-            window_handle: None,
             current_dir,
             parent_dir: None,
             locations: PathBrowser::default_locations(),
@@ -193,7 +178,7 @@ impl SourcePickerState {
         self.path_input_selection_drag = None;
     }
 
-    /// 将选择器恢复到每次新打开窗口时的默认浏览状态。
+    /// 将选择器恢复到每次新打开模态框时的默认浏览状态。
     ///
     /// 说明：默认定位下载目录并按修改日期倒序排列，符合日志包通常来自下载目录、
     /// 新文件更常被选择的使用路径。
@@ -214,24 +199,15 @@ impl SourcePickerState {
 }
 
 impl ArgusApp {
-    /// 打开自定义来源选择器独立窗口，并在后台刷新当前目录条目。
+    /// 打开主窗口内的自定义来源选择器模态框，并在后台刷新当前目录条目。
     pub fn open_source_picker(&mut self, cx: &mut Context<Self>) {
         if self.is_source_loading {
             self.placeholder_notice = "日志来源正在加载中，请稍候".to_string();
             return;
         }
-        if self.source_picker.is_open {
-            if let Some(window_handle) = self.source_picker.window_handle.clone()
-                && window_handle
-                    .update(cx, |_, window, _| window.activate_window())
-                    .is_ok()
-            {
-                self.placeholder_notice = "日志来源选择器已显示到最前".to_string();
-                return;
-            }
-
-            self.source_picker.is_open = false;
-            self.source_picker.window_handle = None;
+        if self.source_picker.is_open && self.source_picker_modal.is_some() {
+            self.placeholder_notice = "日志来源选择器已打开".to_string();
+            return;
         }
 
         let app_entity = cx.entity();
@@ -245,46 +221,15 @@ impl ArgusApp {
 
         let initial_theme = self.theme.clone();
         let initial_source_picker = self.source_picker.clone();
-        let bounds = Bounds::centered(
-            None,
-            size(
-                px(SOURCE_PICKER_WINDOW_WIDTH),
-                px(SOURCE_PICKER_WINDOW_HEIGHT),
-            ),
-            cx,
-        );
-        let window_options = WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(
-                px(SOURCE_PICKER_WINDOW_MIN_WIDTH),
-                px(SOURCE_PICKER_WINDOW_MIN_HEIGHT),
-            )),
-            ..Default::default()
-        };
-
-        match cx.open_window(window_options, move |_, cx| {
-            cx.new(|cx| {
-                SourcePickerWindow::new(app_entity, initial_theme, initial_source_picker, cx)
-            })
-        }) {
-            Ok(window_handle) => {
-                self.source_picker.window_handle = Some(window_handle);
-            }
-            Err(error) => {
-                self.source_picker.is_open = false;
-                self.source_picker.window_handle = None;
-                self.source_picker.is_loading = false;
-                self.source_picker.error_message = Some(error.to_string());
-                self.placeholder_notice = format!("打开日志来源选择器失败：{error}");
-            }
-        }
+        self.source_picker_modal = Some(cx.new(|cx| {
+            SourcePickerWindow::new(app_entity, initial_theme, initial_source_picker, cx)
+        }));
     }
 
     /// 关闭自定义来源选择器，不影响已经加载的来源树。
     pub fn close_source_picker(&mut self) {
         self.source_picker.is_open = false;
-        self.source_picker.window_handle = None;
+        self.source_picker_modal = None;
         self.source_picker.is_loading = false;
         self.source_picker.error_message = None;
         self.source_picker.selected_paths.clear();
@@ -435,8 +380,9 @@ impl ArgusApp {
             return false;
         }
 
+        self.activate_log_analysis_for_source_load();
         self.source_picker.is_open = false;
-        self.source_picker.window_handle = None;
+        self.source_picker_modal = None;
         self.source_picker.error_message = None;
         self.source_picker.selected_paths.clear();
         self.is_source_loading = true;
@@ -472,6 +418,16 @@ impl ArgusApp {
         .detach();
 
         true
+    }
+
+    /// 开始加载日志来源前返回日志分析工作区，并同步对应侧栏的动画宽度。
+    fn activate_log_analysis_for_source_load(&mut self) {
+        if self.workspace != Workspace::Connections {
+            return;
+        }
+
+        self.workspace = Workspace::LogAnalysis;
+        self.sync_source_panel_animation_to_current_width();
     }
 
     /// 加载用户拖拽到主窗口上的日志来源。
@@ -875,6 +831,21 @@ mod tests {
 
         assert!(!app.source_picker.is_open);
         assert!(app.source_picker.selected_paths.is_empty());
+    }
+
+    /// 验证从链接工作区加载来源时会返回日志分析，并恢复日志侧栏宽度。
+    #[test]
+    fn source_load_switches_connections_to_log_analysis() {
+        let mut app = test_app();
+        app.workspace = Workspace::Connections;
+        app.connection_source_panel_width = 360.0;
+        app.source_panel_width = 280.0;
+
+        app.activate_log_analysis_for_source_load();
+
+        assert_eq!(app.workspace, Workspace::LogAnalysis);
+        assert_eq!(app.source_panel_animation_from_width, 280.0);
+        assert_eq!(app.source_panel_animation_to_width, 280.0);
     }
 
     /// 验证名称排序在目录优先的前提下按名称升降序切换。

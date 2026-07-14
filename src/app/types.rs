@@ -1,5 +1,6 @@
 //! 文件职责：提取应用通用类型定义。
 //! 创建日期：2026-07-08
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
 //! 主要功能：定义工作区、标签页、文本输入目标和占位数据等跨功能域共享类型。
 
@@ -19,6 +20,35 @@ pub enum Workspace {
     Connections,
     /// 设置工作区，用于展示主题、编码、缓存、快捷键等占位配置。
     Settings,
+}
+
+/// 设置模态框左侧导航当前选中的分类。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SettingsSection {
+    /// 关于应用，展示版本和运行平台。
+    #[default]
+    About,
+    /// 外观设置，包含主题选择。
+    Appearance,
+    /// 日志显示设置，包含字号和 Jstack 过滤规则。
+    LogDisplay,
+    /// 日志搜索设置，包含快搜关键字。
+    LogSearch,
+    /// 日志加载设置，包含压缩包和符号链接策略。
+    LogLoading,
+}
+
+impl SettingsSection {
+    /// 返回设置分类在导航和内容标题中使用的文案。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::About => "关于",
+            Self::Appearance => "外观",
+            Self::LogDisplay => "日志显示",
+            Self::LogSearch => "日志搜索",
+            Self::LogLoading => "日志加载",
+        }
+    }
 }
 
 /// 打开来源占位弹窗中的来源类型。
@@ -222,15 +252,15 @@ pub enum AppTextInputTarget {
         /// 过滤输入框类型。
         input_kind: RuntimeFilterInputKind,
     },
-    /// 设置窗口快搜关键字输入框。
+    /// 设置模态框快搜关键字输入框。
     SettingsQuickKeywords,
-    /// 设置窗口 Jstack 线程名过滤输入框。
+    /// 设置模态框 Jstack 线程名过滤输入框。
     SettingsJstackThreadNameFilter,
-    /// 设置窗口 Jstack 完整线程段过滤输入框。
+    /// 设置模态框 Jstack 完整线程段过滤输入框。
     SettingsJstackStackSegmentFilter,
-    /// 设置窗口升级服务器输入框。
+    /// 设置模态框升级服务器输入框。
     SettingsUpgradeServer,
-    /// 设置窗口升级验签公钥输入框。
+    /// 设置模态框升级验签公钥输入框。
     SettingsUpgradePublicKey,
 }
 
@@ -296,6 +326,14 @@ pub struct AppInputFocusHandles {
     pub sftp_rename_name: FocusHandle,
     /// 压缩包密码弹窗输入框焦点。
     pub archive_password: FocusHandle,
+    /// 设置模态框快搜关键字输入框焦点。
+    pub settings_quick_keywords: FocusHandle,
+    /// 设置模态框 Jstack 线程名过滤输入框焦点。
+    pub settings_jstack_thread_names: FocusHandle,
+    /// 设置模态框升级服务器输入框焦点。
+    pub settings_upgrade_server: FocusHandle,
+    /// 设置模态框升级验签公钥输入框焦点。
+    pub settings_upgrade_public_key: FocusHandle,
     /// 右侧终端面板焦点。
     pub terminal: FocusHandle,
     /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。

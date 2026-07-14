@@ -1,15 +1,16 @@
-//! 文件职责：渲染自定义跨平台日志来源选择器独立窗口。
+//! 文件职责：渲染自定义跨平台日志来源选择器模态框。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-16
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
-//! 主要功能：提供独立窗口中的目录浏览、目录/文件/压缩包多选和确认加载入口。
+//! 主要功能：提供主窗口模态框中的目录浏览、目录/文件/压缩包多选和确认加载入口。
 
 use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render,
-    SharedString, Subscription, Window, div, prelude::*, px, rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement,
+    KeyDownEvent, Render, SharedString, Subscription, Window, div, prelude::*, px, rgb,
+    uniform_list,
 };
 
 use crate::app::{
@@ -24,6 +25,7 @@ use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
 use crate::ui::components::loading_spinner::render_loading_spinner;
+use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 use crate::ui::input_native::app_native_input;
 use crate::utils::path::{display_name, display_path};
 use crate::utils::size_format::format_bytes;
@@ -31,9 +33,13 @@ use crate::utils::time_format::format_modified_time;
 
 /// 左侧快捷入口宽度。
 const SOURCE_PICKER_LOCATION_WIDTH: f32 = 188.0;
-/// 选择器窗口固定头部高度，和设置窗口保持一致。
+/// 来源选择器模态框宽度，沿用改造前独立窗口尺寸。
+const SOURCE_PICKER_MODAL_WIDTH: f32 = 900.0;
+/// 来源选择器模态框高度，沿用改造前独立窗口尺寸。
+const SOURCE_PICKER_MODAL_HEIGHT: f32 = 620.0;
+/// 选择器模态框固定头部高度，和设置模态框保持一致。
 const SOURCE_PICKER_HEADER_HEIGHT: f32 = 56.0;
-/// 选择器窗口标题图标尺寸，和 14px 标题文字保持协调比例。
+/// 选择器模态框标题图标尺寸，和 14px 标题文字保持协调比例。
 const SOURCE_PICKER_TITLE_ICON_SIZE: f32 = 16.0;
 /// 选择器内容区统一内边距。
 const SOURCE_PICKER_CONTENT_PADDING: f32 = 16.0;
@@ -50,11 +56,11 @@ const SOURCE_PICKER_HEADER_CONTENT_Y_OFFSET: f32 = 0.5;
 /// 选择器表头图标尺寸。
 const SOURCE_PICKER_HEADER_ICON_SIZE: f32 = 13.0;
 
-/// 来源选择器独立窗口根视图；通过观察主应用实体获得最新选择器状态。
+/// 来源选择器子视图；通过观察主应用实体获得最新选择器状态。
 pub struct SourcePickerWindow {
     /// 主应用实体，选择器所有业务状态仍集中保存在 `ArgusApp`。
     app: Entity<ArgusApp>,
-    /// 当前窗口自己的渲染快照，避免首次打开窗口时读取正在更新的主应用实体。
+    /// 当前子视图自己的渲染快照，避免首次打开时读取正在更新的主应用实体。
     snapshot: SourcePickerSnapshot,
     /// 当前渲染快照的轻量签名，用于跳过主应用无关通知。
     snapshot_signature: SourcePickerSnapshotSignature,
@@ -62,20 +68,40 @@ pub struct SourcePickerWindow {
     root_focus_handle: FocusHandle,
     /// 路径输入框真实焦点句柄。
     path_focus_handle: FocusHandle,
-    /// 主应用状态订阅，保持选择器窗口随后台目录读取结果刷新。
+    /// 主应用状态订阅，保持选择器模态框随后台目录读取结果刷新。
     _app_observer: Subscription,
 }
 
+/// 将来源选择器子视图包裹为主窗口模态框。
+pub fn render_source_picker_modal(
+    picker: Entity<SourcePickerWindow>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    render_modal_dialog(
+        ModalDialog {
+            overlay_id: "source-picker-modal-overlay",
+            container_id: "source-picker-modal-container",
+            width: SOURCE_PICKER_MODAL_WIDTH,
+            height: SOURCE_PICKER_MODAL_HEIGHT,
+            content: picker.into_any_element(),
+        },
+        theme.clone(),
+        cx,
+    )
+    .into_any_element()
+}
+
 impl SourcePickerWindow {
-    /// 创建来源选择器窗口视图，并监听主应用状态变化。
+    /// 创建来源选择器模态框子视图，并监听主应用状态变化。
     ///
     /// 参数说明：
     /// - `app`：主应用实体，用于读取主题、目录列表和写回交互状态。
-    /// - `theme`：窗口首次绘制使用的主题快照。
-    /// - `source_picker`：窗口首次绘制使用的选择器状态快照。
-    /// - `cx`：选择器窗口上下文，用于注册观察订阅。
+    /// - `theme`：子视图首次绘制使用的主题快照。
+    /// - `source_picker`：子视图首次绘制使用的选择器状态快照。
+    /// - `cx`：选择器子视图上下文，用于注册观察订阅。
     ///
-    /// 返回值：可渲染的选择器窗口视图。
+    /// 返回值：可渲染的选择器模态框子视图。
     pub fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
@@ -114,7 +140,7 @@ impl SourcePickerWindow {
 }
 
 impl Render for SourcePickerWindow {
-    /// 渲染独立窗口内的选择器内容。
+    /// 渲染模态框内的选择器内容。
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let app_handle = self.app.clone();
         let snapshot = self.snapshot.clone();
@@ -193,7 +219,7 @@ impl SourcePickerSnapshotSignature {
     }
 }
 
-/// 渲染来源选择器窗口主体。
+/// 渲染来源选择器模态框主体。
 fn render_window_content(
     snapshot: &SourcePickerSnapshot,
     app_handle: &Entity<ArgusApp>,
@@ -212,8 +238,11 @@ fn render_window_content(
         .size_full()
         .relative()
         .flex()
-        .flex_col()
+        .rounded_lg()
+        .overflow_hidden()
         .bg(rgb(theme.content))
+        .border_1()
+        .border_color(rgb(theme.border))
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .occlude()
@@ -225,14 +254,26 @@ fn render_window_content(
                 app.clear_all_text_input_focus();
             });
         })
-        .child(render_title_bar(&theme, &close_app))
+        .child(
+            div()
+                .w(px(SOURCE_PICKER_LOCATION_WIDTH))
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .bg(rgb(theme.side_bar))
+                .child(render_sidebar_title(&theme))
+                .child(render_locations(snapshot, &theme, app_handle)),
+        )
         .child(
             div()
                 .flex_1()
-                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .h_full()
                 .flex()
+                .flex_col()
                 .bg(rgb(theme.content))
-                .child(render_locations(snapshot, &theme, app_handle))
+                .child(render_browser_title_bar(&theme, &close_app))
                 .child(render_browser(
                     snapshot,
                     &theme,
@@ -243,21 +284,15 @@ fn render_window_content(
         )
 }
 
-/// 渲染来源选择器固定头部。
-///
-/// 说明：头部只承载窗口标题和关闭按钮，不参与目录浏览业务，保持和设置窗口一致的
-/// 无标题栏窗口结构。
-fn render_title_bar(theme: &AppTheme, close_app: &Entity<ArgusApp>) -> impl IntoElement + use<> {
-    let close_app = close_app.clone();
-
+/// 渲染左侧标题，使侧栏背景从模态框顶部连续延伸到底部。
+fn render_sidebar_title(theme: &AppTheme) -> impl IntoElement + use<> {
     div()
         .h(px(SOURCE_PICKER_HEADER_HEIGHT))
         .flex_none()
-        .px_5()
+        .px_4()
         .flex()
         .items_center()
-        .justify_between()
-        .bg(rgb(theme.content))
+        .bg(rgb(theme.side_bar))
         .child(
             div()
                 .flex()
@@ -274,6 +309,23 @@ fn render_title_bar(theme: &AppTheme, close_app: &Entity<ArgusApp>) -> impl Into
                 ))
                 .child("加载日志来源"),
         )
+}
+
+/// 渲染右侧顶部操作区；背景跟随浏览内容，不再形成独立的全宽色带。
+fn render_browser_title_bar(
+    theme: &AppTheme,
+    close_app: &Entity<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let close_app = close_app.clone();
+
+    div()
+        .h(px(SOURCE_PICKER_HEADER_HEIGHT))
+        .flex_none()
+        .px_5()
+        .flex()
+        .items_center()
+        .justify_end()
+        .bg(rgb(theme.content))
         .child(render_icon_button(
             "source-picker-window-close",
             ArgusIcon::Close,
@@ -281,9 +333,8 @@ fn render_title_bar(theme: &AppTheme, close_app: &Entity<ArgusApp>) -> impl Into
             false,
             IconButtonSize::Small,
             theme,
-            move |_, window, cx| {
+            move |_, _, cx| {
                 update_picker_app(&close_app, cx, |app, _| app.close_source_picker());
-                window.remove_window();
             },
         ))
 }
@@ -298,16 +349,15 @@ fn render_locations(
     let current_dir = snapshot.source_picker.current_dir.clone();
 
     div()
-        .w(px(SOURCE_PICKER_LOCATION_WIDTH))
-        .h_full()
+        .w_full()
+        .flex_1()
+        .min_h(px(0.0))
         .flex()
         .flex_col()
         .gap_1()
         .px_4()
         .py(px(SOURCE_PICKER_CONTENT_PADDING))
-        .border_r_1()
-        .border_color(rgb(theme.border))
-        .bg(rgb(theme.content))
+        .bg(rgb(theme.side_bar))
         .child(
             div()
                 .h(px(28.0))
@@ -365,11 +415,10 @@ fn render_browser(
 ) -> impl IntoElement + use<> {
     div()
         .flex_1()
-        .h_full()
+        .min_h(px(0.0))
         .flex()
         .flex_col()
         .bg(rgb(theme.content))
-        .pt(px(SOURCE_PICKER_CONTENT_PADDING))
         .child(render_header(
             snapshot,
             theme,
@@ -444,15 +493,11 @@ fn render_header(
                 native_input: Some(native_input),
             },
             theme,
-            move |event: &KeyDownEvent, window, cx| {
+            move |event: &KeyDownEvent, _, cx| {
                 cx.stop_propagation();
-                let should_close = event.keystroke.key == "escape";
                 update_picker_app(&input_key_app, cx, |app, app_cx| {
                     app.handle_source_picker_path_key(&event.keystroke, app_cx);
                 });
-                if should_close {
-                    window.remove_window();
-                }
             },
             move |_, _, cx| {
                 cx.stop_propagation();
@@ -940,11 +985,10 @@ fn render_footer(
                             ArgusIcon::Close,
                             "取消",
                             theme,
-                            move |_, window, cx| {
+                            move |_, _, cx| {
                                 update_picker_app(&cancel_app, cx, |app, _| {
                                     app.close_source_picker();
                                 });
-                                window.remove_window();
                             },
                         ))
                         .child(primary_button(
@@ -953,15 +997,11 @@ fn render_footer(
                             "加载",
                             selected_count > 0,
                             theme,
-                            move |_, window, cx| {
-                                let should_close = confirm_app.update(cx, |app, app_cx| {
-                                    let should_close = app.confirm_source_picker_selection(app_cx);
+                            move |_, _, cx| {
+                                confirm_app.update(cx, |app, app_cx| {
+                                    app.confirm_source_picker_selection(app_cx);
                                     app_cx.notify();
-                                    should_close
                                 });
-                                if should_close {
-                                    window.remove_window();
-                                }
                             },
                         )),
                 ),

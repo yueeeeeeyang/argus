@@ -1,15 +1,15 @@
-//! 文件职责：渲染链接工作区的新增目录窗口、新增 SSH 链接窗口和主机指纹确认弹窗。
+//! 文件职责：渲染链接工作区的目录、链接和确认模态框。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
-//! 主要功能：提供链接目录和 SSH 链接创建独立窗口，并在首次连接未知主机时展示指纹确认。
+//! 主要功能：提供链接目录和 SSH/SMB 链接表单模态框，并在首次连接未知主机时展示指纹确认。
 
 use std::ops::Range;
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, FontWeight, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Render, Subscription, Window, div, prelude::*, px,
-    rgb,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, Subscription, Window, div,
+    prelude::*, px, rgb,
 };
 
 use crate::app::{
@@ -33,8 +33,16 @@ use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 
 /// 新增目录窗口固定标题栏高度，和设置窗口保持一致。
 const CONNECTION_WINDOW_HEADER_HEIGHT: f32 = 56.0;
-/// 新增目录/链接窗口标题图标尺寸，匹配设置窗口标题视觉比例。
+/// 目录/链接模态框标题图标尺寸，匹配设置模态框标题视觉比例。
 const CONNECTION_WINDOW_TITLE_ICON_SIZE: f32 = 16.0;
+/// 目录表单模态框宽度，沿用改造前独立窗口尺寸。
+const CONNECTION_DIRECTORY_MODAL_WIDTH: f32 = 420.0;
+/// 目录表单模态框高度，沿用改造前独立窗口尺寸。
+const CONNECTION_DIRECTORY_MODAL_HEIGHT: f32 = 170.0;
+/// 链接表单模态框宽度，沿用改造前独立窗口尺寸。
+const CONNECTION_LINK_MODAL_WIDTH: f32 = 520.0;
+/// 链接表单模态框高度，沿用改造前独立窗口尺寸。
+const CONNECTION_LINK_MODAL_HEIGHT: f32 = 470.0;
 /// 主机指纹确认弹窗宽度。
 const HOST_KEY_DIALOG_WIDTH: f32 = 520.0;
 /// 主机指纹确认弹窗高度。
@@ -68,19 +76,19 @@ pub enum ConnectionLinkWindowMode {
     },
 }
 
-/// 目录表单独立窗口视图；表单状态保存在窗口本地，提交时写回主应用配置。
+/// 目录表单模态框子视图；表单状态保存在子视图内，提交时写回主应用配置。
 pub struct ConnectionDirectoryWindow {
     /// 主应用实体，提交和关闭状态同步都写回 `ArgusApp`。
     app: Entity<ArgusApp>,
-    /// 当前窗口使用的主题快照。
+    /// 当前模态框使用的主题快照。
     theme: AppTheme,
     /// 目录表单状态。
     form: ConnectionDirectoryFormState,
-    /// 当前窗口处于新增还是编辑模式。
+    /// 当前模态框处于新增还是编辑模式。
     mode: ConnectionDirectoryWindowMode,
-    /// 窗口根区域和输入框焦点句柄。
+    /// 模态框根区域和输入框焦点句柄。
     focus_handles: ConnectionDirectoryWindowFocusHandles,
-    /// 主应用状态订阅，主题切换后窗口跟随刷新。
+    /// 主应用状态订阅，主题切换后模态框跟随刷新。
     _app_observer: Subscription,
 }
 
@@ -94,15 +102,15 @@ struct ConnectionDirectoryWindowFocusHandles {
 }
 
 impl ConnectionDirectoryWindow {
-    /// 创建目录表单独立窗口。
+    /// 创建目录表单模态框子视图。
     ///
     /// 参数说明：
     /// - `app`：主应用实体。
     /// - `theme`：首次绘制使用的主题。
     /// - `form`：按当前选中目录推导出的初始表单。
-    /// - `cx`：窗口上下文，用于创建焦点句柄和订阅主应用变化。
+    /// - `cx`：子视图上下文，用于创建焦点句柄和订阅主应用变化。
     ///
-    /// 返回值：可渲染的新增目录窗口视图。
+    /// 返回值：可渲染的目录表单模态框子视图。
     pub fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
@@ -133,12 +141,12 @@ impl ConnectionDirectoryWindow {
         }
     }
 
-    /// 判断当前目录窗口是否为指定模式，用于重复点击按钮时决定置前还是替换表单。
+    /// 判断当前目录模态框是否为指定模式，用于重复点击按钮时决定是否替换表单。
     pub fn is_mode(&self, mode: ConnectionDirectoryWindowMode) -> bool {
         self.mode == mode
     }
 
-    /// 替换目录窗口表单和模式，供右键编辑入口复用已经打开的窗口。
+    /// 替换目录模态框表单和模式，供右键编辑入口复用已经打开的子视图。
     pub fn replace_form(
         &mut self,
         mut form: ConnectionDirectoryFormState,
@@ -173,7 +181,7 @@ impl ConnectionDirectoryWindow {
         }
     }
 
-    /// 处理目录窗口输入框键盘事件，并返回是否需要提交或关闭窗口。
+    /// 处理目录模态框输入事件，并返回是否需要提交或关闭模态框。
     fn handle_input_key(
         &mut self,
         target: ConnectionFormInputTarget,
@@ -242,7 +250,7 @@ impl ConnectionDirectoryWindow {
 }
 
 impl Render for ConnectionDirectoryWindow {
-    /// 渲染目录表单独立窗口主体。
+    /// 渲染目录表单模态框主体。
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_directory_window_content(
             self.app.clone(),
@@ -255,19 +263,19 @@ impl Render for ConnectionDirectoryWindow {
     }
 }
 
-/// SSH 链接表单独立窗口视图；表单状态保存在窗口本地，提交时写回主应用配置。
+/// 链接表单模态框子视图；表单状态保存在子视图内，提交时写回主应用配置。
 pub struct ConnectionLinkWindow {
     /// 主应用实体，提交和关闭状态同步都写回 `ArgusApp`。
     app: Entity<ArgusApp>,
-    /// 当前窗口使用的主题快照。
+    /// 当前模态框使用的主题快照。
     theme: AppTheme,
     /// SSH 链接表单状态。
     form: ConnectionLinkFormState,
-    /// 当前窗口处于新增还是编辑模式。
+    /// 当前模态框处于新增还是编辑模式。
     mode: ConnectionLinkWindowMode,
-    /// 窗口根区域和输入框焦点句柄。
+    /// 模态框根区域和输入框焦点句柄。
     focus_handles: ConnectionLinkWindowFocusHandles,
-    /// 主应用状态订阅，主题切换后窗口跟随刷新。
+    /// 主应用状态订阅，主题切换后模态框跟随刷新。
     _app_observer: Subscription,
 }
 
@@ -299,15 +307,15 @@ struct ConnectionLinkWindowFocusHandles {
 }
 
 impl ConnectionLinkWindow {
-    /// 创建 SSH 链接表单独立窗口。
+    /// 创建链接表单模态框子视图。
     ///
     /// 参数说明：
     /// - `app`：主应用实体。
     /// - `theme`：首次绘制使用的主题。
     /// - `form`：按当前选中目录推导出的初始表单。
-    /// - `cx`：窗口上下文，用于创建焦点句柄和订阅主应用变化。
+    /// - `cx`：子视图上下文，用于创建焦点句柄和订阅主应用变化。
     ///
-    /// 返回值：可渲染的新增 SSH 链接窗口视图。
+    /// 返回值：可渲染的链接表单模态框子视图。
     pub fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
@@ -347,17 +355,17 @@ impl ConnectionLinkWindow {
         }
     }
 
-    /// 判断当前链接窗口是否为指定模式，用于重复点击按钮时决定置前还是替换表单。
+    /// 判断当前链接模态框是否为指定模式，用于重复点击按钮时决定是否替换表单。
     pub fn is_mode(&self, mode: ConnectionLinkWindowMode) -> bool {
         self.mode == mode
     }
 
-    /// 返回当前链接窗口表单协议，用于重复打开不同协议表单时判断是否需要替换。
+    /// 返回当前链接模态框表单协议，用于重复打开不同协议表单时判断是否需要替换。
     pub fn link_kind(&self) -> ConnectionLinkKind {
         self.form.link_kind
     }
 
-    /// 替换链接窗口表单和模式，供右键编辑入口复用已经打开的窗口。
+    /// 替换链接模态框表单和模式，供右键编辑入口复用已经打开的子视图。
     pub fn replace_form(
         &mut self,
         mut form: ConnectionLinkFormState,
@@ -414,7 +422,7 @@ impl ConnectionLinkWindow {
         }
     }
 
-    /// 处理链接窗口输入框键盘事件，并返回是否需要提交或关闭窗口。
+    /// 处理链接模态框输入事件，并返回是否需要提交或关闭模态框。
     fn handle_input_key(
         &mut self,
         target: ConnectionFormInputTarget,
@@ -483,7 +491,7 @@ impl ConnectionLinkWindow {
 }
 
 impl Render for ConnectionLinkWindow {
-    /// 渲染 SSH 链接表单独立窗口主体。
+    /// 渲染链接表单模态框主体。
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_link_window_content(
             self.app.clone(),
@@ -496,7 +504,7 @@ impl Render for ConnectionLinkWindow {
     }
 }
 
-/// 独立窗口表单输入目标，目录和链接窗口共用输入处理函数。
+/// 模态框表单输入目标，目录和链接子视图共用输入处理函数。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectionFormInputTarget {
     /// 目录名称输入框。
@@ -532,7 +540,7 @@ enum ConnectionWindowInputAction {
     Changed,
     /// 提交当前表单。
     Submit,
-    /// 关闭当前窗口。
+    /// 关闭当前模态框。
     Close,
 }
 
@@ -574,7 +582,47 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     }
 }
 
-/// 渲染目录表单独立窗口内容。
+/// 将目录表单子视图包裹为主窗口模态框。
+pub fn render_connection_directory_modal(
+    modal: Entity<ConnectionDirectoryWindow>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    render_modal_dialog(
+        ModalDialog {
+            overlay_id: "connection-directory-modal-overlay",
+            container_id: "connection-directory-modal-container",
+            width: CONNECTION_DIRECTORY_MODAL_WIDTH,
+            height: CONNECTION_DIRECTORY_MODAL_HEIGHT,
+            content: modal.into_any_element(),
+        },
+        theme.clone(),
+        cx,
+    )
+    .into_any_element()
+}
+
+/// 将链接表单子视图包裹为主窗口模态框。
+pub fn render_connection_link_modal(
+    modal: Entity<ConnectionLinkWindow>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    render_modal_dialog(
+        ModalDialog {
+            overlay_id: "connection-link-modal-overlay",
+            container_id: "connection-link-modal-container",
+            width: CONNECTION_LINK_MODAL_WIDTH,
+            height: CONNECTION_LINK_MODAL_HEIGHT,
+            content: modal.into_any_element(),
+        },
+        theme.clone(),
+        cx,
+    )
+    .into_any_element()
+}
+
+/// 渲染目录表单模态框内容。
 fn render_directory_window_content(
     app_handle: Entity<ArgusApp>,
     window_entity: Entity<ConnectionDirectoryWindow>,
@@ -598,7 +646,11 @@ fn render_directory_window_content(
         .relative()
         .flex()
         .flex_col()
+        .rounded_lg()
+        .overflow_hidden()
         .bg(rgb(theme.content))
+        .border_1()
+        .border_color(rgb(theme.border))
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .occlude()
@@ -652,7 +704,7 @@ fn render_directory_window_content(
         )
 }
 
-/// 渲染 SSH 链接表单独立窗口内容。
+/// 渲染 SSH/SMB 链接表单模态框内容。
 fn render_link_window_content(
     app_handle: Entity<ArgusApp>,
     window_entity: Entity<ConnectionLinkWindow>,
@@ -694,7 +746,11 @@ fn render_link_window_content(
         .relative()
         .flex()
         .flex_col()
+        .rounded_lg()
+        .overflow_hidden()
         .bg(rgb(theme.content))
+        .border_1()
+        .border_color(rgb(theme.border))
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
         .occlude()
@@ -856,7 +912,7 @@ fn render_link_window_content(
         )
 }
 
-/// 渲染独立窗口标题栏；结构和设置窗口一致，不额外绘制分割线。
+/// 渲染模态框标题栏；结构和设置模态框一致，不额外绘制分割线。
 fn render_connection_window_header(
     title: &'static str,
     icon: ArgusIcon,
@@ -1170,7 +1226,7 @@ fn render_link_actions(
         ))
 }
 
-/// 渲染独立窗口操作按钮。
+/// 渲染模态框操作按钮。
 fn window_action_button(
     id: &'static str,
     icon: ArgusIcon,
@@ -1295,11 +1351,11 @@ fn handle_link_window_action(
     }
 }
 
-/// 提交目录窗口表单，成功后关闭窗口，失败则把错误留在当前表单上。
+/// 提交目录模态框表单，成功后关闭模态框，失败则把错误留在当前表单上。
 fn submit_directory_window(
     app_handle: &Entity<ArgusApp>,
     window_entity: &Entity<ConnectionDirectoryWindow>,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) {
     let (mode, form) = window_entity.read_with(cx, |window_state, _| {
@@ -1320,17 +1376,16 @@ fn submit_directory_window(
             update_connection_app(app_handle, cx, |app, _| {
                 app.finish_connection_directory_window()
             });
-            window.remove_window();
         }
         Err(message) => set_directory_window_error(window_entity, cx, message),
     }
 }
 
-/// 提交 SSH 链接窗口表单，成功后关闭窗口，失败则把错误留在当前表单上。
+/// 提交链接模态框表单，成功后关闭模态框，失败则把错误留在当前表单上。
 fn submit_link_window(
     app_handle: &Entity<ArgusApp>,
     window_entity: &Entity<ConnectionLinkWindow>,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) {
     let (mode, form) = window_entity.read_with(cx, |window_state, _| {
@@ -1349,24 +1404,21 @@ fn submit_link_window(
     match result {
         Ok(_) => {
             update_connection_app(app_handle, cx, |app, _| app.finish_connection_link_window());
-            window.remove_window();
         }
         Err(message) => set_link_window_error(window_entity, cx, message),
     }
 }
 
-/// 关闭目录窗口并同步主应用打开状态。
-fn close_directory_window(app_handle: &Entity<ArgusApp>, window: &mut Window, cx: &mut App) {
+/// 关闭目录模态框并同步主应用状态。
+fn close_directory_window(app_handle: &Entity<ArgusApp>, _window: &mut Window, cx: &mut App) {
     update_connection_app(app_handle, cx, |app, _| {
         app.close_connection_directory_window()
     });
-    window.remove_window();
 }
 
-/// 关闭 SSH 链接窗口并同步主应用打开状态。
-fn close_link_window(app_handle: &Entity<ArgusApp>, window: &mut Window, cx: &mut App) {
+/// 关闭链接模态框并同步主应用状态。
+fn close_link_window(app_handle: &Entity<ArgusApp>, _window: &mut Window, cx: &mut App) {
     update_connection_app(app_handle, cx, |app, _| app.close_connection_link_window());
-    window.remove_window();
 }
 
 /// 写入目录窗口校验错误。

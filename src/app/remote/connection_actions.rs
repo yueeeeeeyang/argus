@@ -1,12 +1,12 @@
 //! 文件职责：实现链接工作区的树操作、表单校验、输入框编辑和配置持久化。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-07-14
 //! 作者：Argus 开发团队
 //! 主要功能：让标题栏链接入口具备新增目录、新增 SSH 链接、过滤和点击打开终端能力。
 
 use std::ops::Range;
 
-use gpui::{AppContext, Bounds, Context, Keystroke, WindowBounds, WindowOptions, px, size};
+use gpui::{AppContext, Context, Keystroke};
 
 use crate::app::{
     AppTextInputTarget, ArgusApp, ConnectionDeletePromptState, ConnectionDialogState,
@@ -25,23 +25,6 @@ use crate::ui::connection_dialog::{
     ConnectionDirectoryWindow, ConnectionDirectoryWindowMode, ConnectionLinkWindow,
     ConnectionLinkWindowMode,
 };
-
-/// 目录表单独立窗口默认宽度。
-const CONNECTION_DIRECTORY_WINDOW_WIDTH: f32 = 420.0;
-/// 目录表单独立窗口默认高度；按一行输入和底部按钮收紧，避免窗口底部留白过大。
-const CONNECTION_DIRECTORY_WINDOW_HEIGHT: f32 = 170.0;
-/// 目录表单独立窗口最小宽度。
-const CONNECTION_DIRECTORY_WINDOW_MIN_WIDTH: f32 = 360.0;
-/// 目录表单独立窗口最小高度。
-const CONNECTION_DIRECTORY_WINDOW_MIN_HEIGHT: f32 = 150.0;
-/// SSH 链接表单独立窗口默认宽度。
-const CONNECTION_LINK_WINDOW_WIDTH: f32 = 520.0;
-/// 链接表单独立窗口默认高度；兼容 SSH/SMB 表单行数并减少底部空白。
-const CONNECTION_LINK_WINDOW_HEIGHT: f32 = 470.0;
-/// SSH 链接表单独立窗口最小宽度。
-const CONNECTION_LINK_WINDOW_MIN_WIDTH: f32 = 460.0;
-/// 链接表单独立窗口最小高度。
-const CONNECTION_LINK_WINDOW_MIN_HEIGHT: f32 = 420.0;
 
 impl ArgusApp {
     /// 返回当前链接树是否处于过滤模式。
@@ -124,10 +107,10 @@ impl ArgusApp {
         self.placeholder_notice = "已切换链接目录展开状态".to_string();
     }
 
-    /// 打开新增目录独立窗口，父目录根据当前选中节点推导。
+    /// 打开新增目录模态框，父目录根据当前选中节点推导。
     ///
     /// 参数说明：
-    /// - `cx`：主应用上下文，用于创建或激活独立窗口。
+    /// - `cx`：主应用上下文，用于创建或更新模态框子视图。
     pub fn open_new_connection_directory_dialog(&mut self, cx: &mut Context<Self>) {
         let parent_id = self
             .config
@@ -139,28 +122,16 @@ impl ArgusApp {
             error_message: None,
         };
 
-        if self.is_connection_directory_window_open {
-            if let Some(window_handle) = self.connection_directory_window_handle.clone()
-                && window_handle
-                    .update(cx, |window_state, window, cx| {
-                        if !window_state.is_mode(ConnectionDirectoryWindowMode::Create) {
-                            window_state.replace_form(
-                                initial_form.clone(),
-                                ConnectionDirectoryWindowMode::Create,
-                            );
-                            cx.notify();
-                        }
-                        window.activate_window();
-                    })
-                    .is_ok()
-            {
-                self.placeholder_notice = "新增目录窗口已显示到最前".to_string();
-                return;
-            }
-
-            // 句柄失效表示窗口可能已被系统关闭，清理后重新创建。
-            self.is_connection_directory_window_open = false;
-            self.connection_directory_window_handle = None;
+        if let Some(modal) = self.connection_directory_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                if !modal_state.is_mode(ConnectionDirectoryWindowMode::Create) {
+                    modal_state
+                        .replace_form(initial_form.clone(), ConnectionDirectoryWindowMode::Create);
+                    cx.notify();
+                }
+            });
+            self.placeholder_notice = "新增目录模态框已打开".to_string();
+            return;
         }
 
         self.open_connection_directory_window_with_form(
@@ -170,10 +141,10 @@ impl ArgusApp {
         );
     }
 
-    /// 打开新增 SSH 链接独立窗口，父目录根据当前选中节点推导。
+    /// 打开新增 SSH 链接模态框，父目录根据当前选中节点推导。
     ///
     /// 参数说明：
-    /// - `cx`：主应用上下文，用于创建或激活独立窗口。
+    /// - `cx`：主应用上下文，用于创建或更新模态框子视图。
     pub fn open_new_ssh_link_dialog(&mut self, cx: &mut Context<Self>) {
         let parent_id = self
             .config
@@ -195,30 +166,18 @@ impl ArgusApp {
             error_message: None,
         };
 
-        if self.is_connection_link_window_open {
-            if let Some(window_handle) = self.connection_link_window_handle.clone()
-                && window_handle
-                    .update(cx, |window_state, window, cx| {
-                        if !window_state.is_mode(ConnectionLinkWindowMode::Create)
-                            || window_state.link_kind() != ConnectionLinkKind::Ssh
-                        {
-                            window_state.replace_form(
-                                initial_form.clone(),
-                                ConnectionLinkWindowMode::Create,
-                            );
-                            cx.notify();
-                        }
-                        window.activate_window();
-                    })
-                    .is_ok()
-            {
-                self.placeholder_notice = "新增链接窗口已显示到最前".to_string();
-                return;
-            }
-
-            // 句柄失效表示窗口可能已被系统关闭，清理后重新创建。
-            self.is_connection_link_window_open = false;
-            self.connection_link_window_handle = None;
+        if let Some(modal) = self.connection_link_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                if !modal_state.is_mode(ConnectionLinkWindowMode::Create)
+                    || modal_state.link_kind() != ConnectionLinkKind::Ssh
+                {
+                    modal_state
+                        .replace_form(initial_form.clone(), ConnectionLinkWindowMode::Create);
+                    cx.notify();
+                }
+            });
+            self.placeholder_notice = "新增链接模态框已打开".to_string();
+            return;
         }
 
         self.open_connection_link_window_with_form(
@@ -228,7 +187,7 @@ impl ArgusApp {
         );
     }
 
-    /// 打开新增 SMB 链接独立窗口，父目录根据当前选中节点推导。
+    /// 打开新增 SMB 链接模态框，父目录根据当前选中节点推导。
     pub fn open_new_smb_link_dialog(&mut self, cx: &mut Context<Self>) {
         let parent_id = self
             .config
@@ -250,29 +209,18 @@ impl ArgusApp {
             error_message: None,
         };
 
-        if self.is_connection_link_window_open {
-            if let Some(window_handle) = self.connection_link_window_handle.clone()
-                && window_handle
-                    .update(cx, |window_state, window, cx| {
-                        if !window_state.is_mode(ConnectionLinkWindowMode::Create)
-                            || window_state.link_kind() != ConnectionLinkKind::Smb
-                        {
-                            window_state.replace_form(
-                                initial_form.clone(),
-                                ConnectionLinkWindowMode::Create,
-                            );
-                            cx.notify();
-                        }
-                        window.activate_window();
-                    })
-                    .is_ok()
-            {
-                self.placeholder_notice = "新增链接窗口已显示到最前".to_string();
-                return;
-            }
-
-            self.is_connection_link_window_open = false;
-            self.connection_link_window_handle = None;
+        if let Some(modal) = self.connection_link_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                if !modal_state.is_mode(ConnectionLinkWindowMode::Create)
+                    || modal_state.link_kind() != ConnectionLinkKind::Smb
+                {
+                    modal_state
+                        .replace_form(initial_form.clone(), ConnectionLinkWindowMode::Create);
+                    cx.notify();
+                }
+            });
+            self.placeholder_notice = "新增链接模态框已打开".to_string();
+            return;
         }
 
         self.open_connection_link_window_with_form(
@@ -282,33 +230,29 @@ impl ArgusApp {
         );
     }
 
-    /// 清理目录表单独立窗口状态；关闭按钮、取消按钮和提交成功后统一调用。
+    /// 清理目录表单模态框状态；关闭按钮、取消按钮和提交成功后统一调用。
     pub fn close_connection_directory_window(&mut self) {
-        self.is_connection_directory_window_open = false;
-        self.connection_directory_window_handle = None;
-        self.placeholder_notice = "已关闭目录窗口".to_string();
+        self.connection_directory_modal = None;
+        self.placeholder_notice = "已关闭目录模态框".to_string();
     }
 
-    /// 目录创建或编辑成功后清理窗口句柄，不覆盖成功提示。
+    /// 目录创建或编辑成功后清理模态框实体，不覆盖成功提示。
     pub fn finish_connection_directory_window(&mut self) {
-        self.is_connection_directory_window_open = false;
-        self.connection_directory_window_handle = None;
+        self.connection_directory_modal = None;
     }
 
-    /// 清理 SSH 链接表单独立窗口状态；关闭按钮、取消按钮和提交成功后统一调用。
+    /// 清理链接表单模态框状态；关闭按钮、取消按钮和提交成功后统一调用。
     pub fn close_connection_link_window(&mut self) {
-        self.is_connection_link_window_open = false;
-        self.connection_link_window_handle = None;
-        self.placeholder_notice = "已关闭链接窗口".to_string();
+        self.connection_link_modal = None;
+        self.placeholder_notice = "已关闭链接模态框".to_string();
     }
 
-    /// SSH 链接创建或编辑成功后清理窗口句柄，不覆盖成功提示。
+    /// 链接创建或编辑成功后清理模态框实体，不覆盖成功提示。
     pub fn finish_connection_link_window(&mut self) {
-        self.is_connection_link_window_open = false;
-        self.connection_link_window_handle = None;
+        self.connection_link_modal = None;
     }
 
-    /// 打开连接节点编辑窗口；目录和 SSH 链接会按节点类型复用对应表单窗口。
+    /// 打开连接节点编辑模态框；目录、SSH 和 SMB 链接按节点类型复用对应表单。
     pub fn open_edit_connection_node_window(
         &mut self,
         node_id: ConnectionNodeId,
@@ -327,7 +271,7 @@ impl ArgusApp {
         }
     }
 
-    /// 打开编辑目录独立窗口。
+    /// 打开编辑目录模态框。
     fn open_edit_connection_directory_window(
         &mut self,
         directory_id: ConnectionNodeId,
@@ -344,27 +288,19 @@ impl ArgusApp {
         };
         let mode = ConnectionDirectoryWindowMode::Edit { directory_id };
 
-        if self.is_connection_directory_window_open {
-            if let Some(window_handle) = self.connection_directory_window_handle.clone()
-                && window_handle
-                    .update(cx, |window_state, window, cx| {
-                        window_state.replace_form(initial_form.clone(), mode);
-                        window.activate_window();
-                        cx.notify();
-                    })
-                    .is_ok()
-            {
-                self.placeholder_notice = "已打开目录编辑窗口".to_string();
-                return;
-            }
-            self.is_connection_directory_window_open = false;
-            self.connection_directory_window_handle = None;
+        if let Some(modal) = self.connection_directory_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                modal_state.replace_form(initial_form.clone(), mode);
+                cx.notify();
+            });
+            self.placeholder_notice = "已打开目录编辑模态框".to_string();
+            return;
         }
 
         self.open_connection_directory_window_with_form(initial_form, mode, cx);
     }
 
-    /// 打开编辑 SSH 链接独立窗口。
+    /// 打开编辑 SSH 链接模态框。
     fn open_edit_ssh_link_window(&mut self, link_id: ConnectionNodeId, cx: &mut Context<Self>) {
         let Some(link) = self.config.connections.link(link_id).cloned() else {
             self.placeholder_notice = "未找到可编辑的 SSH 链接".to_string();
@@ -395,27 +331,19 @@ impl ArgusApp {
         };
         let mode = ConnectionLinkWindowMode::Edit { link_id };
 
-        if self.is_connection_link_window_open {
-            if let Some(window_handle) = self.connection_link_window_handle.clone()
-                && window_handle
-                    .update(cx, |window_state, window, cx| {
-                        window_state.replace_form(initial_form.clone(), mode);
-                        window.activate_window();
-                        cx.notify();
-                    })
-                    .is_ok()
-            {
-                self.placeholder_notice = "已打开链接编辑窗口".to_string();
-                return;
-            }
-            self.is_connection_link_window_open = false;
-            self.connection_link_window_handle = None;
+        if let Some(modal) = self.connection_link_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                modal_state.replace_form(initial_form.clone(), mode);
+                cx.notify();
+            });
+            self.placeholder_notice = "已打开链接编辑模态框".to_string();
+            return;
         }
 
         self.open_connection_link_window_with_form(initial_form, mode, cx);
     }
 
-    /// 打开编辑 SMB 链接独立窗口。
+    /// 打开编辑 SMB 链接模态框。
     fn open_edit_smb_link_window(&mut self, link_id: ConnectionNodeId, cx: &mut Context<Self>) {
         let Some(link) = self.config.connections.link(link_id).cloned() else {
             self.placeholder_notice = "未找到可编辑的 SMB 链接".to_string();
@@ -442,27 +370,19 @@ impl ArgusApp {
         };
         let mode = ConnectionLinkWindowMode::Edit { link_id };
 
-        if self.is_connection_link_window_open {
-            if let Some(window_handle) = self.connection_link_window_handle.clone()
-                && window_handle
-                    .update(cx, |window_state, window, cx| {
-                        window_state.replace_form(initial_form.clone(), mode);
-                        window.activate_window();
-                        cx.notify();
-                    })
-                    .is_ok()
-            {
-                self.placeholder_notice = "已打开链接编辑窗口".to_string();
-                return;
-            }
-            self.is_connection_link_window_open = false;
-            self.connection_link_window_handle = None;
+        if let Some(modal) = self.connection_link_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                modal_state.replace_form(initial_form.clone(), mode);
+                cx.notify();
+            });
+            self.placeholder_notice = "已打开链接编辑模态框".to_string();
+            return;
         }
 
         self.open_connection_link_window_with_form(initial_form, mode, cx);
     }
 
-    /// 使用指定表单打开目录窗口，供编辑入口复用创建窗口参数。
+    /// 使用指定表单打开目录模态框，供新增和编辑入口复用。
     fn open_connection_directory_window_with_form(
         &mut self,
         initial_form: ConnectionDirectoryFormState,
@@ -471,47 +391,17 @@ impl ArgusApp {
     ) {
         let app_entity = cx.entity();
         let initial_theme = self.theme.clone();
-        let bounds = Bounds::centered(
-            None,
-            size(
-                px(CONNECTION_DIRECTORY_WINDOW_WIDTH),
-                px(CONNECTION_DIRECTORY_WINDOW_HEIGHT),
-            ),
-            cx,
-        );
-        let window_options = WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(
-                px(CONNECTION_DIRECTORY_WINDOW_MIN_WIDTH),
-                px(CONNECTION_DIRECTORY_WINDOW_MIN_HEIGHT),
-            )),
-            ..Default::default()
-        };
-
-        self.is_connection_directory_window_open = true;
         self.placeholder_notice = match mode {
             ConnectionDirectoryWindowMode::Create => "请输入链接目录名称".to_string(),
             ConnectionDirectoryWindowMode::Edit { .. } => "请编辑链接目录名称".to_string(),
         };
 
-        match cx.open_window(window_options, move |_, cx| {
-            cx.new(|cx| {
-                ConnectionDirectoryWindow::new(app_entity, initial_theme, initial_form, mode, cx)
-            })
-        }) {
-            Ok(window_handle) => {
-                self.connection_directory_window_handle = Some(window_handle);
-            }
-            Err(error) => {
-                self.is_connection_directory_window_open = false;
-                self.connection_directory_window_handle = None;
-                self.placeholder_notice = format!("打开目录窗口失败：{error}");
-            }
-        }
+        self.connection_directory_modal = Some(cx.new(|cx| {
+            ConnectionDirectoryWindow::new(app_entity, initial_theme, initial_form, mode, cx)
+        }));
     }
 
-    /// 使用指定表单打开 SSH 链接窗口，供编辑入口复用创建窗口参数。
+    /// 使用指定表单打开链接模态框，供 SSH、SMB 的新增和编辑入口复用。
     fn open_connection_link_window_with_form(
         &mut self,
         initial_form: ConnectionLinkFormState,
@@ -520,25 +410,6 @@ impl ArgusApp {
     ) {
         let app_entity = cx.entity();
         let initial_theme = self.theme.clone();
-        let bounds = Bounds::centered(
-            None,
-            size(
-                px(CONNECTION_LINK_WINDOW_WIDTH),
-                px(CONNECTION_LINK_WINDOW_HEIGHT),
-            ),
-            cx,
-        );
-        let window_options = WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(
-                px(CONNECTION_LINK_WINDOW_MIN_WIDTH),
-                px(CONNECTION_LINK_WINDOW_MIN_HEIGHT),
-            )),
-            ..Default::default()
-        };
-
-        self.is_connection_link_window_open = true;
         let protocol_label = match initial_form.link_kind {
             ConnectionLinkKind::Ssh => "SSH",
             ConnectionLinkKind::Smb => "SMB",
@@ -548,20 +419,9 @@ impl ArgusApp {
             ConnectionLinkWindowMode::Edit { .. } => format!("请编辑 {protocol_label} 链接信息"),
         };
 
-        match cx.open_window(window_options, move |_, cx| {
-            cx.new(|cx| {
-                ConnectionLinkWindow::new(app_entity, initial_theme, initial_form, mode, cx)
-            })
-        }) {
-            Ok(window_handle) => {
-                self.connection_link_window_handle = Some(window_handle);
-            }
-            Err(error) => {
-                self.is_connection_link_window_open = false;
-                self.connection_link_window_handle = None;
-                self.placeholder_notice = format!("打开链接窗口失败：{error}");
-            }
-        }
+        self.connection_link_modal = Some(cx.new(|cx| {
+            ConnectionLinkWindow::new(app_entity, initial_theme, initial_form, mode, cx)
+        }));
     }
 
     /// 关闭当前链接工作区弹窗。
@@ -907,7 +767,7 @@ impl ArgusApp {
         }
     }
 
-    /// 校验并创建链接目录，供独立窗口和兼容弹窗共同复用。
+    /// 校验并创建链接目录，供表单模态框和兼容弹窗共同复用。
     pub fn create_connection_directory_from_form(
         &mut self,
         form: ConnectionDirectoryFormState,
@@ -930,7 +790,7 @@ impl ArgusApp {
         Ok(directory_id)
     }
 
-    /// 校验并创建 SSH 链接，供独立窗口和兼容弹窗共同复用。
+    /// 校验并创建链接，按表单协议分派给 SSH 或 SMB 创建逻辑。
     pub fn create_connection_link_from_form(
         &mut self,
         form: ConnectionLinkFormState,
@@ -941,7 +801,7 @@ impl ArgusApp {
         }
     }
 
-    /// 校验并创建 SSH 链接，供独立窗口和兼容弹窗共同复用。
+    /// 校验并创建 SSH 链接，供表单模态框和兼容弹窗共同复用。
     pub fn create_ssh_link_from_form(
         &mut self,
         form: ConnectionLinkFormState,
@@ -972,7 +832,7 @@ impl ArgusApp {
         Ok(link_id)
     }
 
-    /// 校验并创建 SMB 链接，供独立窗口和兼容弹窗共同复用。
+    /// 校验并创建 SMB 链接，供表单模态框和兼容弹窗共同复用。
     pub fn create_smb_link_from_form(
         &mut self,
         form: ConnectionLinkFormState,
