@@ -1,8 +1,8 @@
 //! 文件职责：封装主窗口自定义标题栏与操作系统原生窗口拖动行为。
 //! 创建日期：2026-07-14
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：在 macOS 上关闭透明内容视图的全区域原生拖动，并仅从显式空白区发起窗口拖动。
+//! 主要功能：按平台协调透明标题栏命中、系统窗口拖动和重复点击行为，并显式驱动 Windows HWND 移动。
 
 use gpui::Window;
 
@@ -23,9 +23,9 @@ pub(crate) fn configure_main_window(
     macos::configure_main_window(window, titlebar_height, native_control_safe_width)
 }
 
-/// 非 macOS 平台由 GPUI 的 `WindowControlArea::Drag` 处理命中，无需额外配置。
+/// 非 macOS 平台无需调整原生内容视图。
 #[cfg(not(target_os = "macos"))]
-pub fn configure_main_window(
+pub(crate) fn configure_main_window(
     _window: &Window,
     _titlebar_height: f32,
     _native_control_safe_width: f32,
@@ -38,16 +38,60 @@ pub fn configure_main_window(
 /// 参数说明：
 /// - `window`：当前 GPUI 主窗口。
 ///
-/// macOS 使用当前原生鼠标按下事件调用 Window Server；其他平台继续使用 GPUI 的
-/// `WindowControlArea::Drag`，因此该函数为空操作。
+/// macOS 使用当前原生鼠标按下事件调用 Window Server；Windows 向当前 HWND 发送原生
+/// 标题栏拖动消息；Linux/BSD 请求合成器开始移动。
 #[cfg(target_os = "macos")]
 pub(crate) fn start_window_drag(window: &Window) {
     macos::start_window_drag(window);
 }
 
-/// 非 macOS 平台的窗口拖动由 GPUI 原生窗口控制区负责。
-#[cfg(not(target_os = "macos"))]
-pub fn start_window_drag(_window: &Window) {}
+/// Windows 直接向当前 HWND 发送标题栏按下消息，绕过 GPUI 0.2.2 尚未实现的移动 API。
+#[cfg(target_os = "windows")]
+pub(crate) fn start_window_drag(window: &Window) {
+    windows::start_window_drag(window);
+}
+
+/// Linux/BSD 的客户端标题栏需要显式请求窗口系统开始移动。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn start_window_drag(window: &Window) {
+    window.start_window_move();
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use gpui::Window;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::{
+        Foundation::HWND,
+        UI::{
+            Input::KeyboardAndMouse::ReleaseCapture,
+            WindowsAndMessaging::{HTCAPTION, SendMessageW, WM_NCLBUTTONDOWN},
+        },
+    };
+
+    /// 释放当前鼠标捕获并让 Windows 进入标准标题栏移动循环。
+    ///
+    /// 参数说明：
+    /// - `window`：当前 GPUI 主窗口，用于取得精确的 Win32 HWND。
+    ///
+    /// 说明：GPUI 0.2.2 的 Windows `start_window_move` 是空实现，透明标题栏的
+    /// `WindowControlArea::Drag` 在部分环境也不会进入系统移动循环，因此这里直接复用
+    /// Win32 客户端自绘标题栏的标准做法。
+    pub(super) fn start_window_drag(window: &Window) {
+        let Ok(window_handle) = HasWindowHandle::window_handle(window) else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
+            return;
+        };
+        let hwnd = handle.hwnd.get() as HWND;
+
+        unsafe {
+            let _ = ReleaseCapture();
+            let _ = SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod macos {
