@@ -285,13 +285,13 @@ fn render_source_search_toolbar(
             Input {
                 id: "source-tree-search-input",
                 placeholder: "过滤已加载日志",
-                value: app.source_tree_search_query.clone(),
+                value: app.source_tree_search_input.value.clone(),
                 is_disabled: false,
-                is_focused: app.is_source_tree_search_focused,
-                cursor_index: app.source_tree_search_cursor,
+                is_focused: app.source_tree_search_input.is_focused,
+                cursor_index: app.source_tree_search_input.cursor,
                 selection_range: app.source_tree_search_selection_range(),
-                marked_range: app.source_tree_search_marked_range.clone(),
-                is_pointer_selecting: app.source_tree_search_selection_drag.is_some(),
+                marked_range: app.source_tree_search_input.marked_range.clone(),
+                is_pointer_selecting: app.source_tree_search_input.selection_drag.is_some(),
                 is_secret: false,
                 size: InputSize::Compact,
                 leading_accessory: Some(InputAccessory {
@@ -432,12 +432,8 @@ fn render_connection_search_toolbar(
 }
 
 /// 返回输入框规范化后的非空选区。
-fn input_selection_range(input: &crate::app::SettingsTextInputState) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+fn input_selection_range(input: &crate::app::TextInputState) -> Option<Range<usize>> {
+    input.selection_range()
 }
 
 /// 渲染内容区常规小型工具按钮，统一更新应用状态提示。

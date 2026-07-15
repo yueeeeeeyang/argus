@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：解析运行期请求耗时日志，按请求地址合并统计并保留请求 SQL 明细。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -16,13 +16,13 @@ use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::{ArchiveFormat, ArchivePasswordKey, ArchivePasswordStore};
-use crate::loader::{
-    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceLocation, SourceTreeNode,
-};
+use crate::loader::{SourceId, SourceLocation, SourceTreeNode};
 use crate::reader::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
 use crate::reader::stream_backend::ArchiveStreamBackend;
 use crate::utils::path::normalize_archive_entry_path;
 use zip::ZipArchive;
+
+use super::source_input::{collect_analysis_files, resolve_analysis_location};
 
 /// Runtime 请求日志慢 SQL 判断比例；SQL 累积耗时超过请求总耗时 90% 即认为该请求慢。
 const SLOW_SQL_REQUEST_PERCENT: u64 = 90;
@@ -1113,80 +1113,23 @@ fn collect_runtime_log_files(
     root: &Path,
     loader_config: &LoaderConfig,
 ) -> Result<Vec<RuntimeAnalysisTarget>> {
-    if !root.is_dir() {
-        bail!("{} 不是本地目录", root.display());
-    }
-
-    let mut paths = Vec::new();
-    let mut visited_dirs = BTreeSet::new();
-    collect_runtime_log_file_paths(
-        root,
-        loader_config.follow_symlinks,
-        &mut visited_dirs,
-        &mut paths,
-    )?;
-    paths.sort();
-
-    Ok(paths
-        .into_iter()
-        .filter_map(|path| {
-            let label = path.file_name()?.to_string_lossy().to_string();
-            Some(RuntimeAnalysisTarget {
-                source_id,
-                location: SourceLocation::LocalPath(path.clone()),
-                archive_probe_node: None,
-                label,
-                path: path.display().to_string(),
-                kind: RuntimeAnalysisTargetKind::File,
-                archive_passwords: ArchivePasswordStore::default(),
+    Ok(
+        collect_analysis_files(root, loader_config.follow_symlinks, has_log_extension)?
+            .into_iter()
+            .filter_map(|path| {
+                let label = path.file_name()?.to_string_lossy().to_string();
+                Some(RuntimeAnalysisTarget {
+                    source_id,
+                    location: SourceLocation::LocalPath(path.clone()),
+                    archive_probe_node: None,
+                    label,
+                    path: path.display().to_string(),
+                    kind: RuntimeAnalysisTargetKind::File,
+                    archive_passwords: ArchivePasswordStore::default(),
+                })
             })
-        })
-        .collect())
-}
-
-/// 深度优先收集 `.log` 文件；符号链接策略与来源加载配置保持一致。
-fn collect_runtime_log_file_paths(
-    dir: &Path,
-    follow_symlinks: bool,
-    visited_dirs: &mut BTreeSet<PathBuf>,
-    paths: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let canonical_dir = fs::canonicalize(dir)
-        .with_context(|| format!("无法解析目录真实路径：{}", dir.display()))?;
-    if !visited_dirs.insert(canonical_dir) {
-        return Ok(());
-    }
-
-    let mut entries = fs::read_dir(dir)
-        .with_context(|| format!("无法读取目录：{}", dir.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .with_context(|| format!("无法遍历目录：{}", dir.display()))?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let link_metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("无法读取文件元数据：{}", path.display()))?;
-        let is_symlink = link_metadata.file_type().is_symlink();
-        if is_symlink && !follow_symlinks {
-            continue;
-        }
-
-        let metadata = if is_symlink && follow_symlinks {
-            fs::metadata(&path)
-        } else {
-            Ok(link_metadata)
-        }
-        .with_context(|| format!("无法读取文件元数据：{}", path.display()))?;
-
-        if metadata.is_dir() {
-            collect_runtime_log_file_paths(&path, follow_symlinks, visited_dirs, paths)?;
-        } else if metadata.is_file() && has_log_extension(&path) {
-            paths.push(path);
-        }
-    }
-
-    Ok(())
+            .collect(),
+    )
 }
 
 /// 判断路径是否是 `.log` 文件，大小写不敏感。
@@ -1743,22 +1686,13 @@ fn resolve_runtime_target_location(
     target: &RuntimeAnalysisTarget,
     loader_config: &LoaderConfig,
 ) -> Result<SourceLocation> {
-    let Some(node) = target.archive_probe_node.clone() else {
-        return Ok(target.location.clone());
-    };
-
-    let probe_result = LogSourceLoader::new(loader_config.clone())
-        .with_archive_passwords(target.archive_passwords.clone())
-        .probe_archive_nodes(vec![SourceArchiveProbeRequest {
-            source_id: target.source_id,
-            node,
-        }])
-        .into_iter()
-        .next()
-        .and_then(|result| result.patch)
-        .ok_or_else(|| anyhow!("压缩包根层不是单文件日志，请展开后选择具体日志条目"))?;
-
-    Ok(probe_result.location)
+    resolve_analysis_location(
+        target.source_id,
+        &target.location,
+        target.archive_probe_node.as_ref(),
+        &target.archive_passwords,
+        loader_config,
+    )
 }
 
 /// 从文件名中解析请求元信息。

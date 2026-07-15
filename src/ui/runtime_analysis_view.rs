@@ -27,7 +27,7 @@ use crate::app::{
     RuntimeSortDirection, RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey,
     RuntimeSqlFrequencyDetailRowsCache, RuntimeSqlIndicesCache, RuntimeSqlSortKey,
     RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummaryRowsCache, RuntimeSummarySortKey,
-    RuntimeTableCellSelection, SettingsTextInputState,
+    RuntimeTableCellSelection, TextInputState,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::infra::perf::PerfSpan;
@@ -703,10 +703,10 @@ mod tests {
             request_sort_direction: RuntimeSortDirection::Descending,
             sql_sort_key: RuntimeSqlSortKey::ExecuteDuration,
             sql_sort_direction: RuntimeSortDirection::Descending,
-            filter_keyword_input: SettingsTextInputState::default(),
-            filter_username_input: SettingsTextInputState::default(),
-            filter_start_time_input: SettingsTextInputState::default(),
-            filter_end_time_input: SettingsTextInputState::default(),
+            filter_keyword_input: TextInputState::default(),
+            filter_username_input: TextInputState::default(),
+            filter_start_time_input: TextInputState::default(),
+            filter_end_time_input: TextInputState::default(),
             applied_filter_keyword: String::new(),
             applied_filter_username: String::new(),
             applied_filter_start_time: String::new(),
@@ -1068,7 +1068,7 @@ mod tests {
     /// 验证时间选择器展示值与过滤输入框解析口径保持一致。
     #[test]
     fn runtime_datetime_picker_value_reads_filter_input() {
-        let input = SettingsTextInputState::from_value("2026-06-25 14:25:03".to_string());
+        let input = TextInputState::from_value("2026-06-25 14:25:03".to_string());
 
         let value = runtime_datetime_picker_value(&input, false);
 

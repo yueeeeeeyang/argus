@@ -384,7 +384,14 @@ pub(crate) fn merge_log_line_highlights(
 
     for span in syntax_spans {
         let syntax_style = HighlightStyle {
-            color: Some(rgb(color_for_highlight_token(span.kind, theme)).into()),
+            color: Some(
+                rgb(crate::ui::highlight_colors::color_for_highlight_token(
+                    span.kind,
+                    theme,
+                    crate::ui::highlight_colors::HighlightColorContext::Log,
+                ))
+                .into(),
+            ),
             ..Default::default()
         };
 
@@ -535,34 +542,6 @@ pub(crate) fn subtract_single_range(
 /// 判断两个半开区间是否重叠。
 pub(crate) fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start < right.end && right.start < left.end
-}
-
-/// 根据高亮 token 返回当前主题下的显示颜色。
-pub(crate) fn color_for_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
-    match kind {
-        HighlightTokenKind::Trace => theme.foreground_muted,
-        HighlightTokenKind::Debug => theme.debug,
-        HighlightTokenKind::Info => theme.info,
-        HighlightTokenKind::Warning => theme.warning,
-        HighlightTokenKind::Error | HighlightTokenKind::Fatal => theme.error,
-        HighlightTokenKind::Timestamp => theme.syntax.timestamp,
-        HighlightTokenKind::Comment => theme.syntax.comment,
-        HighlightTokenKind::Key => theme.syntax.key,
-        HighlightTokenKind::Value => theme.syntax.string,
-        HighlightTokenKind::String => theme.syntax.string,
-        HighlightTokenKind::Number => theme.syntax.number,
-        HighlightTokenKind::Boolean => theme.syntax.boolean,
-        HighlightTokenKind::Punctuation => theme.syntax.punctuation,
-        HighlightTokenKind::Tag => theme.syntax.tag,
-        HighlightTokenKind::Attribute => theme.syntax.attribute,
-        HighlightTokenKind::ThreadName => theme.syntax.thread,
-        HighlightTokenKind::ThreadState => theme.warning,
-        HighlightTokenKind::StackClass => theme.syntax.class,
-        HighlightTokenKind::StackMethod => theme.syntax.method,
-        HighlightTokenKind::StackLocation => theme.foreground_muted,
-        HighlightTokenKind::Lock => theme.syntax.lock,
-        HighlightTokenKind::Exception => theme.syntax.exception,
-    }
 }
 
 /// 构造搜索结果行预览；长行只截取命中附近文本，避免列表滚动时处理整条超长日志。

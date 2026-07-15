@@ -5,24 +5,21 @@
 //! 主要功能：使用内嵌 ssh2 通道建立远程 shell，并把后台输出安全回传给 GPUI 状态。
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::ops::Range;
-use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use async_channel::{Receiver, Sender};
-use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use gpui::ScrollHandle;
-use ssh2::{HashType, Session};
 
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, word_range_at,
 };
 use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId, SshLinkConfig};
+use crate::remote::ssh::{authenticate_ssh_session, connect_ssh_session};
 
 /// 终端默认行数。
 pub(crate) const DEFAULT_TERMINAL_ROWS: u16 = 30;
@@ -888,17 +885,9 @@ fn run_ssh_worker(
     command_receiver: mpsc::Receiver<TerminalCommand>,
     event_sender: Sender<TerminalEvent>,
 ) -> Result<()> {
-    let tcp = TcpStream::connect((request.ssh.host.as_str(), request.ssh.port))
-        .with_context(|| format!("无法连接到 {}:{}", request.ssh.host, request.ssh.port))?;
-    tcp.set_nodelay(true).ok();
-
-    let mut session = Session::new().context("无法创建 SSH 会话")?;
-    session.set_tcp_stream(tcp);
-    session.handshake().context("SSH 握手失败")?;
-
-    let fingerprint = sha256_fingerprint(&session).context("无法获取 SSH 主机指纹")?;
+    let (session, fingerprint) = connect_ssh_session(&request.ssh)?;
     let pty_size = verify_host_key(&request, &command_receiver, &event_sender, &fingerprint)?;
-    authenticate(&session, &request.ssh)?;
+    authenticate_ssh_session(&session, &request.ssh)?;
 
     let mut channel = session
         .channel_session()
@@ -972,14 +961,6 @@ fn run_ssh_worker(
     Ok(())
 }
 
-/// 生成 libssh2 握手后返回的 SHA256 主机指纹文本。
-fn sha256_fingerprint(session: &Session) -> Result<String> {
-    let hash = session
-        .host_key_hash(HashType::Sha256)
-        .ok_or_else(|| anyhow!("服务器未返回 SHA256 主机指纹"))?;
-    Ok(format!("SHA256:{}", STANDARD_NO_PAD.encode(hash)))
-}
-
 /// 校验主机指纹；未知主机需要等待 UI 发送确认或拒绝命令。
 fn verify_host_key(
     request: &TerminalWorkerRequest,
@@ -1021,35 +1002,6 @@ fn verify_host_key(
                 }
             }
         }
-    }
-}
-
-/// 按“私钥优先、密码兜底”的顺序执行 SSH 鉴权。
-fn authenticate(session: &Session, ssh: &SshLinkConfig) -> Result<()> {
-    let mut auth_errors = Vec::new();
-    if let Some(private_key_path) = ssh.private_key_path.as_deref() {
-        let passphrase = ssh.private_key_passphrase.as_deref();
-        if let Err(error) = session.userauth_pubkey_file(
-            &ssh.username,
-            None,
-            Path::new(private_key_path),
-            passphrase,
-        ) {
-            auth_errors.push(format!("私钥鉴权失败：{error}"));
-        }
-    }
-    if !session.authenticated()
-        && !ssh.password.is_empty()
-        && let Err(error) = session.userauth_password(&ssh.username, &ssh.password)
-    {
-        auth_errors.push(format!("密码鉴权失败：{error}"));
-    }
-    if session.authenticated() {
-        Ok(())
-    } else if auth_errors.is_empty() {
-        bail!("SSH 鉴权失败：未配置可用凭据")
-    } else {
-        bail!("SSH 鉴权失败：{}", auth_errors.join("；"))
     }
 }
 

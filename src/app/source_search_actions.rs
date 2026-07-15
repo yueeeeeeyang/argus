@@ -19,12 +19,12 @@ impl ArgusApp {
     /// 打开来源树搜索输入模式，并准备接收目录树过滤关键字。
     pub(crate) fn open_source_tree_search(&mut self) {
         self.is_source_tree_search_open = true;
-        self.source_tree_search_query.clear();
-        self.source_tree_search_cursor = 0;
-        self.source_tree_search_selection_anchor = None;
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
-        self.is_source_tree_search_focused = true;
+        self.source_tree_search_input.value.clear();
+        self.source_tree_search_input.cursor = 0;
+        self.source_tree_search_input.selection_anchor = None;
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
+        self.source_tree_search_input.is_focused = true;
         self.source_tree_search_animation_generation =
             self.source_tree_search_animation_generation.wrapping_add(1);
         self.filtered_source_ids.clear();
@@ -34,12 +34,12 @@ impl ArgusApp {
     /// 关闭来源树搜索输入模式，清空过滤条件并恢复完整来源树。
     pub(crate) fn close_source_tree_search(&mut self) {
         self.is_source_tree_search_open = false;
-        self.source_tree_search_query.clear();
-        self.source_tree_search_cursor = 0;
-        self.source_tree_search_selection_anchor = None;
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
-        self.is_source_tree_search_focused = false;
+        self.source_tree_search_input.value.clear();
+        self.source_tree_search_input.cursor = 0;
+        self.source_tree_search_input.selection_anchor = None;
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
+        self.source_tree_search_input.is_focused = false;
         self.source_tree_search_animation_generation =
             self.source_tree_search_animation_generation.wrapping_add(1);
         self.filtered_source_ids.clear();
@@ -48,19 +48,20 @@ impl ArgusApp {
 
     /// 更新来源树搜索关键字，并同步重建过滤后的可见节点索引。
     pub(crate) fn update_source_tree_search_query(&mut self, query: String) {
-        self.source_tree_search_query = query;
-        self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
-        self.source_tree_search_selection_anchor = None;
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        self.source_tree_search_input.value = query;
+        self.source_tree_search_input.cursor =
+            character_count(&self.source_tree_search_input.value);
+        self.source_tree_search_input.selection_anchor = None;
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
         self.rebuild_filtered_source_ids();
 
-        if self.source_tree_search_query.is_empty() {
+        if self.source_tree_search_input.value.is_empty() {
             self.placeholder_notice = "来源树搜索框为空，显示完整目录树".to_string();
         } else {
             self.placeholder_notice = format!(
                 "来源树搜索「{}」命中 {} 个可见节点",
-                self.source_tree_search_query,
+                self.source_tree_search_input.value,
                 self.filtered_source_ids.len()
             );
         }
@@ -68,15 +69,16 @@ impl ArgusApp {
 
     /// 设置来源树搜索框焦点状态；聚焦时将光标放到当前文本末尾。
     pub(crate) fn set_source_tree_search_focused(&mut self, is_focused: bool) {
-        self.is_source_tree_search_focused = is_focused;
+        self.source_tree_search_input.is_focused = is_focused;
         if is_focused {
-            self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
-            self.source_tree_search_selection_anchor = None;
-            self.source_tree_search_marked_range = None;
-            self.source_tree_search_selection_drag = None;
+            self.source_tree_search_input.cursor =
+                character_count(&self.source_tree_search_input.value);
+            self.source_tree_search_input.selection_anchor = None;
+            self.source_tree_search_input.marked_range = None;
+            self.source_tree_search_input.selection_drag = None;
         } else {
-            self.source_tree_search_marked_range = None;
-            self.source_tree_search_selection_drag = None;
+            self.source_tree_search_input.marked_range = None;
+            self.source_tree_search_input.selection_drag = None;
         }
     }
 
@@ -107,7 +109,7 @@ impl ArgusApp {
                     self.move_source_tree_search_cursor(0, keystroke.modifiers.shift);
                 }
                 "right" | "arrowright" => {
-                    let end = character_count(&self.source_tree_search_query);
+                    let end = character_count(&self.source_tree_search_input.value);
                     self.move_source_tree_search_cursor(end, keystroke.modifiers.shift);
                 }
                 _ => {}
@@ -126,12 +128,12 @@ impl ArgusApp {
                 return;
             }
             "enter" => {
-                self.placeholder_notice = if self.source_tree_search_query.is_empty() {
+                self.placeholder_notice = if self.source_tree_search_input.value.is_empty() {
                     "来源树搜索框为空，未执行过滤".to_string()
                 } else {
                     format!(
                         "来源树已按「{}」过滤当前已加载日志",
-                        self.source_tree_search_query
+                        self.source_tree_search_input.value
                     )
                 };
                 return;
@@ -140,7 +142,7 @@ impl ArgusApp {
             "right" | "arrowright" => self.move_source_tree_search_right(keystroke.modifiers.shift),
             "home" => self.move_source_tree_search_cursor(0, keystroke.modifiers.shift),
             "end" => {
-                let end = character_count(&self.source_tree_search_query);
+                let end = character_count(&self.source_tree_search_input.value);
                 self.move_source_tree_search_cursor(end, keystroke.modifiers.shift);
             }
             _ => {
@@ -157,12 +159,12 @@ impl ArgusApp {
         }
 
         self.rebuild_filtered_source_ids();
-        if self.source_tree_search_query.is_empty() {
+        if self.source_tree_search_input.value.is_empty() {
             self.placeholder_notice = "来源树搜索框为空，显示完整目录树".to_string();
         } else {
             self.placeholder_notice = format!(
                 "来源树搜索「{}」命中 {} 个可见节点",
-                self.source_tree_search_query,
+                self.source_tree_search_input.value,
                 self.filtered_source_ids.len()
             );
         }
@@ -170,12 +172,7 @@ impl ArgusApp {
 
     /// 返回来源树搜索框当前选区范围；没有有效选区时返回 `None`。
     pub(crate) fn source_tree_search_selection_range(&self) -> Option<std::ops::Range<usize>> {
-        let anchor = self.source_tree_search_selection_anchor?;
-        if anchor == self.source_tree_search_cursor {
-            return None;
-        }
-
-        Some(anchor.min(self.source_tree_search_cursor)..anchor.max(self.source_tree_search_cursor))
+        self.source_tree_search_input.selection_range()
     }
 
     /// 将来源树搜索框光标移动到指定字符位置，并根据 Shift 状态维护选区。
@@ -184,18 +181,18 @@ impl ArgusApp {
         next_cursor: usize,
         should_select: bool,
     ) {
-        let previous_cursor = self.source_tree_search_cursor;
-        let text_length = character_count(&self.source_tree_search_query);
-        self.source_tree_search_cursor = next_cursor.min(text_length);
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        let previous_cursor = self.source_tree_search_input.cursor;
+        let text_length = character_count(&self.source_tree_search_input.value);
+        self.source_tree_search_input.cursor = next_cursor.min(text_length);
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
 
         if should_select {
-            if self.source_tree_search_selection_anchor.is_none() {
-                self.source_tree_search_selection_anchor = Some(previous_cursor);
+            if self.source_tree_search_input.selection_anchor.is_none() {
+                self.source_tree_search_input.selection_anchor = Some(previous_cursor);
             }
         } else {
-            self.source_tree_search_selection_anchor = None;
+            self.source_tree_search_input.selection_anchor = None;
         }
     }
 
@@ -207,7 +204,7 @@ impl ArgusApp {
         }
 
         self.move_source_tree_search_cursor(
-            self.source_tree_search_cursor.saturating_sub(1),
+            self.source_tree_search_input.cursor.saturating_sub(1),
             should_select,
         );
     }
@@ -219,7 +216,10 @@ impl ArgusApp {
             return;
         }
 
-        self.move_source_tree_search_cursor(self.source_tree_search_cursor + 1, should_select);
+        self.move_source_tree_search_cursor(
+            self.source_tree_search_input.cursor + 1,
+            should_select,
+        );
     }
 
     /// 删除来源树搜索框当前选区，并返回是否发生了删除。
@@ -228,41 +228,44 @@ impl ArgusApp {
             return false;
         };
 
-        self.source_tree_search_query =
-            remove_character_range(&self.source_tree_search_query, selection_range.clone());
-        self.source_tree_search_cursor = selection_range.start;
-        self.source_tree_search_selection_anchor = None;
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        self.source_tree_search_input.value = remove_character_range(
+            &self.source_tree_search_input.value,
+            selection_range.clone(),
+        );
+        self.source_tree_search_input.cursor = selection_range.start;
+        self.source_tree_search_input.selection_anchor = None;
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
         true
     }
 
     /// 在光标位置插入文本；插入前会替换现有选区。
     pub(crate) fn insert_source_tree_search_text(&mut self, text: &str) {
         self.delete_source_tree_search_selection();
-        self.source_tree_search_query = insert_text_at_character_index(
-            &self.source_tree_search_query,
-            self.source_tree_search_cursor,
+        self.source_tree_search_input.value = insert_text_at_character_index(
+            &self.source_tree_search_input.value,
+            self.source_tree_search_input.cursor,
             text,
         );
-        self.source_tree_search_cursor += character_count(text);
-        self.source_tree_search_selection_anchor = None;
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        self.source_tree_search_input.cursor += character_count(text);
+        self.source_tree_search_input.selection_anchor = None;
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
     }
 
     /// 向后删除一个字符；若存在选区则删除整个选区。
     pub(crate) fn delete_source_tree_search_backward(&mut self) {
-        if self.delete_source_tree_search_selection() || self.source_tree_search_cursor == 0 {
+        if self.delete_source_tree_search_selection() || self.source_tree_search_input.cursor == 0 {
             return;
         }
 
-        let delete_range = self.source_tree_search_cursor - 1..self.source_tree_search_cursor;
-        self.source_tree_search_query =
-            remove_character_range(&self.source_tree_search_query, delete_range);
-        self.source_tree_search_cursor -= 1;
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        let delete_range =
+            self.source_tree_search_input.cursor - 1..self.source_tree_search_input.cursor;
+        self.source_tree_search_input.value =
+            remove_character_range(&self.source_tree_search_input.value, delete_range);
+        self.source_tree_search_input.cursor -= 1;
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
     }
 
     /// 向前删除一个字符；若存在选区则删除整个选区。
@@ -271,24 +274,26 @@ impl ArgusApp {
             return;
         }
 
-        let text_length = character_count(&self.source_tree_search_query);
-        if self.source_tree_search_cursor >= text_length {
+        let text_length = character_count(&self.source_tree_search_input.value);
+        if self.source_tree_search_input.cursor >= text_length {
             return;
         }
 
-        let delete_range = self.source_tree_search_cursor..self.source_tree_search_cursor + 1;
-        self.source_tree_search_query =
-            remove_character_range(&self.source_tree_search_query, delete_range);
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        let delete_range =
+            self.source_tree_search_input.cursor..self.source_tree_search_input.cursor + 1;
+        self.source_tree_search_input.value =
+            remove_character_range(&self.source_tree_search_input.value, delete_range);
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
     }
 
     /// 全选来源树搜索框文本。
     pub(crate) fn select_all_source_tree_search(&mut self) {
-        self.source_tree_search_selection_anchor = Some(0);
-        self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        self.source_tree_search_input.selection_anchor = Some(0);
+        self.source_tree_search_input.cursor =
+            character_count(&self.source_tree_search_input.value);
+        self.source_tree_search_input.marked_range = None;
+        self.source_tree_search_input.selection_drag = None;
     }
 
     /// 根据鼠标按下位置开始来源树搜索框选择。
@@ -297,75 +302,28 @@ impl ArgusApp {
         character_index: usize,
         granularity: TextSelectionGranularity,
     ) {
-        let anchor_range =
-            self.source_tree_search_range_for_granularity(character_index, granularity);
-        self.apply_source_tree_search_pointer_range(anchor_range.clone(), anchor_range.clone());
-        self.source_tree_search_selection_drag = Some(InputTextSelectionDrag {
-            anchor_range,
-            granularity,
-        });
-        self.source_tree_search_marked_range = None;
-        self.is_source_tree_search_focused = true;
+        self.source_tree_search_input.is_focused = true;
+        self.source_tree_search_input
+            .begin_pointer_selection(character_index, granularity);
     }
 
     /// 鼠标拖拽过程中按初始粒度扩展来源树搜索框选区。
     pub(crate) fn update_source_tree_search_pointer_selection(&mut self, character_index: usize) {
-        let Some(drag) = self.source_tree_search_selection_drag.clone() else {
-            return;
-        };
-        let focus_range =
-            self.source_tree_search_range_for_granularity(character_index, drag.granularity);
-        self.apply_source_tree_search_pointer_range(drag.anchor_range, focus_range);
-        self.source_tree_search_marked_range = None;
-        self.is_source_tree_search_focused = true;
+        self.source_tree_search_input.is_focused = true;
+        self.source_tree_search_input
+            .update_pointer_selection(character_index);
     }
 
     /// 结束来源树搜索框鼠标选择；空选区会退化为普通光标。
     pub(crate) fn finish_source_tree_search_pointer_selection(&mut self) {
-        self.source_tree_search_selection_drag = None;
-        if self.source_tree_search_selection_range().is_none() {
-            self.source_tree_search_selection_anchor = None;
-        }
-    }
-
-    /// 根据选择粒度返回来源树搜索框内的目标字符范围。
-    fn source_tree_search_range_for_granularity(
-        &self,
-        character_index: usize,
-        granularity: TextSelectionGranularity,
-    ) -> std::ops::Range<usize> {
-        let text_length = character_count(&self.source_tree_search_query);
-        let cursor = character_index.min(text_length);
-        match granularity {
-            TextSelectionGranularity::Character => cursor..cursor,
-            TextSelectionGranularity::Word => {
-                word_range_at(&self.source_tree_search_query, cursor).unwrap_or(cursor..cursor)
-            }
-            TextSelectionGranularity::Line => 0..text_length,
-        }
-    }
-
-    /// 将两个选择范围合并为最终输入框选区。
-    fn apply_source_tree_search_pointer_range(
-        &mut self,
-        anchor_range: std::ops::Range<usize>,
-        focus_range: std::ops::Range<usize>,
-    ) {
-        if focus_range.end <= anchor_range.start {
-            self.source_tree_search_selection_anchor = Some(anchor_range.end);
-            self.source_tree_search_cursor = focus_range.start;
-        } else {
-            self.source_tree_search_selection_anchor = Some(anchor_range.start);
-            self.source_tree_search_cursor = anchor_range.end.max(focus_range.end);
-        }
-        self.source_tree_search_marked_range = None;
+        self.source_tree_search_input.finish_pointer_selection();
     }
 
     /// 返回来源树搜索框当前选中的文本。
     pub(crate) fn selected_source_tree_search_text(&self) -> Option<String> {
         let selection_range = self.source_tree_search_selection_range()?;
         Some(slice_character_range(
-            &self.source_tree_search_query,
+            &self.source_tree_search_input.value,
             selection_range,
         ))
     }
@@ -414,14 +372,14 @@ impl ArgusApp {
 
     /// 返回来源树当前是否正在使用非空关键字过滤。
     pub(crate) fn is_source_tree_filtering(&self) -> bool {
-        self.is_source_tree_search_open && !self.source_tree_search_query.trim().is_empty()
+        self.is_source_tree_search_open && !self.source_tree_search_input.value.trim().is_empty()
     }
 
     /// 重建来源树过滤结果；匹配已加载日志候选和未完成单文件探测的压缩包，并保留祖先目录上下文。
     pub(crate) fn rebuild_filtered_source_ids(&mut self) {
         self.filtered_source_ids.clear();
 
-        let query = self.source_tree_search_query.trim().to_lowercase();
+        let query = self.source_tree_search_input.value.trim().to_lowercase();
         if query.is_empty() {
             return;
         }

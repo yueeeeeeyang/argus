@@ -7,7 +7,6 @@
 use std::collections::BTreeSet;
 use std::fs::File as LocalFile;
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -15,19 +14,18 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use async_channel::{Receiver, Sender};
-use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use gpui::UniformListScrollHandle;
 use smb2::{
     ClientConfig as SmbClientConfig, DirectoryEntry as SmbDirectoryEntry, SmbClient,
     Tree as SmbTree,
 };
-use ssh2::{HashType, Session};
 
+use crate::infra::text_input::TextInputState;
 use crate::remote::connection::{
     ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig,
 };
+use crate::remote::ssh::{authenticate_ssh_session, connect_ssh_session};
 use crate::remote::terminal::PendingHostKey;
-use crate::types::SettingsTextInputState;
 
 /// 远程 Unix 文件类型掩码。
 const SFTP_MODE_TYPE_MASK: u32 = 0o170000;
@@ -72,7 +70,7 @@ pub(crate) struct SftpSessionState {
     /// 当前远程目录。
     pub current_dir: String,
     /// 地址栏输入框状态。
-    pub address_input: SettingsTextInputState,
+    pub address_input: TextInputState,
     /// 当前目录文件列表。
     pub entries: Vec<SftpEntry>,
     /// 已按当前排序字段排序的文件列表快照，供 UI 切换页签时直接复用。
@@ -108,7 +106,7 @@ impl SftpSessionState {
             command_sender: Some(command_sender),
             pending_host_key: None,
             current_dir: String::new(),
-            address_input: SettingsTextInputState::default(),
+            address_input: TextInputState::default(),
             entries: Vec::new(),
             sorted_entries: Arc::new(Vec::new()),
             selected_paths: BTreeSet::new(),
@@ -122,7 +120,7 @@ impl SftpSessionState {
     /// 同步当前目录和文件列表，成功加载后清理旧选择。
     pub(crate) fn apply_directory_listing(&mut self, current_dir: String, entries: Vec<SftpEntry>) {
         self.current_dir = current_dir.clone();
-        self.address_input = SettingsTextInputState::from_value(current_dir);
+        self.address_input = TextInputState::from_value(current_dir);
         self.entries = entries;
         self.rebuild_sorted_entries();
         self.selected_paths.clear();
@@ -524,15 +522,7 @@ fn run_ssh_sftp_worker(
     command_receiver: mpsc::Receiver<SftpCommand>,
     event_sender: Sender<SftpEvent>,
 ) -> Result<()> {
-    let tcp = TcpStream::connect((ssh.host.as_str(), ssh.port))
-        .with_context(|| format!("无法连接到 {}:{}", ssh.host, ssh.port))?;
-    tcp.set_nodelay(true).ok();
-
-    let mut session = Session::new().context("无法创建 SSH 会话")?;
-    session.set_tcp_stream(tcp);
-    session.handshake().context("SSH 握手失败")?;
-
-    let fingerprint = sha256_fingerprint(&session).context("无法获取 SSH 主机指纹")?;
+    let (session, fingerprint) = connect_ssh_session(&ssh)?;
     verify_host_key(
         session_id,
         &ssh,
@@ -541,7 +531,7 @@ fn run_ssh_sftp_worker(
         &event_sender,
         &fingerprint,
     )?;
-    authenticate(&session, &ssh)?;
+    authenticate_ssh_session(&session, &ssh)?;
 
     let sftp = session.sftp().context("无法创建 SFTP 通道")?;
     let mut current_dir =
@@ -1539,14 +1529,6 @@ fn remote_file_name(path: &str) -> String {
         .to_string()
 }
 
-/// 生成 libssh2 握手后返回的 SHA256 主机指纹文本。
-fn sha256_fingerprint(session: &Session) -> Result<String> {
-    let hash = session
-        .host_key_hash(HashType::Sha256)
-        .ok_or_else(|| anyhow!("服务器未返回 SHA256 主机指纹"))?;
-    Ok(format!("SHA256:{}", STANDARD_NO_PAD.encode(hash)))
-}
-
 /// 校验主机指纹；未知主机需要等待 UI 发送确认或拒绝命令。
 fn verify_host_key(
     session_id: usize,
@@ -1587,35 +1569,6 @@ fn verify_host_key(
                 }
             }
         }
-    }
-}
-
-/// 按“私钥优先、密码兜底”的顺序执行 SSH 鉴权。
-fn authenticate(session: &Session, ssh: &SshLinkConfig) -> Result<()> {
-    let mut auth_errors = Vec::new();
-    if let Some(private_key_path) = ssh.private_key_path.as_deref() {
-        let passphrase = ssh.private_key_passphrase.as_deref();
-        if let Err(error) = session.userauth_pubkey_file(
-            &ssh.username,
-            None,
-            Path::new(private_key_path),
-            passphrase,
-        ) {
-            auth_errors.push(format!("私钥鉴权失败：{error}"));
-        }
-    }
-    if !session.authenticated()
-        && !ssh.password.is_empty()
-        && let Err(error) = session.userauth_password(&ssh.username, &ssh.password)
-    {
-        auth_errors.push(format!("密码鉴权失败：{error}"));
-    }
-    if session.authenticated() {
-        Ok(())
-    } else if auth_errors.is_empty() {
-        bail!("SSH 鉴权失败：未配置可用凭据")
-    } else {
-        bail!("SSH 鉴权失败：{}", auth_errors.join("；"))
     }
 }
 

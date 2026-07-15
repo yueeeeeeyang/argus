@@ -18,7 +18,6 @@ mod reader;
 mod remote;
 mod search;
 mod theme;
-mod types;
 mod ui;
 mod utils;
 

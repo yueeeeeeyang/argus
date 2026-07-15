@@ -191,7 +191,7 @@ pub(crate) struct ArchivePasswordPromptState {
     /// 底层压缩包适配器报告的密码错误。
     pub error: ArchivePasswordError,
     /// 密码输入框状态。
-    pub input: SettingsTextInputState,
+    pub input: TextInputState,
     /// 用户提交密码后需要重试的原始动作。
     pub retry_action: ArchivePasswordRetryAction,
     /// 弹窗中的额外错误提示。
@@ -199,11 +199,8 @@ pub(crate) struct ArchivePasswordPromptState {
 }
 
 /// 返回单行输入框当前选区；无有效选区时返回 `None`。
-fn input_selection_range(input: &SettingsTextInputState) -> Option<std::ops::Range<usize>> {
-    let anchor = input.selection_anchor?;
-    let start = anchor.min(input.cursor);
-    let end = anchor.max(input.cursor);
-    (start < end).then_some(start..end)
+fn input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize>> {
+    input.selection_range()
 }
 
 /// 构建无系统标题栏但保留可缩放能力的窗口标题栏选项。
@@ -246,18 +243,8 @@ pub(crate) struct ArgusApp {
     pub source_scrollbar_drag_position: Option<Point<Pixels>>,
     /// 来源树搜索工具栏是否处于输入模式。
     pub is_source_tree_search_open: bool,
-    /// 来源树搜索框输入内容，仅过滤已加载的日志候选节点。
-    pub source_tree_search_query: String,
-    /// 来源树搜索框光标位置，使用字符索引而非字节索引以兼容中文。
-    pub source_tree_search_cursor: usize,
-    /// 来源树搜索框选区锚点；与光标不一致时表示存在选区。
-    pub source_tree_search_selection_anchor: Option<usize>,
-    /// 来源树搜索框输入法 marked text 字符范围。
-    pub source_tree_search_marked_range: Option<std::ops::Range<usize>>,
-    /// 来源树搜索框鼠标拖拽选择状态；鼠标释放后清空。
-    pub source_tree_search_selection_drag: Option<InputTextSelectionDrag>,
-    /// 来源树搜索框是否处于聚焦状态，用于展示光标和选区。
-    pub is_source_tree_search_focused: bool,
+    /// 来源树搜索框通用输入状态，仅过滤已加载的日志候选节点。
+    pub source_tree_search_input: TextInputState,
     /// 来源树搜索框显隐动画序号，每次开关递增以重启动画。
     pub source_tree_search_animation_generation: usize,
     /// 来源树过滤后的可见节点 ID，包含命中日志和必要祖先目录。
@@ -269,7 +256,7 @@ pub(crate) struct ArgusApp {
     /// 链接树搜索工具栏是否处于输入模式。
     pub is_connection_tree_search_open: bool,
     /// 链接树过滤输入框状态。
-    pub connection_tree_search_input: SettingsTextInputState,
+    pub connection_tree_search_input: TextInputState,
     /// 当前打开的链接工作区弹窗。
     pub connection_dialog: Option<ConnectionDialogState>,
     /// 新增或编辑链接目录模态框子视图。
@@ -373,15 +360,15 @@ pub(crate) struct ArgusApp {
     /// 设置模态框主题下拉框是否展开。
     pub is_theme_dropdown_open: bool,
     /// 设置模态框“快搜关键字”输入框状态。
-    pub settings_quick_keywords_input: SettingsTextInputState,
+    pub settings_quick_keywords_input: TextInputState,
     /// 设置模态框“Jstack 线程名过滤”输入框状态。
-    pub settings_jstack_thread_name_filter_input: SettingsTextInputState,
+    pub settings_jstack_thread_name_filter_input: TextInputState,
     /// 设置模态框“Jstack 线程段过滤”输入框状态。
-    pub settings_jstack_stack_segment_filter_input: SettingsTextInputState,
+    pub settings_jstack_stack_segment_filter_input: TextInputState,
     /// 设置模态框“升级服务器”输入框状态。
-    pub settings_upgrade_server_input: SettingsTextInputState,
+    pub settings_upgrade_server_input: TextInputState,
     /// 设置模态框“升级验签公钥”输入框状态。
-    pub settings_upgrade_public_key_input: SettingsTextInputState,
+    pub settings_upgrade_public_key_input: TextInputState,
     /// 设置模态框是否处于打开状态。
     pub is_settings_modal_open: bool,
     /// 设置模态框左侧导航当前选中的分类。
@@ -452,18 +439,13 @@ impl ArgusApp {
             source_tree_scroll: UniformListScrollHandle::new(),
             source_scrollbar_drag_position: None,
             is_source_tree_search_open: false,
-            source_tree_search_query: String::new(),
-            source_tree_search_cursor: 0,
-            source_tree_search_selection_anchor: None,
-            source_tree_search_marked_range: None,
-            source_tree_search_selection_drag: None,
-            is_source_tree_search_focused: false,
+            source_tree_search_input: TextInputState::default(),
             source_tree_search_animation_generation: 0,
             filtered_source_ids: Vec::new(),
             connection_tree_scroll: UniformListScrollHandle::new(),
             selected_connection_node_id: None,
             is_connection_tree_search_open: false,
-            connection_tree_search_input: SettingsTextInputState::default(),
+            connection_tree_search_input: TextInputState::default(),
             connection_dialog: None,
             connection_directory_modal: None,
             connection_link_modal: None,
@@ -519,19 +501,15 @@ impl ArgusApp {
             source_panel_animation_to_width: SOURCE_PANEL_DEFAULT_WIDTH,
             selected_theme_id,
             is_theme_dropdown_open: false,
-            settings_quick_keywords_input: SettingsTextInputState::from_value(
-                quick_keywords_input_value,
-            ),
-            settings_jstack_thread_name_filter_input: SettingsTextInputState::from_value(
+            settings_quick_keywords_input: TextInputState::from_value(quick_keywords_input_value),
+            settings_jstack_thread_name_filter_input: TextInputState::from_value(
                 jstack_thread_name_filter_input_value,
             ),
-            settings_jstack_stack_segment_filter_input: SettingsTextInputState::from_value(
+            settings_jstack_stack_segment_filter_input: TextInputState::from_value(
                 jstack_stack_segment_filter_input_value,
             ),
-            settings_upgrade_server_input: SettingsTextInputState::from_value(
-                upgrade_server_input_value,
-            ),
-            settings_upgrade_public_key_input: SettingsTextInputState::from_value(
+            settings_upgrade_server_input: TextInputState::from_value(upgrade_server_input_value),
+            settings_upgrade_public_key_input: TextInputState::from_value(
                 upgrade_public_key_input_value,
             ),
             is_settings_modal_open: false,
@@ -939,7 +917,7 @@ impl ArgusApp {
             self.archive_passwords.remove(&key);
         }
 
-        let mut input = SettingsTextInputState::default();
+        let mut input = TextInputState::default();
         input.is_focused = true;
         self.archive_password_prompt = Some(ArchivePasswordPromptState {
             message: password_error

@@ -3,7 +3,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：定义连接目录表单、SSH/SMB 链接表单、主机指纹确认、SFTP 弹窗和升级弹窗状态。
 
-use super::types::SettingsTextInputState;
+use super::types::TextInputState;
 use crate::infra::updater::AvailableUpgrade;
 use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
 
@@ -22,7 +22,7 @@ pub(crate) struct ConnectionDirectoryFormState {
     /// 新目录的父目录 ID；为空表示创建在根层级。
     pub parent_id: Option<ConnectionNodeId>,
     /// 目录名称输入框。
-    pub name_input: SettingsTextInputState,
+    pub name_input: TextInputState,
     /// 最近一次校验错误。
     pub error_message: Option<String>,
 }
@@ -35,25 +35,25 @@ pub(crate) struct ConnectionLinkFormState {
     /// 新链接的父目录 ID；为空表示创建在根层级。
     pub parent_id: Option<ConnectionNodeId>,
     /// 链接名称输入框。
-    pub name_input: SettingsTextInputState,
+    pub name_input: TextInputState,
     /// SSH 主机输入框。
-    pub host_input: SettingsTextInputState,
+    pub host_input: TextInputState,
     /// SSH 端口输入框。
-    pub port_input: SettingsTextInputState,
+    pub port_input: TextInputState,
     /// SSH 用户名输入框。
-    pub username_input: SettingsTextInputState,
+    pub username_input: TextInputState,
     /// SSH 密码输入框。
-    pub password_input: SettingsTextInputState,
+    pub password_input: TextInputState,
     /// SMB 共享名称输入框。
-    pub share_input: SettingsTextInputState,
+    pub share_input: TextInputState,
     /// SMB 初始目录输入框。
-    pub initial_dir_input: SettingsTextInputState,
+    pub initial_dir_input: TextInputState,
     /// SMB 域或工作组输入框。
-    pub domain_input: SettingsTextInputState,
+    pub domain_input: TextInputState,
     /// SSH 私钥路径输入框。
-    pub private_key_path_input: SettingsTextInputState,
+    pub private_key_path_input: TextInputState,
     /// SSH 私钥口令输入框。
-    pub private_key_passphrase_input: SettingsTextInputState,
+    pub private_key_passphrase_input: TextInputState,
     /// 最近一次校验错误。
     pub error_message: Option<String>,
 }
@@ -120,7 +120,7 @@ pub(crate) struct SftpRenameDialogState {
     /// 原始名称。
     pub original_name: String,
     /// 名称输入框。
-    pub name_input: SettingsTextInputState,
+    pub name_input: TextInputState,
     /// 最近一次校验错误。
     pub error_message: Option<String>,
 }

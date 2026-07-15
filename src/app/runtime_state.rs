@@ -19,7 +19,7 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, slice_character_range, word_range_at,
 };
 
-use super::types::{RuntimeDateTimePart, RuntimeFilterInputKind, SettingsTextInputState};
+use super::types::{RuntimeDateTimePart, RuntimeFilterInputKind, TextInputState};
 
 /// Runtime 分析任务状态，供内容区页签展示加载、结果或失败。
 #[derive(Clone, Debug)]
@@ -266,13 +266,13 @@ pub(crate) struct RuntimeAnalysisState {
     /// SQL 明细表排序方向。
     pub sql_sort_direction: RuntimeSortDirection,
     /// 任意关键字过滤输入框状态。
-    pub filter_keyword_input: SettingsTextInputState,
+    pub filter_keyword_input: TextInputState,
     /// 用户名过滤输入框状态。
-    pub filter_username_input: SettingsTextInputState,
+    pub filter_username_input: TextInputState,
     /// 请求开始时间过滤输入框状态。
-    pub filter_start_time_input: SettingsTextInputState,
+    pub filter_start_time_input: TextInputState,
     /// 请求结束时间过滤输入框状态。
-    pub filter_end_time_input: SettingsTextInputState,
+    pub filter_end_time_input: TextInputState,
     /// 已应用到结果缓存的关键字过滤值，输入防抖完成前仍保持旧值。
     pub applied_filter_keyword: String,
     /// 已应用到结果缓存的用户名过滤值。
@@ -650,39 +650,24 @@ pub(super) fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysis
 }
 
 /// 清理单个 Runtime 过滤输入框焦点态，保留文本和光标位置。
-pub(super) fn clear_runtime_filter_input_focus(input: &mut SettingsTextInputState) {
-    input.is_focused = false;
-    input.selection_anchor = None;
-    input.marked_range = None;
-    input.selection_drag = None;
+pub(super) fn clear_runtime_filter_input_focus(input: &mut TextInputState) {
+    input.clear_focus();
 }
 
 /// 返回 Runtime 过滤输入框规范化后的非空选区。
 pub(super) fn normalized_runtime_filter_input_selection_range(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
 ) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+    input.selection_range()
 }
 
 /// 根据鼠标选择粒度返回 Runtime 过滤输入框目标字符范围。
 pub(super) fn runtime_filter_input_range_for_granularity(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
     character_index: usize,
     granularity: TextSelectionGranularity,
 ) -> Range<usize> {
-    let text_length = character_count(&input.value);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
+    input.range_for_granularity(character_index, granularity)
 }
 
 /// 解析 Runtime 时间过滤输入，支持毫秒时间戳和常见本地日期时间格式。

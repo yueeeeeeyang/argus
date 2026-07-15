@@ -9,15 +9,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::{ArchivePasswordStore, detect_archive_format};
-use crate::loader::{
-    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceKind, SourceLocation,
-    SourceMetadata, SourceTreeNode,
-};
+use crate::loader::{SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
 use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
+
+use super::source_input::{collect_analysis_files, resolve_analysis_location};
 
 /// Jstack 本地目录递归时识别的普通文本日志扩展名。
 const JSTACK_TEXT_EXTENSIONS: &[&str] = &["log", "txt", "out", "dump"];
@@ -437,69 +436,14 @@ fn collect_jstack_log_files(
     root: &Path,
     loader_config: &LoaderConfig,
 ) -> Result<Vec<JstackAnalysisTarget>> {
-    if !root.is_dir() {
-        return Err(anyhow!("{} 不是本地目录", root.display()));
-    }
-
-    let mut paths = Vec::new();
-    let mut visited_dirs = BTreeSet::new();
-    collect_jstack_log_file_paths(
+    Ok(collect_analysis_files(
         root,
         loader_config.follow_symlinks,
-        &mut visited_dirs,
-        &mut paths,
-    )?;
-    paths.sort();
-
-    Ok(paths
-        .into_iter()
-        .filter_map(|path| jstack_target_for_local_file(source_id, path))
-        .collect())
-}
-
-/// 深度优先收集候选文件；符号链接策略与来源加载配置保持一致。
-fn collect_jstack_log_file_paths(
-    dir: &Path,
-    follow_symlinks: bool,
-    visited_dirs: &mut BTreeSet<PathBuf>,
-    paths: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let canonical_dir = fs::canonicalize(dir)
-        .map_err(|error| anyhow!("无法解析目录真实路径 {}：{error}", dir.display()))?;
-    if !visited_dirs.insert(canonical_dir) {
-        return Ok(());
-    }
-
-    let mut entries = fs::read_dir(dir)
-        .map_err(|error| anyhow!("无法读取目录 {}：{error}", dir.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| anyhow!("无法遍历目录 {}：{error}", dir.display()))?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let link_metadata = fs::symlink_metadata(&path)
-            .map_err(|error| anyhow!("无法读取文件元数据 {}：{error}", path.display()))?;
-        let is_symlink = link_metadata.file_type().is_symlink();
-        if is_symlink && !follow_symlinks {
-            continue;
-        }
-
-        let metadata = if is_symlink && follow_symlinks {
-            fs::metadata(&path)
-        } else {
-            Ok(link_metadata)
-        }
-        .map_err(|error| anyhow!("无法读取文件元数据 {}：{error}", path.display()))?;
-
-        if metadata.is_dir() {
-            collect_jstack_log_file_paths(&path, follow_symlinks, visited_dirs, paths)?;
-        } else if metadata.is_file() && is_jstack_candidate_file(&path) {
-            paths.push(path);
-        }
-    }
-
-    Ok(())
+        is_jstack_candidate_file,
+    )?
+    .into_iter()
+    .filter_map(|path| jstack_target_for_local_file(source_id, path))
+    .collect())
 }
 
 /// 判断本地文件是否值得作为 Jstack 快照尝试解析。
@@ -696,22 +640,13 @@ fn resolve_jstack_target_location(
     target: &JstackAnalysisTarget,
     loader_config: &LoaderConfig,
 ) -> Result<SourceLocation> {
-    let Some(node) = target.archive_probe_node.clone() else {
-        return Ok(target.location.clone());
-    };
-
-    let probe_result = LogSourceLoader::new(loader_config.clone())
-        .with_archive_passwords(target.archive_passwords.clone())
-        .probe_archive_nodes(vec![SourceArchiveProbeRequest {
-            source_id: target.source_id,
-            node,
-        }])
-        .into_iter()
-        .next()
-        .and_then(|result| result.patch)
-        .ok_or_else(|| anyhow!("压缩包根层不是单文件日志，请展开后选择具体日志条目"))?;
-
-    Ok(probe_result.location)
+    resolve_analysis_location(
+        target.source_id,
+        &target.location,
+        target.archive_probe_node.as_ref(),
+        &target.archive_passwords,
+        loader_config,
+    )
 }
 
 /// 按批次读取日志文档并增量解析 Jstack，避免把完整日志拼成一个大字符串。

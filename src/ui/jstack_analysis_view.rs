@@ -23,6 +23,7 @@ use crate::infra::text_selection::{
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::loading_spinner::render_loading_spinner;
+use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, IntoElement, KeyDownEvent,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -1119,39 +1120,18 @@ fn preview_highlight_style_for_span(
         (
             range,
             HighlightStyle {
-                color: Some(rgb(color_for_preview_highlight_token(kind, theme)).into()),
+                color: Some(
+                    rgb(color_for_highlight_token(
+                        kind,
+                        theme,
+                        HighlightColorContext::Jstack,
+                    ))
+                    .into(),
+                ),
                 ..Default::default()
             },
         )
     })
-}
-
-/// 返回悬浮预览的语法高亮颜色。
-fn color_for_preview_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
-    match kind {
-        HighlightTokenKind::Trace => theme.foreground_muted,
-        HighlightTokenKind::Debug => theme.debug,
-        HighlightTokenKind::Info => theme.info,
-        HighlightTokenKind::Warning => theme.warning,
-        HighlightTokenKind::Error | HighlightTokenKind::Fatal => theme.error,
-        HighlightTokenKind::Timestamp => theme.syntax.timestamp,
-        HighlightTokenKind::Comment => theme.syntax.comment,
-        HighlightTokenKind::Key => theme.syntax.key,
-        HighlightTokenKind::Value => theme.syntax.string,
-        HighlightTokenKind::String => theme.syntax.string,
-        HighlightTokenKind::Number => theme.syntax.number,
-        HighlightTokenKind::Boolean => theme.syntax.boolean,
-        HighlightTokenKind::Punctuation => theme.syntax.punctuation,
-        HighlightTokenKind::Tag => theme.syntax.tag,
-        HighlightTokenKind::Attribute => theme.syntax.attribute,
-        HighlightTokenKind::ThreadName => theme.info,
-        HighlightTokenKind::ThreadState => theme.success,
-        HighlightTokenKind::StackClass => theme.syntax.class,
-        HighlightTokenKind::StackMethod => theme.info,
-        HighlightTokenKind::StackLocation => theme.syntax.string,
-        HighlightTokenKind::Lock => theme.syntax.lock,
-        HighlightTokenKind::Exception => theme.syntax.exception,
-    }
 }
 
 /// 根据矩阵滚动状态绘制可见滚动条。

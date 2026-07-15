@@ -14,8 +14,7 @@ use gpui::{
 
 use crate::app::{
     ArgusApp, ConnectionDeletePromptState, ConnectionDialogState, ConnectionDirectoryFormState,
-    ConnectionHostKeyPromptState, ConnectionLinkFormState, InputTextSelectionDrag,
-    SettingsTextInputState,
+    ConnectionHostKeyPromptState, ConnectionLinkFormState, InputTextSelectionDrag, TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::text_selection::{
@@ -171,10 +170,7 @@ impl ConnectionDirectoryWindow {
     }
 
     /// 返回目录窗口输入框的可变引用。
-    fn input_mut(
-        &mut self,
-        target: ConnectionFormInputTarget,
-    ) -> Option<&mut SettingsTextInputState> {
+    fn input_mut(&mut self, target: ConnectionFormInputTarget) -> Option<&mut TextInputState> {
         match target {
             ConnectionFormInputTarget::DirectoryName => Some(&mut self.form.name_input),
             _ => None,
@@ -399,10 +395,7 @@ impl ConnectionLinkWindow {
     }
 
     /// 返回链接窗口输入框的可变引用。
-    fn input_mut(
-        &mut self,
-        target: ConnectionFormInputTarget,
-    ) -> Option<&mut SettingsTextInputState> {
+    fn input_mut(&mut self, target: ConnectionFormInputTarget) -> Option<&mut TextInputState> {
         match target {
             ConnectionFormInputTarget::LinkName => Some(&mut self.form.name_input),
             ConnectionFormInputTarget::LinkHost => Some(&mut self.form.host_input),
@@ -958,7 +951,7 @@ fn render_connection_window_header(
 fn render_directory_input_row(
     label: &'static str,
     target: ConnectionFormInputTarget,
-    input_state: &SettingsTextInputState,
+    input_state: &TextInputState,
     focus_handle: FocusHandle,
     placeholder: &'static str,
     is_secret: bool,
@@ -1049,7 +1042,7 @@ fn render_directory_input_row(
 fn render_link_input_row(
     label: &'static str,
     target: ConnectionFormInputTarget,
-    input_state: &SettingsTextInputState,
+    input_state: &TextInputState,
     focus_handle: FocusHandle,
     placeholder: &'static str,
     is_secret: bool,
@@ -1665,7 +1658,7 @@ fn error_text(message: String, theme: &AppTheme) -> impl IntoElement {
 }
 
 /// 聚焦输入框状态，并把光标移动到文本末尾。
-fn focus_input_state(input: &mut SettingsTextInputState) {
+fn focus_input_state(input: &mut TextInputState) {
     input.is_focused = true;
     input.cursor = character_count(&input.value);
     input.selection_anchor = None;
@@ -1674,11 +1667,8 @@ fn focus_input_state(input: &mut SettingsTextInputState) {
 }
 
 /// 清理单个输入框焦点态。
-fn clear_input_focus_state(input: &mut SettingsTextInputState) {
-    input.is_focused = false;
-    input.selection_anchor = None;
-    input.marked_range = None;
-    input.selection_drag = None;
+fn clear_input_focus_state(input: &mut TextInputState) {
+    input.clear_focus();
 }
 
 /// 处理输入框剪贴板快捷键（粘贴/复制/剪切/全选），命中时返回对应动作，否则返回 `None`。
@@ -1687,7 +1677,7 @@ fn clear_input_focus_state(input: &mut SettingsTextInputState) {
 /// [`handle_text_input_key`] 的字符插入分支跳过，因此在这里单独拦截处理，
 /// 和设置窗口、Runtime 过滤输入框的粘贴行为保持一致。
 fn handle_text_input_clipboard(
-    input: &mut SettingsTextInputState,
+    input: &mut TextInputState,
     keystroke: &gpui::Keystroke,
     cx: &mut gpui::App,
 ) -> Option<ConnectionWindowInputAction> {
@@ -1735,7 +1725,7 @@ fn handle_text_input_clipboard(
 
 /// 处理单行输入框按键编辑。
 fn handle_text_input_key(
-    input: &mut SettingsTextInputState,
+    input: &mut TextInputState,
     keystroke: &gpui::Keystroke,
 ) -> ConnectionWindowInputAction {
     match keystroke.key.as_str() {
@@ -1782,46 +1772,25 @@ fn handle_text_input_key(
 
 /// 鼠标开始选择输入框文本。
 fn begin_input_pointer_selection(
-    input: &mut SettingsTextInputState,
+    input: &mut TextInputState,
     character_index: usize,
     granularity: TextSelectionGranularity,
 ) {
-    let range = input_range_for_granularity(input, character_index, granularity);
-    input.selection_anchor = Some(range.start);
-    input.cursor = range.end;
-    input.selection_drag = Some(InputTextSelectionDrag {
-        anchor_range: range,
-        granularity,
-    });
-    input.marked_range = None;
+    input.begin_pointer_selection(character_index, granularity);
 }
 
 /// 鼠标拖拽更新输入框选区。
-fn update_input_pointer_selection(input: &mut SettingsTextInputState, character_index: usize) {
-    let Some(drag) = input.selection_drag.clone() else {
-        return;
-    };
-    let focus_range = input_range_for_granularity(input, character_index, drag.granularity);
-    if focus_range.start < drag.anchor_range.start {
-        input.selection_anchor = Some(drag.anchor_range.end);
-        input.cursor = focus_range.start;
-    } else {
-        input.selection_anchor = Some(drag.anchor_range.start);
-        input.cursor = focus_range.end;
-    }
-    input.marked_range = None;
+fn update_input_pointer_selection(input: &mut TextInputState, character_index: usize) {
+    input.update_pointer_selection(character_index);
 }
 
 /// 鼠标结束输入框文本选择。
-fn finish_input_pointer_selection(input: &mut SettingsTextInputState) {
-    input.selection_drag = None;
-    if input_selection_range(input).is_none() {
-        input.selection_anchor = None;
-    }
+fn finish_input_pointer_selection(input: &mut TextInputState) {
+    input.finish_pointer_selection();
 }
 
 /// 删除输入框当前选区。
-fn delete_input_selection(input: &mut SettingsTextInputState) -> bool {
+fn delete_input_selection(input: &mut TextInputState) -> bool {
     let Some(range) = input_selection_range(input) else {
         return false;
     };
@@ -1834,7 +1803,7 @@ fn delete_input_selection(input: &mut SettingsTextInputState) -> bool {
 }
 
 /// 向输入框插入文本。
-fn insert_input_text(input: &mut SettingsTextInputState, text: &str) {
+fn insert_input_text(input: &mut TextInputState, text: &str) {
     if text.is_empty() {
         return;
     }
@@ -1848,7 +1817,7 @@ fn insert_input_text(input: &mut SettingsTextInputState, text: &str) {
 }
 
 /// 删除输入框光标前一个字符。
-fn delete_input_backward(input: &mut SettingsTextInputState) {
+fn delete_input_backward(input: &mut TextInputState) {
     if delete_input_selection(input) || input.cursor == 0 {
         return;
     }
@@ -1860,7 +1829,7 @@ fn delete_input_backward(input: &mut SettingsTextInputState) {
 }
 
 /// 删除输入框光标后一个字符。
-fn delete_input_forward(input: &mut SettingsTextInputState) {
+fn delete_input_forward(input: &mut TextInputState) {
     if delete_input_selection(input) {
         return;
     }
@@ -1876,19 +1845,19 @@ fn delete_input_forward(input: &mut SettingsTextInputState) {
 }
 
 /// 输入框光标左移。
-fn move_input_left(input: &mut SettingsTextInputState, extend_selection: bool) {
+fn move_input_left(input: &mut TextInputState, extend_selection: bool) {
     let cursor = input.cursor.saturating_sub(1);
     move_input_cursor(input, cursor, extend_selection);
 }
 
 /// 输入框光标右移。
-fn move_input_right(input: &mut SettingsTextInputState, extend_selection: bool) {
+fn move_input_right(input: &mut TextInputState, extend_selection: bool) {
     let cursor = (input.cursor + 1).min(character_count(&input.value));
     move_input_cursor(input, cursor, extend_selection);
 }
 
 /// 移动输入框光标，并按需扩展选区。
-fn move_input_cursor(input: &mut SettingsTextInputState, cursor: usize, extend_selection: bool) {
+fn move_input_cursor(input: &mut TextInputState, cursor: usize, extend_selection: bool) {
     let cursor = cursor.min(character_count(&input.value));
     if extend_selection {
         input.selection_anchor.get_or_insert(input.cursor);
@@ -1901,7 +1870,7 @@ fn move_input_cursor(input: &mut SettingsTextInputState, cursor: usize, extend_s
 }
 
 /// 应用系统输入法提交的文本编辑。
-fn apply_native_edit_to_input(input: &mut SettingsTextInputState, edit: &NativeTextEdit) {
+fn apply_native_edit_to_input(input: &mut TextInputState, edit: &NativeTextEdit) {
     let text_length = character_count(&input.value);
     let replacement_range = clamp_range(edit.replacement_range.clone(), text_length);
     let next_value = replace_character_range(&input.value, replacement_range, &edit.text);
@@ -1922,29 +1891,17 @@ fn apply_native_edit_to_input(input: &mut SettingsTextInputState, edit: &NativeT
 }
 
 /// 返回输入框规范化后的非空选区。
-fn input_selection_range(input: &SettingsTextInputState) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+fn input_selection_range(input: &TextInputState) -> Option<Range<usize>> {
+    input.selection_range()
 }
 
 /// 按鼠标点击粒度生成输入框字符范围。
 fn input_range_for_granularity(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
     character_index: usize,
     granularity: TextSelectionGranularity,
 ) -> Range<usize> {
-    let text_length = character_count(&input.value);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
+    input.range_for_granularity(character_index, granularity)
 }
 
 /// 将字符范围夹在文本长度内，并确保起止顺序稳定。

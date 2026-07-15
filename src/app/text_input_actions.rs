@@ -32,10 +32,7 @@ impl ArgusApp {
     /// 说明：点击输入框以外区域时调用；只清理焦点、选区和 marked text，
     /// 不修改用户已经输入的文本内容，避免误清配置或搜索条件。
     pub(crate) fn clear_all_text_input_focus(&mut self) {
-        self.is_source_tree_search_focused = false;
-        self.source_tree_search_selection_anchor = None;
-        self.source_tree_search_marked_range = None;
-        self.source_tree_search_selection_drag = None;
+        self.source_tree_search_input.clear_focus();
 
         self.clear_connection_text_input_focuses();
         self.clear_sftp_text_input_focuses();
@@ -46,34 +43,44 @@ impl ArgusApp {
         self.source_picker.path_input_selection_drag = None;
 
         if let Some(prompt) = self.archive_password_prompt.as_mut() {
-            prompt.input.is_focused = false;
-            prompt.input.selection_anchor = None;
-            prompt.input.marked_range = None;
-            prompt.input.selection_drag = None;
+            prompt.input.clear_focus();
         }
 
-        clear_settings_input_focus(&mut self.settings_quick_keywords_input);
-        clear_settings_input_focus(&mut self.settings_jstack_thread_name_filter_input);
-        clear_settings_input_focus(&mut self.settings_jstack_stack_segment_filter_input);
-        clear_settings_input_focus(&mut self.settings_upgrade_server_input);
-        clear_settings_input_focus(&mut self.settings_upgrade_public_key_input);
+        // 点击外部区域造成设置输入失焦时，沿用 Enter 与原生文本提交的同一持久化入口。
+        let focused_settings_target = if self.settings_quick_keywords_input.is_focused {
+            Some(AppTextInputTarget::SettingsQuickKeywords)
+        } else if self.settings_jstack_thread_name_filter_input.is_focused {
+            Some(AppTextInputTarget::SettingsJstackThreadNameFilter)
+        } else if self.settings_jstack_stack_segment_filter_input.is_focused {
+            Some(AppTextInputTarget::SettingsJstackStackSegmentFilter)
+        } else if self.settings_upgrade_server_input.is_focused {
+            Some(AppTextInputTarget::SettingsUpgradeServer)
+        } else if self.settings_upgrade_public_key_input.is_focused {
+            Some(AppTextInputTarget::SettingsUpgradePublicKey)
+        } else {
+            None
+        };
+        if let Some(target) = focused_settings_target {
+            self.commit_settings_text_input(target);
+        }
 
-        self.log_search.keyword_input.is_focused = false;
-        self.log_search.keyword_input.selection_anchor = None;
-        self.log_search.keyword_input.marked_range = None;
-        self.log_search.keyword_input.selection_drag = None;
-        self.log_search.directory_input.is_focused = false;
-        self.log_search.directory_input.selection_anchor = None;
-        self.log_search.directory_input.marked_range = None;
-        self.log_search.directory_input.selection_drag = None;
+        self.settings_quick_keywords_input.clear_focus();
+        self.settings_jstack_thread_name_filter_input.clear_focus();
+        self.settings_jstack_stack_segment_filter_input
+            .clear_focus();
+        self.settings_upgrade_server_input.clear_focus();
+        self.settings_upgrade_public_key_input.clear_focus();
+
+        self.log_search.keyword_input.clear_focus();
+        self.log_search.directory_input.clear_focus();
         // 关键字历史下拉跟随关键字输入框的焦点：失焦时一并收起，避免下拉悬空残留。
         self.close_keyword_history();
 
         for state in self.runtime_analyses.values_mut() {
-            clear_settings_input_focus(&mut state.filter_keyword_input);
-            clear_settings_input_focus(&mut state.filter_username_input);
-            clear_settings_input_focus(&mut state.filter_start_time_input);
-            clear_settings_input_focus(&mut state.filter_end_time_input);
+            state.filter_keyword_input.clear_focus();
+            state.filter_username_input.clear_focus();
+            state.filter_start_time_input.clear_focus();
+            state.filter_end_time_input.clear_focus();
             state.open_time_picker = None;
         }
     }
@@ -92,23 +99,14 @@ impl ArgusApp {
 
         match target {
             AppTextInputTarget::SourceTreeSearch => {
-                apply_native_edit_to_parts(
-                    NativeInputParts {
-                        value: &mut self.source_tree_search_query,
-                        cursor: &mut self.source_tree_search_cursor,
-                        selection_anchor: &mut self.source_tree_search_selection_anchor,
-                        marked_range: &mut self.source_tree_search_marked_range,
-                        selection_drag: &mut self.source_tree_search_selection_drag,
-                    },
-                    &edit,
-                );
+                self.source_tree_search_input.apply_native_edit(&edit);
                 self.rebuild_filtered_source_ids();
-                self.placeholder_notice = if self.source_tree_search_query.is_empty() {
+                self.placeholder_notice = if self.source_tree_search_input.value.is_empty() {
                     "来源树搜索框为空，显示完整目录树".to_string()
                 } else {
                     format!(
                         "来源树搜索「{}」命中 {} 个可见节点",
-                        self.source_tree_search_query,
+                        self.source_tree_search_input.value,
                         self.filtered_source_ids.len()
                     )
                 };
@@ -121,16 +119,7 @@ impl ArgusApp {
             }
             AppTextInputTarget::ArchivePassword => {
                 if let Some(prompt) = self.archive_password_prompt.as_mut() {
-                    apply_native_edit_to_parts(
-                        NativeInputParts {
-                            value: &mut prompt.input.value,
-                            cursor: &mut prompt.input.cursor,
-                            selection_anchor: &mut prompt.input.selection_anchor,
-                            marked_range: &mut prompt.input.marked_range,
-                            selection_drag: &mut prompt.input.selection_drag,
-                        },
-                        &edit,
-                    );
+                    prompt.input.apply_native_edit(&edit);
                     prompt.message = None;
                 }
             }
@@ -157,117 +146,40 @@ impl ArgusApp {
                 apply_native_runtime_filter_edit(self, analysis_id, input_kind, &edit);
             }
             AppTextInputTarget::SettingsQuickKeywords => {
-                apply_native_edit_to_parts(
-                    NativeInputParts {
-                        value: &mut self.settings_quick_keywords_input.value,
-                        cursor: &mut self.settings_quick_keywords_input.cursor,
-                        selection_anchor: &mut self.settings_quick_keywords_input.selection_anchor,
-                        marked_range: &mut self.settings_quick_keywords_input.marked_range,
-                        selection_drag: &mut self.settings_quick_keywords_input.selection_drag,
-                    },
-                    &edit,
-                );
+                self.settings_quick_keywords_input.apply_native_edit(&edit);
                 if edit.marked_range.is_none() {
-                    self.config.log_search.quick_keywords =
-                        self.settings_quick_keywords_input.value.clone();
-                    self.placeholder_notice = "快搜关键字已保存".to_string();
-                    self.persist_config_or_report();
+                    self.commit_settings_text_input(AppTextInputTarget::SettingsQuickKeywords);
                 }
             }
             AppTextInputTarget::SettingsJstackThreadNameFilter => {
-                apply_native_edit_to_parts(
-                    NativeInputParts {
-                        value: &mut self.settings_jstack_thread_name_filter_input.value,
-                        cursor: &mut self.settings_jstack_thread_name_filter_input.cursor,
-                        selection_anchor: &mut self
-                            .settings_jstack_thread_name_filter_input
-                            .selection_anchor,
-                        marked_range: &mut self
-                            .settings_jstack_thread_name_filter_input
-                            .marked_range,
-                        selection_drag: &mut self
-                            .settings_jstack_thread_name_filter_input
-                            .selection_drag,
-                    },
-                    &edit,
-                );
+                self.settings_jstack_thread_name_filter_input
+                    .apply_native_edit(&edit);
                 if edit.marked_range.is_none() {
-                    self.config.log_display.jstack_thread_name_filters = self
-                        .settings_jstack_thread_name_filter_input
-                        .value
-                        .trim()
-                        .to_string();
-                    self.rebuild_all_jstack_visible_row_caches();
-                    self.placeholder_notice = "Jstack 线程名过滤已保存".to_string();
-                    self.persist_config_or_report();
+                    self.commit_settings_text_input(
+                        AppTextInputTarget::SettingsJstackThreadNameFilter,
+                    );
                 }
             }
             AppTextInputTarget::SettingsJstackStackSegmentFilter => {
-                apply_native_edit_to_parts(
-                    NativeInputParts {
-                        value: &mut self.settings_jstack_stack_segment_filter_input.value,
-                        cursor: &mut self.settings_jstack_stack_segment_filter_input.cursor,
-                        selection_anchor: &mut self
-                            .settings_jstack_stack_segment_filter_input
-                            .selection_anchor,
-                        marked_range: &mut self
-                            .settings_jstack_stack_segment_filter_input
-                            .marked_range,
-                        selection_drag: &mut self
-                            .settings_jstack_stack_segment_filter_input
-                            .selection_drag,
-                    },
-                    &edit,
-                );
+                self.settings_jstack_stack_segment_filter_input
+                    .apply_native_edit(&edit);
                 if edit.marked_range.is_none() {
-                    self.config.log_display.jstack_stack_segment_filters =
-                        normalized_native_textarea_value(
-                            &self.settings_jstack_stack_segment_filter_input.value,
-                        );
-                    self.rebuild_all_jstack_visible_row_caches();
-                    self.placeholder_notice = "Jstack 线程段过滤已保存".to_string();
-                    self.persist_config_or_report();
+                    self.commit_settings_text_input(
+                        AppTextInputTarget::SettingsJstackStackSegmentFilter,
+                    );
                 }
             }
             AppTextInputTarget::SettingsUpgradeServer => {
-                apply_native_edit_to_parts(
-                    NativeInputParts {
-                        value: &mut self.settings_upgrade_server_input.value,
-                        cursor: &mut self.settings_upgrade_server_input.cursor,
-                        selection_anchor: &mut self.settings_upgrade_server_input.selection_anchor,
-                        marked_range: &mut self.settings_upgrade_server_input.marked_range,
-                        selection_drag: &mut self.settings_upgrade_server_input.selection_drag,
-                    },
-                    &edit,
-                );
+                self.settings_upgrade_server_input.apply_native_edit(&edit);
                 if edit.marked_range.is_none() {
-                    self.config.upgrade.server_url =
-                        self.settings_upgrade_server_input.value.trim().to_string();
-                    self.placeholder_notice = "升级服务器已保存".to_string();
-                    self.persist_config_or_report();
+                    self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradeServer);
                 }
             }
             AppTextInputTarget::SettingsUpgradePublicKey => {
-                apply_native_edit_to_parts(
-                    NativeInputParts {
-                        value: &mut self.settings_upgrade_public_key_input.value,
-                        cursor: &mut self.settings_upgrade_public_key_input.cursor,
-                        selection_anchor: &mut self
-                            .settings_upgrade_public_key_input
-                            .selection_anchor,
-                        marked_range: &mut self.settings_upgrade_public_key_input.marked_range,
-                        selection_drag: &mut self.settings_upgrade_public_key_input.selection_drag,
-                    },
-                    &edit,
-                );
+                self.settings_upgrade_public_key_input
+                    .apply_native_edit(&edit);
                 if edit.marked_range.is_none() {
-                    self.config.upgrade.public_key_base64 = self
-                        .settings_upgrade_public_key_input
-                        .value
-                        .trim()
-                        .to_string();
-                    self.placeholder_notice = "升级验签公钥已保存".to_string();
-                    self.persist_config_or_report();
+                    self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradePublicKey);
                 }
             }
         }
@@ -277,7 +189,7 @@ impl ArgusApp {
     fn focus_native_text_input_target(&mut self, target: AppTextInputTarget) {
         match target {
             AppTextInputTarget::SourceTreeSearch => {
-                self.is_source_tree_search_focused = true;
+                self.source_tree_search_input.is_focused = true;
             }
             AppTextInputTarget::ConnectionTreeSearch => {
                 self.focus_connection_text_input_target(target);
@@ -416,16 +328,7 @@ fn apply_native_log_search_edit(
         LogSearchInputKind::Keyword => &mut app.log_search.keyword_input,
         LogSearchInputKind::Directory => &mut app.log_search.directory_input,
     };
-    apply_native_edit_to_parts(
-        NativeInputParts {
-            value: &mut input.value,
-            cursor: &mut input.cursor,
-            selection_anchor: &mut input.selection_anchor,
-            marked_range: &mut input.marked_range,
-            selection_drag: &mut input.selection_drag,
-        },
-        edit,
-    );
+    input.apply_native_edit(edit);
     if input_kind == LogSearchInputKind::Keyword {
         app.clear_quick_log_search_state();
         // 输入变化后重置高亮避免错位；下拉保持展开，历史条目始终为全部最近关键字。
@@ -444,16 +347,7 @@ fn apply_native_connection_edit(
         let Some(input) = app.connection_text_input_mut(target) else {
             return;
         };
-        apply_native_edit_to_parts(
-            NativeInputParts {
-                value: &mut input.value,
-                cursor: &mut input.cursor,
-                selection_anchor: &mut input.selection_anchor,
-                marked_range: &mut input.marked_range,
-                selection_drag: &mut input.selection_drag,
-            },
-            edit,
-        );
+        input.apply_native_edit(edit);
         Some(input.value.clone())
     }) else {
         return;
@@ -479,16 +373,7 @@ fn apply_native_runtime_filter_edit(
     let Some(input) = app.runtime_filter_input_mut(analysis_id, input_kind) else {
         return;
     };
-    apply_native_edit_to_parts(
-        NativeInputParts {
-            value: &mut input.value,
-            cursor: &mut input.cursor,
-            selection_anchor: &mut input.selection_anchor,
-            marked_range: &mut input.marked_range,
-            selection_drag: &mut input.selection_drag,
-        },
-        edit,
-    );
+    input.apply_native_edit(edit);
     if edit.marked_range.is_none() {
         app.after_runtime_filter_changed(analysis_id);
     }
@@ -522,19 +407,6 @@ fn clamp_range(range: Range<usize>, text_length: usize) -> Range<usize> {
     start.min(end)..start.max(end)
 }
 
-/// 清理设置输入框焦点态，保留文本和光标，便于再次点击时继续编辑。
-fn clear_settings_input_focus(input: &mut crate::app::SettingsTextInputState) {
-    input.is_focused = false;
-    input.selection_anchor = None;
-    input.marked_range = None;
-    input.selection_drag = None;
-}
-
-/// 归一化原生输入提交的 textarea 文本，统一换行符并保留多行内容。
-fn normalized_native_textarea_value(value: &str) -> String {
-    value.replace("\r\n", "\n").replace('\r', "\n")
-}
-
 #[cfg(test)]
 mod tests {
     use crate::app::{AppTextInputTarget, ArgusApp};
@@ -555,9 +427,9 @@ mod tests {
             },
         );
 
-        assert_eq!(app.source_tree_search_query, "中文");
-        assert_eq!(app.source_tree_search_cursor, 2);
-        assert!(app.source_tree_search_selection_anchor.is_none());
+        assert_eq!(app.source_tree_search_input.value, "中文");
+        assert_eq!(app.source_tree_search_input.cursor, 2);
+        assert!(app.source_tree_search_input.selection_anchor.is_none());
     }
 
     /// 验证设置输入框切换目标后，原生输入不会继续写入旧输入框。
@@ -598,11 +470,11 @@ mod tests {
     #[test]
     fn clear_all_text_input_focus_preserves_values() {
         let mut app = ArgusApp::new();
-        app.source_tree_search_query = "错误".to_string();
-        app.source_tree_search_cursor = 2;
-        app.source_tree_search_selection_anchor = Some(0);
-        app.source_tree_search_marked_range = Some(0..2);
-        app.is_source_tree_search_focused = true;
+        app.source_tree_search_input.value = "错误".to_string();
+        app.source_tree_search_input.cursor = 2;
+        app.source_tree_search_input.selection_anchor = Some(0);
+        app.source_tree_search_input.marked_range = Some(0..2);
+        app.source_tree_search_input.is_focused = true;
         app.settings_upgrade_server_input.value = "https://updates.example.com".to_string();
         app.settings_upgrade_server_input.cursor = 27;
         app.settings_upgrade_server_input.selection_anchor = Some(0);
@@ -614,18 +486,18 @@ mod tests {
 
         app.clear_all_text_input_focus();
 
-        assert_eq!(app.source_tree_search_query, "错误");
+        assert_eq!(app.source_tree_search_input.value, "错误");
         assert_eq!(
             app.settings_upgrade_server_input.value,
             "https://updates.example.com"
         );
         assert_eq!(app.log_search.keyword_input.value, "中文");
-        assert!(!app.is_source_tree_search_focused);
+        assert!(!app.source_tree_search_input.is_focused);
         assert!(!app.settings_upgrade_server_input.is_focused);
         assert!(!app.log_search.keyword_input.is_focused);
-        assert!(app.source_tree_search_selection_anchor.is_none());
+        assert!(app.source_tree_search_input.selection_anchor.is_none());
         assert!(app.settings_upgrade_server_input.selection_anchor.is_none());
-        assert!(app.source_tree_search_marked_range.is_none());
+        assert!(app.source_tree_search_input.marked_range.is_none());
         assert!(app.settings_upgrade_server_input.marked_range.is_none());
     }
 }

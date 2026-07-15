@@ -20,9 +20,9 @@ use gpui::{
 };
 
 use super::{
-    ArgusApp, InputTextSelectionDrag, LogSearchInputKind, LogSearchInputState, QuickMatchKey,
+    ArgusApp, InputTextSelectionDrag, LogSearchInputKind, QuickMatchKey,
     SEARCH_RESULT_PANEL_HEIGHT_MIN, SearchResultGroup, SearchResultListItem,
-    SearchResultPanelResizeDrag, SearchRunKind, TabKind,
+    SearchResultPanelResizeDrag, SearchRunKind, TabKind, TextInputState,
 };
 use crate::app::LOG_VIEWER_ROW_HEIGHT;
 use crate::config::SEARCH_RECENT_KEYWORDS_MAX;
@@ -1334,17 +1334,8 @@ impl ArgusApp {
         granularity: TextSelectionGranularity,
     ) {
         self.focus_log_search_input(input_kind);
-        let anchor_range =
-            self.log_search_input_range_for_granularity(input_kind, character_index, granularity);
-        self.apply_log_search_input_pointer_range(
-            input_kind,
-            anchor_range.clone(),
-            anchor_range.clone(),
-        );
-        self.log_search_input_mut(input_kind).selection_drag = Some(InputTextSelectionDrag {
-            anchor_range,
-            granularity,
-        });
+        self.log_search_input_mut(input_kind)
+            .begin_pointer_selection(character_index, granularity);
     }
 
     /// 鼠标拖拽过程中扩展搜索输入框选区。
@@ -1353,15 +1344,8 @@ impl ArgusApp {
         input_kind: LogSearchInputKind,
         character_index: usize,
     ) {
-        let Some(drag) = self.log_search_input(input_kind).selection_drag.clone() else {
-            return;
-        };
-        let focus_range = self.log_search_input_range_for_granularity(
-            input_kind,
-            character_index,
-            drag.granularity,
-        );
-        self.apply_log_search_input_pointer_range(input_kind, drag.anchor_range, focus_range);
+        self.log_search_input_mut(input_kind)
+            .update_pointer_selection(character_index);
     }
 
     /// 结束搜索输入框鼠标选择。
@@ -1370,11 +1354,7 @@ impl ArgusApp {
         input_kind: LogSearchInputKind,
     ) {
         let input = self.log_search_input_mut(input_kind);
-        input.selection_drag = None;
-        input.marked_range = None;
-        if input.selection_anchor == Some(input.cursor) {
-            input.selection_anchor = None;
-        }
+        input.finish_pointer_selection();
     }
 
     /// 当前输入框是否正在鼠标拖拽选择。
@@ -2120,7 +2100,7 @@ impl ArgusApp {
     }
 
     /// 返回指定搜索输入框状态。
-    fn log_search_input(&self, input_kind: LogSearchInputKind) -> &LogSearchInputState {
+    fn log_search_input(&self, input_kind: LogSearchInputKind) -> &TextInputState {
         match input_kind {
             LogSearchInputKind::Keyword => &self.log_search.keyword_input,
             LogSearchInputKind::Directory => &self.log_search.directory_input,
@@ -2128,7 +2108,7 @@ impl ArgusApp {
     }
 
     /// 返回指定搜索输入框可变状态。
-    fn log_search_input_mut(&mut self, input_kind: LogSearchInputKind) -> &mut LogSearchInputState {
+    fn log_search_input_mut(&mut self, input_kind: LogSearchInputKind) -> &mut TextInputState {
         match input_kind {
             LogSearchInputKind::Keyword => &mut self.log_search.keyword_input,
             LogSearchInputKind::Directory => &mut self.log_search.directory_input,
@@ -2731,7 +2711,7 @@ fn quick_match_result_for_occurrence(
 }
 
 /// 将搜索输入框恢复为空闲空值；用于“重新加载日志”这类需要清空搜索记录的场景。
-fn reset_log_search_input_state(input: &mut LogSearchInputState) {
+fn reset_log_search_input_state(input: &mut TextInputState) {
     input.value.clear();
     input.cursor = 0;
     input.selection_anchor = None;

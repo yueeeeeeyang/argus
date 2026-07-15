@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::analysis::jstack::split_stack_segment_filter_blocks;
 use crate::app::{
-    AppInputFocusHandles, AppTextInputTarget, ArgusApp, SettingsSection, SettingsTextInputState,
+    AppInputFocusHandles, AppTextInputTarget, ArgusApp, SettingsSection, TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::platform::open_with_registration::RegistrationStatus;
@@ -121,17 +121,17 @@ struct SettingsModalSnapshot {
     /// 是否跟随符号链接。
     follow_symlinks: bool,
     /// 快搜关键字输入框状态。
-    quick_keywords_input: SettingsTextInputState,
+    quick_keywords_input: TextInputState,
     /// Jstack 线程名过滤输入框状态。
-    jstack_thread_name_filter_input: SettingsTextInputState,
+    jstack_thread_name_filter_input: TextInputState,
     /// Jstack 完整线程段过滤输入框状态。
-    jstack_stack_segment_filter_input: SettingsTextInputState,
+    jstack_stack_segment_filter_input: TextInputState,
     /// 是否启用启动时自动检查升级。
     upgrade_enabled: bool,
     /// 升级服务器输入框状态。
-    upgrade_server_input: SettingsTextInputState,
+    upgrade_server_input: TextInputState,
     /// 升级验签公钥输入框状态。
-    upgrade_public_key_input: SettingsTextInputState,
+    upgrade_public_key_input: TextInputState,
     /// 当前平台 manifest 标识。
     upgrade_platform_label: String,
     /// 是否正在检查升级。
@@ -272,7 +272,7 @@ pub(crate) struct JstackStackSegmentFilterEditorSnapshot {
     /// 当前主题令牌。
     pub theme: AppTheme,
     /// 当前线程段过滤输入状态。
-    pub input: SettingsTextInputState,
+    pub input: TextInputState,
 }
 
 /// 渲染覆盖主窗口的设置模态框。
@@ -1456,14 +1456,8 @@ fn upgrade_public_key_input_control(
 }
 
 /// 返回设置输入框的规范化非空选区。
-fn settings_input_selection_range(
-    input: &SettingsTextInputState,
-) -> Option<std::ops::Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+fn settings_input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize>> {
+    input.selection_range()
 }
 
 /// 渲染设置组背景容器。

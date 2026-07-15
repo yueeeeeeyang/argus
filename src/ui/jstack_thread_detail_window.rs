@@ -20,6 +20,7 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::scrollbar::{
     ScrollbarMetrics, scrollbar_metrics, scrollbar_scroll_for_drag,
 };
+use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
 use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, FocusHandle, FontWeight, HighlightStyle,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -1162,39 +1163,18 @@ fn highlight_style_for_span(
         (
             range,
             HighlightStyle {
-                color: Some(rgb(color_for_detail_highlight_token(kind, theme)).into()),
+                color: Some(
+                    rgb(color_for_highlight_token(
+                        kind,
+                        theme,
+                        HighlightColorContext::Jstack,
+                    ))
+                    .into(),
+                ),
                 ..Default::default()
             },
         )
     })
-}
-
-/// 返回详情窗口专用高亮色；线程状态使用成功色，更接近线程分析语义。
-fn color_for_detail_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
-    match kind {
-        HighlightTokenKind::Trace => theme.foreground_muted,
-        HighlightTokenKind::Debug => theme.debug,
-        HighlightTokenKind::Info => theme.info,
-        HighlightTokenKind::Warning => theme.warning,
-        HighlightTokenKind::Error | HighlightTokenKind::Fatal => theme.error,
-        HighlightTokenKind::Timestamp => theme.syntax.timestamp,
-        HighlightTokenKind::Comment => theme.syntax.comment,
-        HighlightTokenKind::Key => theme.syntax.key,
-        HighlightTokenKind::Value => theme.syntax.string,
-        HighlightTokenKind::String => theme.syntax.string,
-        HighlightTokenKind::Number => theme.syntax.number,
-        HighlightTokenKind::Boolean => theme.syntax.boolean,
-        HighlightTokenKind::Punctuation => theme.syntax.punctuation,
-        HighlightTokenKind::Tag => theme.syntax.tag,
-        HighlightTokenKind::Attribute => theme.syntax.attribute,
-        HighlightTokenKind::ThreadName => theme.info,
-        HighlightTokenKind::ThreadState => theme.success,
-        HighlightTokenKind::StackClass => theme.syntax.class,
-        HighlightTokenKind::StackMethod => theme.info,
-        HighlightTokenKind::StackLocation => theme.syntax.string,
-        HighlightTokenKind::Lock => theme.syntax.lock,
-        HighlightTokenKind::Exception => theme.syntax.exception,
-    }
 }
 
 /// 默认高亮第一条 `at ...` 栈帧，便于打开窗口后快速定位代码路径。

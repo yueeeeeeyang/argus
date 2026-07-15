@@ -11,6 +11,7 @@ pub(crate) mod connection_tree_panel;
 pub(crate) mod custom_title_bar;
 pub(crate) mod dir_tree_panel;
 pub(crate) mod file_preview_window;
+pub(crate) mod highlight_colors;
 pub(crate) mod input_native;
 pub(crate) mod jstack_analysis_view;
 pub(crate) mod jstack_thread_detail_window;

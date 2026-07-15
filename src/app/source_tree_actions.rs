@@ -256,11 +256,11 @@ impl ArgusApp {
         self.ensure_log_tab_view_state(empty_tab_id);
 
         self.is_source_tree_search_open = false;
-        self.source_tree_search_query.clear();
-        self.source_tree_search_cursor = 0;
-        self.source_tree_search_selection_anchor = None;
-        self.source_tree_search_selection_drag = None;
-        self.is_source_tree_search_focused = false;
+        self.source_tree_search_input.value.clear();
+        self.source_tree_search_input.cursor = 0;
+        self.source_tree_search_input.selection_anchor = None;
+        self.source_tree_search_input.selection_drag = None;
+        self.source_tree_search_input.is_focused = false;
         self.filtered_source_ids.clear();
         self.source_tree_scroll
             .scroll_to_item(0, ScrollStrategy::Top);

@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::app::{
-    AppTextInputTarget, ArgusApp, LogSearchInputKind, LogSearchInputState, LogSearchState,
+    AppTextInputTarget, ArgusApp, LogSearchInputKind, LogSearchState, TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::search::search_engine::{SearchProgress, SearchScope};
@@ -191,13 +191,13 @@ struct LogSearchWindowStateSnapshot {
     /// 当前搜索范围。
     scope: SearchScope,
     /// 关键字输入框状态。
-    keyword_input: LogSearchInputState,
+    keyword_input: TextInputState,
     /// 关键字历史下拉菜单是否展开。
     keyword_history_open: bool,
     /// 关键字历史下拉菜单当前高亮项索引。
     keyword_history_highlight: Option<usize>,
     /// 目录输入框状态。
-    directory_input: LogSearchInputState,
+    directory_input: TextInputState,
     /// 是否区分大小写。
     case_sensitive: bool,
     /// 是否启用正则搜索。
@@ -1119,9 +1119,7 @@ fn button_label(label: &'static str) -> impl IntoElement {
 }
 
 /// 计算输入框选区范围。
-fn selection_range_for_input(
-    input: &crate::app::LogSearchInputState,
-) -> Option<std::ops::Range<usize>> {
+fn selection_range_for_input(input: &crate::app::TextInputState) -> Option<std::ops::Range<usize>> {
     let anchor = input.selection_anchor?;
     if anchor == input.cursor {
         return None;

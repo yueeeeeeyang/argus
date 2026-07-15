@@ -423,7 +423,7 @@ pub(crate) fn runtime_sql_matches_keyword(
 
 /// 返回日期时间选择器当前展示值；输入为空或非法时使用当天边界作为默认值。
 pub(crate) fn runtime_datetime_picker_value(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
     is_end: bool,
 ) -> DateTimePickerValue {
     let datetime = parse_runtime_filter_time_value(&input.value, is_end)
@@ -487,13 +487,9 @@ pub(crate) fn runtime_filter_status_label(state: &RuntimeAnalysisState) -> Strin
 
 /// 返回 Runtime 过滤输入框的规范化非空选区。
 pub(crate) fn runtime_filter_input_selection_range(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
 ) -> Option<std::ops::Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+    input.selection_range()
 }
 
 /// 返回 Runtime 过滤输入框使用的焦点句柄。

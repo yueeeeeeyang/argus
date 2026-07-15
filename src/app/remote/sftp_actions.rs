@@ -11,8 +11,8 @@ use gpui::{Context, Keystroke, PathPromptOptions, Pixels, Point, SharedString};
 
 use crate::app::{
     AppTextInputTarget, ArgusApp, ArgusTab, ConnectionHostKeyPromptState, HostKeyPromptOwner,
-    InputTextSelectionDrag, SettingsTextInputState, SftpDeletePromptState, SftpDialogState,
-    SftpRenameDialogState, TabKind, Workspace,
+    InputTextSelectionDrag, SftpDeletePromptState, SftpDialogState, SftpRenameDialogState, TabKind,
+    TextInputState, Workspace,
 };
 use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
@@ -494,7 +494,7 @@ impl ArgusApp {
             session_id,
             remote_path: entry.path,
             original_name: entry.name.clone(),
-            name_input: SettingsTextInputState::from_value(entry.name),
+            name_input: TextInputState::from_value(entry.name),
             error_message: None,
         }));
     }
@@ -573,10 +573,7 @@ impl ArgusApp {
     }
 
     /// 返回指定 SFTP 输入框状态。
-    pub(crate) fn sftp_text_input(
-        &self,
-        target: AppTextInputTarget,
-    ) -> Option<&SettingsTextInputState> {
+    pub(crate) fn sftp_text_input(&self, target: AppTextInputTarget) -> Option<&TextInputState> {
         match target {
             AppTextInputTarget::SftpAddress { session_id } => self
                 .sftp_sessions
@@ -594,7 +591,7 @@ impl ArgusApp {
     pub(crate) fn sftp_text_input_mut(
         &mut self,
         target: AppTextInputTarget,
-    ) -> Option<&mut SettingsTextInputState> {
+    ) -> Option<&mut TextInputState> {
         match target {
             AppTextInputTarget::SftpAddress { session_id } => self
                 .sftp_sessions
@@ -689,14 +686,7 @@ impl ArgusApp {
         let Some(input) = self.sftp_text_input_mut(target) else {
             return;
         };
-        let range = input_range_for_granularity(input, character_index, granularity);
-        input.selection_anchor = Some(range.start);
-        input.cursor = range.end;
-        input.selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
-        input.marked_range = None;
+        input.begin_pointer_selection(character_index, granularity);
     }
 
     /// 鼠标拖拽更新 SFTP 输入框选区。
@@ -708,27 +698,13 @@ impl ArgusApp {
         let Some(input) = self.sftp_text_input_mut(target) else {
             return;
         };
-        let Some(drag) = input.selection_drag.clone() else {
-            return;
-        };
-        let focus_range = input_range_for_granularity(input, character_index, drag.granularity);
-        if focus_range.start < drag.anchor_range.start {
-            input.selection_anchor = Some(drag.anchor_range.end);
-            input.cursor = focus_range.start;
-        } else {
-            input.selection_anchor = Some(drag.anchor_range.start);
-            input.cursor = focus_range.end;
-        }
-        input.marked_range = None;
+        input.update_pointer_selection(character_index);
     }
 
     /// 鼠标结束 SFTP 输入框文本选择。
     pub(crate) fn finish_sftp_input_pointer_selection(&mut self, target: AppTextInputTarget) {
         if let Some(input) = self.sftp_text_input_mut(target) {
-            input.selection_drag = None;
-            if normalized_input_selection_range(input).is_none() {
-                input.selection_anchor = None;
-            }
+            input.finish_pointer_selection();
         }
     }
 
@@ -1206,15 +1182,12 @@ fn sftp_dialog_session_id(dialog: &SftpDialogState) -> Option<usize> {
 }
 
 /// 清理 SFTP 输入框焦点态。
-fn clear_sftp_input_focus(input: &mut SettingsTextInputState) {
-    input.is_focused = false;
-    input.selection_anchor = None;
-    input.marked_range = None;
-    input.selection_drag = None;
+fn clear_sftp_input_focus(input: &mut TextInputState) {
+    input.clear_focus();
 }
 
 /// 应用系统原生文本输入编辑结果。
-fn apply_native_edit_to_sftp_input(input: &mut SettingsTextInputState, edit: &NativeTextEdit) {
+fn apply_native_edit_to_sftp_input(input: &mut TextInputState, edit: &NativeTextEdit) {
     let parts = SftpInputParts {
         value: &mut input.value,
         cursor: &mut input.cursor,
@@ -1232,38 +1205,21 @@ fn apply_native_edit_to_sftp_input(input: &mut SettingsTextInputState, edit: &Na
 }
 
 /// 返回输入框当前规范化选区。
-fn normalized_input_selection_range(
-    input: &SettingsTextInputState,
-) -> Option<std::ops::Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        None
-    } else if anchor < input.cursor {
-        Some(anchor..input.cursor)
-    } else {
-        Some(input.cursor..anchor)
-    }
+fn normalized_input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize>> {
+    input.selection_range()
 }
 
 /// 根据选择粒度返回输入框字符范围。
 fn input_range_for_granularity(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
     character_index: usize,
     granularity: TextSelectionGranularity,
 ) -> std::ops::Range<usize> {
-    let text_length = character_count(&input.value);
-    let character_index = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => character_index..character_index,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, character_index).unwrap_or(character_index..character_index)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
+    input.range_for_granularity(character_index, granularity)
 }
 
 /// 返回输入框指定字符范围的文本。
 #[allow(dead_code)]
-fn selected_sftp_input_text(input: &SettingsTextInputState) -> Option<String> {
+fn selected_sftp_input_text(input: &TextInputState) -> Option<String> {
     normalized_input_selection_range(input).map(|range| slice_character_range(&input.value, range))
 }

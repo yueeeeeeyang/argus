@@ -116,10 +116,10 @@ impl ArgusApp {
                 request_sort_direction: RuntimeSortDirection::Descending,
                 sql_sort_key: RuntimeSqlSortKey::ExecuteDuration,
                 sql_sort_direction: RuntimeSortDirection::Descending,
-                filter_keyword_input: SettingsTextInputState::default(),
-                filter_username_input: SettingsTextInputState::default(),
-                filter_start_time_input: SettingsTextInputState::default(),
-                filter_end_time_input: SettingsTextInputState::default(),
+                filter_keyword_input: TextInputState::default(),
+                filter_username_input: TextInputState::default(),
+                filter_start_time_input: TextInputState::default(),
+                filter_end_time_input: TextInputState::default(),
                 applied_filter_keyword: String::new(),
                 applied_filter_username: String::new(),
                 applied_filter_start_time: String::new(),
@@ -1506,14 +1506,7 @@ impl ArgusApp {
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
             return;
         };
-        let range = runtime_filter_input_range_for_granularity(input, character_index, granularity);
-        input.cursor = range.end;
-        input.selection_anchor = Some(range.start);
-        input.marked_range = None;
-        input.selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
+        input.begin_pointer_selection(character_index, granularity);
     }
 
     /// 更新 Runtime 过滤输入框鼠标拖拽选区。
@@ -1526,14 +1519,7 @@ impl ArgusApp {
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
             return;
         };
-        let Some(drag) = input.selection_drag.clone() else {
-            return;
-        };
-        let focus_range =
-            runtime_filter_input_range_for_granularity(input, character_index, drag.granularity);
-        input.selection_anchor = Some(drag.anchor_range.start.min(focus_range.start));
-        input.marked_range = None;
-        input.cursor = drag.anchor_range.end.max(focus_range.end);
+        input.update_pointer_selection(character_index);
     }
 
     /// 结束 Runtime 过滤输入框鼠标选择。
@@ -1543,7 +1529,7 @@ impl ArgusApp {
         input_kind: RuntimeFilterInputKind,
     ) {
         if let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) {
-            input.selection_drag = None;
+            input.finish_pointer_selection();
         }
     }
 
@@ -1552,7 +1538,7 @@ impl ArgusApp {
         &self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
-    ) -> Option<&SettingsTextInputState> {
+    ) -> Option<&TextInputState> {
         let state = self.runtime_analyses.get(&analysis_id)?;
         Some(match input_kind {
             RuntimeFilterInputKind::Keyword => &state.filter_keyword_input,
@@ -1567,7 +1553,7 @@ impl ArgusApp {
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
-    ) -> Option<&mut SettingsTextInputState> {
+    ) -> Option<&mut TextInputState> {
         let state = self.runtime_analyses.get_mut(&analysis_id)?;
         Some(match input_kind {
             RuntimeFilterInputKind::Keyword => &mut state.filter_keyword_input,

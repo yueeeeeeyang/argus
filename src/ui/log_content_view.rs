@@ -14,7 +14,7 @@ use crate::app::{
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
-    HighlightCache, HighlightLanguage, HighlightSpan, HighlightTokenKind, detect_highlight_language,
+    HighlightCache, HighlightLanguage, HighlightSpan, detect_highlight_language,
 };
 use crate::infra::perf::PerfSpan;
 use crate::infra::text_selection::{
@@ -266,6 +266,7 @@ fn paged_vertical_max_scroll(line_count: usize, viewport_height: gpui::Pixels) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::highlight::HighlightTokenKind;
 
     /// 验证选区覆盖语法高亮中段时，只覆盖被选中的范围，两侧语法颜色仍会保留。
     #[test]

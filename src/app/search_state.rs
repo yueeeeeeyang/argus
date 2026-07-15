@@ -14,7 +14,7 @@ use crate::search::search_task::SearchTaskState;
 use crate::ui::log_search_window::LogSearchWindow;
 
 use super::constants::SEARCH_RESULT_PANEL_HEIGHT_DEFAULT;
-use super::types::LogSearchInputState;
+use super::types::TextInputState;
 
 /// 当前日志快速查找缓存键，避免关键字、选项或日志变化后复用过期结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,13 +99,13 @@ pub(crate) struct LogSearchState {
     /// 当前搜索范围。
     pub scope: SearchScope,
     /// 关键字输入框状态。
-    pub keyword_input: LogSearchInputState,
+    pub keyword_input: TextInputState,
     /// 关键字历史下拉菜单是否展开。
     pub keyword_history_open: bool,
     /// 关键字历史下拉菜单当前高亮项索引。
     pub keyword_history_highlight: Option<usize>,
     /// 目录输入框状态。
-    pub directory_input: LogSearchInputState,
+    pub directory_input: TextInputState,
     /// 目录输入框对应的来源树目录节点。
     pub directory_source_id: Option<SourceId>,
     /// 是否区分大小写；同时影响普通关键字和正则搜索。
@@ -175,10 +175,10 @@ impl Default for LogSearchState {
             is_window_open: false,
             window_handle: None,
             scope: SearchScope::CurrentFile,
-            keyword_input: LogSearchInputState::default(),
+            keyword_input: TextInputState::default(),
             keyword_history_open: false,
             keyword_history_highlight: None,
-            directory_input: LogSearchInputState::default(),
+            directory_input: TextInputState::default(),
             directory_source_id: None,
             case_sensitive: false,
             regex_enabled: false,

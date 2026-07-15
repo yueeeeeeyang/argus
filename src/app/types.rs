@@ -8,8 +8,8 @@ use gpui::FocusHandle;
 
 use crate::loader::SourceId;
 
-// 从共享类型模块重导出，保持 `crate::app::SettingsTextInputState` 等路径向后兼容。
-pub(crate) use crate::types::{InputTextSelectionDrag, SettingsTextInputState};
+// 从基础设施模块重导出，应用与 UI 通过同一状态类型处理文本输入。
+pub(crate) use crate::infra::text_input::{InputTextSelectionDrag, TextInputState};
 
 /// 当前界面工作区，驱动标题栏入口和左侧侧栏内容。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,37 +207,6 @@ pub(crate) enum AppTextInputTarget {
     SettingsUpgradeServer,
     /// 设置模态框升级验签公钥输入框。
     SettingsUpgradePublicKey,
-}
-
-/// 日志搜索窗口中的单行输入框状态。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LogSearchInputState {
-    /// 输入框当前文本。
-    pub value: String,
-    /// 光标字符位置。
-    pub cursor: usize,
-    /// 选区锚点；与光标不一致时表示存在选区。
-    pub selection_anchor: Option<usize>,
-    /// 输入法 marked text 字符范围，候选态替换时使用。
-    pub marked_range: Option<std::ops::Range<usize>>,
-    /// 鼠标拖拽选区状态。
-    pub selection_drag: Option<InputTextSelectionDrag>,
-    /// 是否处于焦点状态。
-    pub is_focused: bool,
-}
-
-impl Default for LogSearchInputState {
-    /// 创建空输入框状态。
-    fn default() -> Self {
-        Self {
-            value: String::new(),
-            cursor: 0,
-            selection_anchor: None,
-            marked_range: None,
-            selection_drag: None,
-            is_focused: false,
-        }
-    }
 }
 
 /// 主窗口内输入框真实焦点句柄集合。

@@ -11,7 +11,7 @@ use gpui::{AppContext, Context, Keystroke};
 use crate::app::{
     AppTextInputTarget, ArgusApp, ConnectionDeletePromptState, ConnectionDialogState,
     ConnectionDirectoryFormState, ConnectionHostKeyPromptState, ConnectionLinkFormState,
-    InputTextSelectionDrag, SettingsTextInputState,
+    InputTextSelectionDrag, TextInputState,
 };
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range, word_range_at,
@@ -47,7 +47,7 @@ impl ArgusApp {
     /// 打开链接树过滤输入框。
     pub(crate) fn open_connection_tree_search(&mut self) {
         self.is_connection_tree_search_open = true;
-        self.connection_tree_search_input = SettingsTextInputState::default();
+        self.connection_tree_search_input = TextInputState::default();
         self.connection_tree_search_input.is_focused = true;
         self.placeholder_notice = "已打开链接过滤".to_string();
     }
@@ -55,7 +55,7 @@ impl ArgusApp {
     /// 关闭链接树过滤输入框并恢复完整目录树。
     pub(crate) fn close_connection_tree_search(&mut self) {
         self.is_connection_tree_search_open = false;
-        self.connection_tree_search_input = SettingsTextInputState::default();
+        self.connection_tree_search_input = TextInputState::default();
         self.placeholder_notice = "已关闭链接过滤".to_string();
     }
 
@@ -118,7 +118,7 @@ impl ArgusApp {
             .parent_for_new_directory(self.selected_connection_node_id);
         let initial_form = ConnectionDirectoryFormState {
             parent_id,
-            name_input: SettingsTextInputState::default(),
+            name_input: TextInputState::default(),
             error_message: None,
         };
 
@@ -153,16 +153,16 @@ impl ArgusApp {
         let initial_form = ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Ssh,
             parent_id,
-            name_input: SettingsTextInputState::default(),
-            host_input: SettingsTextInputState::default(),
-            port_input: SettingsTextInputState::from_value("22".to_string()),
-            username_input: SettingsTextInputState::default(),
-            password_input: SettingsTextInputState::default(),
-            share_input: SettingsTextInputState::default(),
-            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
-            domain_input: SettingsTextInputState::default(),
-            private_key_path_input: SettingsTextInputState::default(),
-            private_key_passphrase_input: SettingsTextInputState::default(),
+            name_input: TextInputState::default(),
+            host_input: TextInputState::default(),
+            port_input: TextInputState::from_value("22".to_string()),
+            username_input: TextInputState::default(),
+            password_input: TextInputState::default(),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::from_value("/".to_string()),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
             error_message: None,
         };
 
@@ -196,16 +196,16 @@ impl ArgusApp {
         let initial_form = ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Smb,
             parent_id,
-            name_input: SettingsTextInputState::default(),
-            host_input: SettingsTextInputState::default(),
-            port_input: SettingsTextInputState::from_value("445".to_string()),
-            username_input: SettingsTextInputState::default(),
-            password_input: SettingsTextInputState::default(),
-            share_input: SettingsTextInputState::default(),
-            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
-            domain_input: SettingsTextInputState::default(),
-            private_key_path_input: SettingsTextInputState::default(),
-            private_key_passphrase_input: SettingsTextInputState::default(),
+            name_input: TextInputState::default(),
+            host_input: TextInputState::default(),
+            port_input: TextInputState::from_value("445".to_string()),
+            username_input: TextInputState::default(),
+            password_input: TextInputState::default(),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::from_value("/".to_string()),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
             error_message: None,
         };
 
@@ -283,7 +283,7 @@ impl ArgusApp {
         };
         let initial_form = ConnectionDirectoryFormState {
             parent_id: directory.parent_id,
-            name_input: SettingsTextInputState::from_value(directory.name),
+            name_input: TextInputState::from_value(directory.name),
             error_message: None,
         };
         let mode = ConnectionDirectoryWindowMode::Edit { directory_id };
@@ -313,18 +313,18 @@ impl ArgusApp {
         let initial_form = ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Ssh,
             parent_id: link.parent_id,
-            name_input: SettingsTextInputState::from_value(link.name),
-            host_input: SettingsTextInputState::from_value(ssh.host),
-            port_input: SettingsTextInputState::from_value(ssh.port.to_string()),
-            username_input: SettingsTextInputState::from_value(ssh.username),
-            password_input: SettingsTextInputState::from_value(ssh.password),
-            share_input: SettingsTextInputState::default(),
-            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
-            domain_input: SettingsTextInputState::default(),
-            private_key_path_input: SettingsTextInputState::from_value(
+            name_input: TextInputState::from_value(link.name),
+            host_input: TextInputState::from_value(ssh.host),
+            port_input: TextInputState::from_value(ssh.port.to_string()),
+            username_input: TextInputState::from_value(ssh.username),
+            password_input: TextInputState::from_value(ssh.password),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::from_value("/".to_string()),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::from_value(
                 ssh.private_key_path.unwrap_or_default(),
             ),
-            private_key_passphrase_input: SettingsTextInputState::from_value(
+            private_key_passphrase_input: TextInputState::from_value(
                 ssh.private_key_passphrase.unwrap_or_default(),
             ),
             error_message: None,
@@ -356,16 +356,16 @@ impl ArgusApp {
         let initial_form = ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Smb,
             parent_id: link.parent_id,
-            name_input: SettingsTextInputState::from_value(link.name),
-            host_input: SettingsTextInputState::from_value(smb.host),
-            port_input: SettingsTextInputState::from_value(smb.port.to_string()),
-            username_input: SettingsTextInputState::from_value(smb.username),
-            password_input: SettingsTextInputState::from_value(smb.password),
-            share_input: SettingsTextInputState::from_value(smb.share),
-            initial_dir_input: SettingsTextInputState::from_value(smb.initial_dir),
-            domain_input: SettingsTextInputState::from_value(smb.domain.unwrap_or_default()),
-            private_key_path_input: SettingsTextInputState::default(),
-            private_key_passphrase_input: SettingsTextInputState::default(),
+            name_input: TextInputState::from_value(link.name),
+            host_input: TextInputState::from_value(smb.host),
+            port_input: TextInputState::from_value(smb.port.to_string()),
+            username_input: TextInputState::from_value(smb.username),
+            password_input: TextInputState::from_value(smb.password),
+            share_input: TextInputState::from_value(smb.share),
+            initial_dir_input: TextInputState::from_value(smb.initial_dir),
+            domain_input: TextInputState::from_value(smb.domain.unwrap_or_default()),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
             error_message: None,
         };
         let mode = ConnectionLinkWindowMode::Edit { link_id };
@@ -469,7 +469,7 @@ impl ArgusApp {
     pub(crate) fn connection_text_input(
         &self,
         target: AppTextInputTarget,
-    ) -> Option<&SettingsTextInputState> {
+    ) -> Option<&TextInputState> {
         match target {
             AppTextInputTarget::ConnectionTreeSearch => Some(&self.connection_tree_search_input),
             _ => None,
@@ -480,7 +480,7 @@ impl ArgusApp {
     pub(crate) fn connection_text_input_mut(
         &mut self,
         target: AppTextInputTarget,
-    ) -> Option<&mut SettingsTextInputState> {
+    ) -> Option<&mut TextInputState> {
         match target {
             AppTextInputTarget::ConnectionTreeSearch => {
                 Some(&mut self.connection_tree_search_input)
@@ -553,14 +553,7 @@ impl ArgusApp {
         let Some(input) = self.connection_text_input_mut(target) else {
             return;
         };
-        let range = connection_input_range_for_granularity(input, character_index, granularity);
-        input.selection_anchor = Some(range.start);
-        input.cursor = range.end;
-        input.selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
-        input.marked_range = None;
+        input.begin_pointer_selection(character_index, granularity);
     }
 
     /// 鼠标拖拽更新链接输入框选区。
@@ -572,28 +565,13 @@ impl ArgusApp {
         let Some(input) = self.connection_text_input_mut(target) else {
             return;
         };
-        let Some(drag) = input.selection_drag.clone() else {
-            return;
-        };
-        let focus_range =
-            connection_input_range_for_granularity(input, character_index, drag.granularity);
-        if focus_range.start < drag.anchor_range.start {
-            input.selection_anchor = Some(drag.anchor_range.end);
-            input.cursor = focus_range.start;
-        } else {
-            input.selection_anchor = Some(drag.anchor_range.start);
-            input.cursor = focus_range.end;
-        }
-        input.marked_range = None;
+        input.update_pointer_selection(character_index);
     }
 
     /// 鼠标结束链接输入框文本选择。
     pub(crate) fn finish_connection_input_pointer_selection(&mut self, target: AppTextInputTarget) {
         if let Some(input) = self.connection_text_input_mut(target) {
-            input.selection_drag = None;
-            if normalized_connection_input_selection_range(input).is_none() {
-                input.selection_anchor = None;
-            }
+            input.finish_pointer_selection();
         }
     }
 
@@ -1062,39 +1040,24 @@ fn smb_config_from_form(form: &ConnectionLinkFormState) -> Result<SmbLinkConfig,
 }
 
 /// 清理单个链接输入框焦点态。
-fn clear_connection_input_focus(input: &mut SettingsTextInputState) {
-    input.is_focused = false;
-    input.selection_anchor = None;
-    input.marked_range = None;
-    input.selection_drag = None;
+fn clear_connection_input_focus(input: &mut TextInputState) {
+    input.clear_focus();
 }
 
 /// 返回输入框规范化后的非空选区。
 pub(crate) fn normalized_connection_input_selection_range(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
 ) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+    input.selection_range()
 }
 
 /// 按鼠标点击粒度生成链接输入框字符范围。
 fn connection_input_range_for_granularity(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
     character_index: usize,
     granularity: TextSelectionGranularity,
 ) -> Range<usize> {
-    let text_length = character_count(&input.value);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
+    input.range_for_granularity(character_index, granularity)
 }
 
 #[cfg(test)]
@@ -1118,7 +1081,7 @@ mod tests {
         let mut app = test_app("submit-directory");
         app.create_connection_directory_from_form(ConnectionDirectoryFormState {
             parent_id: None,
-            name_input: SettingsTextInputState::from_value("生产环境".to_string()),
+            name_input: TextInputState::from_value("生产环境".to_string()),
             error_message: None,
         })
         .expect("有效目录表单应创建成功");
@@ -1138,16 +1101,16 @@ mod tests {
         let result = app.create_connection_link_from_form(ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Ssh,
             parent_id: None,
-            name_input: SettingsTextInputState::from_value("app-01".to_string()),
-            host_input: SettingsTextInputState::from_value("10.0.0.1".to_string()),
-            port_input: SettingsTextInputState::from_value("70000".to_string()),
-            username_input: SettingsTextInputState::from_value("deploy".to_string()),
-            password_input: SettingsTextInputState::from_value("secret".to_string()),
-            share_input: SettingsTextInputState::default(),
-            initial_dir_input: SettingsTextInputState::from_value("/".to_string()),
-            domain_input: SettingsTextInputState::default(),
-            private_key_path_input: SettingsTextInputState::default(),
-            private_key_passphrase_input: SettingsTextInputState::default(),
+            name_input: TextInputState::from_value("app-01".to_string()),
+            host_input: TextInputState::from_value("10.0.0.1".to_string()),
+            port_input: TextInputState::from_value("70000".to_string()),
+            username_input: TextInputState::from_value("deploy".to_string()),
+            password_input: TextInputState::from_value("secret".to_string()),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::from_value("/".to_string()),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
             error_message: None,
         });
 
@@ -1162,16 +1125,16 @@ mod tests {
         app.create_connection_link_from_form(ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Smb,
             parent_id: None,
-            name_input: SettingsTextInputState::from_value("共享日志".to_string()),
-            host_input: SettingsTextInputState::from_value("10.0.0.2".to_string()),
-            port_input: SettingsTextInputState::from_value("445".to_string()),
-            username_input: SettingsTextInputState::from_value("smbuser".to_string()),
-            password_input: SettingsTextInputState::from_value(" secret ".to_string()),
-            share_input: SettingsTextInputState::from_value("logs".to_string()),
-            initial_dir_input: SettingsTextInputState::from_value("runtime".to_string()),
-            domain_input: SettingsTextInputState::from_value("WORKGROUP".to_string()),
-            private_key_path_input: SettingsTextInputState::default(),
-            private_key_passphrase_input: SettingsTextInputState::default(),
+            name_input: TextInputState::from_value("共享日志".to_string()),
+            host_input: TextInputState::from_value("10.0.0.2".to_string()),
+            port_input: TextInputState::from_value("445".to_string()),
+            username_input: TextInputState::from_value("smbuser".to_string()),
+            password_input: TextInputState::from_value(" secret ".to_string()),
+            share_input: TextInputState::from_value("logs".to_string()),
+            initial_dir_input: TextInputState::from_value("runtime".to_string()),
+            domain_input: TextInputState::from_value("WORKGROUP".to_string()),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
             error_message: None,
         })
         .expect("有效 SMB 表单应创建成功");
