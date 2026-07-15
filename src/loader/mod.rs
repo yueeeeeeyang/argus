@@ -5,13 +5,10 @@
 //! 主要功能：提供日志来源模型、来源注册表、目录树加载器和压缩包适配器。
 
 pub(crate) mod archive;
-pub(crate) mod credential_store;
 pub(crate) mod dir_tree;
-pub(crate) mod file_watcher;
 pub(crate) mod log_source;
 pub(crate) mod path_browser;
 pub(crate) mod source_registry;
-pub(crate) mod spool_manager;
 
 pub(crate) use dir_tree::{
     LoadReport, LogSourceLoader, SourceArchiveProbeRequest, SourceArchiveProbeResult,

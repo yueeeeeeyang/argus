@@ -29,7 +29,6 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::jstack_analysis_view;
 use crate::ui::runtime_analysis_view;
-use crate::ui::settings_page;
 use crate::ui::sftp_file_manager_view;
 use crate::ui::terminal_view;
 use gpui::{

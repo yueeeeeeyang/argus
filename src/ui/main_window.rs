@@ -9,8 +9,8 @@ use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::ui::{
     archive_password_dialog, components::context_menu, connection_dialog, custom_title_bar,
-    log_content_view, placeholder_dialog, settings_window, sftp_dialog, source_panel,
-    source_picker, source_resizer, upgrade_dialog,
+    log_content_view, settings_window, sftp_dialog, source_panel, source_picker, source_resizer,
+    upgrade_dialog,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
@@ -103,9 +103,6 @@ pub(crate) fn render(
         )
         .when(!app.is_source_panel_collapsed, |this| {
             this.child(source_resizer::render(app, "source-resizer", cx))
-        })
-        .when(app.active_dialog.is_some(), |this| {
-            this.child(placeholder_dialog::render(app, cx))
         })
         .when(app.connection_dialog.is_some(), |this| {
             this.child(connection_dialog::render(app, cx))

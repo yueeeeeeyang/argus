@@ -13,7 +13,6 @@ pub(crate) mod rar_adapter;
 pub(crate) mod registry;
 pub(crate) mod sevenz_adapter;
 pub(crate) mod tar_adapter;
-pub(crate) mod unsupported;
 pub(crate) mod zip_adapter;
 
 pub(crate) use adapter::{ArchiveEntryConsumer, stream_archive_entry_with_passwords};
