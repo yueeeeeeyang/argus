@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 /// 返回路径最后一段作为界面标签；无法取得文件名时退回完整路径。
-pub fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned)
@@ -15,12 +15,12 @@ pub fn display_name(path: &Path) -> String {
 }
 
 /// 返回适合状态栏和面包屑显示的路径文本。
-pub fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
 /// 组合压缩包真实路径、嵌套容器链路与内部条目路径，形成稳定的虚拟路径文案。
-pub fn archive_virtual_path(
+pub(crate) fn archive_virtual_path(
     archive_path: &Path,
     container_entries: &[String],
     entry_path: &str,
@@ -36,7 +36,7 @@ pub fn archive_virtual_path(
 }
 
 /// 将压缩包条目路径规范化为统一的 `/` 分隔形式。
-pub fn normalize_archive_entry_path(path: &str) -> String {
+pub(crate) fn normalize_archive_entry_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches('/')
         .trim_end_matches('/')
@@ -44,7 +44,7 @@ pub fn normalize_archive_entry_path(path: &str) -> String {
 }
 
 /// 返回路径的父目录；没有父目录时返回原路径副本，便于后续状态栏展示。
-pub fn parent_or_self(path: &Path) -> PathBuf {
+pub(crate) fn parent_or_self(path: &Path) -> PathBuf {
     path.parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| path.to_path_buf())

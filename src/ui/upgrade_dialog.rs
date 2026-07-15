@@ -17,7 +17,7 @@ const UPGRADE_DIALOG_WIDTH: f32 = 560.0;
 const UPGRADE_DIALOG_HEIGHT: f32 = 420.0;
 
 /// 渲染当前升级弹窗。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(dialog) = app.upgrade_dialog.clone() else {
         return div().into_any_element();

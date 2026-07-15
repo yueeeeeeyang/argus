@@ -4,16 +4,16 @@
 //! 作者：Argus 开发团队
 //! 主要功能：集中声明高亮子模块，并向 UI 层暴露语言识别、缓存和高亮结果类型。
 
-pub mod cache;
-pub mod highlighter;
-pub mod language;
-pub mod rules;
-pub mod span;
+pub(crate) mod cache;
+pub(crate) mod highlighter;
+pub(crate) mod language;
+pub(crate) mod rules;
+pub(crate) mod span;
 
 #[cfg(test)]
 mod tests;
 
-pub use cache::HighlightCache;
-pub use highlighter::SyntaxHighlighter;
-pub use language::{HighlightLanguage, detect_highlight_language};
-pub use span::{HighlightSpan, HighlightTokenKind, MAX_HIGHLIGHT_BYTES};
+pub(crate) use cache::HighlightCache;
+pub(crate) use highlighter::SyntaxHighlighter;
+pub(crate) use language::{HighlightLanguage, detect_highlight_language};
+pub(crate) use span::{HighlightSpan, HighlightTokenKind};

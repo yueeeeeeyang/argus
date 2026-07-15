@@ -38,12 +38,12 @@ const SFTP_MODE_DIRECTORY: u32 = 0o040000;
 /// 远程符号链接类型位。
 const SFTP_MODE_SYMLINK: u32 = 0o120000;
 /// 允许预览的文件总大小上限，超过则不发起预览读取。
-pub const SFTP_PREVIEW_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
+pub(crate) const SFTP_PREVIEW_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
 /// 预览单次读取的字节上限，超出部分截断并提示。
-pub const SFTP_PREVIEW_MAX_READ: usize = 512 * 1024;
+pub(crate) const SFTP_PREVIEW_MAX_READ: usize = 512 * 1024;
 
 /// 判断远程条目是否允许文本预览：普通文件且总大小不超过预览上限。
-pub fn is_sftp_entry_previewable(entry: &SftpEntry) -> bool {
+pub(crate) fn is_sftp_entry_previewable(entry: &SftpEntry) -> bool {
     if entry.kind != SftpEntryKind::RegularFile {
         return false;
     }
@@ -52,7 +52,7 @@ pub fn is_sftp_entry_previewable(entry: &SftpEntry) -> bool {
         .is_none_or(|size| size <= SFTP_PREVIEW_MAX_FILE_SIZE)
 }
 /// 远程文件管理会话运行期状态，存放在 `ArgusApp` 中并由 UI 渲染。
-pub struct SftpSessionState {
+pub(crate) struct SftpSessionState {
     /// 远程文件管理会话 ID，与标签页中的 `session_id` 对应。
     pub id: usize,
     /// 关联的链接节点 ID。
@@ -91,7 +91,7 @@ pub struct SftpSessionState {
 
 impl SftpSessionState {
     /// 创建一个处于“连接中”的远程文件管理会话状态。
-    pub fn connecting(
+    pub(crate) fn connecting(
         id: usize,
         link: &ConnectionLinkConfig,
         backend: RemoteFileBackend,
@@ -120,7 +120,7 @@ impl SftpSessionState {
     }
 
     /// 同步当前目录和文件列表，成功加载后清理旧选择。
-    pub fn apply_directory_listing(&mut self, current_dir: String, entries: Vec<SftpEntry>) {
+    pub(crate) fn apply_directory_listing(&mut self, current_dir: String, entries: Vec<SftpEntry>) {
         self.current_dir = current_dir.clone();
         self.address_input = SettingsTextInputState::from_value(current_dir);
         self.entries = entries;
@@ -130,14 +130,14 @@ impl SftpSessionState {
     }
 
     /// 根据当前排序字段重建 UI 使用的有序列表快照。
-    pub fn rebuild_sorted_entries(&mut self) {
+    pub(crate) fn rebuild_sorted_entries(&mut self) {
         let mut entries = self.entries.clone();
         sort_sftp_entries(&mut entries, self.sort_field, self.sort_direction);
         self.sorted_entries = Arc::new(entries);
     }
 
     /// 返回当前选中的文件条目。
-    pub fn selected_entries(&self) -> Vec<SftpEntry> {
+    pub(crate) fn selected_entries(&self) -> Vec<SftpEntry> {
         self.entries
             .iter()
             .filter(|entry| self.selected_paths.contains(&entry.path))
@@ -148,7 +148,7 @@ impl SftpSessionState {
 
 /// 文件管理后端协议。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RemoteFileBackend {
+pub(crate) enum RemoteFileBackend {
     /// SSH SFTP 文件管理。
     Sftp,
     /// SMB 共享文件管理。
@@ -157,7 +157,7 @@ pub enum RemoteFileBackend {
 
 impl RemoteFileBackend {
     /// 返回 UI 状态提示使用的协议名称。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Sftp => "SFTP",
             Self::Smb => "SMB",
@@ -167,7 +167,7 @@ impl RemoteFileBackend {
 
 /// 远程文件管理会话状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SftpStatus {
+pub(crate) enum SftpStatus {
     /// 正在连接服务器。
     Connecting,
     /// 已拿到未知主机指纹，等待用户确认。
@@ -186,7 +186,7 @@ pub enum SftpStatus {
 
 /// 远程文件条目类型。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum SftpEntryKind {
+pub(crate) enum SftpEntryKind {
     /// 目录。
     Directory,
     /// 普通文件。
@@ -199,7 +199,7 @@ pub enum SftpEntryKind {
 
 impl SftpEntryKind {
     /// 返回 UI 展示用中文类型。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Directory => "目录",
             Self::RegularFile => "文件",
@@ -209,14 +209,14 @@ impl SftpEntryKind {
     }
 
     /// 判断当前条目是否支持普通文件传输。
-    pub fn is_regular_file(self) -> bool {
+    pub(crate) fn is_regular_file(self) -> bool {
         self == Self::RegularFile
     }
 }
 
 /// 远程文件列表排序字段，对应表头各列。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SftpSortField {
+pub(crate) enum SftpSortField {
     /// 名称列。
     Name,
     /// 类型列。
@@ -231,7 +231,7 @@ pub enum SftpSortField {
 
 /// 远程文件列表排序方向。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SftpSortDirection {
+pub(crate) enum SftpSortDirection {
     /// 升序。
     Asc,
     /// 降序。
@@ -240,7 +240,7 @@ pub enum SftpSortDirection {
 
 /// 远程目录中的单个文件条目。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SftpEntry {
+pub(crate) struct SftpEntry {
     /// 文件名。
     pub name: String,
     /// 完整远程路径。
@@ -257,7 +257,7 @@ pub struct SftpEntry {
 
 /// 启动远程文件 worker 时需要的不可变请求数据。
 #[derive(Clone, Debug)]
-pub struct SftpWorkerRequest {
+pub(crate) struct SftpWorkerRequest {
     /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 关联链接 ID。
@@ -268,7 +268,7 @@ pub struct SftpWorkerRequest {
 
 /// 文件管理 worker 使用的后端连接请求。
 #[derive(Clone, Debug)]
-pub enum RemoteFileWorkerBackend {
+pub(crate) enum RemoteFileWorkerBackend {
     /// 通过 SSH SFTP 通道管理远程文件。
     Sftp {
         /// SSH 配置快照。
@@ -285,7 +285,7 @@ pub enum RemoteFileWorkerBackend {
 
 impl RemoteFileWorkerBackend {
     /// 返回对应的 UI 后端协议。
-    pub fn backend(&self) -> RemoteFileBackend {
+    pub(crate) fn backend(&self) -> RemoteFileBackend {
         match self {
             Self::Sftp { .. } => RemoteFileBackend::Sftp,
             Self::Smb { .. } => RemoteFileBackend::Smb,
@@ -295,7 +295,7 @@ impl RemoteFileWorkerBackend {
 
 /// UI 发送给远程文件 worker 的命令。
 #[derive(Clone, Debug)]
-pub enum SftpCommand {
+pub(crate) enum SftpCommand {
     /// 用户确认当前未知主机指纹可信。
     TrustHostKey,
     /// 用户拒绝当前未知主机指纹。
@@ -346,7 +346,7 @@ pub enum SftpCommand {
 
 /// 远程文件预览内容；由 worker 读取后回传给 UI 展示。
 #[derive(Clone, Debug)]
-pub enum FilePreviewContent {
+pub(crate) enum FilePreviewContent {
     /// 文本内容；`truncated` 为真表示因超过预览读取上限被截断。
     Text {
         /// 解码后的文本。
@@ -362,7 +362,7 @@ pub enum FilePreviewContent {
 
 /// 远程文件 worker 回传给 UI 的事件。
 #[derive(Clone, Debug)]
-pub enum SftpEvent {
+pub(crate) enum SftpEvent {
     /// 发现未知主机指纹，需要 UI 弹窗确认。
     HostKeyVerification {
         /// 会话 ID。
@@ -434,7 +434,7 @@ pub enum SftpEvent {
 }
 
 /// 启动 SFTP 后台线程，并返回命令发送端与事件接收端。
-pub fn spawn_sftp_worker(
+pub(crate) fn spawn_sftp_worker(
     request: SftpWorkerRequest,
 ) -> (mpsc::Sender<SftpCommand>, Receiver<SftpEvent>) {
     let (command_sender, command_receiver) = mpsc::channel();
@@ -455,7 +455,7 @@ pub fn spawn_sftp_worker(
 }
 
 /// 校验远程文件重命名的新名称，第一版不允许跨目录移动。
-pub fn validate_sftp_rename_name(name: &str) -> Result<String, String> {
+pub(crate) fn validate_sftp_rename_name(name: &str) -> Result<String, String> {
     let normalized = name.trim();
     if normalized.is_empty() {
         return Err("名称不能为空".to_string());
@@ -471,7 +471,7 @@ pub fn validate_sftp_rename_name(name: &str) -> Result<String, String> {
 }
 
 /// 返回指定远程目录的父目录。
-pub fn remote_parent_dir(path: &str) -> Option<String> {
+pub(crate) fn remote_parent_dir(path: &str) -> Option<String> {
     let normalized = path.trim_end_matches('/');
     if normalized.is_empty() || normalized == "/" {
         return None;
@@ -485,7 +485,7 @@ pub fn remote_parent_dir(path: &str) -> Option<String> {
 }
 
 /// 拼接远程目录和文件名，使用服务器通用的 POSIX 路径分隔符。
-pub fn remote_child_path(directory: &str, name: &str) -> String {
+pub(crate) fn remote_child_path(directory: &str, name: &str) -> String {
     if directory == "/" {
         format!("/{name}")
     } else {
@@ -1464,7 +1464,7 @@ fn sort_remote_entries(entries: &mut [SftpEntry]) {
 }
 
 /// 按指定字段和方向排序远程文件条目；目录始终分组靠前，方向只在各自分组内生效。
-pub fn sort_sftp_entries(
+pub(crate) fn sort_sftp_entries(
     entries: &mut [SftpEntry],
     field: SftpSortField,
     direction: SftpSortDirection,

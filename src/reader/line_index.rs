@@ -16,7 +16,7 @@ const LINE_INDEX_BLOCK_BYTES: usize = 8 * 1024 * 1024;
 
 /// 单行在文件中的字节范围，不包含 LF、CRLF 或 CR 行尾。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LineIndexEntry {
+pub(crate) struct LineIndexEntry {
     /// 行正文起始字节偏移。
     pub offset: u64,
     /// 行正文字节长度，不包含换行符。
@@ -25,7 +25,7 @@ pub struct LineIndexEntry {
 
 /// 完整日志行索引；entries 使用 `Arc`，便于 reader 句柄在 UI 与后台间共享。
 #[derive(Clone, Debug, Default)]
-pub struct LineIndex {
+pub(crate) struct LineIndex {
     /// 每一行对应的字节范围。
     entries: Arc<Vec<LineIndexEntry>>,
     /// 文件总字节数。
@@ -43,7 +43,11 @@ impl LineIndex {
     /// - `longest_line_index`：最长行下标。
     ///
     /// 返回值：可共享的行索引对象。
-    pub fn new(entries: Vec<LineIndexEntry>, total_bytes: u64, longest_line_index: usize) -> Self {
+    pub(crate) fn new(
+        entries: Vec<LineIndexEntry>,
+        total_bytes: u64,
+        longest_line_index: usize,
+    ) -> Self {
         Self {
             entries: Arc::new(entries),
             total_bytes,
@@ -52,34 +56,34 @@ impl LineIndex {
     }
 
     /// 返回日志行数。
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// 返回索引是否为空。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// 返回文件总字节数。
-    pub fn total_bytes(&self) -> u64 {
+    pub(crate) fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
 
     /// 返回最长行索引。
-    pub fn longest_line_index(&self) -> usize {
+    pub(crate) fn longest_line_index(&self) -> usize {
         self.longest_line_index
     }
 
     /// 返回最长行的原始字节长度，用于 UI 横向滚动范围估算，避免渲染时读取正文。
-    pub fn longest_line_byte_len(&self) -> u32 {
+    pub(crate) fn longest_line_byte_len(&self) -> u32 {
         self.get(self.longest_line_index)
             .map(|entry| entry.byte_len)
             .unwrap_or_default()
     }
 
     /// 返回指定行的字节范围。
-    pub fn get(&self, line_number: usize) -> Option<LineIndexEntry> {
+    pub(crate) fn get(&self, line_number: usize) -> Option<LineIndexEntry> {
         self.entries.get(line_number).copied()
     }
 }
@@ -90,7 +94,7 @@ impl LineIndex {
 /// - `path`：需要分页读取的本地日志或已物化压缩日志路径。
 ///
 /// 返回值：完整行索引；空文件返回 0 行。
-pub fn build_line_index(path: &Path) -> Result<LineIndex> {
+pub(crate) fn build_line_index(path: &Path) -> Result<LineIndex> {
     build_line_index_with_encoding(path, "UTF-8")
 }
 
@@ -101,7 +105,10 @@ pub fn build_line_index(path: &Path) -> Result<LineIndex> {
 /// - `encoding_label`：检测得到的编码名称，用于选择换行扫描策略。
 ///
 /// 返回值：完整行索引；空文件返回 0 行。
-pub fn build_line_index_with_encoding(path: &Path, encoding_label: &str) -> Result<LineIndex> {
+pub(crate) fn build_line_index_with_encoding(
+    path: &Path,
+    encoding_label: &str,
+) -> Result<LineIndex> {
     if encoding_label.eq_ignore_ascii_case("UTF-16LE") {
         return build_utf16_line_index(path, Utf16Endian::Little);
     }
@@ -380,7 +387,7 @@ fn push_line_entry(
 }
 
 /// 确保行读取范围没有出现整数溢出。
-pub fn checked_line_span(start: LineIndexEntry, end: LineIndexEntry) -> Result<(u64, u64)> {
+pub(crate) fn checked_line_span(start: LineIndexEntry, end: LineIndexEntry) -> Result<(u64, u64)> {
     let span_end = end
         .offset
         .checked_add(u64::from(end.byte_len))

@@ -74,7 +74,7 @@ impl Render for SourceNameTooltip {
 /// - `cx`：应用上下文，用于虚拟列表范围处理和节点事件回调。
 ///
 /// 返回值：GPUI 元素树；只渲染当前视口范围内的来源节点。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let visible_count = app.visible_source_ids().len();
     let empty_message = if app.is_source_loading {

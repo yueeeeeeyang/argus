@@ -14,7 +14,7 @@ use gpui::{IntoElement, div, prelude::*, px, rgb};
 /// - `app`：应用状态，提供主题、日志行数和占位提示。
 ///
 /// 返回值：GPUI 元素树；调用方应将其放在内容区内部，避免横跨活动栏和来源侧栏。
-pub fn render(app: &ArgusApp) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp) -> impl IntoElement {
     let theme = app.theme.clone();
     let content_status = match app.active_tab_kind() {
         TabKind::Empty if !app.logs.is_empty() => format!("{} 行样例", app.logs.len()),

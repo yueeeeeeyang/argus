@@ -46,7 +46,7 @@ const TERMINAL_SCROLLBAR_PADDING: f32 = 4.0;
 const TERMINAL_SCROLLBAR_MIN_THUMB: f32 = 32.0;
 
 /// 渲染 SSH 终端面板。
-pub fn render(
+pub(crate) fn render(
     app: &ArgusApp,
     session_id: usize,
     window: &mut Window,

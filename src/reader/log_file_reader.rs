@@ -27,7 +27,7 @@ use crate::reader::spooled_backend::{SpoolCleanup, create_spool_file};
 use crate::reader::stream_backend::ArchiveStreamBackend;
 
 /// 超大日志分页阈值；超过该大小后不再整体解码到内存。
-pub const LARGE_LOG_THRESHOLD_BYTES: u64 = 30 * 1024 * 1024;
+pub(crate) const LARGE_LOG_THRESHOLD_BYTES: u64 = 30 * 1024 * 1024;
 /// 分页行缓存上限，避免大日志滚动后把已访问内容全部留在内存中。
 const PAGED_DECODE_CACHE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// 分页搜索批量读取字节上限；顺序扫描时按字节窗口合并行，避免逐行 seek/read。
@@ -37,7 +37,7 @@ const ENCODING_SAMPLE_BYTES: usize = 4 * 1024 * 1024;
 
 /// 打开日志的请求模型，隔离 UI 状态和底层读取实现。
 #[derive(Clone, Debug)]
-pub struct OpenLogRequest {
+pub(crate) struct OpenLogRequest {
     /// 来源树节点 ID，用于读取结果回填和 tab 去重。
     pub source_id: SourceId,
     /// 来源位置，可能是本地文件，也可能是压缩包内部条目。
@@ -52,7 +52,7 @@ pub struct OpenLogRequest {
 
 /// 日志读取生命周期状态，存入应用状态供内容区和状态栏展示。
 #[derive(Clone, Debug)]
-pub enum LogOpenState {
+pub(crate) enum LogOpenState {
     /// 尚未开始读取。
     Idle,
     /// 后台任务正在打开或索引日志。
@@ -75,7 +75,7 @@ pub enum LogOpenState {
 
 impl LogOpenState {
     /// 返回状态栏可展示的简短说明。
-    pub fn status_label(&self) -> String {
+    pub(crate) fn status_label(&self) -> String {
         match self {
             Self::Idle => "未读取".to_string(),
             Self::Loading { mode, .. } => format!("{} · 索引中", mode.label()),
@@ -92,7 +92,7 @@ impl LogOpenState {
     }
 
     /// 返回失败或加载状态中的详细消息。
-    pub fn message(&self) -> Option<&str> {
+    pub(crate) fn message(&self) -> Option<&str> {
         match self {
             Self::Loading { message, .. } | Self::Failed { message, .. } => Some(message.as_str()),
             Self::Idle | Self::Ready(_) => None,
@@ -102,7 +102,7 @@ impl LogOpenState {
 
 /// 打开后的日志读取句柄，保存统一文档模型并提供状态栏统计。
 #[derive(Clone, Debug)]
-pub struct LogReaderHandle {
+pub(crate) struct LogReaderHandle {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// UI 展示名称。
@@ -117,27 +117,31 @@ pub struct LogReaderHandle {
 
 impl LogReaderHandle {
     /// 返回当前日志文档。
-    pub fn document(&self) -> &LogDocument {
+    pub(crate) fn document(&self) -> &LogDocument {
         &self.document
     }
 
     /// 返回总行数。
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         self.document.line_count()
     }
 
     /// 返回实际采用的编码标签。
-    pub fn encoding(&self) -> &str {
+    pub(crate) fn encoding(&self) -> &str {
         self.document.encoding()
     }
 
     /// 返回日志文本是否为空。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.document.line_count() == 0
     }
 
     /// 读取指定范围内的日志行文本，供复制和 UI 可见区渲染复用。
-    pub fn lines(&self, start_line: usize, max_lines: usize) -> Result<Vec<DisplayedLogLine>> {
+    pub(crate) fn lines(
+        &self,
+        start_line: usize,
+        max_lines: usize,
+    ) -> Result<Vec<DisplayedLogLine>> {
         self.document.lines(start_line, max_lines)
     }
 
@@ -148,7 +152,7 @@ impl LogReaderHandle {
     /// - `max_lines`：最大读取行数。
     ///
     /// 返回值：与请求范围等长的行槽位；`None` 表示该行尚未进入分页缓存。
-    pub fn cached_lines(
+    pub(crate) fn cached_lines(
         &self,
         start_line: usize,
         max_lines: usize,
@@ -157,7 +161,7 @@ impl LogReaderHandle {
     }
 
     /// 判断指定行范围是否已经完整进入缓存，供 UI 决定是否需要后台预取。
-    pub fn has_cached_lines(&self, start_line: usize, max_lines: usize) -> bool {
+    pub(crate) fn has_cached_lines(&self, start_line: usize, max_lines: usize) -> bool {
         self.document
             .cached_lines(start_line, max_lines)
             .iter()
@@ -165,19 +169,19 @@ impl LogReaderHandle {
     }
 
     /// 返回用于横向滚动估算的最长行文本。
-    pub fn longest_line_text(&self) -> Option<String> {
+    pub(crate) fn longest_line_text(&self) -> Option<String> {
         self.document.longest_line_text()
     }
 
     /// 返回用于横向滚动估算的最长显示列数，不在分页文档中读取正文。
-    pub fn estimated_longest_display_columns(&self) -> usize {
+    pub(crate) fn estimated_longest_display_columns(&self) -> usize {
         self.document.estimated_longest_display_columns()
     }
 }
 
 /// UI 可展示的日志文档；小文件在内存中，大文件按页读取。
 #[derive(Clone, Debug)]
-pub enum LogDocument {
+pub(crate) enum LogDocument {
     /// 小日志完整拆行为内存行列表。
     InMemory(InMemoryLogDocument),
     /// 大日志只保存行索引，正文按需读取。
@@ -186,7 +190,7 @@ pub enum LogDocument {
 
 impl LogDocument {
     /// 返回日志行数。
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         match self {
             Self::InMemory(document) => document.line_count(),
             Self::Paged(document) => document.line_count(),
@@ -194,7 +198,7 @@ impl LogDocument {
     }
 
     /// 返回当前日志编码标签。
-    pub fn encoding(&self) -> &str {
+    pub(crate) fn encoding(&self) -> &str {
         match self {
             Self::InMemory(document) => &document.encoding,
             Self::Paged(document) => &document.encoding,
@@ -202,7 +206,11 @@ impl LogDocument {
     }
 
     /// 按范围读取日志行。
-    pub fn lines(&self, start_line: usize, max_lines: usize) -> Result<Vec<DisplayedLogLine>> {
+    pub(crate) fn lines(
+        &self,
+        start_line: usize,
+        max_lines: usize,
+    ) -> Result<Vec<DisplayedLogLine>> {
         match self {
             Self::InMemory(document) => Ok(document
                 .lines
@@ -261,7 +269,7 @@ impl LogDocument {
     }
 
     /// 读取最长行文本，用于估算横向滚动范围。
-    pub fn longest_line_text(&self) -> Option<String> {
+    pub(crate) fn longest_line_text(&self) -> Option<String> {
         match self {
             Self::InMemory(document) => document.lines.get(document.longest_line_index).cloned(),
             Self::Paged(document) => document
@@ -273,7 +281,7 @@ impl LogDocument {
     }
 
     /// 返回最长显示列数估算；分页文档只使用索引元信息，避免 UI 渲染路径读取正文。
-    pub fn estimated_longest_display_columns(&self) -> usize {
+    pub(crate) fn estimated_longest_display_columns(&self) -> usize {
         match self {
             Self::InMemory(document) => document.longest_display_columns,
             Self::Paged(document) => document.estimated_longest_display_columns(),
@@ -283,7 +291,7 @@ impl LogDocument {
 
 /// 小日志内存文档。
 #[derive(Clone, Debug)]
-pub struct InMemoryLogDocument {
+pub(crate) struct InMemoryLogDocument {
     /// 已解码行列表，不包含行尾换行符。
     pub lines: Arc<Vec<String>>,
     /// 实际采用的编码标签。
@@ -296,14 +304,14 @@ pub struct InMemoryLogDocument {
 
 impl InMemoryLogDocument {
     /// 返回日志行数。
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         self.lines.len()
     }
 }
 
 /// 分页读取后返回的一行日志。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PagedLine {
+pub(crate) struct PagedLine {
     /// 0 基行号。
     pub line_number: usize,
     /// 已解码正文，不包含行尾换行符。
@@ -314,7 +322,7 @@ pub struct PagedLine {
 
 /// UI 展示用日志行。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DisplayedLogLine {
+pub(crate) struct DisplayedLogLine {
     /// 0 基行号。
     pub line_number: usize,
     /// 行正文。
@@ -323,7 +331,7 @@ pub struct DisplayedLogLine {
 
 /// 大日志分页文档。
 #[derive(Clone, Debug)]
-pub struct PagedLogDocument {
+pub(crate) struct PagedLogDocument {
     /// 可 seek 的本地文件路径；可能是真实日志，也可能是压缩流物化文件。
     path: PathBuf,
     /// 实际采用的编码标签。
@@ -351,7 +359,7 @@ impl PagedLogDocument {
     /// - `spool_cleanup`：压缩日志临时文件清理器，本地文件传 `None`。
     ///
     /// 返回值：可按行分页读取的文档。
-    pub fn open(
+    pub(crate) fn open(
         path: PathBuf,
         preferred_encoding: String,
         spool_cleanup: Option<Arc<SpoolCleanup>>,
@@ -374,22 +382,22 @@ impl PagedLogDocument {
     }
 
     /// 返回日志行数。
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         self.line_index.len()
     }
 
     /// 返回文件总字节数。
-    pub fn total_bytes(&self) -> u64 {
+    pub(crate) fn total_bytes(&self) -> u64 {
         self.line_index.total_bytes()
     }
 
     /// 返回最长行索引。
-    pub fn longest_line_index(&self) -> usize {
+    pub(crate) fn longest_line_index(&self) -> usize {
         self.line_index.longest_line_index()
     }
 
     /// 返回最长显示列数估算，不读取最长行正文。
-    pub fn estimated_longest_display_columns(&self) -> usize {
+    pub(crate) fn estimated_longest_display_columns(&self) -> usize {
         let byte_len = self.line_index.longest_line_byte_len() as usize;
         let encoding = self.effective_encoding_label();
         if encoding.eq_ignore_ascii_case("UTF-16LE") || encoding.eq_ignore_ascii_case("UTF-16BE") {
@@ -400,7 +408,7 @@ impl PagedLogDocument {
     }
 
     /// 读取单行日志。
-    pub fn read_line(&self, line_number: usize) -> Result<Option<PagedLine>> {
+    pub(crate) fn read_line(&self, line_number: usize) -> Result<Option<PagedLine>> {
         self.read_visible_lines(line_number, 1)
             .map(|mut lines| lines.pop())
     }
@@ -412,7 +420,7 @@ impl PagedLogDocument {
     /// - `max_lines`：最大读取行数，通常为当前视口容量。
     ///
     /// 返回值：按行号升序排列的解码行。
-    pub fn read_visible_lines(
+    pub(crate) fn read_visible_lines(
         &self,
         start_line: usize,
         max_lines: usize,
@@ -463,7 +471,7 @@ impl PagedLogDocument {
     }
 
     /// 只读取分页缓存中的连续可见行，缓存缺失时返回空槽位并且不访问文件。
-    pub fn cached_visible_lines(
+    pub(crate) fn cached_visible_lines(
         &self,
         start_line: usize,
         max_lines: usize,
@@ -491,7 +499,7 @@ impl PagedLogDocument {
     /// - `callback`：每解码一行调用；返回 `false` 表示调用方已找到目标，可以提前停止。
     ///
     /// 返回值：`true` 表示完整遍历，`false` 表示被回调提前停止。
-    pub fn for_each_line_in_range<F>(
+    pub(crate) fn for_each_line_in_range<F>(
         &self,
         line_range: Range<usize>,
         mut callback: F,
@@ -534,7 +542,7 @@ impl PagedLogDocument {
     /// - `callback`：每解码一行调用；返回 `false` 表示调用方已找到目标，可以提前停止。
     ///
     /// 返回值：`true` 表示完整遍历，`false` 表示被回调提前停止。
-    pub fn for_each_line_in_range_rev<F>(
+    pub(crate) fn for_each_line_in_range_rev<F>(
         &self,
         line_range: Range<usize>,
         mut callback: F,
@@ -886,7 +894,7 @@ impl PagedLineCache {
 
 /// 日志文件读取器入口；所有后端选择逻辑集中在这里，UI 不直接 match 来源类型。
 #[derive(Debug, Default)]
-pub struct LogFileReader;
+pub(crate) struct LogFileReader;
 
 impl LogFileReader {
     /// 打开指定来源并返回可按行显示的日志句柄。
@@ -895,7 +903,7 @@ impl LogFileReader {
     /// - `request`：包含来源 ID、位置、标签和默认编码。
     ///
     /// 返回值：读取成功的句柄；失败时带上下文错误。
-    pub fn open(request: OpenLogRequest) -> Result<LogReaderHandle> {
+    pub(crate) fn open(request: OpenLogRequest) -> Result<LogReaderHandle> {
         match &request.location {
             SourceLocation::LocalPath(path) => open_local_log(request.clone(), path),
             SourceLocation::ArchiveEntry { .. } => open_archive_log(request),

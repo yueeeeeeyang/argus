@@ -114,7 +114,7 @@ struct StackTextSelectionDrag {
 }
 
 /// Jstack 线程详情窗口根视图。
-pub struct JstackThreadDetailWindow {
+pub(crate) struct JstackThreadDetailWindow {
     /// 打开窗口时的主题快照。
     theme: AppTheme,
     /// 当前线程的跨快照堆栈记录。
@@ -145,7 +145,7 @@ impl JstackThreadDetailWindow {
     /// - `active_occurrence_index`：同快照内的线程出现序号，用于重复线程名时精确定位。
     ///
     /// 返回值：可由 GPUI 独立窗口渲染的详情视图。
-    pub fn new(
+    pub(crate) fn new(
         theme: AppTheme,
         detail: JstackThreadDetail,
         active_snapshot_index: usize,

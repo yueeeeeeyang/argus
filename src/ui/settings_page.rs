@@ -15,7 +15,7 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 /// - `_cx`：保留上下文参数以兼容旧调用签名。
 ///
 /// 返回值：只读提示元素；真实设置从标题栏设置按钮打开模态框。
-pub fn render(app: &ArgusApp, _cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, _cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
 
     div()

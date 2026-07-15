@@ -5,11 +5,11 @@
 
 /// 临时凭据仓库占位结构，后续确保敏感信息不落盘。
 #[derive(Debug, Default)]
-pub struct CredentialStorePlaceholder;
+pub(crate) struct CredentialStorePlaceholder;
 
 impl CredentialStorePlaceholder {
     /// 返回模块职责说明；当前不保存任何真实凭据。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "以内存方式管理压缩包密码等敏感信息；当前仅保留占位边界。"
     }
 }

@@ -18,7 +18,11 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 /// - `cx`：应用上下文，用于创建工作区切换回调。
 ///
 /// 返回值：GPUI 元素树；当前只有两个图标入口。
-pub fn render(active: Workspace, theme: &AppTheme, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    active: Workspace,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     div()
         .w(px(48.0))
         .h_full()

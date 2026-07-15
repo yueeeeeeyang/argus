@@ -5,11 +5,11 @@
 
 /// 搜索框占位结构，后续与搜索引擎状态联动。
 #[derive(Debug, Default)]
-pub struct SearchBoxPlaceholder;
+pub(crate) struct SearchBoxPlaceholder;
 
 impl SearchBoxPlaceholder {
     /// 返回组件职责说明；当前不启动真实搜索。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "收集搜索条件并触发搜索任务；当前仅保留组件边界。"
     }
 }

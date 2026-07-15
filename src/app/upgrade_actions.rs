@@ -8,7 +8,7 @@ impl ArgusApp {
     /// 参数说明：
     /// - `is_manual`：是否由用户在设置页手动触发；手动检查会忽略“已跳过版本”并显示失败提示。
     /// - `cx`：应用上下文，用于调度后台网络任务并在完成后刷新 UI。
-    pub fn start_upgrade_check(&mut self, is_manual: bool, cx: &mut Context<Self>) {
+    pub(crate) fn start_upgrade_check(&mut self, is_manual: bool, cx: &mut Context<Self>) {
         if self.is_upgrade_checking {
             self.upgrade_message = Some("升级检查正在进行".to_string());
             self.placeholder_notice = "升级检查正在进行".to_string();
@@ -113,13 +113,13 @@ impl ArgusApp {
     }
 
     /// 关闭升级弹窗，保留已经记录的升级消息。
-    pub fn dismiss_upgrade_dialog(&mut self) {
+    pub(crate) fn dismiss_upgrade_dialog(&mut self) {
         self.upgrade_dialog = None;
         self.placeholder_notice = "已关闭升级提示".to_string();
     }
 
     /// 跳过当前弹窗中的升级版本，并持久化到配置。
-    pub fn skip_available_upgrade(&mut self) {
+    pub(crate) fn skip_available_upgrade(&mut self) {
         let Some(UpgradeDialogState::Available { upgrade }) = self.upgrade_dialog.clone() else {
             return;
         };
@@ -131,7 +131,7 @@ impl ArgusApp {
     }
 
     /// 下载、校验并安装当前弹窗中的升级版本，成功后自动重启 Argus。
-    pub fn install_available_upgrade(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn install_available_upgrade(&mut self, cx: &mut Context<Self>) {
         if self.is_upgrade_installing {
             self.upgrade_message = Some("升级安装正在进行".to_string());
             return;
@@ -196,7 +196,7 @@ impl ArgusApp {
 
     /// 记录用户触发了尚未实现的操作。
     /// 切换自动升级开关；仅影响启动后的自动检查，不影响设置页手动检查。
-    pub fn toggle_upgrade_enabled(&mut self) {
+    pub(crate) fn toggle_upgrade_enabled(&mut self) {
         self.config.upgrade.enabled = !self.config.upgrade.enabled;
         self.placeholder_notice = if self.config.upgrade.enabled {
             "已启用启动时自动检查升级".to_string()
@@ -207,7 +207,7 @@ impl ArgusApp {
     }
 
     /// 返回当前平台在升级 manifest 中使用的展示文案。
-    pub fn upgrade_platform_label(&self) -> String {
+    pub(crate) fn upgrade_platform_label(&self) -> String {
         format!("{}/{}", current_platform_os(), current_platform_arch())
     }
 }

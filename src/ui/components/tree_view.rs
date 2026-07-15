@@ -5,11 +5,11 @@
 
 /// 树形控件占位结构，后续承载目录树展开折叠状态。
 #[derive(Debug, Default)]
-pub struct TreeViewPlaceholder;
+pub(crate) struct TreeViewPlaceholder;
 
 impl TreeViewPlaceholder {
     /// 返回组件职责说明；当前不触发真实懒加载。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "展示来源目录树并支持懒加载；当前仅保留组件边界。"
     }
 }

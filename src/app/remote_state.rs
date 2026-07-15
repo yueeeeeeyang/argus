@@ -9,7 +9,7 @@ use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
 
 /// 链接工作区当前打开的弹窗。
 #[derive(Clone, Debug)]
-pub enum ConnectionDialogState {
+pub(crate) enum ConnectionDialogState {
     /// 新增目录表单。
     NewDirectory(ConnectionDirectoryFormState),
     /// 新增远程链接表单。
@@ -22,7 +22,7 @@ pub enum ConnectionDialogState {
 
 /// 新增目录表单状态。
 #[derive(Clone, Debug)]
-pub struct ConnectionDirectoryFormState {
+pub(crate) struct ConnectionDirectoryFormState {
     /// 新目录的父目录 ID；为空表示创建在根层级。
     pub parent_id: Option<ConnectionNodeId>,
     /// 目录名称输入框。
@@ -33,7 +33,7 @@ pub struct ConnectionDirectoryFormState {
 
 /// 新增远程链接表单状态。
 #[derive(Clone, Debug)]
-pub struct ConnectionLinkFormState {
+pub(crate) struct ConnectionLinkFormState {
     /// 当前表单对应的链接协议。
     pub link_kind: ConnectionLinkKind,
     /// 新链接的父目录 ID；为空表示创建在根层级。
@@ -64,7 +64,7 @@ pub struct ConnectionLinkFormState {
 
 /// SSH 主机指纹确认弹窗状态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HostKeyPromptOwner {
+pub(crate) enum HostKeyPromptOwner {
     /// 终端会话触发的主机指纹确认。
     Terminal {
         /// 终端会话 ID。
@@ -79,7 +79,7 @@ pub enum HostKeyPromptOwner {
 
 /// SSH 主机指纹确认弹窗状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionHostKeyPromptState {
+pub(crate) struct ConnectionHostKeyPromptState {
     /// 等待确认的会话 ID；具体类型由 `owner` 区分。
     pub session_id: usize,
     /// 触发确认的会话类型。
@@ -96,7 +96,7 @@ pub struct ConnectionHostKeyPromptState {
 
 /// 删除链接节点二次确认弹窗状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionDeletePromptState {
+pub(crate) struct ConnectionDeletePromptState {
     /// 待删除的连接节点 ID。
     pub node_id: ConnectionNodeId,
     /// 待删除节点展示名称。
@@ -107,7 +107,7 @@ pub struct ConnectionDeletePromptState {
 
 /// 远程文件管理内的应用弹窗。
 #[derive(Clone, Debug)]
-pub enum SftpDialogState {
+pub(crate) enum SftpDialogState {
     /// 重命名远程文件或目录。
     Rename(SftpRenameDialogState),
     /// 删除远程普通文件或空目录前的二次确认。
@@ -116,7 +116,7 @@ pub enum SftpDialogState {
 
 /// SFTP 重命名弹窗状态。
 #[derive(Clone, Debug)]
-pub struct SftpRenameDialogState {
+pub(crate) struct SftpRenameDialogState {
     /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 原始远程路径。
@@ -131,7 +131,7 @@ pub struct SftpRenameDialogState {
 
 /// SFTP 删除二次确认弹窗状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SftpDeletePromptState {
+pub(crate) struct SftpDeletePromptState {
     /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 待删除远程路径。
@@ -144,7 +144,7 @@ pub struct SftpDeletePromptState {
 
 /// 升级弹窗状态，覆盖发现版本、安装进度和失败提示三类用户可见流程。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UpgradeDialogState {
+pub(crate) enum UpgradeDialogState {
     /// 发现可安装版本，等待用户确认升级、跳过或稍后。
     Available {
         /// 待安装的新版本信息。

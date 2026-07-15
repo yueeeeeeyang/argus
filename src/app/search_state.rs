@@ -18,7 +18,7 @@ use super::types::LogSearchInputState;
 
 /// 当前日志快速查找缓存键，避免关键字、选项或日志变化后复用过期结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QuickMatchKey {
+pub(crate) struct QuickMatchKey {
     /// 当前日志来源节点。
     pub source_id: SourceId,
     /// 当前关键字。
@@ -31,7 +31,7 @@ pub struct QuickMatchKey {
 
 /// 搜索结果文件分组，记录结果在全量列表中的连续范围。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SearchResultGroup {
+pub(crate) struct SearchResultGroup {
     /// 分组对应的来源节点。
     pub source_id: SourceId,
     /// 文件展示名称。
@@ -46,7 +46,7 @@ pub struct SearchResultGroup {
 
 /// 搜索结果面板虚拟列表中的可见行。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchResultListItem {
+pub(crate) enum SearchResultListItem {
     /// 文件分组标题行。
     Group(usize),
     /// 单条命中结果行。
@@ -55,7 +55,7 @@ pub enum SearchResultListItem {
 
 /// 日志搜索任务来源，用于结果面板区分普通搜索和快搜。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchRunKind {
+pub(crate) enum SearchRunKind {
     /// 搜索窗口关键字输入框发起的普通搜索。
     Normal,
     /// 设置中的快搜关键字集合发起的一键搜索。
@@ -64,7 +64,7 @@ pub enum SearchRunKind {
 
 /// 搜索结果面板自绘滚动条方向。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchResultScrollbarAxis {
+pub(crate) enum SearchResultScrollbarAxis {
     /// 纵向结果滚动。
     Vertical,
     /// 横向预览滚动。
@@ -73,7 +73,7 @@ pub enum SearchResultScrollbarAxis {
 
 /// 搜索结果面板滚动条拖拽状态。
 #[derive(Clone, Copy, Debug)]
-pub struct SearchResultScrollbarDrag {
+pub(crate) struct SearchResultScrollbarDrag {
     /// 当前拖动方向。
     pub axis: SearchResultScrollbarAxis,
     /// 鼠标按下点在 thumb 内的相对偏移。
@@ -82,7 +82,7 @@ pub struct SearchResultScrollbarDrag {
 
 /// 搜索结果面板高度拖拽状态。
 #[derive(Clone, Copy, Debug)]
-pub struct SearchResultPanelResizeDrag {
+pub(crate) struct SearchResultPanelResizeDrag {
     /// 鼠标按下时的窗口 y 坐标。
     pub start_y: Pixels,
     /// 鼠标按下时的面板高度。
@@ -91,7 +91,7 @@ pub struct SearchResultPanelResizeDrag {
 
 /// 独立日志搜索窗口和结果面板共享的运行期状态。
 #[derive(Clone, Debug)]
-pub struct LogSearchState {
+pub(crate) struct LogSearchState {
     /// 搜索窗口是否已打开。
     pub is_window_open: bool,
     /// 搜索窗口句柄；再次打开时用于置前。

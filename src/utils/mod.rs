@@ -3,7 +3,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：为路径处理、大小格式化和异步任务封装预留模块结构。
 
-pub mod async_task;
-pub mod path;
-pub mod size_format;
-pub mod time_format;
+pub(crate) mod async_task;
+pub(crate) mod path;
+pub(crate) mod size_format;
+pub(crate) mod time_format;

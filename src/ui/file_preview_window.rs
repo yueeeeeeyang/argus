@@ -44,7 +44,7 @@ enum FilePreviewBody {
 }
 
 /// 远程文件预览独立窗口视图。
-pub struct FilePreviewWindow {
+pub(crate) struct FilePreviewWindow {
     /// 当前窗口使用的主题快照。
     theme: AppTheme,
     /// 文件名，用于标题展示。
@@ -68,7 +68,7 @@ impl FilePreviewWindow {
     /// - `file_name`：预览文件名。
     /// - `content`：worker 读取回传的预览内容。
     /// - `cx`：窗口上下文，用于创建滚动句柄和订阅主应用变化。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         file_name: String,

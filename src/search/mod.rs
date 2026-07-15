@@ -3,7 +3,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：为搜索引擎、正则缓存、搜索任务和过滤器预留模块结构。
 
-pub mod filter;
-pub mod regex_cache;
-pub mod search_engine;
-pub mod search_task;
+pub(crate) mod filter;
+pub(crate) mod regex_cache;
+pub(crate) mod search_engine;
+pub(crate) mod search_task;

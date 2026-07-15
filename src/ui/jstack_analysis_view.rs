@@ -61,7 +61,7 @@ const HOVER_STACK_PREVIEW_LINE_LIMIT: usize = 10;
 
 /// Jstack 方块悬浮预览数据。
 #[derive(Clone)]
-pub struct JstackCellPreviewData {
+pub(crate) struct JstackCellPreviewData {
     /// 当前主题令牌。
     pub theme: AppTheme,
     /// 快照文件名称。
@@ -78,7 +78,7 @@ pub struct JstackCellPreviewData {
 
 /// Jstack 方块内部悬浮气泡状态，位置以矩阵容器为坐标系。
 #[derive(Clone)]
-pub struct JstackCellHoverPreview {
+pub(crate) struct JstackCellHoverPreview {
     /// 当前气泡对应的稳定方块 key。
     pub key: String,
     /// 分析页 ID，避免跨页签显示旧气泡。
@@ -115,7 +115,11 @@ impl Render for ThreadNameSelectionTooltip {
 }
 
 /// 渲染 Jstack 分析页签主体。
-pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    analysis_id: usize,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(state) = app.jstack_analysis_state(analysis_id) else {
         return render_missing_state(app, &theme);

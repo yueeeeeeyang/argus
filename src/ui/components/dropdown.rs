@@ -13,7 +13,7 @@ use crate::ui::components::icon::{ArgusIcon, render_icon};
 
 /// 下拉框选项数据。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DropdownItem {
+pub(crate) struct DropdownItem {
     /// 选项稳定 ID，业务方可用它持久化选择。
     pub id: String,
     /// 选项展示文案。
@@ -22,7 +22,7 @@ pub struct DropdownItem {
 
 /// 下拉框渲染数据。
 #[derive(Clone, Debug)]
-pub struct Dropdown {
+pub(crate) struct Dropdown {
     /// 组件根节点 ID，便于测试与多下拉框共存。
     pub id: &'static str,
     /// 当前选中项 ID。
@@ -40,7 +40,7 @@ pub struct Dropdown {
 }
 
 /// 下拉框选项点击回调类型。
-pub type DropdownSelectCallback = Arc<dyn Fn(String, &mut Window, &mut App) + 'static>;
+pub(crate) type DropdownSelectCallback = Arc<dyn Fn(String, &mut Window, &mut App) + 'static>;
 
 /// 下拉触发按钮内容视觉下移量，用于和其它文字按钮保持垂直居中观感。
 const DROPDOWN_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
@@ -54,7 +54,7 @@ const DROPDOWN_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
 /// - `on_select`：点击选项时回传选项 ID。
 ///
 /// 返回值：可直接嵌入设置页面的 GPUI 元素树。
-pub fn render_dropdown(
+pub(crate) fn render_dropdown(
     dropdown: Dropdown,
     theme: &AppTheme,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,

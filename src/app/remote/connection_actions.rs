@@ -28,12 +28,12 @@ use crate::ui::connection_dialog::{
 
 impl ArgusApp {
     /// 返回当前链接树是否处于过滤模式。
-    pub fn is_connection_tree_filtering(&self) -> bool {
+    pub(crate) fn is_connection_tree_filtering(&self) -> bool {
         self.is_connection_tree_search_open && !self.connection_tree_search_input.value.is_empty()
     }
 
     /// 返回链接树当前应渲染的可见行。
-    pub fn visible_connection_rows(&self) -> Vec<ConnectionTreeRow> {
+    pub(crate) fn visible_connection_rows(&self) -> Vec<ConnectionTreeRow> {
         let query = if self.is_connection_tree_search_open {
             self.connection_tree_search_input.value.as_str()
         } else {
@@ -45,7 +45,7 @@ impl ArgusApp {
     }
 
     /// 打开链接树过滤输入框。
-    pub fn open_connection_tree_search(&mut self) {
+    pub(crate) fn open_connection_tree_search(&mut self) {
         self.is_connection_tree_search_open = true;
         self.connection_tree_search_input = SettingsTextInputState::default();
         self.connection_tree_search_input.is_focused = true;
@@ -53,14 +53,14 @@ impl ArgusApp {
     }
 
     /// 关闭链接树过滤输入框并恢复完整目录树。
-    pub fn close_connection_tree_search(&mut self) {
+    pub(crate) fn close_connection_tree_search(&mut self) {
         self.is_connection_tree_search_open = false;
         self.connection_tree_search_input = SettingsTextInputState::default();
         self.placeholder_notice = "已关闭链接过滤".to_string();
     }
 
     /// 收起链接目录树中的所有目录。
-    pub fn collapse_all_connections(&mut self) {
+    pub(crate) fn collapse_all_connections(&mut self) {
         let collapsed_count = self.config.connections.collapse_all();
         self.persist_config_or_report();
         self.placeholder_notice = if collapsed_count == 0 {
@@ -71,7 +71,7 @@ impl ArgusApp {
     }
 
     /// 点击链接树节点；目录执行展开折叠，SSH 链接打开终端标签。
-    pub fn handle_connection_tree_click(
+    pub(crate) fn handle_connection_tree_click(
         &mut self,
         node_id: ConnectionNodeId,
         cx: &mut Context<Self>,
@@ -94,7 +94,7 @@ impl ArgusApp {
     }
 
     /// 切换指定链接目录展开状态。
-    pub fn toggle_connection_directory(&mut self, directory_id: ConnectionNodeId) {
+    pub(crate) fn toggle_connection_directory(&mut self, directory_id: ConnectionNodeId) {
         if !self
             .config
             .connections
@@ -111,7 +111,7 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `cx`：主应用上下文，用于创建或更新模态框子视图。
-    pub fn open_new_connection_directory_dialog(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_new_connection_directory_dialog(&mut self, cx: &mut Context<Self>) {
         let parent_id = self
             .config
             .connections
@@ -145,7 +145,7 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `cx`：主应用上下文，用于创建或更新模态框子视图。
-    pub fn open_new_ssh_link_dialog(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_new_ssh_link_dialog(&mut self, cx: &mut Context<Self>) {
         let parent_id = self
             .config
             .connections
@@ -188,7 +188,7 @@ impl ArgusApp {
     }
 
     /// 打开新增 SMB 链接模态框，父目录根据当前选中节点推导。
-    pub fn open_new_smb_link_dialog(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_new_smb_link_dialog(&mut self, cx: &mut Context<Self>) {
         let parent_id = self
             .config
             .connections
@@ -231,29 +231,29 @@ impl ArgusApp {
     }
 
     /// 清理目录表单模态框状态；关闭按钮、取消按钮和提交成功后统一调用。
-    pub fn close_connection_directory_window(&mut self) {
+    pub(crate) fn close_connection_directory_window(&mut self) {
         self.connection_directory_modal = None;
         self.placeholder_notice = "已关闭目录模态框".to_string();
     }
 
     /// 目录创建或编辑成功后清理模态框实体，不覆盖成功提示。
-    pub fn finish_connection_directory_window(&mut self) {
+    pub(crate) fn finish_connection_directory_window(&mut self) {
         self.connection_directory_modal = None;
     }
 
     /// 清理链接表单模态框状态；关闭按钮、取消按钮和提交成功后统一调用。
-    pub fn close_connection_link_window(&mut self) {
+    pub(crate) fn close_connection_link_window(&mut self) {
         self.connection_link_modal = None;
         self.placeholder_notice = "已关闭链接模态框".to_string();
     }
 
     /// 链接创建或编辑成功后清理模态框实体，不覆盖成功提示。
-    pub fn finish_connection_link_window(&mut self) {
+    pub(crate) fn finish_connection_link_window(&mut self) {
         self.connection_link_modal = None;
     }
 
     /// 打开连接节点编辑模态框；目录、SSH 和 SMB 链接按节点类型复用对应表单。
-    pub fn open_edit_connection_node_window(
+    pub(crate) fn open_edit_connection_node_window(
         &mut self,
         node_id: ConnectionNodeId,
         cx: &mut Context<Self>,
@@ -425,7 +425,7 @@ impl ArgusApp {
     }
 
     /// 关闭当前链接工作区弹窗。
-    pub fn close_connection_dialog(&mut self) {
+    pub(crate) fn close_connection_dialog(&mut self) {
         if let Some(ConnectionDialogState::ConfirmHostKey(prompt)) = self.connection_dialog.clone()
         {
             self.reject_connection_host_key_prompt(prompt);
@@ -436,7 +436,7 @@ impl ArgusApp {
     }
 
     /// 提交当前链接工作区弹窗。
-    pub fn submit_connection_dialog(&mut self) {
+    pub(crate) fn submit_connection_dialog(&mut self) {
         match self.connection_dialog.clone() {
             Some(ConnectionDialogState::NewDirectory(form)) => {
                 self.submit_connection_directory_form(form)
@@ -453,7 +453,7 @@ impl ArgusApp {
     }
 
     /// 聚焦链接相关输入框，并清理其他链接输入框焦点态。
-    pub fn focus_connection_text_input_target(&mut self, target: AppTextInputTarget) {
+    pub(crate) fn focus_connection_text_input_target(&mut self, target: AppTextInputTarget) {
         self.clear_connection_text_input_focuses();
         if let Some(input) = self.connection_text_input_mut(target) {
             input.is_focused = true;
@@ -465,7 +465,7 @@ impl ArgusApp {
     }
 
     /// 清理链接树和链接表单输入框焦点态。
-    pub fn clear_connection_text_input_focuses(&mut self) {
+    pub(crate) fn clear_connection_text_input_focuses(&mut self) {
         clear_connection_input_focus(&mut self.connection_tree_search_input);
         if let Some(dialog) = self.connection_dialog.as_mut() {
             match dialog {
@@ -625,7 +625,7 @@ impl ArgusApp {
     }
 
     /// 处理链接树或链接表单输入框的非文本按键。
-    pub fn handle_connection_text_input_key(
+    pub(crate) fn handle_connection_text_input_key(
         &mut self,
         target: AppTextInputTarget,
         keystroke: &Keystroke,
@@ -678,7 +678,7 @@ impl ArgusApp {
     }
 
     /// 鼠标开始选择链接输入框文本。
-    pub fn begin_connection_input_pointer_selection(
+    pub(crate) fn begin_connection_input_pointer_selection(
         &mut self,
         target: AppTextInputTarget,
         character_index: usize,
@@ -699,7 +699,7 @@ impl ArgusApp {
     }
 
     /// 鼠标拖拽更新链接输入框选区。
-    pub fn update_connection_input_pointer_selection(
+    pub(crate) fn update_connection_input_pointer_selection(
         &mut self,
         target: AppTextInputTarget,
         character_index: usize,
@@ -723,7 +723,7 @@ impl ArgusApp {
     }
 
     /// 鼠标结束链接输入框文本选择。
-    pub fn finish_connection_input_pointer_selection(&mut self, target: AppTextInputTarget) {
+    pub(crate) fn finish_connection_input_pointer_selection(&mut self, target: AppTextInputTarget) {
         if let Some(input) = self.connection_text_input_mut(target) {
             input.selection_drag = None;
             if normalized_connection_input_selection_range(input).is_none() {
@@ -768,7 +768,7 @@ impl ArgusApp {
     }
 
     /// 校验并创建链接目录，供表单模态框和兼容弹窗共同复用。
-    pub fn create_connection_directory_from_form(
+    pub(crate) fn create_connection_directory_from_form(
         &mut self,
         form: ConnectionDirectoryFormState,
     ) -> Result<ConnectionNodeId, String> {
@@ -791,7 +791,7 @@ impl ArgusApp {
     }
 
     /// 校验并创建链接，按表单协议分派给 SSH 或 SMB 创建逻辑。
-    pub fn create_connection_link_from_form(
+    pub(crate) fn create_connection_link_from_form(
         &mut self,
         form: ConnectionLinkFormState,
     ) -> Result<ConnectionNodeId, String> {
@@ -802,7 +802,7 @@ impl ArgusApp {
     }
 
     /// 校验并创建 SSH 链接，供表单模态框和兼容弹窗共同复用。
-    pub fn create_ssh_link_from_form(
+    pub(crate) fn create_ssh_link_from_form(
         &mut self,
         form: ConnectionLinkFormState,
     ) -> Result<ConnectionNodeId, String> {
@@ -833,7 +833,7 @@ impl ArgusApp {
     }
 
     /// 校验并创建 SMB 链接，供表单模态框和兼容弹窗共同复用。
-    pub fn create_smb_link_from_form(
+    pub(crate) fn create_smb_link_from_form(
         &mut self,
         form: ConnectionLinkFormState,
     ) -> Result<ConnectionNodeId, String> {
@@ -864,7 +864,7 @@ impl ArgusApp {
     }
 
     /// 校验并更新链接目录名称。
-    pub fn update_connection_directory_from_form(
+    pub(crate) fn update_connection_directory_from_form(
         &mut self,
         directory_id: ConnectionNodeId,
         form: ConnectionDirectoryFormState,
@@ -889,7 +889,7 @@ impl ArgusApp {
     }
 
     /// 校验并更新 SSH 链接名称和连接参数。
-    pub fn update_connection_link_from_form(
+    pub(crate) fn update_connection_link_from_form(
         &mut self,
         link_id: ConnectionNodeId,
         form: ConnectionLinkFormState,
@@ -901,7 +901,7 @@ impl ArgusApp {
     }
 
     /// 校验并更新 SSH 链接名称和连接参数。
-    pub fn update_ssh_link_from_form(
+    pub(crate) fn update_ssh_link_from_form(
         &mut self,
         link_id: ConnectionNodeId,
         form: ConnectionLinkFormState,
@@ -933,7 +933,7 @@ impl ArgusApp {
     }
 
     /// 校验并更新 SMB 链接名称和连接参数。
-    pub fn update_smb_link_from_form(
+    pub(crate) fn update_smb_link_from_form(
         &mut self,
         link_id: ConnectionNodeId,
         form: ConnectionLinkFormState,
@@ -965,7 +965,7 @@ impl ArgusApp {
     }
 
     /// 请求删除链接目录或 SSH 链接；删除前必须进入二次确认。
-    pub fn request_delete_connection_node(&mut self, node_id: ConnectionNodeId) {
+    pub(crate) fn request_delete_connection_node(&mut self, node_id: ConnectionNodeId) {
         if let Some(directory) = self.config.connections.directory(node_id) {
             if !self.config.connections.is_directory_empty(node_id) {
                 self.selected_connection_node_id = Some(node_id);
@@ -1007,7 +1007,7 @@ impl ArgusApp {
     }
 
     /// 确认删除链接目录或 SSH 链接；目录只能在没有子节点时删除。
-    pub fn confirm_delete_connection_node(&mut self, node_id: ConnectionNodeId) {
+    pub(crate) fn confirm_delete_connection_node(&mut self, node_id: ConnectionNodeId) {
         self.delete_connection_node(node_id);
         self.connection_dialog = None;
     }

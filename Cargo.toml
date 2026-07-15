@@ -8,7 +8,11 @@
 name = "argus"
 version = "0.1.0"
 edition = "2024"
-description = "Argus 高性能日志查看平台的界面占位框架"
+publish = false
+description = "Argus 高性能日志查看与分析桌面客户端"
+
+[lints.rust]
+unreachable_pub = "warn"
 
 [dependencies]
 anyhow = "1.0.102"

@@ -4,7 +4,7 @@ use super::*;
 
 impl ArgusApp {
     /// 在指定窗口坐标打开标签页右键菜单。
-    pub fn open_tab_context_menu(&mut self, tab_id: usize, anchor: Point<Pixels>) {
+    pub(crate) fn open_tab_context_menu(&mut self, tab_id: usize, anchor: Point<Pixels>) {
         if !self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.placeholder_notice = "未找到可操作的标签页".to_string();
             return;
@@ -18,7 +18,7 @@ impl ArgusApp {
     }
 
     /// 在指定窗口坐标打开全部标签页溢出菜单。
-    pub fn open_tab_overflow_menu(&mut self, anchor: Point<Pixels>) {
+    pub(crate) fn open_tab_overflow_menu(&mut self, anchor: Point<Pixels>) {
         self.tab_menu_scroll = UniformListScrollHandle::new();
         self.active_menu = Some(ActiveMenu {
             kind: ActiveMenuKind::TabOverflow,
@@ -27,7 +27,7 @@ impl ArgusApp {
     }
 
     /// 在搜索结果面板指定窗口坐标打开批量操作右键菜单。
-    pub fn open_search_results_context_menu(&mut self, anchor: Point<Pixels>) {
+    pub(crate) fn open_search_results_context_menu(&mut self, anchor: Point<Pixels>) {
         if self.log_search.result_groups.is_empty() {
             self.placeholder_notice = "暂无可操作的搜索结果分组".to_string();
             return;
@@ -41,7 +41,11 @@ impl ArgusApp {
     }
 
     /// 在来源树指定窗口坐标打开日志候选或 Runtime 目录节点右键菜单。
-    pub fn open_source_tree_context_menu(&mut self, source_id: SourceId, anchor: Point<Pixels>) {
+    pub(crate) fn open_source_tree_context_menu(
+        &mut self,
+        source_id: SourceId,
+        anchor: Point<Pixels>,
+    ) {
         let Some(source) = self.source_registry.node(source_id) else {
             self.placeholder_notice = "未找到可操作的来源节点".to_string();
             return;
@@ -59,7 +63,7 @@ impl ArgusApp {
     }
 
     /// 在链接树指定窗口坐标打开目录或 SSH 链接右键菜单。
-    pub fn open_connection_tree_context_menu(
+    pub(crate) fn open_connection_tree_context_menu(
         &mut self,
         node_id: ConnectionNodeId,
         anchor: Point<Pixels>,
@@ -80,7 +84,7 @@ impl ArgusApp {
     }
 
     /// 在指定窗口坐标打开新增链接类型下拉菜单。
-    pub fn open_connection_link_create_menu(&mut self, anchor: Point<Pixels>) {
+    pub(crate) fn open_connection_link_create_menu(&mut self, anchor: Point<Pixels>) {
         self.tab_menu_scroll = UniformListScrollHandle::new();
         self.active_menu = Some(ActiveMenu {
             kind: ActiveMenuKind::ConnectionLinkCreate,
@@ -89,12 +93,12 @@ impl ArgusApp {
     }
 
     /// 关闭当前活动菜单。
-    pub fn close_active_menu(&mut self) {
+    pub(crate) fn close_active_menu(&mut self) {
         self.active_menu = None;
     }
 
     /// 返回当前活动菜单应展示的菜单项。
-    pub fn active_menu_entries(&self) -> Vec<MenuEntry> {
+    pub(crate) fn active_menu_entries(&self) -> Vec<MenuEntry> {
         let Some(active_menu) = &self.active_menu else {
             return Vec::new();
         };
@@ -183,7 +187,7 @@ impl ArgusApp {
     }
 
     /// 执行通用菜单动作，并在动作完成后关闭菜单。
-    pub fn handle_menu_action(&mut self, action: MenuAction) {
+    pub(crate) fn handle_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::ActivateTab { tab_id } => self.activate_tab(tab_id),
             MenuAction::CloseTab { tab_id } => self.close_tab(tab_id),
@@ -227,7 +231,11 @@ impl ArgusApp {
     }
 
     /// 执行需要 GPUI 上下文的菜单动作；普通动作复用无上下文分发。
-    pub fn handle_menu_action_with_context(&mut self, action: MenuAction, cx: &mut Context<Self>) {
+    pub(crate) fn handle_menu_action_with_context(
+        &mut self,
+        action: MenuAction,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             MenuAction::ActivateTab { tab_id } => {
                 self.activate_tab_with_context(tab_id, cx);

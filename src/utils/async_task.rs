@@ -5,11 +5,11 @@
 
 /// 异步任务占位结构，后续统一管理后台任务生命周期。
 #[derive(Debug, Default)]
-pub struct AsyncTaskPlaceholder;
+pub(crate) struct AsyncTaskPlaceholder;
 
 impl AsyncTaskPlaceholder {
     /// 返回模块职责说明；当前不启动任何后台任务。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "封装后台任务取消和状态回传；当前仅保留占位边界。"
     }
 }

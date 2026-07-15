@@ -5,11 +5,11 @@
 
 /// 临时缓存管理占位结构，后续负责缓存限额、取消和清理。
 #[derive(Debug, Default)]
-pub struct SpoolManagerPlaceholder;
+pub(crate) struct SpoolManagerPlaceholder;
 
 impl SpoolManagerPlaceholder {
     /// 返回模块职责说明；当前不创建任何临时文件。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "管理压缩条目临时缓存和清理；当前仅保留占位边界。"
     }
 }

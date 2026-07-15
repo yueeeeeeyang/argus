@@ -54,7 +54,7 @@ const DELETE_DIALOG_HEIGHT: f32 = 210.0;
 
 /// 目录窗口模式，区分新增和编辑已有目录。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConnectionDirectoryWindowMode {
+pub(crate) enum ConnectionDirectoryWindowMode {
     /// 新增目录。
     Create,
     /// 编辑已有目录。
@@ -66,7 +66,7 @@ pub enum ConnectionDirectoryWindowMode {
 
 /// SSH 链接窗口模式，区分新增和编辑已有链接。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConnectionLinkWindowMode {
+pub(crate) enum ConnectionLinkWindowMode {
     /// 新增 SSH 链接。
     Create,
     /// 编辑已有 SSH 链接。
@@ -77,7 +77,7 @@ pub enum ConnectionLinkWindowMode {
 }
 
 /// 目录表单模态框子视图；表单状态保存在子视图内，提交时写回主应用配置。
-pub struct ConnectionDirectoryWindow {
+pub(crate) struct ConnectionDirectoryWindow {
     /// 主应用实体，提交和关闭状态同步都写回 `ArgusApp`。
     app: Entity<ArgusApp>,
     /// 当前模态框使用的主题快照。
@@ -111,7 +111,7 @@ impl ConnectionDirectoryWindow {
     /// - `cx`：子视图上下文，用于创建焦点句柄和订阅主应用变化。
     ///
     /// 返回值：可渲染的目录表单模态框子视图。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         mut form: ConnectionDirectoryFormState,
@@ -142,12 +142,12 @@ impl ConnectionDirectoryWindow {
     }
 
     /// 判断当前目录模态框是否为指定模式，用于重复点击按钮时决定是否替换表单。
-    pub fn is_mode(&self, mode: ConnectionDirectoryWindowMode) -> bool {
+    pub(crate) fn is_mode(&self, mode: ConnectionDirectoryWindowMode) -> bool {
         self.mode == mode
     }
 
     /// 替换目录模态框表单和模式，供右键编辑入口复用已经打开的子视图。
-    pub fn replace_form(
+    pub(crate) fn replace_form(
         &mut self,
         mut form: ConnectionDirectoryFormState,
         mode: ConnectionDirectoryWindowMode,
@@ -264,7 +264,7 @@ impl Render for ConnectionDirectoryWindow {
 }
 
 /// 链接表单模态框子视图；表单状态保存在子视图内，提交时写回主应用配置。
-pub struct ConnectionLinkWindow {
+pub(crate) struct ConnectionLinkWindow {
     /// 主应用实体，提交和关闭状态同步都写回 `ArgusApp`。
     app: Entity<ArgusApp>,
     /// 当前模态框使用的主题快照。
@@ -316,7 +316,7 @@ impl ConnectionLinkWindow {
     /// - `cx`：子视图上下文，用于创建焦点句柄和订阅主应用变化。
     ///
     /// 返回值：可渲染的链接表单模态框子视图。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         mut form: ConnectionLinkFormState,
@@ -356,17 +356,17 @@ impl ConnectionLinkWindow {
     }
 
     /// 判断当前链接模态框是否为指定模式，用于重复点击按钮时决定是否替换表单。
-    pub fn is_mode(&self, mode: ConnectionLinkWindowMode) -> bool {
+    pub(crate) fn is_mode(&self, mode: ConnectionLinkWindowMode) -> bool {
         self.mode == mode
     }
 
     /// 返回当前链接模态框表单协议，用于重复打开不同协议表单时判断是否需要替换。
-    pub fn link_kind(&self) -> ConnectionLinkKind {
+    pub(crate) fn link_kind(&self) -> ConnectionLinkKind {
         self.form.link_kind
     }
 
     /// 替换链接模态框表单和模式，供右键编辑入口复用已经打开的子视图。
-    pub fn replace_form(
+    pub(crate) fn replace_form(
         &mut self,
         mut form: ConnectionLinkFormState,
         mode: ConnectionLinkWindowMode,
@@ -545,7 +545,7 @@ enum ConnectionWindowInputAction {
 }
 
 /// 渲染当前链接工作区主机指纹确认弹窗。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(dialog) = app.connection_dialog.clone() else {
         return div().into_any_element();
@@ -583,7 +583,7 @@ pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
 }
 
 /// 将目录表单子视图包裹为主窗口模态框。
-pub fn render_connection_directory_modal(
+pub(crate) fn render_connection_directory_modal(
     modal: Entity<ConnectionDirectoryWindow>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
@@ -603,7 +603,7 @@ pub fn render_connection_directory_modal(
 }
 
 /// 将链接表单子视图包裹为主窗口模态框。
-pub fn render_connection_link_modal(
+pub(crate) fn render_connection_link_modal(
     modal: Entity<ConnectionLinkWindow>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,

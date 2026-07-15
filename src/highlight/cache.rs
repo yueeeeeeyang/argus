@@ -17,7 +17,7 @@ const DEFAULT_HIGHLIGHT_CACHE_CAPACITY: usize = 2048;
 
 /// 单个 tab 的语法高亮缓存，滚动时避免重复扫描热点可见行。
 #[derive(Clone, Debug)]
-pub struct HighlightCache {
+pub(crate) struct HighlightCache {
     /// 内部可变缓存；GPUI 渲染路径通常只持有不可变 app 引用。
     inner: Arc<Mutex<HighlightCacheInner>>,
 }
@@ -29,7 +29,7 @@ impl HighlightCache {
     /// - `capacity`：最多保留的行高亮结果数量。
     ///
     /// 返回值：可克隆且内部共享的高亮缓存。
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HighlightCacheInner {
                 capacity: capacity.max(1),
@@ -47,7 +47,7 @@ impl HighlightCache {
     /// - `line`：当前展示行文本。
     ///
     /// 返回值：当前行的高亮范围；缓存锁异常时直接同步计算。
-    pub fn highlight_line(
+    pub(crate) fn highlight_line(
         &self,
         line_number: usize,
         language: HighlightLanguage,
@@ -75,7 +75,7 @@ impl HighlightCache {
     }
 
     /// 只读取缓存中的高亮结果；缓存缺失时不执行同步高亮计算。
-    pub fn cached_highlight_line(
+    pub(crate) fn cached_highlight_line(
         &self,
         line_number: usize,
         language: HighlightLanguage,

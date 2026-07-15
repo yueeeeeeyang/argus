@@ -17,7 +17,7 @@ use crate::infra::text_selection::{
 
 impl ArgusApp {
     /// 打开来源树搜索输入模式，并准备接收目录树过滤关键字。
-    pub fn open_source_tree_search(&mut self) {
+    pub(crate) fn open_source_tree_search(&mut self) {
         self.is_source_tree_search_open = true;
         self.source_tree_search_query.clear();
         self.source_tree_search_cursor = 0;
@@ -32,7 +32,7 @@ impl ArgusApp {
     }
 
     /// 关闭来源树搜索输入模式，清空过滤条件并恢复完整来源树。
-    pub fn close_source_tree_search(&mut self) {
+    pub(crate) fn close_source_tree_search(&mut self) {
         self.is_source_tree_search_open = false;
         self.source_tree_search_query.clear();
         self.source_tree_search_cursor = 0;
@@ -47,7 +47,7 @@ impl ArgusApp {
     }
 
     /// 更新来源树搜索关键字，并同步重建过滤后的可见节点索引。
-    pub fn update_source_tree_search_query(&mut self, query: String) {
+    pub(crate) fn update_source_tree_search_query(&mut self, query: String) {
         self.source_tree_search_query = query;
         self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
         self.source_tree_search_selection_anchor = None;
@@ -67,7 +67,7 @@ impl ArgusApp {
     }
 
     /// 设置来源树搜索框焦点状态；聚焦时将光标放到当前文本末尾。
-    pub fn set_source_tree_search_focused(&mut self, is_focused: bool) {
+    pub(crate) fn set_source_tree_search_focused(&mut self, is_focused: bool) {
         self.is_source_tree_search_focused = is_focused;
         if is_focused {
             self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
@@ -81,7 +81,11 @@ impl ArgusApp {
     }
 
     /// 处理来源树搜索框按键输入，只改变本地过滤状态，不读取日志正文。
-    pub fn handle_source_tree_search_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    pub(crate) fn handle_source_tree_search_key(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
         let key = keystroke.key.to_lowercase();
 
         if keystroke.modifiers.secondary() {
@@ -165,7 +169,7 @@ impl ArgusApp {
     }
 
     /// 返回来源树搜索框当前选区范围；没有有效选区时返回 `None`。
-    pub fn source_tree_search_selection_range(&self) -> Option<std::ops::Range<usize>> {
+    pub(crate) fn source_tree_search_selection_range(&self) -> Option<std::ops::Range<usize>> {
         let anchor = self.source_tree_search_selection_anchor?;
         if anchor == self.source_tree_search_cursor {
             return None;
@@ -280,7 +284,7 @@ impl ArgusApp {
     }
 
     /// 全选来源树搜索框文本。
-    pub fn select_all_source_tree_search(&mut self) {
+    pub(crate) fn select_all_source_tree_search(&mut self) {
         self.source_tree_search_selection_anchor = Some(0);
         self.source_tree_search_cursor = character_count(&self.source_tree_search_query);
         self.source_tree_search_marked_range = None;
@@ -288,7 +292,7 @@ impl ArgusApp {
     }
 
     /// 根据鼠标按下位置开始来源树搜索框选择。
-    pub fn begin_source_tree_search_pointer_selection(
+    pub(crate) fn begin_source_tree_search_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
@@ -305,7 +309,7 @@ impl ArgusApp {
     }
 
     /// 鼠标拖拽过程中按初始粒度扩展来源树搜索框选区。
-    pub fn update_source_tree_search_pointer_selection(&mut self, character_index: usize) {
+    pub(crate) fn update_source_tree_search_pointer_selection(&mut self, character_index: usize) {
         let Some(drag) = self.source_tree_search_selection_drag.clone() else {
             return;
         };
@@ -317,7 +321,7 @@ impl ArgusApp {
     }
 
     /// 结束来源树搜索框鼠标选择；空选区会退化为普通光标。
-    pub fn finish_source_tree_search_pointer_selection(&mut self) {
+    pub(crate) fn finish_source_tree_search_pointer_selection(&mut self) {
         self.source_tree_search_selection_drag = None;
         if self.source_tree_search_selection_range().is_none() {
             self.source_tree_search_selection_anchor = None;
@@ -409,12 +413,12 @@ impl ArgusApp {
     }
 
     /// 返回来源树当前是否正在使用非空关键字过滤。
-    pub fn is_source_tree_filtering(&self) -> bool {
+    pub(crate) fn is_source_tree_filtering(&self) -> bool {
         self.is_source_tree_search_open && !self.source_tree_search_query.trim().is_empty()
     }
 
     /// 重建来源树过滤结果；匹配已加载日志候选和未完成单文件探测的压缩包，并保留祖先目录上下文。
-    pub fn rebuild_filtered_source_ids(&mut self) {
+    pub(crate) fn rebuild_filtered_source_ids(&mut self) {
         self.filtered_source_ids.clear();
 
         let query = self.source_tree_search_query.trim().to_lowercase();

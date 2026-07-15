@@ -57,7 +57,7 @@ const SOURCE_PICKER_HEADER_CONTENT_Y_OFFSET: f32 = 0.5;
 const SOURCE_PICKER_HEADER_ICON_SIZE: f32 = 13.0;
 
 /// 来源选择器子视图；通过观察主应用实体获得最新选择器状态。
-pub struct SourcePickerWindow {
+pub(crate) struct SourcePickerWindow {
     /// 主应用实体，选择器所有业务状态仍集中保存在 `ArgusApp`。
     app: Entity<ArgusApp>,
     /// 当前子视图自己的渲染快照，避免首次打开时读取正在更新的主应用实体。
@@ -73,7 +73,7 @@ pub struct SourcePickerWindow {
 }
 
 /// 将来源选择器子视图包裹为主窗口模态框。
-pub fn render_source_picker_modal(
+pub(crate) fn render_source_picker_modal(
     picker: Entity<SourcePickerWindow>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
@@ -102,7 +102,7 @@ impl SourcePickerWindow {
     /// - `cx`：选择器子视图上下文，用于注册观察订阅。
     ///
     /// 返回值：可渲染的选择器模态框子视图。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         source_picker: SourcePickerState,

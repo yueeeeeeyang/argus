@@ -13,7 +13,7 @@ use gpui::{
 
 /// 图标按钮尺寸。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IconButtonSize {
+pub(crate) enum IconButtonSize {
     /// 标题栏和内容工具栏中的小按钮。
     Small,
     /// 来源侧栏工具区中的 14px 图标按钮。
@@ -68,7 +68,7 @@ impl Render for TooltipView {
 /// - `on_click`：点击回调，可操作应用状态或窗口 API。
 ///
 /// 返回值：GPUI 元素树；不会直接触发真实业务功能。
-pub fn render_icon_button(
+pub(crate) fn render_icon_button(
     id: impl Into<ElementId>,
     icon: ArgusIcon,
     tooltip: &'static str,

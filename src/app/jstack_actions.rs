@@ -4,7 +4,7 @@ use super::*;
 
 impl ArgusApp {
     /// 创建 Jstack 分析标签页，并启动后台读取与聚合任务。
-    pub fn open_jstack_analysis_tab(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+    pub(crate) fn open_jstack_analysis_tab(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
         if !self.ensure_source_directory_ready_for_analysis(
             source_id,
             PendingSourceAnalysisAction::Jstack { source_id },
@@ -51,12 +51,12 @@ impl ArgusApp {
     }
 
     /// 返回指定 Jstack 分析状态。
-    pub fn jstack_analysis_state(&self, analysis_id: usize) -> Option<&JstackAnalysisState> {
+    pub(crate) fn jstack_analysis_state(&self, analysis_id: usize) -> Option<&JstackAnalysisState> {
         self.jstack_analyses.get(&analysis_id)
     }
 
     /// 返回当前设置页配置的 Jstack 线程过滤器。
-    pub fn jstack_thread_filter(&self) -> JstackThreadFilter {
+    pub(crate) fn jstack_thread_filter(&self) -> JstackThreadFilter {
         JstackThreadFilter::from_raw(
             &self.config.log_display.jstack_thread_name_filters,
             &self.config.log_display.jstack_stack_segment_filters,
@@ -64,7 +64,7 @@ impl ArgusApp {
     }
 
     /// 根据当前配置重建所有 Jstack 分析页的可见行缓存。
-    pub fn rebuild_all_jstack_visible_row_caches(&mut self) {
+    pub(crate) fn rebuild_all_jstack_visible_row_caches(&mut self) {
         let thread_filter = self.jstack_thread_filter();
         for state in self.jstack_analyses.values_mut() {
             state.rebuild_visible_row_cache(&thread_filter);
@@ -79,7 +79,7 @@ impl ArgusApp {
     /// - `active_snapshot_index`：用户点击的快照列索引。
     /// - `active_occurrence_index`：同快照内重复线程名的出现序号。
     /// - `cx`：主应用上下文，用于继续打开详情窗口。
-    pub fn open_jstack_thread_detail_for_cell(
+    pub(crate) fn open_jstack_thread_detail_for_cell(
         &mut self,
         analysis_id: usize,
         row_index: usize,
@@ -149,7 +149,7 @@ impl ArgusApp {
     /// - `active_snapshot_index`：用户点击的快照序号，用于定位详情初始页。
     /// - `active_occurrence_index`：同快照内线程出现序号，用于重复线程名时定位具体堆栈。
     /// - `cx`：主应用上下文，用于创建无系统标题栏窗口。
-    pub fn open_jstack_thread_detail_window(
+    pub(crate) fn open_jstack_thread_detail_window(
         &mut self,
         detail: JstackThreadDetail,
         active_snapshot_index: usize,
@@ -207,7 +207,7 @@ impl ArgusApp {
     /// - `file_name`：文件名，用于窗口标题。
     /// - `content`：预览内容，可能为文本、二进制提示或读取错误。
     /// - `cx`：主应用上下文，用于创建无系统标题栏窗口并同步主题。
-    pub fn open_file_preview_window(
+    pub(crate) fn open_file_preview_window(
         &mut self,
         file_name: String,
         content: crate::remote::sftp::FilePreviewContent,
@@ -249,12 +249,12 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `preview`：当前方块的稳定 key、位置和预览内容。
-    pub fn show_jstack_cell_hover_preview(&mut self, preview: JstackCellHoverPreview) {
+    pub(crate) fn show_jstack_cell_hover_preview(&mut self, preview: JstackCellHoverPreview) {
         self.jstack_cell_hover_preview = Some(preview);
     }
 
     /// 清理 Jstack 方块内部悬浮气泡。
-    pub fn clear_jstack_cell_hover_preview(&mut self) {
+    pub(crate) fn clear_jstack_cell_hover_preview(&mut self) {
         self.jstack_cell_hover_preview = None;
     }
 
@@ -321,7 +321,7 @@ impl ArgusApp {
     }
 
     /// 切换 Jstack 分析结果中的线程状态筛选项。
-    pub fn toggle_jstack_state_filter(
+    pub(crate) fn toggle_jstack_state_filter(
         &mut self,
         analysis_id: usize,
         thread_state: JstackThreadState,
@@ -358,7 +358,7 @@ impl ArgusApp {
     /// - `thread_name`：当前行显示的线程名文本。
     /// - `character_index`：鼠标按下位置命中的字符列。
     /// - `granularity`：按点击次数决定的选择粒度。
-    pub fn begin_jstack_thread_name_selection(
+    pub(crate) fn begin_jstack_thread_name_selection(
         &mut self,
         analysis_id: usize,
         thread_identity: String,
@@ -391,7 +391,7 @@ impl ArgusApp {
     /// 拖拽更新 Jstack 分析矩阵左侧线程名列中的文本选区。
     ///
     /// 返回值：本次拖拽是否命中当前分析页和当前线程行。
-    pub fn update_jstack_thread_name_selection(
+    pub(crate) fn update_jstack_thread_name_selection(
         &mut self,
         analysis_id: usize,
         thread_identity: &str,
@@ -424,7 +424,7 @@ impl ArgusApp {
     /// 结束 Jstack 线程名文本选择；如果没有选中字符则清理空选区。
     ///
     /// 返回值：当前分析页是否存在需要结束的拖拽状态。
-    pub fn finish_jstack_thread_name_selection(&mut self, analysis_id: usize) -> bool {
+    pub(crate) fn finish_jstack_thread_name_selection(&mut self, analysis_id: usize) -> bool {
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             return false;
         };
@@ -441,7 +441,11 @@ impl ArgusApp {
     }
 
     /// 复制当前 Jstack 分析页左侧线程名列中拖选的文本。
-    pub fn copy_selected_jstack_thread_name(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+    pub(crate) fn copy_selected_jstack_thread_name(
+        &mut self,
+        analysis_id: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some((thread_name, range)) = self
             .jstack_analyses
             .get(&analysis_id)
@@ -463,7 +467,7 @@ impl ArgusApp {
     }
 
     /// 切换 Jstack 分析页是否应用设置页中的线程堆栈过滤规则。
-    pub fn toggle_jstack_thread_filter(&mut self, analysis_id: usize) {
+    pub(crate) fn toggle_jstack_thread_filter(&mut self, analysis_id: usize) {
         let thread_filter = self.jstack_thread_filter();
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Jstack 分析结果".to_string();

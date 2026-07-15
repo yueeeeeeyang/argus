@@ -16,7 +16,7 @@ use crate::infra::text_selection::{TextSelectionGranularity, character_count, wo
 
 /// Jstack 分析任务状态，供内容区页签展示加载、结果或失败。
 #[derive(Clone, Debug)]
-pub enum JstackAnalysisTaskState {
+pub(crate) enum JstackAnalysisTaskState {
     /// 后台任务正在读取和聚合线程栈。
     Loading {
         /// 当前加载提示。
@@ -33,7 +33,7 @@ pub enum JstackAnalysisTaskState {
 
 /// 单个 Jstack 分析页签的持久状态。
 #[derive(Clone, Debug)]
-pub struct JstackAnalysisState {
+pub(crate) struct JstackAnalysisState {
     /// 分析 ID，与 `TabKind::JstackAnalysis` 对应。
     pub id: usize,
     /// 页签标题。
@@ -64,7 +64,7 @@ pub struct JstackAnalysisState {
 
 /// Jstack 分析矩阵左侧线程名的单行文本选区。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadNameSelection {
+pub(crate) struct JstackThreadNameSelection {
     /// 线程身份 key，包含线程名和线程 ID，用于区分同名线程。
     pub thread_identity: String,
     /// 当前显示的线程名文本；复制时只复制该文本的选中片段。
@@ -77,7 +77,7 @@ pub struct JstackThreadNameSelection {
 
 impl JstackThreadNameSelection {
     /// 返回按字符顺序归一化后的非空选区。
-    pub fn normalized_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn normalized_range(&self) -> Option<Range<usize>> {
         let text_length = character_count(&self.thread_name);
         let start = self.anchor.min(self.focus).min(text_length);
         let end = self.anchor.max(self.focus).min(text_length);
@@ -87,7 +87,7 @@ impl JstackThreadNameSelection {
 
 /// Jstack 分析矩阵左侧线程名拖拽选择状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadNameSelectionDrag {
+pub(crate) struct JstackThreadNameSelectionDrag {
     /// 本次拖拽起始的线程身份 key。
     pub thread_identity: String,
     /// 本次拖拽起始的线程名文本。
@@ -105,7 +105,7 @@ impl JstackAnalysisState {
     /// - `thread_filter`：设置页当前配置的线程过滤器。
     ///
     /// 返回值：无；结果会写入 `visible_row_indices` 和 `filtered_row_count`。
-    pub fn rebuild_visible_row_cache(&mut self, thread_filter: &JstackThreadFilter) {
+    pub(crate) fn rebuild_visible_row_cache(&mut self, thread_filter: &JstackThreadFilter) {
         let JstackAnalysisTaskState::Ready(result) = &self.task_state else {
             self.visible_row_indices.clear();
             self.filtered_row_count = 0;
@@ -238,7 +238,7 @@ pub(super) fn jstack_detail_occurrences_for_visible_cells(
 /// - `snapshot_index`：快照列索引。
 ///
 /// 返回值：可在状态和 UI 之间共享的方块标识。
-pub fn jstack_cell_selection_key(row_index: usize, snapshot_index: usize) -> String {
+pub(crate) fn jstack_cell_selection_key(row_index: usize, snapshot_index: usize) -> String {
     format!("{row_index}:{snapshot_index}")
 }
 

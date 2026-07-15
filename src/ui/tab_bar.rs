@@ -88,7 +88,11 @@ pub(crate) struct TabBarLayout {
 /// - `cx`：应用上下文，用于绑定切换、关闭、右键菜单和溢出菜单。
 ///
 /// 返回值：GPUI 元素树；不包含新增标签页和拖拽排序入口。
-pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    window: &mut Window,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let tabs = app.tabs.clone();
     let active_tab_id = app.active_tab_id;

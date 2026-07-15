@@ -1,11 +1,11 @@
 use super::*;
 
-pub fn render_sql_analysis_column_gap() -> impl IntoElement {
+pub(crate) fn render_sql_analysis_column_gap() -> impl IntoElement {
     div().w(px(SQL_ANALYSIS_COLUMN_GAP)).flex_none()
 }
 
 /// 渲染固定表格无数据时覆盖在表体区域的空态。
-pub fn render_table_empty_overlay(
+pub(crate) fn render_table_empty_overlay(
     message: &'static str,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
@@ -24,7 +24,7 @@ pub fn render_table_empty_overlay(
 }
 
 /// 渲染总览表头。
-pub fn render_summary_header(
+pub(crate) fn render_summary_header(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     theme: &AppTheme,
@@ -97,7 +97,7 @@ pub fn render_summary_header(
 }
 
 /// 渲染单条总览行。
-pub fn render_summary_row(
+pub(crate) fn render_summary_row(
     analysis_id: usize,
     summary_index: usize,
     summary: &RuntimeRequestSummary,
@@ -166,7 +166,7 @@ pub fn render_summary_row(
 }
 
 /// 渲染请求详情顶部信息。
-pub fn render_request_details_topbar(
+pub(crate) fn render_request_details_topbar(
     analysis_id: usize,
     summary: &RuntimeRequestSummary,
     theme: &AppTheme,
@@ -224,7 +224,7 @@ pub fn render_request_details_topbar(
 }
 
 /// 渲染请求明细表头。
-pub fn render_request_header(
+pub(crate) fn render_request_header(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     theme: &AppTheme,
@@ -286,7 +286,7 @@ pub fn render_request_header(
 }
 
 /// 渲染单条请求明细行。
-pub fn render_request_row(
+pub(crate) fn render_request_row(
     analysis_id: usize,
     request: &RuntimeRequestRecord,
     selection: Option<&RuntimeTableCellSelection>,
@@ -355,7 +355,7 @@ pub fn render_request_row(
 }
 
 /// 渲染 SQL 列表顶部信息。
-pub fn render_sql_topbar(
+pub(crate) fn render_sql_topbar(
     analysis_id: usize,
     request_path: &str,
     request: &RuntimeRequestRecord,
@@ -420,7 +420,7 @@ pub fn render_sql_topbar(
 }
 
 /// 渲染 SQL 明细表头。
-pub fn render_sql_header(
+pub(crate) fn render_sql_header(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     theme: &AppTheme,
@@ -501,7 +501,7 @@ pub fn render_sql_header(
 }
 
 /// 渲染单条 SQL 明细行。
-pub fn render_sql_row(
+pub(crate) fn render_sql_row(
     analysis_id: usize,
     request_index: usize,
     request_path: String,
@@ -594,7 +594,7 @@ pub fn render_sql_row(
 ///
 /// 统计分析、频率/慢 SQL 分析及其详情列表共用此函数；调用方通过 `hover_key` 区分
 /// 具体记录（`Record`）与聚合行（`Summary`），通过 `dialog` 传入弹窗所需上下文。
-pub fn render_sql_text_cell_with_more(
+pub(crate) fn render_sql_text_cell_with_more(
     analysis_id: usize,
     cell_id: String,
     scroll_cell_id: String,
@@ -645,7 +645,7 @@ pub fn render_sql_text_cell_with_more(
 }
 
 /// 渲染 SQL 文本单元格；单元格宽度由表格列固定，长 SQL 在单元格内部横向滚动。
-pub fn render_sql_text_cell(
+pub(crate) fn render_sql_text_cell(
     analysis_id: usize,
     request_index: usize,
     request_path: String,
@@ -688,7 +688,7 @@ pub fn render_sql_text_cell(
 }
 
 /// 渲染 SQL 单元格末尾的更多入口，点击后展示保留格式的完整 SQL。
-pub fn render_sql_more_button(
+pub(crate) fn render_sql_more_button(
     analysis_id: usize,
     id: String,
     dialog: RuntimeSqlTextDialog,
@@ -729,7 +729,7 @@ pub fn render_sql_more_button(
 }
 
 /// 渲染表格外层表头行；表格随容器宽度伸缩，避免把整页撑出横向滚动。
-pub fn render_table_header(theme: &AppTheme) -> gpui::Div {
+pub(crate) fn render_table_header(theme: &AppTheme) -> gpui::Div {
     div()
         .h(px(TABLE_HEADER_HEIGHT))
         .w_full()
@@ -745,7 +745,7 @@ pub fn render_table_header(theme: &AppTheme) -> gpui::Div {
 }
 
 /// 渲染可排序表头单元格。
-pub fn render_header_cell(
+pub(crate) fn render_header_cell(
     id: &'static str,
     label: &'static str,
     width: f32,
@@ -776,7 +776,7 @@ pub fn render_header_cell(
 }
 
 /// 渲染会吸收剩余宽度的可排序表头单元格。
-pub fn render_flex_header_cell(
+pub(crate) fn render_flex_header_cell(
     id: &'static str,
     label: &'static str,
     is_active: bool,
@@ -811,7 +811,7 @@ pub fn render_flex_header_cell(
 }
 
 /// 渲染不可排序表头单元格。
-pub fn render_static_header_cell(
+pub(crate) fn render_static_header_cell(
     label: &'static str,
     width: f32,
     theme: &AppTheme,
@@ -828,7 +828,10 @@ pub fn render_static_header_cell(
 }
 
 /// 渲染不可排序且吸收剩余宽度的表头单元格。
-pub fn render_static_flex_header_cell(label: &'static str, theme: &AppTheme) -> impl IntoElement {
+pub(crate) fn render_static_flex_header_cell(
+    label: &'static str,
+    theme: &AppTheme,
+) -> impl IntoElement {
     div()
         .flex_1()
         .min_w(px(0.0))
@@ -841,7 +844,7 @@ pub fn render_static_flex_header_cell(label: &'static str, theme: &AppTheme) -> 
 }
 
 /// 渲染普通表格行；行宽固定为容器宽度，长字段由单元格内部滚动承载。
-pub fn render_table_row(height: f32, theme: &AppTheme) -> gpui::Div {
+pub(crate) fn render_table_row(height: f32, theme: &AppTheme) -> gpui::Div {
     div()
         .h(px(height))
         .w_full()
@@ -857,7 +860,7 @@ pub fn render_table_row(height: f32, theme: &AppTheme) -> gpui::Div {
 }
 
 /// 渲染可选择复制的固定宽度文本单元格。
-pub fn render_selectable_cell(
+pub(crate) fn render_selectable_cell(
     analysis_id: usize,
     cell_key: String,
     text: String,
@@ -898,7 +901,7 @@ pub fn render_selectable_cell(
 }
 
 /// 渲染可选择复制并在自身内部横向滚动的长文本单元格。
-pub fn render_selectable_scroll_cell(
+pub(crate) fn render_selectable_scroll_cell(
     analysis_id: usize,
     id: String,
     cell_key: String,
@@ -924,7 +927,7 @@ pub fn render_selectable_scroll_cell(
 }
 
 /// 渲染指定字体的可选择长文本单元格，SQL 文本列使用等宽字体。
-pub fn render_selectable_scroll_cell_with_font(
+pub(crate) fn render_selectable_scroll_cell_with_font(
     analysis_id: usize,
     id: String,
     cell_key: String,

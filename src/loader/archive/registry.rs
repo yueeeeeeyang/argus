@@ -51,20 +51,20 @@ static RAR_ADAPTER: RarArchiveAdapter = RarArchiveAdapter;
 static DEFAULT_REGISTRY: OnceLock<ArchiveAdapterRegistry> = OnceLock::new();
 
 /// 获取全局默认压缩适配器注册表。
-pub fn archive_registry() -> &'static ArchiveAdapterRegistry {
+pub(crate) fn archive_registry() -> &'static ArchiveAdapterRegistry {
     DEFAULT_REGISTRY.get_or_init(ArchiveAdapterRegistry::with_builtin_adapters)
 }
 
 /// 压缩适配器注册表；后续新增格式只需注册新的适配器对象。
 #[derive(Clone)]
-pub struct ArchiveAdapterRegistry {
+pub(crate) struct ArchiveAdapterRegistry {
     /// 已注册适配器列表，顺序决定扩展名识别的兜底优先级。
     adapters: Vec<&'static dyn ArchiveAdapter>,
 }
 
 impl ArchiveAdapterRegistry {
     /// 构造包含所有内置格式的注册表。
-    pub fn with_builtin_adapters() -> Self {
+    pub(crate) fn with_builtin_adapters() -> Self {
         Self {
             adapters: vec![
                 &ZIP_ADAPTER,
@@ -80,7 +80,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 根据格式返回对应适配器。
-    pub fn adapter_for(&self, format: ArchiveFormat) -> Option<&'static dyn ArchiveAdapter> {
+    pub(crate) fn adapter_for(&self, format: ArchiveFormat) -> Option<&'static dyn ArchiveAdapter> {
         self.adapters
             .iter()
             .copied()
@@ -88,13 +88,13 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 查询某格式的能力声明。
-    pub fn capabilities(&self, format: ArchiveFormat) -> Option<ArchiveCapabilities> {
+    pub(crate) fn capabilities(&self, format: ArchiveFormat) -> Option<ArchiveCapabilities> {
         self.adapter_for(format)
             .map(|adapter| adapter.capabilities())
     }
 
     /// 判断指定格式是否具备目录树展开所需的基本能力。
-    pub fn is_supported(&self, format: ArchiveFormat) -> bool {
+    pub(crate) fn is_supported(&self, format: ArchiveFormat) -> bool {
         self.capabilities(format).is_some_and(|capabilities| {
             capabilities.supports_listing
                 && capabilities.supports_entry_reading
@@ -103,7 +103,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 识别本地路径对应的压缩格式，明确容器文件头优先，扩展名兜底。
-    pub fn detect_path(&self, path: &Path) -> Option<ArchiveFormat> {
+    pub(crate) fn detect_path(&self, path: &Path) -> Option<ArchiveFormat> {
         let name_format = path
             .file_name()
             .and_then(|file_name| file_name.to_str())
@@ -121,7 +121,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 根据文件名或压缩包内虚拟条目名称识别格式。
-    pub fn detect_name(&self, name: &str) -> Option<ArchiveFormat> {
+    pub(crate) fn detect_name(&self, name: &str) -> Option<ArchiveFormat> {
         let lowercase_name = name.to_ascii_lowercase();
         self.adapters
             .iter()
@@ -131,7 +131,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 枚举本地压缩包条目并统一补充错误上下文。
-    pub fn list_entries(
+    pub(crate) fn list_entries(
         &self,
         format: ArchiveFormat,
         path: &Path,
@@ -145,7 +145,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 枚举本地压缩包条目，并在密码失败时补充具体容器键。
-    pub fn list_entries_with_password_context(
+    pub(crate) fn list_entries_with_password_context(
         &self,
         format: ArchiveFormat,
         path: &Path,
@@ -158,7 +158,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 枚举内存压缩包条目并统一补充错误上下文。
-    pub fn list_entries_from_reader(
+    pub(crate) fn list_entries_from_reader(
         &self,
         format: ArchiveFormat,
         reader: &mut dyn ArchiveReadSeek,
@@ -174,7 +174,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 枚举内存压缩包条目，并在密码失败时补充具体容器键。
-    pub fn list_entries_from_reader_with_password_context(
+    pub(crate) fn list_entries_from_reader_with_password_context(
         &self,
         format: ArchiveFormat,
         reader: &mut dyn ArchiveReadSeek,
@@ -190,7 +190,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 轻量探测本地压缩包根层是否恰好只有一个普通文件。
-    pub fn probe_single_file_root(
+    pub(crate) fn probe_single_file_root(
         &self,
         format: ArchiveFormat,
         path: &Path,
@@ -204,7 +204,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 轻量探测本地压缩包根层是否恰好只有一个普通文件，并补充密码上下文。
-    pub fn probe_single_file_root_with_password_context(
+    pub(crate) fn probe_single_file_root_with_password_context(
         &self,
         format: ArchiveFormat,
         path: &Path,
@@ -217,7 +217,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 轻量探测内存压缩包根层是否恰好只有一个普通文件。
-    pub fn probe_single_file_root_from_reader(
+    pub(crate) fn probe_single_file_root_from_reader(
         &self,
         format: ArchiveFormat,
         reader: &mut dyn ArchiveReadSeek,
@@ -233,7 +233,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 轻量探测内存压缩包根层是否恰好只有一个普通文件，并补充密码上下文。
-    pub fn probe_single_file_root_from_reader_with_password_context(
+    pub(crate) fn probe_single_file_root_from_reader_with_password_context(
         &self,
         format: ArchiveFormat,
         reader: &mut dyn ArchiveReadSeek,
@@ -249,7 +249,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 从本地压缩包读取指定条目并统一补充错误上下文。
-    pub fn read_entry_bytes(
+    pub(crate) fn read_entry_bytes(
         &self,
         format: ArchiveFormat,
         path: &Path,
@@ -267,7 +267,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 从内存压缩包读取指定条目并统一补充错误上下文。
-    pub fn read_entry_bytes_from_reader(
+    pub(crate) fn read_entry_bytes_from_reader(
         &self,
         format: ArchiveFormat,
         reader: &mut dyn ArchiveReadSeek,
@@ -288,7 +288,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 从本地压缩包流式读取指定条目并统一补充错误上下文。
-    pub fn stream_entry(
+    pub(crate) fn stream_entry(
         &self,
         format: ArchiveFormat,
         path: &Path,
@@ -307,7 +307,7 @@ impl ArchiveAdapterRegistry {
     }
 
     /// 从内存压缩包流式读取指定条目并统一补充错误上下文。
-    pub fn stream_entry_from_reader(
+    pub(crate) fn stream_entry_from_reader(
         &self,
         format: ArchiveFormat,
         reader: &mut dyn ArchiveReadSeek,

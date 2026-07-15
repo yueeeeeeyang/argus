@@ -26,7 +26,7 @@ use std::time::Duration;
 /// - `cx`：应用上下文，用于更新占位提示。
 ///
 /// 返回值：GPUI 元素树；加载按钮会打开自定义来源选择器，其余按钮只更新本地状态。
-pub fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
+pub(crate) fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
     let theme = app.theme.clone();
 
     if app.is_source_tree_search_open {
@@ -68,7 +68,7 @@ pub fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyE
 /// - `cx`：应用上下文，用于打开表单、过滤框或执行收起操作。
 ///
 /// 返回值：GPUI 元素树；按钮顺序固定为新增链接、新增目录、过滤、收起全部。
-pub fn render_connection_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
+pub(crate) fn render_connection_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
     let theme = app.theme.clone();
 
     if app.is_connection_tree_search_open {
@@ -111,7 +111,10 @@ pub fn render_connection_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> 
 }
 
 /// 渲染日志内容区顶部的导航和上下文工具。
-pub fn render_content_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render_content_toolbar(
+    app: &ArgusApp,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
 
     div()

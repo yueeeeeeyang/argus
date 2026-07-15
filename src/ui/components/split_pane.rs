@@ -5,11 +5,11 @@
 
 /// 分割面板占位结构，后续管理面板尺寸和拖拽状态。
 #[derive(Debug, Default)]
-pub struct SplitPanePlaceholder;
+pub(crate) struct SplitPanePlaceholder;
 
 impl SplitPanePlaceholder {
     /// 返回组件职责说明；当前不处理真实拖拽。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "管理可拖拽分割布局；当前仅保留组件边界。"
     }
 }

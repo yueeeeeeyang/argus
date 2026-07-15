@@ -15,7 +15,7 @@ use gpui::Window;
 ///
 /// 返回值：配置成功返回 `Ok(())`；无法取得或调整原生视图时返回可展示的错误文本。
 #[cfg(target_os = "macos")]
-pub fn configure_main_window(
+pub(crate) fn configure_main_window(
     window: &Window,
     titlebar_height: f32,
     native_control_safe_width: f32,
@@ -41,7 +41,7 @@ pub fn configure_main_window(
 /// macOS 使用当前原生鼠标按下事件调用 Window Server；其他平台继续使用 GPUI 的
 /// `WindowControlArea::Drag`，因此该函数为空操作。
 #[cfg(target_os = "macos")]
-pub fn start_window_drag(window: &Window) {
+pub(crate) fn start_window_drag(window: &Window) {
     macos::start_window_drag(window);
 }
 

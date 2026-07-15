@@ -7,9 +7,9 @@
 #![allow(clippy::module_inception)]
 // 当前目录使用 `theme/theme.rs` 承载核心主题模型，`theme/mod.rs` 仅作为领域出口保留。
 
-pub mod builtin;
-pub mod theme;
-pub mod theme_manager;
+pub(crate) mod builtin;
+pub(crate) mod theme;
+pub(crate) mod theme_manager;
 
-pub use theme::{AppTheme, SyntaxTheme};
-pub use theme_manager::{BUILTIN_DARK_THEME_ID, ThemeError, ThemeManager, ThemeOption};
+pub(crate) use theme::{AppTheme, SyntaxTheme};
+pub(crate) use theme_manager::{ThemeManager, ThemeOption};

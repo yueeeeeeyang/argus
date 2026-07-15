@@ -31,7 +31,7 @@ impl ArgusApp {
     ///
     /// 说明：点击输入框以外区域时调用；只清理焦点、选区和 marked text，
     /// 不修改用户已经输入的文本内容，避免误清配置或搜索条件。
-    pub fn clear_all_text_input_focus(&mut self) {
+    pub(crate) fn clear_all_text_input_focus(&mut self) {
         self.is_source_tree_search_focused = false;
         self.source_tree_search_selection_anchor = None;
         self.source_tree_search_marked_range = None;
@@ -83,7 +83,7 @@ impl ArgusApp {
     /// 参数说明：
     /// - `target`：被编辑的业务输入框。
     /// - `edit`：输入组件已转换为字符索引的编辑结果。
-    pub fn apply_native_text_input_edit(
+    pub(crate) fn apply_native_text_input_edit(
         &mut self,
         target: AppTextInputTarget,
         edit: NativeTextEdit,
@@ -400,7 +400,7 @@ impl ArgusApp {
     ///
     /// 说明：纯状态测试仍使用 `apply_native_text_input_edit`；真实 UI 输入会走这里，
     /// Runtime 过滤输入提交完成后即可进入与键盘路径一致的防抖后台过滤流程。
-    pub fn apply_native_text_input_edit_with_context(
+    pub(crate) fn apply_native_text_input_edit_with_context(
         &mut self,
         target: AppTextInputTarget,
         edit: NativeTextEdit,

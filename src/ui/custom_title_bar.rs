@@ -19,11 +19,11 @@ use gpui::{
 ///
 /// 公开供依赖标题栏高度的计算（如搜索结果面板保留高度）派生使用，避免各自维护
 /// 易漂移的字面量。
-pub const TITLE_BAR_HEIGHT: f32 = 40.0;
+pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.0;
 /// 原生交通灯及其周围不可接管连续点击的横向安全宽度。
 ///
 /// 该值覆盖窗口左侧内边距、交通灯实际按钮和视觉占位，供原生事件命中判断复用。
-pub const NATIVE_TRAFFIC_LIGHT_SAFE_WIDTH: f32 = 96.0;
+pub(crate) const NATIVE_TRAFFIC_LIGHT_SAFE_WIDTH: f32 = 96.0;
 /// 标题栏布局为原生交通灯保留的固定占位宽度。
 const NATIVE_TRAFFIC_LIGHT_SPACER_WIDTH: f32 = 76.0;
 /// 标签页与来源侧栏分割线之间的视觉留白。
@@ -41,7 +41,11 @@ const TITLE_BUTTON_INACTIVE_Y_OFFSET: f32 = 1.0;
 /// - `cx`：应用上下文，用于创建标题栏按钮的占位回调。
 ///
 /// 返回值：GPUI 元素树；当前不执行真实搜索或打开文件逻辑。
-pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    window: &mut Window,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let show_source_boundary = matches!(
         app.workspace,

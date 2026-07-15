@@ -10,7 +10,7 @@ use crate::loader::archive::registry::archive_registry;
 
 /// Argus MVP 支持识别的压缩格式。
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ArchiveFormat {
+pub(crate) enum ArchiveFormat {
     /// ZIP 压缩包。
     Zip,
     /// 普通 TAR 归档。
@@ -31,7 +31,7 @@ pub enum ArchiveFormat {
 
 impl ArchiveFormat {
     /// 返回面向用户的格式名称。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         archive_registry()
             .capabilities(self)
             .map(|capabilities| capabilities.label)
@@ -39,7 +39,7 @@ impl ArchiveFormat {
     }
 
     /// 返回该格式是否属于当前注册表可展开范围。
-    pub fn is_supported(self) -> bool {
+    pub(crate) fn is_supported(self) -> bool {
         archive_registry().is_supported(self)
     }
 }
@@ -47,12 +47,12 @@ impl ArchiveFormat {
 /// 尝试识别路径对应的压缩格式。
 ///
 /// 返回值：识别成功时返回具体格式；普通日志文件或未知文件返回 `None`。
-pub fn detect_archive_format(path: &Path) -> Option<ArchiveFormat> {
+pub(crate) fn detect_archive_format(path: &Path) -> Option<ArchiveFormat> {
     archive_registry().detect_path(path)
 }
 
 /// 仅根据文件名判断压缩格式，用于压缩包内部虚拟条目的轻量识别。
-pub fn detect_archive_format_by_name(name: &str) -> Option<ArchiveFormat> {
+pub(crate) fn detect_archive_format_by_name(name: &str) -> Option<ArchiveFormat> {
     archive_registry().detect_name(name)
 }
 

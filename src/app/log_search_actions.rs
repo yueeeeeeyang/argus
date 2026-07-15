@@ -150,7 +150,7 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `cx`：GPUI 上下文，用于创建独立无标题栏窗口。
-    pub fn open_log_search_window(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_log_search_window(&mut self, cx: &mut Context<Self>) {
         if !self.ensure_active_log_tab_for_search() {
             self.placeholder_notice = "请先打开日志再搜索".to_string();
             return;
@@ -211,7 +211,7 @@ impl ArgusApp {
     }
 
     /// 关闭独立日志搜索窗口；保留底部结果面板，便于继续查看搜索结果。
-    pub fn close_log_search_window(&mut self) {
+    pub(crate) fn close_log_search_window(&mut self) {
         self.log_search.is_window_open = false;
         self.log_search.window_handle = None;
         self.clear_log_search_input_focus();
@@ -219,14 +219,14 @@ impl ArgusApp {
     }
 
     /// 设置搜索范围。
-    pub fn set_log_search_scope(&mut self, scope: SearchScope) {
+    pub(crate) fn set_log_search_scope(&mut self, scope: SearchScope) {
         self.log_search.scope = scope;
         self.prepare_log_search_directory_default();
         self.placeholder_notice = format!("搜索范围已切换为{}", scope.label());
     }
 
     /// 切换搜索大小写敏感选项；只影响下一次启动的搜索任务。
-    pub fn toggle_log_search_case_sensitive(&mut self) {
+    pub(crate) fn toggle_log_search_case_sensitive(&mut self) {
         self.log_search.case_sensitive = !self.log_search.case_sensitive;
         self.clear_quick_log_search_state();
         self.placeholder_notice = if self.log_search.case_sensitive {
@@ -237,7 +237,7 @@ impl ArgusApp {
     }
 
     /// 切换正则搜索选项；关键字保持原样，由启动搜索时统一校验。
-    pub fn toggle_log_search_regex_enabled(&mut self) {
+    pub(crate) fn toggle_log_search_regex_enabled(&mut self) {
         self.log_search.regex_enabled = !self.log_search.regex_enabled;
         self.clear_quick_log_search_state();
         self.placeholder_notice = if self.log_search.regex_enabled {
@@ -252,7 +252,7 @@ impl ArgusApp {
     /// 参数说明：
     /// - `scope`：搜索范围。
     /// - `cx`：GPUI 上下文，用于安排后台线程事件轮询。
-    pub fn start_log_search(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
+    pub(crate) fn start_log_search(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
         let keyword = self.log_search.keyword_input.value.trim().to_string();
         if keyword.is_empty() {
             self.log_search.message = Some("请输入搜索关键字".to_string());
@@ -282,7 +282,7 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `cx`：GPUI 上下文，用于安排后台线程事件轮询。
-    pub fn start_quick_keyword_search(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_quick_keyword_search(&mut self, cx: &mut Context<Self>) {
         let keywords = parse_quick_search_keywords(&self.config.log_search.quick_keywords);
         if keywords.is_empty() {
             let message = "请先在设置中配置快搜关键字".to_string();
@@ -548,12 +548,12 @@ impl ArgusApp {
     }
 
     /// 统计当前日志中关键字出现次数。
-    pub fn count_current_log_matches(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn count_current_log_matches(&mut self, cx: &mut Context<Self>) {
         self.start_current_log_count_scan(cx);
     }
 
     /// 跳转到当前日志中的下一个关键字命中。
-    pub fn activate_next_current_log_match(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn activate_next_current_log_match(&mut self, cx: &mut Context<Self>) {
         if self.try_activate_cached_quick_match(QuickMatchAction::Next) {
             return;
         }
@@ -561,7 +561,7 @@ impl ArgusApp {
     }
 
     /// 跳转到当前日志中的上一个关键字命中。
-    pub fn activate_previous_current_log_match(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn activate_previous_current_log_match(&mut self, cx: &mut Context<Self>) {
         if self.try_activate_cached_quick_match(QuickMatchAction::Previous) {
             return;
         }
@@ -569,7 +569,7 @@ impl ArgusApp {
     }
 
     /// 清理当前日志快速查找状态，并取消尚未完成的扫描任务。
-    pub fn clear_quick_log_search_state(&mut self) {
+    pub(crate) fn clear_quick_log_search_state(&mut self) {
         if let Some(cancel_token) = self.log_search.quick_cancel_token.take() {
             cancel_token.store(true, Ordering::Relaxed);
         }
@@ -587,7 +587,7 @@ impl ArgusApp {
     }
 
     /// 取消当前搜索任务。
-    pub fn cancel_log_search(&mut self) {
+    pub(crate) fn cancel_log_search(&mut self) {
         let was_running = self.cancel_active_log_search_task();
         if was_running {
             self.log_search.task_state = SearchTaskState::Cancelled;
@@ -952,7 +952,7 @@ impl ArgusApp {
     }
 
     /// 点击搜索结果后打开对应日志、滚动到行并高亮命中。
-    pub fn activate_search_result(&mut self, result_index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn activate_search_result(&mut self, result_index: usize, cx: &mut Context<Self>) {
         let Some(result) = self.log_search.results.get(result_index).cloned() else {
             self.placeholder_notice = "未找到搜索结果".to_string();
             return;
@@ -970,14 +970,14 @@ impl ArgusApp {
     }
 
     /// 返回结果面板是否需要显示。
-    pub fn should_show_log_search_results(&self) -> bool {
+    pub(crate) fn should_show_log_search_results(&self) -> bool {
         !self.log_search.results.is_empty()
             || self.log_search.task_state.is_running()
             || self.log_search.message.is_some()
     }
 
     /// 关闭底部搜索结果面板并清理当前正文高亮。
-    pub fn close_log_search_results_panel(&mut self) {
+    pub(crate) fn close_log_search_results_panel(&mut self) {
         self.cancel_active_log_search_task();
         self.log_search.task_state = SearchTaskState::Idle;
         self.clear_quick_log_search_state();
@@ -1024,7 +1024,7 @@ impl ArgusApp {
     }
 
     /// 来源树行点击入口，兼容普通打开、Ctrl/Cmd 多选和 Shift 范围选择。
-    pub fn handle_source_tree_click(
+    pub(crate) fn handle_source_tree_click(
         &mut self,
         source_id: SourceId,
         modifiers: Modifiers,
@@ -1086,7 +1086,7 @@ impl ArgusApp {
     }
 
     /// 返回来源节点是否属于搜索多选集合，用于来源树绘制选中态。
-    pub fn is_source_selected_for_search(&self, source_id: SourceId) -> bool {
+    pub(crate) fn is_source_selected_for_search(&self, source_id: SourceId) -> bool {
         self.selected_search_source_ids.contains(&source_id)
     }
 
@@ -1112,7 +1112,7 @@ impl ArgusApp {
     }
 
     /// 返回输入框当前选区范围。
-    pub fn log_search_input_selection_range(
+    pub(crate) fn log_search_input_selection_range(
         &self,
         input_kind: LogSearchInputKind,
     ) -> Option<Range<usize>> {
@@ -1126,7 +1126,7 @@ impl ArgusApp {
     }
 
     /// 聚焦指定搜索输入框。
-    pub fn focus_log_search_input(&mut self, input_kind: LogSearchInputKind) {
+    pub(crate) fn focus_log_search_input(&mut self, input_kind: LogSearchInputKind) {
         self.clear_log_search_input_focus();
         let input = self.log_search_input_mut(input_kind);
         input.is_focused = true;
@@ -1143,7 +1143,7 @@ impl ArgusApp {
     }
 
     /// 清空指定搜索输入框，并保持输入焦点。
-    pub fn clear_log_search_input(&mut self, input_kind: LogSearchInputKind) {
+    pub(crate) fn clear_log_search_input(&mut self, input_kind: LogSearchInputKind) {
         let input = self.log_search_input_mut(input_kind);
         input.value.clear();
         input.cursor = 0;
@@ -1157,7 +1157,7 @@ impl ArgusApp {
     }
 
     /// 记录一次成功搜索的关键字到历史：去重后置于最前、截断到上限并持久化。
-    pub fn record_search_keyword(&mut self, keyword: &str) {
+    pub(crate) fn record_search_keyword(&mut self, keyword: &str) {
         let keyword = keyword.trim();
         if keyword.is_empty() {
             return;
@@ -1173,18 +1173,18 @@ impl ArgusApp {
     ///
     /// 历史下拉始终展示全部最近关键字：输入框可能残留上次搜索的关键字，若按其做子串
     /// 过滤，下拉会只剩"当前关键字"一项，无法起到挑选其它历史关键字的作用。
-    pub fn keyword_history_items(&self) -> Vec<String> {
+    pub(crate) fn keyword_history_items(&self) -> Vec<String> {
         self.config.log_search.recent_keywords.clone()
     }
 
     /// 打开关键字历史下拉菜单并重置高亮。
-    pub fn open_keyword_history(&mut self) {
+    pub(crate) fn open_keyword_history(&mut self) {
         self.log_search.keyword_history_open = true;
         self.log_search.keyword_history_highlight = None;
     }
 
     /// 关闭关键字历史下拉菜单并清空高亮。
-    pub fn close_keyword_history(&mut self) {
+    pub(crate) fn close_keyword_history(&mut self) {
         self.log_search.keyword_history_open = false;
         self.log_search.keyword_history_highlight = None;
     }
@@ -1193,12 +1193,12 @@ impl ArgusApp {
     ///
     /// 输入文本变化或选区改变后历史条目集合随之变化，原高亮索引会错位；此时清空高亮，
     /// 下拉仍展开以便实时过滤，下一次方向键会重新落到首/末项。
-    pub fn reset_keyword_history_highlight(&mut self) {
+    pub(crate) fn reset_keyword_history_highlight(&mut self) {
         self.log_search.keyword_history_highlight = None;
     }
 
     /// 在关键字历史下拉中按 `delta` 移动高亮项；越过边界时循环到对端。
-    pub fn move_keyword_history_highlight(&mut self, delta: isize) {
+    pub(crate) fn move_keyword_history_highlight(&mut self, delta: isize) {
         if !self.log_search.keyword_history_open {
             return;
         }
@@ -1222,7 +1222,7 @@ impl ArgusApp {
     }
 
     /// 选中历史下拉中指定索引的关键字：填入输入框并立即触发搜索。
-    pub fn select_keyword_history(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn select_keyword_history(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(keyword) = self.config.log_search.recent_keywords.get(index).cloned() {
             self.set_log_search_input_value(LogSearchInputKind::Keyword, &keyword);
             self.start_log_search(self.log_search.scope, cx);
@@ -1244,7 +1244,7 @@ impl ArgusApp {
     }
 
     /// 处理搜索窗口输入框键盘输入。
-    pub fn handle_log_search_input_key(
+    pub(crate) fn handle_log_search_input_key(
         &mut self,
         input_kind: LogSearchInputKind,
         keystroke: &Keystroke,
@@ -1327,7 +1327,7 @@ impl ArgusApp {
     }
 
     /// 根据鼠标按下位置开始搜索输入框选择。
-    pub fn begin_log_search_input_pointer_selection(
+    pub(crate) fn begin_log_search_input_pointer_selection(
         &mut self,
         input_kind: LogSearchInputKind,
         character_index: usize,
@@ -1348,7 +1348,7 @@ impl ArgusApp {
     }
 
     /// 鼠标拖拽过程中扩展搜索输入框选区。
-    pub fn update_log_search_input_pointer_selection(
+    pub(crate) fn update_log_search_input_pointer_selection(
         &mut self,
         input_kind: LogSearchInputKind,
         character_index: usize,
@@ -1365,7 +1365,10 @@ impl ArgusApp {
     }
 
     /// 结束搜索输入框鼠标选择。
-    pub fn finish_log_search_input_pointer_selection(&mut self, input_kind: LogSearchInputKind) {
+    pub(crate) fn finish_log_search_input_pointer_selection(
+        &mut self,
+        input_kind: LogSearchInputKind,
+    ) {
         let input = self.log_search_input_mut(input_kind);
         input.selection_drag = None;
         input.marked_range = None;
@@ -1375,7 +1378,10 @@ impl ArgusApp {
     }
 
     /// 当前输入框是否正在鼠标拖拽选择。
-    pub fn is_log_search_input_pointer_selecting(&self, input_kind: LogSearchInputKind) -> bool {
+    pub(crate) fn is_log_search_input_pointer_selecting(
+        &self,
+        input_kind: LogSearchInputKind,
+    ) -> bool {
         self.log_search_input(input_kind).selection_drag.is_some()
     }
 
@@ -1452,7 +1458,7 @@ impl ArgusApp {
     }
 
     /// 应用搜索进度；generation 不一致时丢弃。
-    pub fn apply_search_progress(&mut self, generation: usize, progress: SearchProgress) {
+    pub(crate) fn apply_search_progress(&mut self, generation: usize, progress: SearchProgress) {
         if self.log_search.generation != generation {
             return;
         }
@@ -1496,7 +1502,11 @@ impl ArgusApp {
     }
 
     /// 追加搜索结果批次；generation 不一致时丢弃。
-    pub fn append_search_results(&mut self, generation: usize, mut results: Vec<SearchResult>) {
+    pub(crate) fn append_search_results(
+        &mut self,
+        generation: usize,
+        mut results: Vec<SearchResult>,
+    ) {
         if self.log_search.generation != generation {
             return;
         }
@@ -1555,7 +1565,7 @@ impl ArgusApp {
     }
 
     /// 切换搜索结果文件分组展开状态。
-    pub fn toggle_search_result_group(&mut self, group_index: usize) {
+    pub(crate) fn toggle_search_result_group(&mut self, group_index: usize) {
         let Some(group) = self.log_search.result_groups.get(group_index) else {
             self.placeholder_notice = "未找到搜索结果分组".to_string();
             return;
@@ -1571,7 +1581,7 @@ impl ArgusApp {
     }
 
     /// 展开全部搜索结果文件分组。
-    pub fn expand_all_search_result_groups(&mut self) {
+    pub(crate) fn expand_all_search_result_groups(&mut self) {
         if self.log_search.result_groups.is_empty() {
             self.placeholder_notice = "暂无可展开的搜索结果".to_string();
             return;
@@ -1583,7 +1593,7 @@ impl ArgusApp {
     }
 
     /// 收起全部搜索结果文件分组。
-    pub fn collapse_all_search_result_groups(&mut self) {
+    pub(crate) fn collapse_all_search_result_groups(&mut self) {
         if self.log_search.result_groups.is_empty() {
             self.placeholder_notice = "暂无可收起的搜索结果".to_string();
             return;
@@ -1600,7 +1610,7 @@ impl ArgusApp {
     }
 
     /// 开始拖拽搜索结果面板高度。
-    pub fn begin_search_result_panel_resize(&mut self, cursor_y: Pixels) {
+    pub(crate) fn begin_search_result_panel_resize(&mut self, cursor_y: Pixels) {
         self.log_search.result_panel_resize_drag = Some(SearchResultPanelResizeDrag {
             start_y: cursor_y,
             start_height: self.log_search.result_panel_height,
@@ -1611,7 +1621,7 @@ impl ArgusApp {
     ///
     /// `max_height` 为当前允许的面板最大高度，由调用方按窗口视口高度动态计算，
     /// 使面板可近乎撑满窗口；传入值小于最小高度时回退到最小高度，避免 clamp 区间反转。
-    pub fn resize_search_result_panel(&mut self, cursor_y: Pixels, max_height: f32) -> bool {
+    pub(crate) fn resize_search_result_panel(&mut self, cursor_y: Pixels, max_height: f32) -> bool {
         let Some(drag) = self.log_search.result_panel_resize_drag else {
             return false;
         };
@@ -1627,7 +1637,7 @@ impl ArgusApp {
     }
 
     /// 结束搜索结果面板高度拖拽。
-    pub fn finish_search_result_panel_resize(&mut self) -> bool {
+    pub(crate) fn finish_search_result_panel_resize(&mut self) -> bool {
         let was_resizing = self.log_search.result_panel_resize_drag.is_some();
         self.log_search.result_panel_resize_drag = None;
         was_resizing

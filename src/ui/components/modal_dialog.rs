@@ -8,7 +8,7 @@ use crate::theme::AppTheme;
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb, rgba};
 
 /// 通用模态框参数，调用方只负责提供内容元素。
-pub struct ModalDialog {
+pub(crate) struct ModalDialog {
     /// 模态遮罩元素 ID，便于测试定位和调试。
     pub overlay_id: &'static str,
     /// 模态容器元素 ID，便于测试定位和调试。
@@ -32,7 +32,7 @@ const MODAL_CONTENT_INSET: f32 = 6.0;
 /// - `cx`：应用上下文，用于阻断遮罩层鼠标事件继续传递。
 ///
 /// 返回值：覆盖整个窗口的 GPUI 元素树。
-pub fn render_modal_dialog<T>(
+pub(crate) fn render_modal_dialog<T>(
     dialog: ModalDialog,
     theme: AppTheme,
     cx: &mut Context<T>,

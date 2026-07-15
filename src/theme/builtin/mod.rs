@@ -3,4 +3,4 @@
 //! 作者：Argus 开发团队
 //! 主要功能：为内置暗色主题保留稳定模块路径。
 
-pub mod dark;
+pub(crate) mod dark;

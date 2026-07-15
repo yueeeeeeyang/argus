@@ -3,6 +3,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：统一导出连接配置、远程文件操作和终端会话三个子模块。
 
-pub mod connection;
-pub mod sftp;
-pub mod terminal;
+pub(crate) mod connection;
+pub(crate) mod sftp;
+pub(crate) mod terminal;

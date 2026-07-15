@@ -15,7 +15,7 @@ use crate::loader::archive::detector::ArchiveFormat;
 
 /// 不支持压缩格式适配器，始终返回用户可理解的错误。
 #[derive(Debug)]
-pub struct UnsupportedArchiveAdapter {
+pub(crate) struct UnsupportedArchiveAdapter {
     /// 被识别出的压缩格式。
     pub format: ArchiveFormat,
 }

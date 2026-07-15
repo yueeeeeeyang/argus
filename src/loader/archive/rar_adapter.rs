@@ -61,7 +61,7 @@ const RAR5_UNIX_DIRECTORY_ATTR: u64 = 0o040000;
 
 /// RAR 适配器，当前仅读取目录结构，不解压条目正文。
 #[derive(Debug, Default)]
-pub struct RarArchiveAdapter;
+pub(crate) struct RarArchiveAdapter;
 
 impl ArchiveAdapter for RarArchiveAdapter {
     /// 声明 RAR 格式的识别规则和可用能力。
@@ -143,7 +143,7 @@ impl ArchiveAdapter for RarArchiveAdapter {
 /// - `entry_path`：目标条目路径。
 ///
 /// 返回值：目标条目解包后的完整字节；读取过程不依赖外部命令，默认兼容 Windows。
-pub fn read_rar_entry_bytes(
+pub(crate) fn read_rar_entry_bytes(
     path: &Path,
     entry_path: &str,
     password: Option<&str>,
@@ -178,7 +178,7 @@ fn map_rar_file(path: &Path) -> Result<Mmap> {
 /// - `source_label`：错误提示中的来源名称。
 ///
 /// 返回值：RAR 内部目录和文件条目。
-pub fn list_rar_entries_from_bytes(
+pub(crate) fn list_rar_entries_from_bytes(
     bytes: &[u8],
     source_label: &str,
     password: Option<&str>,
@@ -200,7 +200,7 @@ pub fn list_rar_entries_from_bytes(
 /// - `source_label`：错误提示中的来源名称。
 ///
 /// 返回值：条目完整字节；读取过程使用纯 Rust 解码库，压缩算法条目也可被解包。
-pub fn read_rar_entry_bytes_from_bytes(
+pub(crate) fn read_rar_entry_bytes_from_bytes(
     bytes: &[u8],
     entry_path: &str,
     source_label: &str,

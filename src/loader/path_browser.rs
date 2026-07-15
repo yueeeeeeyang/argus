@@ -16,7 +16,7 @@ use crate::utils::path::display_name;
 
 /// 自定义选择器左侧快捷入口。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BrowseLocation {
+pub(crate) struct BrowseLocation {
     /// 展示文案，例如“主目录”或“下载”。
     pub label: String,
     /// 入口对应的真实本地路径。
@@ -25,7 +25,7 @@ pub struct BrowseLocation {
 
 /// 文件系统条目类型，决定选择器行图标、点击行为和可选状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BrowseEntryKind {
+pub(crate) enum BrowseEntryKind {
     /// 本地目录；目录行用于进入浏览，不直接通过行选中。
     Directory,
     /// 普通文件；与当前来源加载器保持一致，全部视为日志候选。
@@ -40,12 +40,12 @@ pub enum BrowseEntryKind {
 
 impl BrowseEntryKind {
     /// 返回当前条目是否可以被选择为加载来源。
-    pub fn is_selectable(&self) -> bool {
+    pub(crate) fn is_selectable(&self) -> bool {
         matches!(self, Self::LogFile | Self::Archive(_))
     }
 
     /// 返回选择器中展示的简短类型文案。
-    pub fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::Directory => "目录".to_string(),
             Self::LogFile => "文件".to_string(),
@@ -58,7 +58,7 @@ impl BrowseEntryKind {
 
 /// 文件系统浏览结果中的单个条目。
 #[derive(Clone, Debug)]
-pub struct BrowseEntry {
+pub(crate) struct BrowseEntry {
     /// 条目真实路径，后续确认选择时直接交给来源加载器。
     pub path: PathBuf,
     /// 条目展示名称。
@@ -77,7 +77,7 @@ pub struct BrowseEntry {
 
 /// 单次目录枚举结果。
 #[derive(Clone, Debug)]
-pub struct BrowseResult {
+pub(crate) struct BrowseResult {
     /// 已规范化的当前目录路径。
     pub directory: PathBuf,
     /// 当前目录的父目录；没有父级时为 `None`。
@@ -87,7 +87,7 @@ pub struct BrowseResult {
 }
 
 /// 跨平台本地文件系统浏览服务。
-pub struct PathBrowser;
+pub(crate) struct PathBrowser;
 
 impl PathBrowser {
     /// 枚举指定目录的直接子项。
@@ -98,7 +98,7 @@ impl PathBrowser {
     /// 返回值：目录自身、父目录和已分类排序的直接子项。
     ///
     /// 可能错误：路径不存在、不是目录、无权限或读取目录项失败。
-    pub fn list_directory(path: PathBuf) -> Result<BrowseResult> {
+    pub(crate) fn list_directory(path: PathBuf) -> Result<BrowseResult> {
         let directory = normalize_existing_directory(&path)?;
         let mut entries = Vec::new();
 
@@ -140,7 +140,7 @@ impl PathBrowser {
     }
 
     /// 返回选择器首次打开时应定位的目录。
-    pub fn default_start_directory() -> PathBuf {
+    pub(crate) fn default_start_directory() -> PathBuf {
         if let Some(home) = user_home_dir() {
             // 选择器主要用于加载用户下载的日志包，优先打开下载目录；目录不存在时回退主目录。
             let downloads = home.join("Downloads");
@@ -155,7 +155,7 @@ impl PathBrowser {
     }
 
     /// 返回跨平台常用位置入口；不存在的位置会被过滤。
-    pub fn default_locations() -> Vec<BrowseLocation> {
+    pub(crate) fn default_locations() -> Vec<BrowseLocation> {
         let mut locations = Vec::new();
 
         if let Some(home) = user_home_dir() {

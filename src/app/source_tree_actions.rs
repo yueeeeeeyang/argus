@@ -80,7 +80,7 @@ impl ArgusApp {
     }
 
     /// 根据节点 ID 选择来源树节点。
-    pub fn select_source(&mut self, source_id: SourceId) {
+    pub(crate) fn select_source(&mut self, source_id: SourceId) {
         let Some(selected_node) = self.source_registry.select(source_id) else {
             self.placeholder_notice = "未找到来源节点".to_string();
             return;
@@ -96,7 +96,7 @@ impl ArgusApp {
     }
 
     /// 展开或折叠目录、压缩包等来源节点。
-    pub fn toggle_source_expanded(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_source_expanded(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
         let Some(node) = self.source_registry.node(source_id).cloned() else {
             self.placeholder_notice = "未找到可展开来源节点".to_string();
             return;
@@ -190,7 +190,7 @@ impl ArgusApp {
     }
 
     /// 收起来源目录树中的所有可展开节点。
-    pub fn collapse_all_sources(&mut self) {
+    pub(crate) fn collapse_all_sources(&mut self) {
         let collapsed_count = self.source_registry.collapse_all();
         self.rebuild_filtered_source_ids();
 
@@ -202,7 +202,7 @@ impl ArgusApp {
     }
 
     /// 返回当前应渲染的来源节点 ID 列表。
-    pub fn visible_source_ids(&self) -> &[SourceId] {
+    pub(crate) fn visible_source_ids(&self) -> &[SourceId] {
         if self.is_source_tree_filtering() {
             &self.filtered_source_ids
         } else {
@@ -277,7 +277,7 @@ impl ArgusApp {
     /// 应用根来源加载报告。
     ///
     /// 每次成功加载真实来源都会替换旧来源，避免不同批次日志结构混在同一棵树中。
-    pub fn apply_load_report(&mut self, report: LoadReport) {
+    pub(crate) fn apply_load_report(&mut self, report: LoadReport) {
         self.is_source_loading = false;
         let added_count = report.added_count;
 
@@ -311,7 +311,7 @@ impl ArgusApp {
     }
 
     /// 在 UI 事件中应用根来源加载报告，并同步清理 Jstack 方块悬浮气泡。
-    pub fn apply_load_report_with_context(
+    pub(crate) fn apply_load_report_with_context(
         &mut self,
         report: LoadReport,
         retry_action: Option<crate::app::ArchivePasswordRetryAction>,
@@ -329,7 +329,7 @@ impl ArgusApp {
     }
 
     /// 应用懒加载子级报告，并挂回指定父节点。
-    pub fn apply_child_load_report(
+    pub(crate) fn apply_child_load_report(
         &mut self,
         parent_id: SourceId,
         load_generation: usize,
@@ -339,7 +339,7 @@ impl ArgusApp {
     }
 
     /// 在 UI 回调中应用子级加载报告，并在压缩包目录加载完毕后自动续做分析动作。
-    pub fn apply_child_load_report_with_context(
+    pub(crate) fn apply_child_load_report_with_context(
         &mut self,
         parent_id: SourceId,
         load_generation: usize,
@@ -470,7 +470,7 @@ impl ArgusApp {
     }
 
     /// 将可见来源节点提升到压缩包探测队列前端。
-    pub fn prioritize_visible_source_archive_probes(
+    pub(crate) fn prioritize_visible_source_archive_probes(
         &mut self,
         source_ids: &[SourceId],
         cx: &mut Context<Self>,

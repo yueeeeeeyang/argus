@@ -3,5 +3,5 @@
 //! 作者：Argus 开发团队
 //! 主要功能：统一导出 Jstack 分析和 Runtime 分析两个子模块。
 
-pub mod jstack;
-pub mod runtime;
+pub(crate) mod jstack;
+pub(crate) mod runtime;

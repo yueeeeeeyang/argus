@@ -33,7 +33,7 @@ const MIN_PARALLEL_ZIP_TARGETS: usize = 64;
 
 /// 分析任务输入目标类型。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RuntimeAnalysisTargetKind {
+pub(crate) enum RuntimeAnalysisTargetKind {
     /// 单个日志文件，可能来自本地或压缩包条目。
     File,
     /// 本地目录；后台会递归收集其中的 `.log` 文件。
@@ -42,7 +42,7 @@ pub enum RuntimeAnalysisTargetKind {
 
 /// Runtime 分析任务输入目标。
 #[derive(Clone, Debug)]
-pub struct RuntimeAnalysisTarget {
+pub(crate) struct RuntimeAnalysisTarget {
     /// 来源树节点 ID；目录递归生成的子文件沿用目录 ID 作为任务上下文。
     pub source_id: SourceId,
     /// 来源位置，目录仅支持本地路径。
@@ -61,7 +61,7 @@ pub struct RuntimeAnalysisTarget {
 
 /// 单条 SQL 明细记录。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlRecord {
+pub(crate) struct RuntimeSqlRecord {
     /// SQL 执行总耗时，单位毫秒。
     pub execute_ms: u64,
     /// 获取数据库连接耗时，单位毫秒。
@@ -80,7 +80,7 @@ pub struct RuntimeSqlRecord {
 
 /// SQL 频率分析行。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeSqlFrequencyAnalysisRow {
+pub(crate) struct RuntimeSqlFrequencyAnalysisRow {
     /// 归一化后的 SQL 结构文本。
     pub normalized_sql: String,
     /// 当前结构下所有 SQL 的执行总耗时。
@@ -91,7 +91,7 @@ pub struct RuntimeSqlFrequencyAnalysisRow {
 
 impl RuntimeSqlFrequencyAnalysisRow {
     /// 返回当前 SQL 结构的平均执行耗时。
-    pub fn average_execute_ms(&self) -> f64 {
+    pub(crate) fn average_execute_ms(&self) -> f64 {
         if self.execute_count == 0 {
             0.0
         } else {
@@ -102,7 +102,7 @@ impl RuntimeSqlFrequencyAnalysisRow {
 
 /// 慢 SQL 归一化聚合行。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeSlowSqlSummaryRow {
+pub(crate) struct RuntimeSlowSqlSummaryRow {
     /// 归一化后的 SQL 结构文本。
     pub normalized_sql: String,
     /// 当前结构下所有 SQL 的执行总耗时。
@@ -113,7 +113,7 @@ pub struct RuntimeSlowSqlSummaryRow {
 
 impl RuntimeSlowSqlSummaryRow {
     /// 返回当前 SQL 结构的平均执行耗时。
-    pub fn average_execute_ms(&self) -> f64 {
+    pub(crate) fn average_execute_ms(&self) -> f64 {
         if self.execute_count == 0 {
             0.0
         } else {
@@ -124,7 +124,7 @@ impl RuntimeSlowSqlSummaryRow {
 
 /// SQL 频率详情行，表示某个 SQL 结构的一次具体执行。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlFrequencyDetailRow {
+pub(crate) struct RuntimeSqlFrequencyDetailRow {
     /// 请求记录在结果集中的稳定索引。
     pub request_index: usize,
     /// SQL 记录在当前请求中的稳定索引。
@@ -135,7 +135,7 @@ pub struct RuntimeSqlFrequencyDetailRow {
 
 /// 单个请求日志文件解析后的记录。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeRequestRecord {
+pub(crate) struct RuntimeRequestRecord {
     /// 记录在 `RuntimeAnalysisResult.requests` 中的稳定索引。
     pub index: usize,
     /// 来源树节点 ID。
@@ -170,7 +170,7 @@ pub struct RuntimeRequestRecord {
 
 /// 按请求地址合并后的总览行。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeRequestSummary {
+pub(crate) struct RuntimeRequestSummary {
     /// 请求地址。
     pub request_path: String,
     /// 请求日志数量。
@@ -187,7 +187,7 @@ pub struct RuntimeRequestSummary {
 
 /// 被跳过或读取失败的 Runtime 日志。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSkippedFile {
+pub(crate) struct RuntimeSkippedFile {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 文件展示名称。
@@ -198,7 +198,7 @@ pub struct RuntimeSkippedFile {
 
 /// Runtime 分析结果，供 UI 三层表格直接读取。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeAnalysisResult {
+pub(crate) struct RuntimeAnalysisResult {
     /// 所有成功解析的请求记录。
     pub requests: Vec<RuntimeRequestRecord>,
     /// 按请求地址合并后的总览行。
@@ -213,7 +213,7 @@ pub struct RuntimeAnalysisResult {
 
 /// Runtime 分析过滤输入快照，保存用户在过滤栏中输入的原始文本。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RuntimeAnalysisFilterSnapshot {
+pub(crate) struct RuntimeAnalysisFilterSnapshot {
     /// 任意关键字过滤输入原文。
     pub keyword: String,
     /// 用户名过滤输入原文。
@@ -226,7 +226,7 @@ pub struct RuntimeAnalysisFilterSnapshot {
 
 /// Runtime 分析过滤条件，解析一次后供后台缓存和 UI 回退路径复用。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RuntimeAnalysisFilterCriteria {
+pub(crate) struct RuntimeAnalysisFilterCriteria {
     /// 关键字小写文本，空字符串表示不启用。
     pub keyword: String,
     /// 用户名过滤关键字列表，空列表表示不启用。
@@ -239,7 +239,7 @@ pub struct RuntimeAnalysisFilterCriteria {
 
 impl RuntimeAnalysisFilterCriteria {
     /// 返回是否配置了任意有效过滤条件。
-    pub fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         !self.keyword.is_empty()
             || !self.usernames.is_empty()
             || self.start_timestamp_ms.is_some()
@@ -247,19 +247,19 @@ impl RuntimeAnalysisFilterCriteria {
     }
 
     /// 判断关键字是否为空或命中已经小写化的文本。
-    pub fn keyword_matches_lowercase(&self, lowercase_text: &str) -> bool {
+    pub(crate) fn keyword_matches_lowercase(&self, lowercase_text: &str) -> bool {
         self.keyword.is_empty() || lowercase_text.contains(&self.keyword)
     }
 
     /// 判断关键字是否为空或命中普通文本；只用于少量汇总字段的回退匹配。
-    pub fn keyword_matches_text(&self, text: &str) -> bool {
+    pub(crate) fn keyword_matches_text(&self, text: &str) -> bool {
         self.keyword.is_empty() || text.to_lowercase().contains(&self.keyword)
     }
 }
 
 /// Runtime 过滤后的统一行缓存，供统计、SQL 频率和慢 SQL 三种结果类型共享。
 #[derive(Clone, Debug)]
-pub struct RuntimeAnalysisFilterRows {
+pub(crate) struct RuntimeAnalysisFilterRows {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeAnalysisFilterSnapshot,
     /// 当前过滤条件下的统计总览行。
@@ -270,17 +270,17 @@ pub struct RuntimeAnalysisFilterRows {
 
 impl RuntimeAnalysisResult {
     /// 返回成功解析的请求日志数量。
-    pub fn request_count(&self) -> usize {
+    pub(crate) fn request_count(&self) -> usize {
         self.requests.len()
     }
 
     /// 返回合并后的请求地址数量。
-    pub fn summary_count(&self) -> usize {
+    pub(crate) fn summary_count(&self) -> usize {
         self.summaries.len()
     }
 
     /// 返回跳过文件数量。
-    pub fn skipped_count(&self) -> usize {
+    pub(crate) fn skipped_count(&self) -> usize {
         self.skipped_files.len()
     }
 }
@@ -293,7 +293,7 @@ impl RuntimeAnalysisResult {
 /// - `loader_config`：日志加载配置，目录递归会尊重符号链接策略。
 ///
 /// 返回值：可直接供 Runtime 分析页渲染的聚合结果。
-pub fn analyze_runtime_targets(
+pub(crate) fn analyze_runtime_targets(
     targets: Vec<RuntimeAnalysisTarget>,
     default_encoding: String,
     loader_config: LoaderConfig,
@@ -338,7 +338,7 @@ pub fn analyze_runtime_targets(
 /// - `text`：文件内容。
 ///
 /// 返回值：单个请求日志记录，索引由上层聚合时写入。
-pub fn parse_runtime_request_text(
+pub(crate) fn parse_runtime_request_text(
     source_id: SourceId,
     label: impl Into<String>,
     path: impl Into<String>,
@@ -359,7 +359,7 @@ pub fn parse_runtime_request_text(
 }
 
 /// 由请求记录构建总览聚合结果。
-pub fn build_runtime_analysis_result(
+pub(crate) fn build_runtime_analysis_result(
     requests: Vec<RuntimeRequestRecord>,
     skipped_files: Vec<RuntimeSkippedFile>,
     total_files: usize,
@@ -430,7 +430,7 @@ pub fn build_runtime_analysis_result(
 }
 
 /// 构建无过滤条件下的 SQL 频率分析结果。
-pub fn build_runtime_sql_frequency_rows(
+pub(crate) fn build_runtime_sql_frequency_rows(
     requests: &[RuntimeRequestRecord],
 ) -> Vec<RuntimeSqlFrequencyAnalysisRow> {
     let mut grouped = BTreeMap::<String, RuntimeSqlFrequencyAnalysisRow>::new();
@@ -454,7 +454,7 @@ pub fn build_runtime_sql_frequency_rows(
 }
 
 /// 构建无过滤条件下的慢 SQL 分析结果。
-pub fn build_runtime_slow_sql_rows(
+pub(crate) fn build_runtime_slow_sql_rows(
     requests: &[RuntimeRequestRecord],
 ) -> Vec<RuntimeSlowSqlSummaryRow> {
     let mut grouped = BTreeMap::<String, RuntimeSlowSqlSummaryRow>::new();
@@ -477,7 +477,7 @@ pub fn build_runtime_slow_sql_rows(
 }
 
 /// 按过滤条件构建 SQL 频率分析结果；用于进入 SQL 频率页时后台懒计算。
-pub fn build_runtime_sql_frequency_rows_for_filter(
+pub(crate) fn build_runtime_sql_frequency_rows_for_filter(
     result: &RuntimeAnalysisResult,
     filter: &RuntimeAnalysisFilterSnapshot,
 ) -> Vec<RuntimeSqlFrequencyAnalysisRow> {
@@ -515,7 +515,7 @@ pub fn build_runtime_sql_frequency_rows_for_filter(
 }
 
 /// 按过滤条件构建慢 SQL 分析结果；用于进入慢 SQL 页时后台懒计算。
-pub fn build_runtime_slow_sql_rows_for_filter(
+pub(crate) fn build_runtime_slow_sql_rows_for_filter(
     result: &RuntimeAnalysisResult,
     filter: &RuntimeAnalysisFilterSnapshot,
 ) -> Vec<RuntimeSlowSqlSummaryRow> {
@@ -552,7 +552,7 @@ pub fn build_runtime_slow_sql_rows_for_filter(
 }
 
 /// 根据原始过滤输入构造可执行的 Runtime 过滤条件。
-pub fn parse_runtime_analysis_filter_criteria(
+pub(crate) fn parse_runtime_analysis_filter_criteria(
     filter: &RuntimeAnalysisFilterSnapshot,
 ) -> RuntimeAnalysisFilterCriteria {
     RuntimeAnalysisFilterCriteria {
@@ -564,7 +564,7 @@ pub fn parse_runtime_analysis_filter_criteria(
 }
 
 /// 解析用户名过滤输入，支持英文逗号和中文逗号分隔多个模糊匹配关键字。
-pub fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
+pub(crate) fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
     raw.split([',', '，'])
         .map(|part| part.trim().to_lowercase())
         .filter(|part| !part.is_empty())
@@ -572,7 +572,7 @@ pub fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
 }
 
 /// 解析 Runtime 时间过滤输入；支持毫秒时间戳和常见本地时间格式。
-pub fn parse_runtime_filter_time_value(raw: &str, is_end: bool) -> Option<i64> {
+pub(crate) fn parse_runtime_filter_time_value(raw: &str, is_end: bool) -> Option<i64> {
     let value = raw.trim();
     if value.is_empty() {
         return None;
@@ -609,7 +609,7 @@ pub fn parse_runtime_filter_time_value(raw: &str, is_end: bool) -> Option<i64> {
 }
 
 /// 在后台构建 Runtime 三类结果共享的过滤行缓存。
-pub fn build_runtime_analysis_filter_rows(
+pub(crate) fn build_runtime_analysis_filter_rows(
     result: &RuntimeAnalysisResult,
     filter: RuntimeAnalysisFilterSnapshot,
 ) -> RuntimeAnalysisFilterRows {
@@ -652,7 +652,7 @@ pub fn build_runtime_analysis_filter_rows(
 }
 
 /// 按执行次数、平均耗时和 SQL 文本稳定排序 SQL 频率分析结果。
-pub fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRow]) {
+pub(crate) fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRow]) {
     rows.sort_by(|left, right| {
         right
             .execute_count
@@ -668,7 +668,7 @@ pub fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRo
 }
 
 /// 按平均执行耗时、执行次数和 SQL 文本稳定排序慢 SQL 聚合结果。
-pub fn sort_runtime_slow_sql_summary_rows(rows: &mut [RuntimeSlowSqlSummaryRow]) {
+pub(crate) fn sort_runtime_slow_sql_summary_rows(rows: &mut [RuntimeSlowSqlSummaryRow]) {
     rows.sort_by(|left, right| {
         right
             .average_execute_ms()
@@ -680,7 +680,7 @@ pub fn sort_runtime_slow_sql_summary_rows(rows: &mut [RuntimeSlowSqlSummaryRow])
 }
 
 /// 按执行耗时和原始位置稳定排序 SQL 频率详情结果。
-pub fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDetailRow]) {
+pub(crate) fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDetailRow]) {
     rows.sort_by(|left, right| {
         right
             .execute_ms
@@ -691,7 +691,7 @@ pub fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDet
 }
 
 /// 判断请求是否命中用户名和时间区间过滤。
-pub fn runtime_request_matches_cross_filters(
+pub(crate) fn runtime_request_matches_cross_filters(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeAnalysisFilterCriteria,
 ) -> bool {
@@ -717,7 +717,7 @@ pub fn runtime_request_matches_cross_filters(
 }
 
 /// 判断请求明细行是否命中关键字；SQL 命中时所属请求也视为命中。
-pub fn runtime_request_matches_keyword(
+pub(crate) fn runtime_request_matches_keyword(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeAnalysisFilterCriteria,
 ) -> bool {
@@ -733,7 +733,7 @@ pub fn runtime_request_matches_keyword(
 }
 
 /// 判断 SQL 明细行是否命中关键字；同时纳入所属请求元信息，便于跨层检索。
-pub fn runtime_sql_matches_keyword(
+pub(crate) fn runtime_sql_matches_keyword(
     request: &RuntimeRequestRecord,
     sql: &RuntimeSqlRecord,
     criteria: &RuntimeAnalysisFilterCriteria,
@@ -784,7 +784,7 @@ fn runtime_sql_fields_match_keyword(
 }
 
 /// 从原始 summary 的请求索引中应用过滤并重新计算聚合统计。
-pub fn filtered_runtime_summary_from_indices(
+pub(crate) fn filtered_runtime_summary_from_indices(
     result: &RuntimeAnalysisResult,
     summary: &RuntimeRequestSummary,
     criteria: &RuntimeAnalysisFilterCriteria,
@@ -892,7 +892,7 @@ fn format_ratio_for_search(ratio: f64) -> String {
 /// - `sql`：Runtime 日志中记录的 SQL 原文。
 ///
 /// 返回值：大小写和空白稳定、常见字面量替换为 `?` 的 SQL 结构文本。
-pub fn normalize_runtime_sql_structure(sql: &str) -> String {
+pub(crate) fn normalize_runtime_sql_structure(sql: &str) -> String {
     let mut tokens = Vec::new();
     let mut chars = sql.chars().peekable();
     while let Some(ch) = chars.peek().copied() {

@@ -21,7 +21,7 @@ const CENTERED_MESSAGE_FONT_SIZE: f32 = 13.0;
 /// - `fill`：`true` 时占满父容器（`size_full`），`false` 时仅占剩余弹性空间（`flex_1`）。
 ///
 /// 返回值：居中文案元素；长文案在最大宽度内截断，不会横向溢出。
-pub fn render_centered_message(message: &str, theme: &AppTheme, fill: bool) -> AnyElement {
+pub(crate) fn render_centered_message(message: &str, theme: &AppTheme, fill: bool) -> AnyElement {
     let mut container = div().flex().items_center().justify_center();
     container = if fill {
         container.size_full()

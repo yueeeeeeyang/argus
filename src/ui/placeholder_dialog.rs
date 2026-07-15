@@ -16,7 +16,7 @@ use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb, rgba};
 /// - `cx`：应用上下文，用于更新弹窗内本地状态。
 ///
 /// 返回值：覆盖全窗口的 GPUI 元素树；不执行真实文件选择。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
 
     div()

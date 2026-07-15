@@ -15,7 +15,11 @@ use gpui::{Context, CursorStyle, IntoElement, MouseButton, MouseDownEvent, div, 
 /// - `cx`：应用上下文，用于启动本地拖拽状态。
 ///
 /// 返回值：GPUI 元素树；拖拽只调整本地 UI 宽度，不持久化配置。
-pub fn render(app: &ArgusApp, id: &'static str, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    id: &'static str,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     div()
         .id(id)
         .absolute()

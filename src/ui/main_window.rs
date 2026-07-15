@@ -26,7 +26,7 @@ use std::time::Duration;
 /// - `cx`：应用上下文，用于为子组件创建状态更新回调。
 ///
 /// 返回值：GPUI 元素树；当前不会抛出业务异常。
-pub fn render(
+pub(crate) fn render(
     app: &mut ArgusApp,
     window: &mut Window,
     cx: &mut Context<ArgusApp>,

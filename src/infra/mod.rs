@@ -3,6 +3,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：统一导出升级服务、性能计时和文本选择三个子模块。
 
-pub mod perf;
-pub mod text_selection;
-pub mod updater;
+pub(crate) mod perf;
+pub(crate) mod text_selection;
+pub(crate) mod updater;

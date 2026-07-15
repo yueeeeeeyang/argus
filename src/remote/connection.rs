@@ -10,16 +10,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// 链接目录和链接共享的节点 ID 类型，便于 UI 在同一棵树中统一选中、展开和定位。
-pub type ConnectionNodeId = usize;
+pub(crate) type ConnectionNodeId = usize;
 
 /// SSH 连接默认端口；新增链接表单未填写端口时使用该值。
-pub const DEFAULT_SSH_PORT: u16 = 22;
+pub(crate) const DEFAULT_SSH_PORT: u16 = 22;
 /// SMB 连接默认端口；新增 SMB 链接表单未填写端口时使用该值。
-pub const DEFAULT_SMB_PORT: u16 = 445;
+pub(crate) const DEFAULT_SMB_PORT: u16 = 445;
 
 /// 链接工作区持久化配置，保存目录、远程链接和已确认的主机指纹。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ConnectionConfig {
+pub(crate) struct ConnectionConfig {
     /// 下一个可分配的目录或链接 ID。
     #[serde(default = "default_next_connection_id")]
     pub next_id: ConnectionNodeId,
@@ -48,7 +48,7 @@ impl Default for ConnectionConfig {
 
 impl ConnectionConfig {
     /// 返回经过边界修正后的配置副本，避免坏配置造成 ID 冲突或端口越界。
-    pub fn normalized(mut self) -> Self {
+    pub(crate) fn normalized(mut self) -> Self {
         let mut used_ids = BTreeSet::new();
         self.directories.retain(|directory| {
             directory.id > 0 && used_ids.insert(directory.id) && !directory.name.trim().is_empty()
@@ -124,7 +124,7 @@ impl ConnectionConfig {
     }
 
     /// 根据当前选中节点推导新增目录的父目录；仅选中目录时创建子目录。
-    pub fn parent_for_new_directory(
+    pub(crate) fn parent_for_new_directory(
         &self,
         selected_id: Option<ConnectionNodeId>,
     ) -> Option<ConnectionNodeId> {
@@ -132,7 +132,7 @@ impl ConnectionConfig {
     }
 
     /// 根据当前选中节点推导新增链接的父目录；选中链接时使用其父目录。
-    pub fn parent_for_new_link(
+    pub(crate) fn parent_for_new_link(
         &self,
         selected_id: Option<ConnectionNodeId>,
     ) -> Option<ConnectionNodeId> {
@@ -140,7 +140,7 @@ impl ConnectionConfig {
     }
 
     /// 创建目录并返回新目录 ID。
-    pub fn add_directory(
+    pub(crate) fn add_directory(
         &mut self,
         parent_id: Option<ConnectionNodeId>,
         name: &str,
@@ -165,7 +165,7 @@ impl ConnectionConfig {
     }
 
     /// 创建 SSH 链接并返回新链接 ID。
-    pub fn add_ssh_link(
+    pub(crate) fn add_ssh_link(
         &mut self,
         parent_id: Option<ConnectionNodeId>,
         name: &str,
@@ -193,7 +193,7 @@ impl ConnectionConfig {
     }
 
     /// 创建 SMB 链接并返回新链接 ID。
-    pub fn add_smb_link(
+    pub(crate) fn add_smb_link(
         &mut self,
         parent_id: Option<ConnectionNodeId>,
         name: &str,
@@ -221,7 +221,7 @@ impl ConnectionConfig {
     }
 
     /// 重命名目录；同级重名校验会忽略当前目录自身。
-    pub fn update_directory(
+    pub(crate) fn update_directory(
         &mut self,
         directory_id: ConnectionNodeId,
         name: &str,
@@ -240,7 +240,7 @@ impl ConnectionConfig {
     }
 
     /// 更新 SSH 链接名称和连接参数；同级重名校验会忽略当前链接自身。
-    pub fn update_ssh_link(
+    pub(crate) fn update_ssh_link(
         &mut self,
         link_id: ConnectionNodeId,
         name: &str,
@@ -265,7 +265,7 @@ impl ConnectionConfig {
     }
 
     /// 更新 SMB 链接名称和连接参数；同级重名校验会忽略当前链接自身。
-    pub fn update_smb_link(
+    pub(crate) fn update_smb_link(
         &mut self,
         link_id: ConnectionNodeId,
         name: &str,
@@ -290,7 +290,7 @@ impl ConnectionConfig {
     }
 
     /// 删除目录或链接；目录必须为空，避免误删整棵子树。
-    pub fn delete_node(
+    pub(crate) fn delete_node(
         &mut self,
         node_id: ConnectionNodeId,
     ) -> Result<ConnectionDeletedNodeKind, ConnectionValidationError> {
@@ -318,7 +318,7 @@ impl ConnectionConfig {
     }
 
     /// 切换目录展开状态；非目录节点返回 `false`。
-    pub fn toggle_directory_expanded(&mut self, directory_id: ConnectionNodeId) -> bool {
+    pub(crate) fn toggle_directory_expanded(&mut self, directory_id: ConnectionNodeId) -> bool {
         let Some(directory) = self.directory_mut(directory_id) else {
             return false;
         };
@@ -327,7 +327,7 @@ impl ConnectionConfig {
     }
 
     /// 收起所有目录并返回实际发生变化的目录数量。
-    pub fn collapse_all(&mut self) -> usize {
+    pub(crate) fn collapse_all(&mut self) -> usize {
         let mut collapsed_count = 0;
         for directory in &mut self.directories {
             if directory.expanded {
@@ -339,7 +339,7 @@ impl ConnectionConfig {
     }
 
     /// 生成链接目录树的可见行；过滤模式会保留命中节点及其祖先。
-    pub fn visible_rows(
+    pub(crate) fn visible_rows(
         &self,
         query: &str,
         selected_id: Option<ConnectionNodeId>,
@@ -367,34 +367,37 @@ impl ConnectionConfig {
     }
 
     /// 返回指定链接配置。
-    pub fn link(&self, link_id: ConnectionNodeId) -> Option<&ConnectionLinkConfig> {
+    pub(crate) fn link(&self, link_id: ConnectionNodeId) -> Option<&ConnectionLinkConfig> {
         self.links.iter().find(|link| link.id == link_id)
     }
 
     /// 返回指定目录配置。
-    pub fn directory(&self, directory_id: ConnectionNodeId) -> Option<&ConnectionDirectoryConfig> {
+    pub(crate) fn directory(
+        &self,
+        directory_id: ConnectionNodeId,
+    ) -> Option<&ConnectionDirectoryConfig> {
         self.directories
             .iter()
             .find(|directory| directory.id == directory_id)
     }
 
     /// 判断节点是否为目录。
-    pub fn is_directory(&self, node_id: ConnectionNodeId) -> bool {
+    pub(crate) fn is_directory(&self, node_id: ConnectionNodeId) -> bool {
         self.directory(node_id).is_some()
     }
 
     /// 判断节点是否为 SSH 链接。
-    pub fn is_link(&self, node_id: ConnectionNodeId) -> bool {
+    pub(crate) fn is_link(&self, node_id: ConnectionNodeId) -> bool {
         self.link(node_id).is_some()
     }
 
     /// 返回目录或链接的父目录 ID。
-    pub fn parent_id_for_node(&self, node_id: ConnectionNodeId) -> Option<ConnectionNodeId> {
+    pub(crate) fn parent_id_for_node(&self, node_id: ConnectionNodeId) -> Option<ConnectionNodeId> {
         self.node_parent_id(node_id)
     }
 
     /// 判断目录是否没有任何直接子目录和链接。
-    pub fn is_directory_empty(&self, directory_id: ConnectionNodeId) -> bool {
+    pub(crate) fn is_directory_empty(&self, directory_id: ConnectionNodeId) -> bool {
         !self
             .directories
             .iter()
@@ -406,7 +409,7 @@ impl ConnectionConfig {
     }
 
     /// 保存或更新用户确认过的主机指纹。
-    pub fn trust_host_key(&mut self, host: &str, port: u16, fingerprint: &str) {
+    pub(crate) fn trust_host_key(&mut self, host: &str, port: u16, fingerprint: &str) {
         let host = normalized_required_text(host);
         let fingerprint = normalized_required_text(fingerprint);
         if let Some(existing) = self
@@ -426,7 +429,7 @@ impl ConnectionConfig {
     }
 
     /// 查询指定主机端口已经保存的可信指纹。
-    pub fn trusted_fingerprint(&self, host: &str, port: u16) -> Option<&str> {
+    pub(crate) fn trusted_fingerprint(&self, host: &str, port: u16) -> Option<&str> {
         let normalized_host = host.trim();
         self.trusted_hosts
             .iter()
@@ -650,7 +653,7 @@ impl ConnectionConfig {
 
 /// 单个链接目录配置。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ConnectionDirectoryConfig {
+pub(crate) struct ConnectionDirectoryConfig {
     /// 目录节点 ID。
     pub id: ConnectionNodeId,
     /// 父目录 ID；为空表示根层级。
@@ -664,7 +667,7 @@ pub struct ConnectionDirectoryConfig {
 
 /// 单个远程链接配置；同一链接只允许保存一种协议配置。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ConnectionLinkConfig {
+pub(crate) struct ConnectionLinkConfig {
     /// 链接节点 ID。
     pub id: ConnectionNodeId,
     /// 父目录 ID；为空表示根层级。
@@ -681,7 +684,7 @@ pub struct ConnectionLinkConfig {
 
 impl ConnectionLinkConfig {
     /// 返回当前链接协议；异常配置没有可用协议时返回空。
-    pub fn protocol(&self) -> Option<ConnectionLinkKind> {
+    pub(crate) fn protocol(&self) -> Option<ConnectionLinkKind> {
         if self.smb.is_some() {
             Some(ConnectionLinkKind::Smb)
         } else if self.ssh.is_some() {
@@ -692,17 +695,17 @@ impl ConnectionLinkConfig {
     }
 
     /// 返回 SSH 配置引用。
-    pub fn ssh_config(&self) -> Option<&SshLinkConfig> {
+    pub(crate) fn ssh_config(&self) -> Option<&SshLinkConfig> {
         self.ssh.as_ref()
     }
 
     /// 返回 SMB 配置引用。
-    pub fn smb_config(&self) -> Option<&SmbLinkConfig> {
+    pub(crate) fn smb_config(&self) -> Option<&SmbLinkConfig> {
         self.smb.as_ref()
     }
 
     /// 返回状态栏、标签和悬浮提示可展示的远程地址。
-    pub fn address_label(&self) -> String {
+    pub(crate) fn address_label(&self) -> String {
         match (&self.ssh, &self.smb) {
             (_, Some(smb)) => smb.address_label(),
             (Some(ssh), _) => format!("{}@{}:{}", ssh.username, ssh.host, ssh.port),
@@ -736,7 +739,7 @@ impl ConnectionLinkConfig {
 
 /// 远程链接协议类型，用于树行、窗口模式和点击动作分发。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum ConnectionLinkKind {
+pub(crate) enum ConnectionLinkKind {
     /// SSH shell/SFTP 链接。
     Ssh,
     /// SMB 共享链接。
@@ -745,7 +748,7 @@ pub enum ConnectionLinkKind {
 
 /// SSH 链接参数；按当前产品选择，密码和私钥口令也会持久化到配置文件。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SshLinkConfig {
+pub(crate) struct SshLinkConfig {
     /// 远程主机名或 IP。
     pub host: String,
     /// SSH 端口。
@@ -780,7 +783,7 @@ impl Default for SshLinkConfig {
 
 impl SshLinkConfig {
     /// 归一化并校验 SSH 配置，确保保存前已经满足第一版连接条件。
-    pub fn normalized_for_save(mut self) -> Result<Self, ConnectionValidationError> {
+    pub(crate) fn normalized_for_save(mut self) -> Result<Self, ConnectionValidationError> {
         self.host = validate_required_text(&self.host, ConnectionValidationError::MissingHost)?;
         self.username =
             validate_required_text(&self.username, ConnectionValidationError::MissingUsername)?;
@@ -799,7 +802,7 @@ impl SshLinkConfig {
 
 /// SMB 链接参数；密码按当前产品策略持久化到本地配置文件。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SmbLinkConfig {
+pub(crate) struct SmbLinkConfig {
     /// SMB 服务器主机名或 IP。
     pub host: String,
     /// SMB 端口。
@@ -837,7 +840,7 @@ impl Default for SmbLinkConfig {
 
 impl SmbLinkConfig {
     /// 归一化并校验 SMB 配置，确保保存前已经具备第一版文件管理能力。
-    pub fn normalized_for_save(mut self) -> Result<Self, ConnectionValidationError> {
+    pub(crate) fn normalized_for_save(mut self) -> Result<Self, ConnectionValidationError> {
         self.host = validate_required_text(&self.host, ConnectionValidationError::MissingHost)?;
         if self.port == 0 {
             return Err(ConnectionValidationError::InvalidPort);
@@ -854,7 +857,7 @@ impl SmbLinkConfig {
     }
 
     /// 返回 SMB 链接在 UI 中展示的地址文案。
-    pub fn address_label(&self) -> String {
+    pub(crate) fn address_label(&self) -> String {
         let user = self
             .domain
             .as_deref()
@@ -865,19 +868,19 @@ impl SmbLinkConfig {
     }
 
     /// 返回 SMB 客户端需要的服务器地址。
-    pub fn server_url(&self) -> String {
+    pub(crate) fn server_url(&self) -> String {
         format!("smb://{}:{}", self.host, self.port)
     }
 
     /// 返回 SMB 客户端需要的共享名参数。
-    pub fn share_path(&self) -> String {
+    pub(crate) fn share_path(&self) -> String {
         format!("/{}", self.share.trim_start_matches('/'))
     }
 }
 
 /// 用户确认可信的 SSH 主机指纹。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TrustedHostKeyConfig {
+pub(crate) struct TrustedHostKeyConfig {
     /// 远程主机名或 IP。
     pub host: String,
     /// SSH 端口。
@@ -888,7 +891,7 @@ pub struct TrustedHostKeyConfig {
 
 /// 链接目录树的一行可见节点。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionTreeRow {
+pub(crate) struct ConnectionTreeRow {
     /// 节点 ID。
     pub id: ConnectionNodeId,
     /// 父目录 ID。
@@ -915,7 +918,7 @@ pub struct ConnectionTreeRow {
 
 /// 链接目录树节点类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConnectionTreeRowKind {
+pub(crate) enum ConnectionTreeRowKind {
     /// 可展开目录节点。
     Directory,
     /// SSH 链接叶子节点。
@@ -926,7 +929,7 @@ pub enum ConnectionTreeRowKind {
 
 /// 删除连接节点后的节点类型，用于应用层展示差异化提示。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConnectionDeletedNodeKind {
+pub(crate) enum ConnectionDeletedNodeKind {
     /// 被删除的是目录。
     Directory,
     /// 被删除的是 SSH 链接。
@@ -949,7 +952,7 @@ impl From<ConnectionLinkKind> for ConnectionDeletedNodeKind {
 
 /// 创建或保存连接配置时的校验错误。
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum ConnectionValidationError {
+pub(crate) enum ConnectionValidationError {
     /// 节点名称为空。
     #[error("名称不能为空")]
     MissingName,
@@ -1055,7 +1058,7 @@ fn normalized_smb_share_name(value: &str) -> String {
 }
 
 /// 归一化 SMB 共享内目录，统一使用类 Unix 路径便于 UI 地址栏复用。
-pub fn normalized_smb_initial_dir(value: &str) -> String {
+pub(crate) fn normalized_smb_initial_dir(value: &str) -> String {
     let mut path = value.trim().replace('\\', "/");
     if path.is_empty() {
         return default_smb_initial_dir();
@@ -1078,7 +1081,7 @@ pub fn normalized_smb_initial_dir(value: &str) -> String {
 /// 三种前缀；非 UNC 形式（无前缀）或段数不足（缺共享名）时返回 `None`，由调用方
 /// 回退到分别填写的主机/共享名/初始目录字段。解析出的共享名为单段路径组件，
 /// 不含分隔符，能通过 [`validate_smb_share_name`]；初始目录已是 `/` 前缀的类 Unix 路径。
-pub fn parse_smb_unc_address(value: &str) -> Option<(String, String, String)> {
+pub(crate) fn parse_smb_unc_address(value: &str) -> Option<(String, String, String)> {
     let trimmed = value.trim();
     let body = trimmed
         .strip_prefix(r"\\")

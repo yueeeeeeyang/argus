@@ -32,7 +32,7 @@ const LOG_SEARCH_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
 const LOG_SEARCH_TITLE_ICON_SIZE: f32 = 16.0;
 
 /// 搜索窗口根视图；业务状态仍保存在主应用实体中。
-pub struct LogSearchWindow {
+pub(crate) struct LogSearchWindow {
     /// 主应用实体。
     app: Entity<ArgusApp>,
     /// 搜索窗口根焦点句柄，用于窗口打开后直接接收键盘输入。
@@ -67,7 +67,7 @@ impl LogSearchWindow {
     /// - `cx`：搜索窗口上下文。
     ///
     /// 返回值：可渲染搜索窗口视图。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         log_search: LogSearchState,

@@ -42,7 +42,11 @@ const SFTP_MTIME_COLUMN_WIDTH: f32 = 168.0;
 const SFTP_PERM_COLUMN_WIDTH: f32 = 96.0;
 
 /// 渲染远程文件管理页面。
-pub fn render(app: &ArgusApp, session_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    session_id: usize,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let _span = PerfSpan::new("render_sftp_file_manager");
     let theme = app.theme.clone();
     let Some(session) = app.sftp_sessions.get(&session_id) else {

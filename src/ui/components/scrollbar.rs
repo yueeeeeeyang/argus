@@ -13,7 +13,7 @@ use gpui::{Pixels, px};
 /// 渲染与拖拽交互各自不同，但滑块几何计算完全一致。日志正文与终端滚动条因几何模型不同
 /// （横向 gutter / 行偏移而非像素偏移）未复用此结构。
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ScrollbarMetrics {
+pub(crate) struct ScrollbarMetrics {
     /// 滑块起始位置（相对滚动容器顶部或左侧）。
     pub thumb_start: Pixels,
     /// 滑块长度。
@@ -29,7 +29,7 @@ pub struct ScrollbarMetrics {
 /// 根据视口、内容长度和当前滚动量计算滑块指标；内容未溢出视口时返回 `None`。
 ///
 /// `padding` 为轨道两端留白，`min_thumb` 为滑块最小长度，由各调用方按自身常量传入。
-pub fn scrollbar_metrics(
+pub(crate) fn scrollbar_metrics(
     viewport_length: Pixels,
     content_length: Pixels,
     scroll_offset: Pixels,
@@ -62,7 +62,7 @@ pub fn scrollbar_metrics(
 ///
 /// `pointer` 为鼠标相对滚动容器顶部/左侧的位置，`cursor_offset` 为按下时鼠标落在滑块内的
 /// 偏移量。返回值为目标滚动偏移（正数，调用方按轴向取负后写入 `ScrollHandle`）。
-pub fn scrollbar_scroll_for_drag(
+pub(crate) fn scrollbar_scroll_for_drag(
     pointer: Pixels,
     cursor_offset: Pixels,
     metrics: &ScrollbarMetrics,

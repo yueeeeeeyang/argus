@@ -6,7 +6,7 @@
 
 /// 语法高亮主题令牌，供日志、配置文件和 Java 线程栈高亮复用。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SyntaxTheme {
+pub(crate) struct SyntaxTheme {
     /// 注释颜色。
     pub comment: u32,
     /// 配置键或 JSON/YAML 属性名颜色。
@@ -39,7 +39,7 @@ pub struct SyntaxTheme {
 
 impl SyntaxTheme {
     /// 构造深色主题语法高亮紧急兜底令牌。
-    pub fn dark() -> Self {
+    pub(crate) fn dark() -> Self {
         Self {
             comment: 0x6a9955,
             key: 0x9cdcfe,
@@ -61,7 +61,7 @@ impl SyntaxTheme {
 
 /// 应用主题令牌，正常运行时由主题管理器读取 TOML 后生成。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppTheme {
+pub(crate) struct AppTheme {
     /// 主窗口背景色。
     pub background: u32,
     /// 自定义标题栏背景色。
@@ -102,7 +102,7 @@ pub struct AppTheme {
 
 impl AppTheme {
     /// 构造深色主题紧急兜底令牌；正常路径应优先读取 `themes/dark.toml`。
-    pub fn dark() -> Self {
+    pub(crate) fn dark() -> Self {
         Self {
             background: 0x1e1e1e,
             title_bar: 0x333333,
@@ -126,7 +126,7 @@ impl AppTheme {
     }
 
     /// 根据日志级别返回对应颜色，未知级别回退为主文本颜色。
-    pub fn color_for_level(&self, level: &str) -> u32 {
+    pub(crate) fn color_for_level(&self, level: &str) -> u32 {
         match level {
             "DEBUG" => self.debug,
             "INFO" => self.info,

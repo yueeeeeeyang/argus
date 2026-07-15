@@ -5,11 +5,11 @@
 
 /// 正则缓存占位结构，后续避免重复编译搜索表达式。
 #[derive(Debug, Default)]
-pub struct RegexCachePlaceholder;
+pub(crate) struct RegexCachePlaceholder;
 
 impl RegexCachePlaceholder {
     /// 返回模块职责说明；当前不编译真实正则。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "缓存已编译正则并限制表达式复杂度；当前仅保留占位边界。"
     }
 }

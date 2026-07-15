@@ -28,7 +28,7 @@ impl ArgusApp {
     /// 返回当前是否存在可搜索的日志标签页。
     ///
     /// 返回值：只要标签列表中包含日志来源标签即返回 `true`；设置页和空标签不计入。
-    pub fn has_open_log_tab(&self) -> bool {
+    pub(crate) fn has_open_log_tab(&self) -> bool {
         self.tabs
             .iter()
             .any(|tab| matches!(tab.kind, TabKind::LogSource { .. }))
@@ -37,7 +37,7 @@ impl ArgusApp {
     /// 确保搜索功能拥有一个活动日志标签页。
     ///
     /// 返回值：当前已经是日志标签，或成功切换到第一个已打开日志标签时返回 `true`。
-    pub fn ensure_active_log_tab_for_search(&mut self) -> bool {
+    pub(crate) fn ensure_active_log_tab_for_search(&mut self) -> bool {
         if matches!(self.active_tab_kind(), TabKind::LogSource { .. }) {
             return true;
         }
@@ -57,7 +57,7 @@ impl ArgusApp {
     }
 
     /// 返回当前活动日志内容区是否拥有业务焦点，用于限制日志搜索快捷键的触发范围。
-    pub fn is_active_log_view_focused(&self) -> bool {
+    pub(crate) fn is_active_log_view_focused(&self) -> bool {
         let Some(active_tab) = self.active_tab() else {
             return false;
         };
@@ -70,7 +70,7 @@ impl ArgusApp {
     }
 
     /// 标记指定日志 tab 获得内容焦点；不改变现有选区。
-    pub fn focus_log_text_view(&mut self, tab_id: usize) {
+    pub(crate) fn focus_log_text_view(&mut self, tab_id: usize) {
         for (state_tab_id, state) in self.log_tab_view_states.iter_mut() {
             state.is_focused = *state_tab_id == tab_id;
         }
@@ -81,7 +81,7 @@ impl ArgusApp {
     }
 
     /// 清理所有日志内容焦点；保留选区本身，避免切换焦点时丢失已选文本。
-    pub fn clear_log_text_focus(&mut self) {
+    pub(crate) fn clear_log_text_focus(&mut self) {
         for state in self.log_tab_view_states.values_mut() {
             state.is_focused = false;
         }
@@ -94,7 +94,11 @@ impl ArgusApp {
     /// - `line_number`：需要读取的 0 基行号。
     ///
     /// 返回值：该行原始日志文本；标签不是日志、日志未读取完成或读取失败时返回 `None`。
-    pub fn log_line_text_for_tab(&self, tab_id: usize, line_number: usize) -> Option<String> {
+    pub(crate) fn log_line_text_for_tab(
+        &self,
+        tab_id: usize,
+        line_number: usize,
+    ) -> Option<String> {
         let source_id = self.tabs.iter().find_map(|tab| {
             if tab.id != tab_id {
                 return None;
@@ -121,7 +125,7 @@ impl ArgusApp {
     }
 
     /// 返回指定日志 tab 当前是否处于文本拖拽选择过程中。
-    pub fn is_log_text_selection_drag_active(&self, tab_id: usize) -> bool {
+    pub(crate) fn is_log_text_selection_drag_active(&self, tab_id: usize) -> bool {
         self.log_tab_view_states
             .get(&tab_id)
             .and_then(|state| state.selection_drag.as_ref())
@@ -147,7 +151,7 @@ impl ArgusApp {
     }
 
     /// 根据鼠标横坐标和 GPUI 字形布局计算行内字符列。
-    pub fn log_text_position_from_pointer(
+    pub(crate) fn log_text_position_from_pointer(
         &self,
         tab_id: usize,
         line_index: usize,
@@ -221,7 +225,7 @@ impl ArgusApp {
     }
 
     /// 从指定行和鼠标位置开始选择日志文本。
-    pub fn begin_log_text_selection(
+    pub(crate) fn begin_log_text_selection(
         &mut self,
         tab_id: usize,
         line_index: usize,
@@ -235,7 +239,7 @@ impl ArgusApp {
     }
 
     /// 从指定行和鼠标位置开始选择日志文本，并根据点击次数选择粒度。
-    pub fn begin_log_text_selection_with_click_count(
+    pub(crate) fn begin_log_text_selection_with_click_count(
         &mut self,
         tab_id: usize,
         line_index: usize,
@@ -259,7 +263,7 @@ impl ArgusApp {
     }
 
     /// 鼠标拖拽过程中更新日志文本选区。
-    pub fn update_log_text_selection(
+    pub(crate) fn update_log_text_selection(
         &mut self,
         tab_id: usize,
         line_index: usize,
@@ -271,7 +275,7 @@ impl ArgusApp {
     }
 
     /// 鼠标拖拽过程中按开始时的粒度扩展日志选区。
-    pub fn update_log_text_selection_by_drag_mode(
+    pub(crate) fn update_log_text_selection_by_drag_mode(
         &mut self,
         tab_id: usize,
         line_index: usize,
@@ -298,7 +302,7 @@ impl ArgusApp {
     }
 
     /// 结束日志文本鼠标选择；若没有选中内容则清理锚点。
-    pub fn finish_log_text_selection(&mut self, tab_id: usize) {
+    pub(crate) fn finish_log_text_selection(&mut self, tab_id: usize) {
         if let Some(state) = self.log_tab_view_states.get_mut(&tab_id) {
             state.selection_drag = None;
             if state
@@ -312,7 +316,7 @@ impl ArgusApp {
     }
 
     /// 在指定日志行内按字符列选中一个词；点到空白时清空选区。
-    pub fn select_log_word_at(
+    pub(crate) fn select_log_word_at(
         &mut self,
         tab_id: usize,
         line_index: usize,
@@ -332,7 +336,7 @@ impl ArgusApp {
     }
 
     /// 在指定日志行选中整行展示文本。
-    pub fn select_log_text_line(&mut self, tab_id: usize, line_index: usize, line: &str) {
+    pub(crate) fn select_log_text_line(&mut self, tab_id: usize, line_index: usize, line: &str) {
         let selection =
             log_text_range_for_granularity(line_index, line, 0, TextSelectionGranularity::Line);
         let state = self.log_tab_view_states.entry(tab_id).or_default();
@@ -342,7 +346,7 @@ impl ArgusApp {
     }
 
     /// 返回指定 tab 中某行的选区字节范围。
-    pub fn log_text_selection_byte_range_for_line(
+    pub(crate) fn log_text_selection_byte_range_for_line(
         &self,
         tab_id: usize,
         line_index: usize,
@@ -377,7 +381,7 @@ impl ArgusApp {
     }
 
     /// 全选当前日志文档，供 `Cmd/Ctrl+A` 使用。
-    pub fn select_all_log_text(&mut self) {
+    pub(crate) fn select_all_log_text(&mut self) {
         let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
             return;
         };
@@ -456,7 +460,7 @@ impl ArgusApp {
     }
 
     /// 复制当前活动日志选区；主窗口快捷键拦截层也会调用该入口，避免 GPUI 子元素焦点丢失时复制失效。
-    pub fn copy_active_log_text_selection(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn copy_active_log_text_selection(&mut self, cx: &mut Context<Self>) {
         self.copy_log_text_selection(cx);
     }
 
@@ -491,7 +495,7 @@ impl ArgusApp {
     }
 
     /// 处理日志文本阅读区按键，仅维护只读查看器的选择和剪贴板行为。
-    pub fn handle_log_text_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    pub(crate) fn handle_log_text_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let Some(active_tab_id) = self.active_tab().map(|tab| tab.id) else {
             return;
         };
@@ -534,7 +538,7 @@ impl ArgusApp {
     /// 参数说明：
     /// - `tab_id`：日志标签页 ID。
     /// - `line_number`：需要切换打点的 0 基行号。
-    pub fn toggle_log_line_marker(&mut self, tab_id: usize, line_number: usize) {
+    pub(crate) fn toggle_log_line_marker(&mut self, tab_id: usize, line_number: usize) {
         let state = self.log_tab_view_states.entry(tab_id).or_default();
         state.is_focused = true;
         clear_last_line_marker_jump(state);
@@ -553,7 +557,7 @@ impl ArgusApp {
     /// - `tab_id`：日志标签页 ID。
     ///
     /// 返回值：根据小日志滚动句柄或分页日志滚动偏移估算出的首行行号。
-    pub fn current_visible_first_log_line(&self, tab_id: usize) -> usize {
+    pub(crate) fn current_visible_first_log_line(&self, tab_id: usize) -> usize {
         let Some(state) = self.log_tab_view_state(tab_id) else {
             return 0;
         };
@@ -589,7 +593,7 @@ impl ArgusApp {
     ///
     /// 说明：打点跳转会把目标行居中显示；若继续从可见首行之后查找，会反复命中同一个仍在
     /// 视口中的打点。使用视口中心作为当前位置，才能让连续 F2 稳定跳到下一个打点。
-    pub fn current_visible_center_log_line(&self, tab_id: usize) -> usize {
+    pub(crate) fn current_visible_center_log_line(&self, tab_id: usize) -> usize {
         let first_line = self.current_visible_first_log_line(tab_id);
         let Some(state) = self.log_tab_view_state(tab_id) else {
             return first_line;
@@ -632,7 +636,11 @@ impl ArgusApp {
     /// - `line_number`：目标 0 基行号。
     ///
     /// 返回值：成功找到活动日志并发起滚动时返回 `true`。
-    pub fn scroll_log_tab_to_line_center(&mut self, tab_id: usize, line_number: usize) -> bool {
+    pub(crate) fn scroll_log_tab_to_line_center(
+        &mut self,
+        tab_id: usize,
+        line_number: usize,
+    ) -> bool {
         if self.active_tab().map(|tab| tab.id) != Some(tab_id) {
             return false;
         }
@@ -663,7 +671,7 @@ impl ArgusApp {
     /// 从当前视口首行之后开始查找下一个打点，并在找不到时循环到第一个打点。
     ///
     /// 返回值：成功发起滚动时返回目标 0 基行号；没有可跳转目标时返回 `None`。
-    pub fn jump_to_next_line_marker_from_viewport(&mut self) -> Option<usize> {
+    pub(crate) fn jump_to_next_line_marker_from_viewport(&mut self) -> Option<usize> {
         let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
             log_line_marker_jump_probe("no-active-tab", None, 0, 0, None, false);
             return None;
@@ -736,7 +744,7 @@ impl ArgusApp {
     }
 
     /// 处理分页日志滚轮事件；大日志不交给 GPUI 完整滚动容器，避免巨大内容高度造成精度问题。
-    pub fn scroll_paged_log(
+    pub(crate) fn scroll_paged_log(
         &mut self,
         tab_id: usize,
         source_id: SourceId,
@@ -777,7 +785,7 @@ impl ArgusApp {
     /// - `tab_id`：日志标签页 ID。
     ///
     /// 返回值：实际清理过缓存时返回 `true`，便于 UI 决定是否需要刷新。
-    pub fn clear_line_marker_jump_cache(&mut self, tab_id: usize) -> bool {
+    pub(crate) fn clear_line_marker_jump_cache(&mut self, tab_id: usize) -> bool {
         let Some(state) = self.log_tab_view_states.get_mut(&tab_id) else {
             return false;
         };

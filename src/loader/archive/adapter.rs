@@ -16,7 +16,7 @@ use crate::utils::path::normalize_archive_entry_path;
 
 /// 压缩包条目枚举结果；只保存结构信息，不读取日志正文内容。
 #[derive(Clone, Debug)]
-pub struct ArchiveEntryInfo {
+pub(crate) struct ArchiveEntryInfo {
     /// 压缩包内规范化路径，统一使用 `/` 分隔。
     pub path: String,
     /// 条目名称，用于来源树显示。
@@ -29,7 +29,7 @@ pub struct ArchiveEntryInfo {
 
 /// 压缩包根层单文件探测结果。
 #[derive(Clone, Debug)]
-pub enum ArchiveRootProbe {
+pub(crate) enum ArchiveRootProbe {
     /// 根层恰好只有一个普通文件，可被折叠为可直接打开的来源树叶子。
     SingleFile(ArchiveEntryInfo),
     /// 根层恰好只有一个文件，但该文件本身仍是压缩包；当前容器保持可展开。
@@ -45,7 +45,7 @@ pub enum ArchiveRootProbe {
 
 /// 根层单文件短路探测状态机，供各格式适配器复用。
 #[derive(Debug, Default)]
-pub struct ArchiveRootProbeState {
+pub(crate) struct ArchiveRootProbeState {
     /// 当前唯一候选文件；一旦发现第二个候选或目录即判定不是单文件压缩包。
     candidate: Option<ArchiveEntryInfo>,
     /// 是否已经判定不是根层单文件。
@@ -54,7 +54,7 @@ pub struct ArchiveRootProbeState {
 
 impl ArchiveRootProbeState {
     /// 记录一个条目；返回 `false` 表示已经可以短路停止枚举。
-    pub fn observe(&mut self, mut entry: ArchiveEntryInfo) -> bool {
+    pub(crate) fn observe(&mut self, mut entry: ArchiveEntryInfo) -> bool {
         if self.is_not_single {
             return false;
         }
@@ -79,7 +79,7 @@ impl ArchiveRootProbeState {
     }
 
     /// 根据已观察条目生成最终探测结果。
-    pub fn finish(self) -> ArchiveRootProbe {
+    pub(crate) fn finish(self) -> ArchiveRootProbe {
         if self.is_not_single {
             return ArchiveRootProbe::NotSingle;
         }
@@ -97,7 +97,7 @@ impl ArchiveRootProbeState {
 
 /// 压缩格式能力声明，供 UI、加载器和后续格式扩展判断可用能力。
 #[derive(Clone, Copy, Debug)]
-pub struct ArchiveCapabilities {
+pub(crate) struct ArchiveCapabilities {
     /// 该能力声明对应的压缩格式。
     pub format: ArchiveFormat,
     /// 面向用户展示的格式名称。
@@ -117,15 +117,15 @@ pub struct ArchiveCapabilities {
 }
 
 /// 任意可读且可定位的压缩数据源；用于对象安全地把内存压缩包交给适配器。
-pub trait ArchiveReadSeek: Read + Seek {}
+pub(crate) trait ArchiveReadSeek: Read + Seek {}
 
 impl<T> ArchiveReadSeek for T where T: Read + Seek {}
 
 /// 压缩包条目流式输出回调；适配器每读取到一段解压后字节就调用一次。
-pub type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
+pub(crate) type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
 
 /// 压缩包适配器统一接口；每个格式自行声明识别规则、能力和读写入口。
-pub trait ArchiveAdapter: Sync {
+pub(crate) trait ArchiveAdapter: Sync {
     /// 返回当前适配器的能力声明。
     fn capabilities(&self) -> ArchiveCapabilities;
 
@@ -248,7 +248,9 @@ pub trait ArchiveAdapter: Sync {
 }
 
 /// 使用完整条目列表兜底推导根层单文件探测结果。
-pub fn probe_single_file_root_from_entries(entries: Vec<ArchiveEntryInfo>) -> ArchiveRootProbe {
+pub(crate) fn probe_single_file_root_from_entries(
+    entries: Vec<ArchiveEntryInfo>,
+) -> ArchiveRootProbe {
     let mut state = ArchiveRootProbeState::default();
     for entry in entries {
         if !state.observe(entry) {
@@ -259,12 +261,15 @@ pub fn probe_single_file_root_from_entries(entries: Vec<ArchiveEntryInfo>) -> Ar
 }
 
 /// 根据注册表中的压缩适配器枚举压缩包条目。
-pub fn list_archive_entries(path: &Path, format: ArchiveFormat) -> Result<Vec<ArchiveEntryInfo>> {
+pub(crate) fn list_archive_entries(
+    path: &Path,
+    format: ArchiveFormat,
+) -> Result<Vec<ArchiveEntryInfo>> {
     archive_registry().list_entries(format, path, None)
 }
 
 /// 根据注册表中的压缩适配器和密码枚举压缩包条目。
-pub fn list_archive_entries_with_password(
+pub(crate) fn list_archive_entries_with_password(
     path: &Path,
     format: ArchiveFormat,
     password: Option<&str>,
@@ -280,7 +285,7 @@ pub fn list_archive_entries_with_password(
 /// - `source_label`：错误提示中的虚拟来源名称。
 ///
 /// 返回值：压缩包内条目列表；用于从父压缩包读取出的内嵌容器。
-pub fn list_archive_entries_from_bytes(
+pub(crate) fn list_archive_entries_from_bytes(
     bytes: Vec<u8>,
     format: ArchiveFormat,
     source_label: &str,
@@ -289,7 +294,7 @@ pub fn list_archive_entries_from_bytes(
 }
 
 /// 从内存字节和可选密码枚举压缩包条目。
-pub fn list_archive_entries_from_bytes_with_password(
+pub(crate) fn list_archive_entries_from_bytes_with_password(
     bytes: Vec<u8>,
     format: ArchiveFormat,
     source_label: &str,
@@ -311,7 +316,7 @@ pub fn list_archive_entries_from_bytes_with_password(
 /// - `source_label`：错误提示中的来源名称。
 ///
 /// 返回值：压缩包内条目列表；用于嵌套压缩包的统一内存枚举。
-pub fn list_archive_entries_from_reader<R>(
+pub(crate) fn list_archive_entries_from_reader<R>(
     reader: R,
     format: ArchiveFormat,
     source_label: &str,
@@ -323,7 +328,7 @@ where
 }
 
 /// 从任意可读可 seek 的输入和可选密码枚举压缩包条目。
-pub fn list_archive_entries_from_reader_with_password<R>(
+pub(crate) fn list_archive_entries_from_reader_with_password<R>(
     mut reader: R,
     format: ArchiveFormat,
     source_label: &str,
@@ -357,7 +362,7 @@ where
 /// - `entry_path`：需要从当前容器中读取的条目路径。
 ///
 /// 返回值：条目完整字节；调用方可继续将其作为下一层压缩包解析。
-pub fn read_archive_entry_bytes(
+pub(crate) fn read_archive_entry_bytes(
     archive_path: &Path,
     root_format: ArchiveFormat,
     container_entries: &[String],
@@ -373,7 +378,7 @@ pub fn read_archive_entry_bytes(
 }
 
 /// 从本地压缩包及其嵌套容器链路读取指定条目的完整字节，并按容器链路应用密码。
-pub fn read_archive_entry_bytes_with_passwords(
+pub(crate) fn read_archive_entry_bytes_with_passwords(
     archive_path: &Path,
     root_format: ArchiveFormat,
     container_entries: &[String],
@@ -445,7 +450,7 @@ pub fn read_archive_entry_bytes_with_passwords(
 /// - `consumer`：接收解压后字节分片的回调。
 ///
 /// 返回值：读取成功返回 `Ok(())`；正文读取不创建临时文件。
-pub fn stream_archive_entry(
+pub(crate) fn stream_archive_entry(
     archive_path: &Path,
     root_format: ArchiveFormat,
     container_entries: &[String],
@@ -463,7 +468,7 @@ pub fn stream_archive_entry(
 }
 
 /// 从本地压缩包及其嵌套容器链路流式读取目标日志条目，并按容器链路应用密码。
-pub fn stream_archive_entry_with_passwords(
+pub(crate) fn stream_archive_entry_with_passwords(
     archive_path: &Path,
     root_format: ArchiveFormat,
     container_entries: &[String],

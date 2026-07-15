@@ -21,7 +21,7 @@ use crate::utils::path::normalize_archive_entry_path;
 
 /// 7Z 适配器，当前只做条目枚举；加密压缩包会由底层库返回错误。
 #[derive(Debug, Default)]
-pub struct SevenzArchiveAdapter;
+pub(crate) struct SevenzArchiveAdapter;
 
 impl ArchiveAdapter for SevenzArchiveAdapter {
     /// 声明 7Z 格式的识别规则和可用能力。
@@ -176,7 +176,7 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
 }
 
 /// 从任意 7Z 数据源短路探测根层单文件。
-pub fn probe_sevenz_single_file_root_from_reader<R>(
+pub(crate) fn probe_sevenz_single_file_root_from_reader<R>(
     reader: R,
     reader_len: u64,
     source_label: &str,
@@ -215,7 +215,7 @@ where
 }
 
 /// 从任意可读可 seek 的输入枚举 7Z 条目。
-pub fn list_sevenz_entries_from_reader<R>(
+pub(crate) fn list_sevenz_entries_from_reader<R>(
     reader: R,
     reader_len: u64,
     source_label: &str,
@@ -251,7 +251,7 @@ where
 }
 
 /// 从任意 7Z 数据源读取指定条目的完整字节。
-pub fn read_sevenz_entry_bytes_from_reader<R>(
+pub(crate) fn read_sevenz_entry_bytes_from_reader<R>(
     reader: R,
     reader_len: u64,
     entry_path: &str,
@@ -277,7 +277,7 @@ where
 }
 
 /// 从任意 7Z 数据源流式读取指定条目。
-pub fn stream_sevenz_entry_from_reader<R>(
+pub(crate) fn stream_sevenz_entry_from_reader<R>(
     reader: R,
     reader_len: u64,
     entry_path: &str,

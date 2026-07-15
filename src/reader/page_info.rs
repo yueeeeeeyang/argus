@@ -5,11 +5,11 @@
 
 /// 分页信息占位结构，后续记录真实页边界。
 #[derive(Debug, Default)]
-pub struct PageInfoPlaceholder;
+pub(crate) struct PageInfoPlaceholder;
 
 impl PageInfoPlaceholder {
     /// 返回模块职责说明；当前不计算真实页边界。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "描述分页字节范围和行号映射；当前仅保留占位边界。"
     }
 }

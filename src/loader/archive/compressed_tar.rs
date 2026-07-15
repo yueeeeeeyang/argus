@@ -33,7 +33,7 @@ const EMPTY_EXTENSIONS: &[&str] = &[];
 
 /// 压缩 TAR 适配器，按格式选择外层解压器。
 #[derive(Debug)]
-pub struct CompressedTarArchiveAdapter {
+pub(crate) struct CompressedTarArchiveAdapter {
     /// 当前压缩 TAR 的具体外层格式。
     pub format: ArchiveFormat,
 }
@@ -180,7 +180,7 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
 }
 
 /// 从任意读取器中短路探测压缩 TAR 根层单文件。
-pub fn probe_compressed_tar_single_file_root<R>(
+pub(crate) fn probe_compressed_tar_single_file_root<R>(
     reader: R,
     format: ArchiveFormat,
     source_label: &str,
@@ -204,7 +204,7 @@ where
 /// - `source_label`：错误提示中的来源名称。
 ///
 /// 返回值：解压外层后的 TAR 条目列表。
-pub fn list_compressed_tar_entries<R>(
+pub(crate) fn list_compressed_tar_entries<R>(
     reader: R,
     format: ArchiveFormat,
     source_label: &str,
@@ -221,7 +221,7 @@ where
 }
 
 /// 从任意读取器中读取压缩 TAR 指定条目的完整字节。
-pub fn read_compressed_tar_entry_bytes<R>(
+pub(crate) fn read_compressed_tar_entry_bytes<R>(
     reader: R,
     format: ArchiveFormat,
     entry_path: &str,
@@ -252,7 +252,7 @@ where
 /// - `entry_path`：目标 TAR 条目路径。
 /// - `source_label`：错误提示中的来源名称。
 /// - `consumer`：接收解压后字节分片的回调。
-pub fn stream_compressed_tar_entry<R>(
+pub(crate) fn stream_compressed_tar_entry<R>(
     reader: R,
     format: ArchiveFormat,
     entry_path: &str,

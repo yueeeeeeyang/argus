@@ -4,6 +4,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：对外暴露系统右键菜单、外部打开路径解析和自定义标题栏等跨平台入口。
 
-pub mod custom_titlebar;
-pub mod external_sources;
-pub mod open_with_registration;
+pub(crate) mod custom_titlebar;
+pub(crate) mod external_sources;
+pub(crate) mod open_with_registration;

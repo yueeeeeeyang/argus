@@ -1,11 +1,11 @@
 use super::*;
 
-pub fn runtime_filter_criteria(state: &RuntimeAnalysisState) -> RuntimeFilterCriteria {
+pub(crate) fn runtime_filter_criteria(state: &RuntimeAnalysisState) -> RuntimeFilterCriteria {
     parse_runtime_analysis_filter_criteria(&runtime_sql_analysis_filter_snapshot(state))
 }
 
 /// 从 Runtime 分析状态中提取 SQL 分析缓存用的原始过滤输入快照。
-pub fn runtime_sql_analysis_filter_snapshot(
+pub(crate) fn runtime_sql_analysis_filter_snapshot(
     state: &RuntimeAnalysisState,
 ) -> RuntimeSqlAnalysisFilterSnapshot {
     RuntimeSqlAnalysisFilterSnapshot {
@@ -17,7 +17,7 @@ pub fn runtime_sql_analysis_filter_snapshot(
 }
 
 /// 从 Runtime 过滤输入框提取当前输入快照，供状态栏展示待应用状态。
-pub fn runtime_filter_input_snapshot(
+pub(crate) fn runtime_filter_input_snapshot(
     state: &RuntimeAnalysisState,
 ) -> RuntimeSqlAnalysisFilterSnapshot {
     RuntimeSqlAnalysisFilterSnapshot {
@@ -29,7 +29,7 @@ pub fn runtime_filter_input_snapshot(
 }
 
 /// 返回 SQL 频率分析过滤并排序后的行。
-pub fn sql_frequency_rows(
+pub(crate) fn sql_frequency_rows(
     _result: &RuntimeAnalysisResult,
     state: &RuntimeAnalysisState,
 ) -> Arc<Vec<RuntimeSqlFrequencyAnalysisRow>> {
@@ -43,7 +43,7 @@ pub fn sql_frequency_rows(
 }
 
 /// 返回指定 SQL 结构的执行详情行，并按过滤条件缓存结果。
-pub fn sql_frequency_detail_rows(
+pub(crate) fn sql_frequency_detail_rows(
     result: &RuntimeAnalysisResult,
     state: &RuntimeAnalysisState,
     normalized_sql: &str,
@@ -115,7 +115,7 @@ pub fn sql_frequency_detail_rows(
 }
 
 /// 返回慢 SQL 分析过滤并按平均执行耗时降序排列后的聚合行。
-pub fn slow_sql_rows(
+pub(crate) fn slow_sql_rows(
     _result: &RuntimeAnalysisResult,
     state: &RuntimeAnalysisState,
 ) -> Arc<Vec<RuntimeSlowSqlSummaryRow>> {
@@ -129,7 +129,7 @@ pub fn slow_sql_rows(
 }
 
 /// 返回总览表缓存后的排序结果，避免渲染期反复 clone 和排序全量行。
-pub fn cached_sorted_summary_rows(
+pub(crate) fn cached_sorted_summary_rows(
     result: &RuntimeAnalysisResult,
     state: &RuntimeAnalysisState,
 ) -> Arc<Vec<RuntimeRequestSummary>> {
@@ -157,7 +157,7 @@ pub fn cached_sorted_summary_rows(
 }
 
 /// 返回总览表过滤并排序后的聚合行。
-pub fn sorted_summary_rows(
+pub(crate) fn sorted_summary_rows(
     result: &RuntimeAnalysisResult,
     state: &RuntimeAnalysisState,
 ) -> Vec<RuntimeRequestSummary> {
@@ -200,7 +200,7 @@ pub fn sorted_summary_rows(
 }
 
 /// 返回指定请求地址在当前过滤条件下的聚合行，供详情页顶部和明细列表使用。
-pub fn filtered_summary_for_request_path(
+pub(crate) fn filtered_summary_for_request_path(
     result: &RuntimeAnalysisResult,
     request_path: &str,
     state: &RuntimeAnalysisState,
@@ -225,7 +225,7 @@ pub fn filtered_summary_for_request_path(
 }
 
 /// 从原始 summary 的请求索引中应用跨表格过滤并重新计算聚合统计。
-pub fn filtered_summary_from_indices(
+pub(crate) fn filtered_summary_from_indices(
     result: &RuntimeAnalysisResult,
     summary: &RuntimeRequestSummary,
     criteria: &RuntimeFilterCriteria,
@@ -235,7 +235,7 @@ pub fn filtered_summary_from_indices(
 }
 
 /// 返回请求明细表缓存后的排序索引，避免切回详情页时重复排序。
-pub fn cached_sorted_request_indices(
+pub(crate) fn cached_sorted_request_indices(
     result: &RuntimeAnalysisResult,
     summary: &RuntimeRequestSummary,
     state: &RuntimeAnalysisState,
@@ -266,7 +266,7 @@ pub fn cached_sorted_request_indices(
 }
 
 /// 返回请求明细表排序后的请求索引。
-pub fn sorted_request_indices(
+pub(crate) fn sorted_request_indices(
     result: &RuntimeAnalysisResult,
     summary: &RuntimeRequestSummary,
     state: &RuntimeAnalysisState,
@@ -314,7 +314,7 @@ pub fn sorted_request_indices(
 }
 
 /// 返回 SQL 明细表缓存后的排序索引，避免切回同一请求时重复排序。
-pub fn cached_sorted_sql_indices(
+pub(crate) fn cached_sorted_sql_indices(
     request: &RuntimeRequestRecord,
     state: &RuntimeAnalysisState,
 ) -> Arc<Vec<usize>> {
@@ -344,7 +344,7 @@ pub fn cached_sorted_sql_indices(
 }
 
 /// 返回 SQL 明细表排序后的 SQL 索引。
-pub fn sorted_sql_indices(
+pub(crate) fn sorted_sql_indices(
     request: &RuntimeRequestRecord,
     state: &RuntimeAnalysisState,
 ) -> Vec<usize> {
@@ -397,7 +397,7 @@ pub fn sorted_sql_indices(
 }
 
 /// 判断请求是否命中跨表格过滤条件：用户名和时间区间。
-pub fn runtime_request_matches_cross_filters(
+pub(crate) fn runtime_request_matches_cross_filters(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeFilterCriteria,
 ) -> bool {
@@ -405,7 +405,7 @@ pub fn runtime_request_matches_cross_filters(
 }
 
 /// 判断请求明细行是否命中关键字。
-pub fn runtime_request_matches_keyword(
+pub(crate) fn runtime_request_matches_keyword(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeFilterCriteria,
 ) -> bool {
@@ -413,7 +413,7 @@ pub fn runtime_request_matches_keyword(
 }
 
 /// 判断 SQL 明细行是否命中关键字；同时纳入所属请求元信息，便于跨层检索。
-pub fn runtime_sql_matches_keyword(
+pub(crate) fn runtime_sql_matches_keyword(
     request: &RuntimeRequestRecord,
     sql: &RuntimeSqlRecord,
     criteria: &RuntimeFilterCriteria,
@@ -422,7 +422,7 @@ pub fn runtime_sql_matches_keyword(
 }
 
 /// 返回日期时间选择器当前展示值；输入为空或非法时使用当天边界作为默认值。
-pub fn runtime_datetime_picker_value(
+pub(crate) fn runtime_datetime_picker_value(
     input: &SettingsTextInputState,
     is_end: bool,
 ) -> DateTimePickerValue {
@@ -441,7 +441,7 @@ pub fn runtime_datetime_picker_value(
 }
 
 /// 返回日期时间选择器在输入为空时使用的默认时间。
-pub fn default_runtime_datetime_picker_datetime(is_end: bool) -> chrono::DateTime<Local> {
+pub(crate) fn default_runtime_datetime_picker_datetime(is_end: bool) -> chrono::DateTime<Local> {
     let now = Local::now();
     let naive = if is_end {
         now.date_naive().and_hms_opt(23, 59, 59)
@@ -454,7 +454,7 @@ pub fn default_runtime_datetime_picker_datetime(is_end: bool) -> chrono::DateTim
 }
 
 /// 返回 Runtime 过滤栏的状态提示。
-pub fn runtime_filter_status_label(state: &RuntimeAnalysisState) -> String {
+pub(crate) fn runtime_filter_status_label(state: &RuntimeAnalysisState) -> String {
     let input_filter = runtime_filter_input_snapshot(state);
     let applied_filter = runtime_sql_analysis_filter_snapshot(state);
     if state.is_filter_computing {
@@ -486,7 +486,7 @@ pub fn runtime_filter_status_label(state: &RuntimeAnalysisState) -> String {
 }
 
 /// 返回 Runtime 过滤输入框的规范化非空选区。
-pub fn runtime_filter_input_selection_range(
+pub(crate) fn runtime_filter_input_selection_range(
     input: &SettingsTextInputState,
 ) -> Option<std::ops::Range<usize>> {
     let anchor = input.selection_anchor?;
@@ -497,7 +497,7 @@ pub fn runtime_filter_input_selection_range(
 }
 
 /// 返回 Runtime 过滤输入框使用的焦点句柄。
-pub fn runtime_filter_focus_handle(
+pub(crate) fn runtime_filter_focus_handle(
     app: &ArgusApp,
     input_kind: RuntimeFilterInputKind,
 ) -> Option<FocusHandle> {
@@ -511,7 +511,7 @@ pub fn runtime_filter_focus_handle(
 }
 
 /// Runtime 过滤输入框主体 ID。
-pub fn runtime_filter_input_id(input_kind: RuntimeFilterInputKind) -> &'static str {
+pub(crate) fn runtime_filter_input_id(input_kind: RuntimeFilterInputKind) -> &'static str {
     match input_kind {
         RuntimeFilterInputKind::Keyword => "runtime-filter-keyword-input",
         RuntimeFilterInputKind::Username => "runtime-filter-username-input",
@@ -521,7 +521,7 @@ pub fn runtime_filter_input_id(input_kind: RuntimeFilterInputKind) -> &'static s
 }
 
 /// Runtime 过滤输入框前置图标 ID。
-pub fn runtime_filter_leading_id(input_kind: RuntimeFilterInputKind) -> &'static str {
+pub(crate) fn runtime_filter_leading_id(input_kind: RuntimeFilterInputKind) -> &'static str {
     match input_kind {
         RuntimeFilterInputKind::Keyword => "runtime-filter-keyword-leading",
         RuntimeFilterInputKind::Username => "runtime-filter-username-leading",
@@ -531,7 +531,7 @@ pub fn runtime_filter_leading_id(input_kind: RuntimeFilterInputKind) -> &'static
 }
 
 /// Runtime 过滤输入框清除按钮 ID。
-pub fn runtime_filter_clear_id(input_kind: RuntimeFilterInputKind) -> &'static str {
+pub(crate) fn runtime_filter_clear_id(input_kind: RuntimeFilterInputKind) -> &'static str {
     match input_kind {
         RuntimeFilterInputKind::Keyword => "runtime-filter-clear-keyword",
         RuntimeFilterInputKind::Username => "runtime-filter-clear-username",
@@ -541,7 +541,10 @@ pub fn runtime_filter_clear_id(input_kind: RuntimeFilterInputKind) -> &'static s
 }
 
 /// 根据排序方向翻转比较结果。
-pub fn apply_sort_direction(ordering: Ordering, direction: RuntimeSortDirection) -> Ordering {
+pub(crate) fn apply_sort_direction(
+    ordering: Ordering,
+    direction: RuntimeSortDirection,
+) -> Ordering {
     match direction {
         RuntimeSortDirection::Ascending => ordering,
         RuntimeSortDirection::Descending => ordering.reverse(),
@@ -549,27 +552,27 @@ pub fn apply_sort_direction(ordering: Ordering, direction: RuntimeSortDirection)
 }
 
 /// 比较浮点统计值；当前统计值均为有限数，异常时按相等兜底。
-pub fn compare_f64(left: f64, right: f64) -> Ordering {
+pub(crate) fn compare_f64(left: f64, right: f64) -> Ordering {
     left.partial_cmp(&right).unwrap_or(Ordering::Equal)
 }
 
 /// 格式化整数毫秒耗时。
-pub fn format_duration(duration_ms: u64) -> String {
+pub(crate) fn format_duration(duration_ms: u64) -> String {
     format!("{duration_ms} ms")
 }
 
 /// 格式化平均耗时，保留一位小数。
-pub fn format_average_duration(duration_ms: f64) -> String {
+pub(crate) fn format_average_duration(duration_ms: f64) -> String {
     format!("{duration_ms:.1} ms")
 }
 
 /// 格式化比例，保留一位百分比。
-pub fn format_ratio(ratio: f64) -> String {
+pub(crate) fn format_ratio(ratio: f64) -> String {
     format!("{:.1}%", ratio * 100.0)
 }
 
 /// 返回用户名展示文本。
-pub fn display_username(username: &str) -> String {
+pub(crate) fn display_username(username: &str) -> String {
     if username.is_empty() {
         "-".to_string()
     } else {

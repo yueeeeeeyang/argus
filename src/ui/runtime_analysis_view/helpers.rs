@@ -4,7 +4,7 @@ use super::*;
 ///
 /// GPUI 的 `shape_line` 和普通文本节点都要求输入不包含换行；Runtime SQL 原文可能跨行，
 /// 因此 UI 单元格统一折叠换行并保留原有词序，过滤和聚合仍继续使用解析层的原始 SQL。
-pub fn runtime_cell_display_text(text: &str) -> String {
+pub(crate) fn runtime_cell_display_text(text: &str) -> String {
     if !text.contains('\n') && !text.contains('\r') {
         return text.to_string();
     }
@@ -18,7 +18,7 @@ pub fn runtime_cell_display_text(text: &str) -> String {
 }
 
 /// 将完整 SQL 原文拆成弹窗代码区渲染行，保留空行和缩进。
-pub fn runtime_sql_dialog_lines(sql_text: &str) -> Vec<String> {
+pub(crate) fn runtime_sql_dialog_lines(sql_text: &str) -> Vec<String> {
     sql_text
         .replace("\r\n", "\n")
         .replace('\r', "\n")
@@ -28,7 +28,7 @@ pub fn runtime_sql_dialog_lines(sql_text: &str) -> Vec<String> {
 }
 
 /// 返回 SQL 弹窗选区覆盖指定行的字符范围。
-pub fn runtime_sql_dialog_selection_range_for_line(
+pub(crate) fn runtime_sql_dialog_selection_range_for_line(
     selection: Option<&RuntimeSqlTextSelection>,
     line_index: usize,
     line: &str,
@@ -54,7 +54,7 @@ pub fn runtime_sql_dialog_selection_range_for_line(
 }
 
 /// 根据点击次数转换 SQL 弹窗文本选择粒度。
-pub fn runtime_sql_dialog_granularity_for_click_count(
+pub(crate) fn runtime_sql_dialog_granularity_for_click_count(
     click_count: usize,
 ) -> TextSelectionGranularity {
     match click_count {
@@ -65,7 +65,7 @@ pub fn runtime_sql_dialog_granularity_for_click_count(
 }
 
 /// 根据鼠标位置计算 SQL 弹窗文本行中的字符列，兼容自动换行后的视觉行命中。
-pub fn runtime_sql_dialog_character_index_from_pointer(
+pub(crate) fn runtime_sql_dialog_character_index_from_pointer(
     line: &str,
     pointer_position: gpui::Point<Pixels>,
     bounds: gpui::Bounds<Pixels>,
@@ -117,7 +117,7 @@ pub fn runtime_sql_dialog_character_index_from_pointer(
 }
 
 /// 渲染 Runtime 单元格文本并叠加当前选区高亮。
-pub fn render_runtime_cell_text(
+pub(crate) fn render_runtime_cell_text(
     text: String,
     selection_range: Option<Range<usize>>,
     theme: &AppTheme,
@@ -145,7 +145,7 @@ pub fn render_runtime_cell_text(
 }
 
 /// 返回当前选区在指定单元格内的字符范围。
-pub fn runtime_cell_selection_range(
+pub(crate) fn runtime_cell_selection_range(
     selection: Option<&RuntimeTableCellSelection>,
     cell_key: &str,
 ) -> Option<Range<usize>> {
@@ -155,7 +155,7 @@ pub fn runtime_cell_selection_range(
 }
 
 /// 渲染 Runtime 表格单元格透明鼠标命中层，负责把拖拽选择转换成应用状态。
-pub fn render_runtime_cell_pointer_layer(
+pub(crate) fn render_runtime_cell_pointer_layer(
     analysis_id: usize,
     cell_key: String,
     text: String,
@@ -273,7 +273,9 @@ pub fn render_runtime_cell_pointer_layer(
 }
 
 /// 根据点击次数转换 Runtime 单元格选择粒度；双击按需求选中整格内容。
-pub fn runtime_cell_granularity_for_click_count(click_count: usize) -> TextSelectionGranularity {
+pub(crate) fn runtime_cell_granularity_for_click_count(
+    click_count: usize,
+) -> TextSelectionGranularity {
     match click_count {
         0 | 1 => TextSelectionGranularity::Character,
         _ => TextSelectionGranularity::Line,
@@ -281,7 +283,7 @@ pub fn runtime_cell_granularity_for_click_count(click_count: usize) -> TextSelec
 }
 
 /// 根据鼠标横坐标计算 Runtime 单元格文本中的字符列。
-pub fn runtime_cell_character_index_from_pointer(
+pub(crate) fn runtime_cell_character_index_from_pointer(
     text: &str,
     font_family: &'static str,
     pointer_x: Pixels,
@@ -315,17 +317,17 @@ pub fn runtime_cell_character_index_from_pointer(
 }
 
 /// 生成 Runtime 普通表格单元格稳定 key。
-pub fn runtime_cell_key(scope: &str, row_index: usize, column: &str) -> String {
+pub(crate) fn runtime_cell_key(scope: &str, row_index: usize, column: &str) -> String {
     format!("{scope}:{row_index}:{column}")
 }
 
 /// 生成 Runtime SQL 表格单元格稳定 key。
-pub fn runtime_sql_cell_key(request_index: usize, sql_index: usize, column: &str) -> String {
+pub(crate) fn runtime_sql_cell_key(request_index: usize, sql_index: usize, column: &str) -> String {
     format!("sql:{request_index}:{sql_index}:{column}")
 }
 
 /// 渲染操作按钮。
-pub fn render_action_button(
+pub(crate) fn render_action_button(
     id: String,
     label: &'static str,
     theme: &AppTheme,
@@ -349,7 +351,7 @@ pub fn render_action_button(
 }
 
 /// 渲染返回按钮。
-pub fn render_back_button(
+pub(crate) fn render_back_button(
     id: &'static str,
     label: &'static str,
     theme: &AppTheme,
@@ -374,7 +376,7 @@ pub fn render_back_button(
 }
 
 /// 渲染空信息。
-pub fn render_empty_message(message: &str, theme: &AppTheme) -> AnyElement {
+pub(crate) fn render_empty_message(message: &str, theme: &AppTheme) -> AnyElement {
     div()
         .flex_1()
         .flex()
@@ -387,4 +389,4 @@ pub fn render_empty_message(message: &str, theme: &AppTheme) -> AnyElement {
 }
 
 /// Runtime 三层表格当前过滤条件类型，具体解析逻辑复用领域层实现。
-pub type RuntimeFilterCriteria = RuntimeAnalysisFilterCriteria;
+pub(crate) type RuntimeFilterCriteria = RuntimeAnalysisFilterCriteria;

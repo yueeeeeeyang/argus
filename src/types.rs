@@ -8,7 +8,7 @@ use crate::infra::text_selection::{TextSelectionGranularity, character_count};
 
 /// 单行输入框拖拽选择状态，记录起始字符范围和当前拖拽粒度。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InputTextSelectionDrag {
+pub(crate) struct InputTextSelectionDrag {
     /// 鼠标按下时形成的基础字符范围。
     pub anchor_range: std::ops::Range<usize>,
     /// 当前拖拽粒度，决定移动时按字符、词或整行扩展。
@@ -17,7 +17,7 @@ pub struct InputTextSelectionDrag {
 
 /// 设置模态框中的单行输入框状态；用于保存持久化设置项的编辑光标和选区。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SettingsTextInputState {
+pub(crate) struct SettingsTextInputState {
     /// 输入框当前文本。
     pub value: String,
     /// 光标字符位置。
@@ -34,7 +34,7 @@ pub struct SettingsTextInputState {
 
 impl SettingsTextInputState {
     /// 根据已有配置值构造设置输入框状态，光标默认位于文本末尾。
-    pub fn from_value(value: String) -> Self {
+    pub(crate) fn from_value(value: String) -> Self {
         let cursor = character_count(&value);
         Self {
             value,

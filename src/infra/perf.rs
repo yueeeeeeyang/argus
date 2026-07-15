@@ -12,7 +12,7 @@ const ARGUS_PERF_ENV: &str = "ARGUS_PERF";
 const DEFAULT_SLOW_THRESHOLD: Duration = Duration::from_millis(16);
 
 /// 作用域耗时打点；离开作用域时按阈值输出慢路径。
-pub struct PerfSpan {
+pub(crate) struct PerfSpan {
     /// 打点名称。
     label: &'static str,
     /// 起始时间。
@@ -25,12 +25,12 @@ pub struct PerfSpan {
 
 impl PerfSpan {
     /// 创建默认阈值的性能打点。
-    pub fn new(label: &'static str) -> Self {
+    pub(crate) fn new(label: &'static str) -> Self {
         Self::with_threshold(label, DEFAULT_SLOW_THRESHOLD)
     }
 
     /// 创建指定阈值的性能打点。
-    pub fn with_threshold(label: &'static str, threshold: Duration) -> Self {
+    pub(crate) fn with_threshold(label: &'static str, threshold: Duration) -> Self {
         Self {
             label,
             started_at: Instant::now(),

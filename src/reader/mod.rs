@@ -3,12 +3,12 @@
 //! 作者：Argus 开发团队
 //! 主要功能：为读取器、后端、文本显示、编码检测和增量解码预留模块结构。
 
-pub mod decoder;
-pub mod encoding_detector;
-pub mod line_index;
-pub mod log_file_reader;
-pub mod mmap_backend;
-pub mod page_info;
-pub mod read_mode;
-pub mod spooled_backend;
-pub mod stream_backend;
+pub(crate) mod decoder;
+pub(crate) mod encoding_detector;
+pub(crate) mod line_index;
+pub(crate) mod log_file_reader;
+pub(crate) mod mmap_backend;
+pub(crate) mod page_info;
+pub(crate) mod read_mode;
+pub(crate) mod spooled_backend;
+pub(crate) mod stream_backend;

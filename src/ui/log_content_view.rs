@@ -78,14 +78,14 @@ mod scrollbars;
 mod search_results;
 mod text_helpers;
 
-pub use log_lines::*;
-pub use scrollbars::*;
-pub use search_results::*;
-pub use text_helpers::*;
+pub(crate) use log_lines::*;
+pub(crate) use scrollbars::*;
+pub(crate) use search_results::*;
+pub(crate) use text_helpers::*;
 
 /// 滚动条渲染和拖拽所需的度量数据。
 #[derive(Clone, Copy, Debug)]
-pub struct LogScrollbarMetrics {
+pub(crate) struct LogScrollbarMetrics {
     /// 滑块起点。
     thumb_start: gpui::Pixels,
     /// 滑块长度。
@@ -100,7 +100,7 @@ pub struct LogScrollbarMetrics {
 
 /// 分页日志单行实际交给 GPUI 渲染的可见文本切片。
 #[derive(Clone, Debug)]
-pub struct LogVisibleText {
+pub(crate) struct LogVisibleText {
     /// 当前切片文本。
     text: String,
     /// 当前切片在完整展示文本中的字符范围。
@@ -114,7 +114,7 @@ pub struct LogVisibleText {
 /// - `cx`：应用上下文，用于内容区工具按钮和日志选择事件。
 ///
 /// 返回值：GPUI 元素树；真实来源会按读取状态展示加载、失败或逐行日志。
-pub fn render(
+pub(crate) fn render(
     app: &mut ArgusApp,
     window: &mut Window,
     cx: &mut Context<ArgusApp>,

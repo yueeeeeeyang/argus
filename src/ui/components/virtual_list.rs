@@ -5,11 +5,11 @@
 
 /// 虚拟列表占位结构，后续负责按可见范围请求日志行。
 #[derive(Debug, Default)]
-pub struct VirtualListPlaceholder;
+pub(crate) struct VirtualListPlaceholder;
 
 impl VirtualListPlaceholder {
     /// 返回组件职责说明；当前不执行真实虚拟滚动计算。
-    pub fn responsibility(&self) -> &'static str {
+    pub(crate) fn responsibility(&self) -> &'static str {
         "按视口范围渲染日志行；当前仅保留组件边界。"
     }
 }

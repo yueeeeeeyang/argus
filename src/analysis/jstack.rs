@@ -24,7 +24,7 @@ const JSTACK_TEXT_EXTENSIONS: &[&str] = &["log", "txt", "out", "dump"];
 
 /// Jstack 线程状态，聚合 UI 会按该枚举映射颜色。
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum JstackThreadState {
+pub(crate) enum JstackThreadState {
     /// Java 线程正在运行或可运行。
     Runnable,
     /// Java 线程阻塞在监视器或锁上。
@@ -39,7 +39,7 @@ pub enum JstackThreadState {
 
 impl JstackThreadState {
     /// 返回 UI 展示用状态标签。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Runnable => "RUNNABLE",
             Self::Blocked => "BLOCKED",
@@ -79,7 +79,7 @@ impl JstackThreadState {
 
 /// 单个快照中的线程样本。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadSample {
+pub(crate) struct JstackThreadSample {
     /// 线程名称，取自 jstack 线程头第一段双引号内容。
     pub thread_name: String,
     /// 线程 ID 摘要，优先包含 `#id`、`tid=` 和 `nid=`，用于区分同名线程。
@@ -92,7 +92,7 @@ pub struct JstackThreadSample {
 
 /// 线程在某个快照中的一次具体出现记录。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadStackOccurrence {
+pub(crate) struct JstackThreadStackOccurrence {
     /// 快照序号，和 `JstackAnalysisResult.snapshots` 对齐。
     pub snapshot_index: usize,
     /// 快照展示名称。
@@ -115,7 +115,7 @@ pub struct JstackThreadStackOccurrence {
 
 /// 线程详情窗口所需的数据快照。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadDetail {
+pub(crate) struct JstackThreadDetail {
     /// 被查看的线程名称。
     pub thread_name: String,
     /// 被查看线程的 ID 摘要。
@@ -126,7 +126,7 @@ pub struct JstackThreadDetail {
 
 /// 一个被分析文件对应的 Jstack 快照。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackSnapshot {
+pub(crate) struct JstackSnapshot {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 来源展示名称。
@@ -139,7 +139,7 @@ pub struct JstackSnapshot {
 
 /// 分析任务输入目标。
 #[derive(Clone, Debug)]
-pub struct JstackAnalysisTarget {
+pub(crate) struct JstackAnalysisTarget {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 来源位置，可能是本地文件或压缩包内条目。
@@ -156,7 +156,7 @@ pub struct JstackAnalysisTarget {
 
 /// 频率矩阵中单个线程在单个快照中的聚合格子。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackFrequencyCell {
+pub(crate) struct JstackFrequencyCell {
     /// 快照序号，和 `JstackAnalysisResult.snapshots` 对齐。
     pub snapshot_index: usize,
     /// 出现次数；为 0 时表示该线程没有出现在当前快照。
@@ -169,7 +169,7 @@ pub struct JstackFrequencyCell {
 
 /// 频率矩阵中的线程行。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackFrequencyRow {
+pub(crate) struct JstackFrequencyRow {
     /// 线程名称。
     pub thread_name: String,
     /// 线程 ID 摘要，避免同名不同线程被聚合到同一行。
@@ -182,28 +182,28 @@ pub struct JstackFrequencyRow {
 
 impl JstackThreadDetail {
     /// 返回适合 UI 展示和复制的线程身份文本。
-    pub fn display_label(&self) -> String {
+    pub(crate) fn display_label(&self) -> String {
         thread_display_label(&self.thread_name, &self.thread_id)
     }
 }
 
 impl JstackThreadStackOccurrence {
     /// 返回当前堆栈出现记录的线程身份文本。
-    pub fn display_label(&self) -> String {
+    pub(crate) fn display_label(&self) -> String {
         thread_display_label(&self.thread_name, &self.thread_id)
     }
 }
 
 impl JstackFrequencyRow {
     /// 返回矩阵行使用的线程身份文本。
-    pub fn display_label(&self) -> String {
+    pub(crate) fn display_label(&self) -> String {
         thread_display_label(&self.thread_name, &self.thread_id)
     }
 }
 
 /// 被跳过或读取失败的快照。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackSkippedSnapshot {
+pub(crate) struct JstackSkippedSnapshot {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 来源展示名称。
@@ -214,7 +214,7 @@ pub struct JstackSkippedSnapshot {
 
 /// Jstack 分析结果，包含快照列、线程行和诊断统计。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackAnalysisResult {
+pub(crate) struct JstackAnalysisResult {
     /// 成功解析的快照列。
     pub snapshots: Vec<JstackSnapshot>,
     /// 按总频率排序后的线程行。
@@ -229,7 +229,7 @@ pub struct JstackAnalysisResult {
 
 /// Jstack 线程过滤器，按线程名关键字和完整线程段片段隐藏分析结果。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct JstackThreadFilter {
+pub(crate) struct JstackThreadFilter {
     /// 线程名匹配规则，已转为小写。
     thread_name_patterns: Vec<JstackThreadNamePattern>,
     /// 完整线程段匹配片段，已转为小写并处理转义换行。
@@ -253,7 +253,7 @@ impl JstackThreadFilter {
     /// - `stack_segment_filters`：完整线程段片段，使用空行分隔多个片段；兼容旧版 `||` 分隔。
     ///
     /// 返回值：归一化后的过滤器；空白配置会被忽略。
-    pub fn from_raw(thread_name_filters: &str, stack_segment_filters: &str) -> Self {
+    pub(crate) fn from_raw(thread_name_filters: &str, stack_segment_filters: &str) -> Self {
         Self {
             thread_name_patterns: parse_thread_name_filter_patterns(thread_name_filters),
             stack_segment_patterns: parse_stack_segment_filter_patterns(stack_segment_filters),
@@ -261,12 +261,12 @@ impl JstackThreadFilter {
     }
 
     /// 返回过滤器是否没有任何有效规则。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.thread_name_patterns.is_empty() && self.stack_segment_patterns.is_empty()
     }
 
     /// 判断一个频率行是否命中配置过滤规则。
-    pub fn matches_row(&self, row: &JstackFrequencyRow) -> bool {
+    pub(crate) fn matches_row(&self, row: &JstackFrequencyRow) -> bool {
         if self.is_empty() {
             return false;
         }
@@ -346,17 +346,17 @@ struct JstackSnapshotThreadAggregate {
 
 impl JstackAnalysisResult {
     /// 返回成功快照数量。
-    pub fn snapshot_count(&self) -> usize {
+    pub(crate) fn snapshot_count(&self) -> usize {
         self.snapshots.len()
     }
 
     /// 返回不同线程数量。
-    pub fn thread_count(&self) -> usize {
+    pub(crate) fn thread_count(&self) -> usize {
         self.rows.len()
     }
 
     /// 返回跳过文件数量。
-    pub fn skipped_count(&self) -> usize {
+    pub(crate) fn skipped_count(&self) -> usize {
         self.skipped_snapshots.len()
     }
 }
@@ -368,7 +368,7 @@ impl JstackAnalysisResult {
 /// - `default_encoding`：日志读取兜底编码。
 ///
 /// 返回值：可直接供 UI 渲染的频率矩阵结果。
-pub fn analyze_jstack_targets(
+pub(crate) fn analyze_jstack_targets(
     targets: Vec<JstackAnalysisTarget>,
     default_encoding: String,
     loader_config: LoaderConfig,
@@ -559,7 +559,7 @@ fn jstack_target_for_local_file(
 /// - `text`：完整日志文本。
 ///
 /// 返回值：一个快照的线程样本列表。
-pub fn parse_jstack_snapshot(
+pub(crate) fn parse_jstack_snapshot(
     source_id: SourceId,
     label: impl Into<String>,
     path: impl Into<String>,
@@ -579,7 +579,7 @@ pub fn parse_jstack_snapshot(
 }
 
 /// 由已解析快照构建频率矩阵。
-pub fn build_analysis_result(
+pub(crate) fn build_analysis_result(
     snapshots: Vec<JstackSnapshot>,
     skipped_snapshots: Vec<JstackSkippedSnapshot>,
     total_files: usize,

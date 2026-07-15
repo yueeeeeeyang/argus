@@ -11,9 +11,9 @@ use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 
 /// 标准独立窗口标题栏高度（设置窗口、Jstack 窗口等使用）。
-pub const STANDARD_TITLE_BAR_HEIGHT: f32 = 56.0;
+pub(crate) const STANDARD_TITLE_BAR_HEIGHT: f32 = 56.0;
 /// 标准独立窗口标题字号。
-pub const STANDARD_TITLE_BAR_FONT_SIZE: f32 = 14.0;
+pub(crate) const STANDARD_TITLE_BAR_FONT_SIZE: f32 = 14.0;
 
 /// 渲染独立窗口标题栏骨架：统一高度、水平内边距、底部分隔线与右侧关闭按钮。
 ///
@@ -28,7 +28,7 @@ pub const STANDARD_TITLE_BAR_FONT_SIZE: f32 = 14.0;
 /// - `left`：标题栏左侧内容，由调用者构造以适配不同标题结构。
 /// - `theme`：主题令牌。
 /// - `on_close`：关闭按钮点击回调。
-pub fn render_window_title_bar(
+pub(crate) fn render_window_title_bar(
     close_id: impl Into<ElementId>,
     close_tooltip: &'static str,
     height: f32,

@@ -46,7 +46,7 @@ const UPGRADE_HTTP_TOTAL_TIMEOUT_SECONDS: u64 = 300;
 
 /// 升级流程错误，UI 层会把它转换为用户可读提示。
 #[derive(Debug, Error)]
-pub enum UpgradeError {
+pub(crate) enum UpgradeError {
     /// 自动升级未启用。
     #[error("自动升级未启用")]
     Disabled,
@@ -107,7 +107,7 @@ pub enum UpgradeError {
 
 /// 升级检查结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UpgradeCheckOutcome {
+pub(crate) enum UpgradeCheckOutcome {
     /// 未启用或缺少服务器配置，因此没有发起检查。
     Disabled,
     /// 当前已经是最新版本。
@@ -120,7 +120,7 @@ pub enum UpgradeCheckOutcome {
 
 /// 可安装升级信息，供 UI 展示和下载流程复用。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AvailableUpgrade {
+pub(crate) struct AvailableUpgrade {
     /// 新版本号。
     pub version: String,
     /// 升级日志，直接来自 manifest。
@@ -133,7 +133,7 @@ pub struct AvailableUpgrade {
 
 /// 已下载并完成校验的升级安装包。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreparedUpgrade {
+pub(crate) struct PreparedUpgrade {
     /// 新版本号。
     pub version: String,
     /// 可交给安装流程使用的本地替换路径；可能是二进制文件，也可能是 `.app` 目录。
@@ -144,7 +144,7 @@ pub struct PreparedUpgrade {
 
 /// 已准备好的安装目标类型。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PreparedInstallTarget {
+pub(crate) enum PreparedInstallTarget {
     /// 替换当前可执行文件，适用于 Windows/Linux 裸二进制运行场景。
     CurrentBinary,
     /// 替换当前 macOS `.app` bundle，适用于正式 `.app` 分发场景。
@@ -170,7 +170,7 @@ enum InstallTarget {
 
 /// manifest v1 根对象。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct UpgradeManifest {
+pub(crate) struct UpgradeManifest {
     /// 新版本号，必须是 SemVer 或带 `v` 前缀的 SemVer。
     pub version: String,
     /// 升级日志文本。
@@ -183,7 +183,7 @@ pub struct UpgradeManifest {
 
 /// manifest v1 中的平台资源对象。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct UpgradeAsset {
+pub(crate) struct UpgradeAsset {
     /// 目标操作系统，例如 `macos` 或 `windows`。
     pub os: String,
     /// 目标 CPU 架构，例如 `aarch64` 或 `x86_64`。
@@ -197,7 +197,7 @@ pub struct UpgradeAsset {
 }
 
 /// 升级网络客户端抽象，测试可注入内存实现避免真实网络访问。
-pub trait UpgradeHttpClient: Clone + Send + Sync + 'static {
+pub(crate) trait UpgradeHttpClient: Clone + Send + Sync + 'static {
     /// 下载指定 URL 的完整响应体。
     ///
     /// 参数说明：
@@ -208,13 +208,13 @@ pub trait UpgradeHttpClient: Clone + Send + Sync + 'static {
 }
 
 /// manifest 验签抽象，测试可注入固定密钥验证不同签名场景。
-pub trait ManifestVerifier: Clone + Send + Sync + 'static {
+pub(crate) trait ManifestVerifier: Clone + Send + Sync + 'static {
     /// 校验 manifest 原文与签名是否匹配。
     fn verify(&self, manifest_bytes: &[u8], signature_bytes: &[u8]) -> Result<(), UpgradeError>;
 }
 
 /// 安装替换和重启抽象，测试中禁止真实替换当前测试进程。
-pub trait BinaryReplacer: Clone + Send + Sync + 'static {
+pub(crate) trait BinaryReplacer: Clone + Send + Sync + 'static {
     /// 使用指定二进制替换当前运行的程序。
     fn replace_current_binary(&self, replacement_path: &Path) -> Result<(), UpgradeError>;
 
@@ -244,7 +244,7 @@ pub trait BinaryReplacer: Clone + Send + Sync + 'static {
 
 /// 基于 `ureq` 的同步网络客户端，调用方应把它放到 GPUI 后台线程执行。
 #[derive(Clone, Debug, Default)]
-pub struct UreqUpgradeHttpClient;
+pub(crate) struct UreqUpgradeHttpClient;
 
 impl UpgradeHttpClient for UreqUpgradeHttpClient {
     /// 使用阻塞 HTTP 请求下载响应体。
@@ -270,7 +270,7 @@ impl UpgradeHttpClient for UreqUpgradeHttpClient {
 
 /// Ed25519 manifest 验签器。
 #[derive(Clone, Debug)]
-pub struct Ed25519ManifestVerifier {
+pub(crate) struct Ed25519ManifestVerifier {
     /// Base64 编码的 32 字节 Ed25519 公钥。
     public_key_base64: String,
 }
@@ -282,7 +282,7 @@ impl Ed25519ManifestVerifier {
     /// - `public_key_base64`：32 字节 Ed25519 公钥的 Base64 文本。
     ///
     /// 返回值：后续用于 manifest 签名校验的验签器。
-    pub fn from_public_key(public_key_base64: String) -> Self {
+    pub(crate) fn from_public_key(public_key_base64: String) -> Self {
         Self { public_key_base64 }
     }
 }
@@ -307,7 +307,7 @@ impl ManifestVerifier for Ed25519ManifestVerifier {
 
 /// 基于 self-replace 和目录交换的真实安装替换器。
 #[derive(Clone, Debug, Default)]
-pub struct SelfReplaceBinaryReplacer;
+pub(crate) struct SelfReplaceBinaryReplacer;
 
 impl BinaryReplacer for SelfReplaceBinaryReplacer {
     /// 调用 `self_replace` 完成当前可执行文件替换。
@@ -393,7 +393,7 @@ impl BinaryReplacer for SelfReplaceBinaryReplacer {
 
 /// 自动升级服务，组合网络、验签和二进制替换能力。
 #[derive(Clone, Debug)]
-pub struct UpgradeService<C, V, R> {
+pub(crate) struct UpgradeService<C, V, R> {
     /// 升级网络客户端。
     http_client: C,
     /// manifest 验签器。
@@ -411,7 +411,7 @@ impl UpgradeService<UreqUpgradeHttpClient, Ed25519ManifestVerifier, SelfReplaceB
     /// - `config`：升级配置，提供 manifest 验签公钥。
     ///
     /// 返回值：使用真实网络、真实验签和真实安装替换器的升级服务。
-    pub fn runtime(config: &UpgradeConfig) -> Self {
+    pub(crate) fn runtime(config: &UpgradeConfig) -> Self {
         Self {
             http_client: UreqUpgradeHttpClient,
             verifier: Ed25519ManifestVerifier::from_public_key(config.public_key_base64.clone()),
@@ -428,7 +428,7 @@ where
     R: BinaryReplacer,
 {
     /// 构造可注入依赖的升级服务，主要供单元测试复用。
-    pub fn new(http_client: C, verifier: V, replacer: R, updates_dir: PathBuf) -> Self {
+    pub(crate) fn new(http_client: C, verifier: V, replacer: R, updates_dir: PathBuf) -> Self {
         Self {
             http_client,
             verifier,
@@ -443,7 +443,7 @@ where
     /// - `config`：升级配置，提供启用开关和服务器地址。
     /// - `current_version`：当前程序版本。
     /// - `respect_skipped_version`：自动检查应尊重跳过版本，手动检查可忽略跳过状态。
-    pub fn check_for_update(
+    pub(crate) fn check_for_update(
         &self,
         config: &UpgradeConfig,
         current_version: &str,
@@ -497,7 +497,7 @@ where
     }
 
     /// 下载并校验升级安装包，返回可安装的本地路径。
-    pub fn download_and_prepare(
+    pub(crate) fn download_and_prepare(
         &self,
         upgrade: &AvailableUpgrade,
     ) -> Result<PreparedUpgrade, UpgradeError> {
@@ -546,7 +546,10 @@ where
     }
 
     /// 使用已准备好的升级安装包替换当前程序并拉起新进程。
-    pub fn install_prepared_upgrade(&self, prepared: &PreparedUpgrade) -> Result<(), UpgradeError> {
+    pub(crate) fn install_prepared_upgrade(
+        &self,
+        prepared: &PreparedUpgrade,
+    ) -> Result<(), UpgradeError> {
         match &prepared.install_target {
             PreparedInstallTarget::CurrentBinary => {
                 let current_exe = std::env::current_exe()?;
@@ -685,7 +688,7 @@ fn normalize_manifest_urls(
 }
 
 /// 选择与当前平台完全匹配的升级资源。
-pub fn select_platform_asset(
+pub(crate) fn select_platform_asset(
     manifest: &UpgradeManifest,
     os: &str,
     arch: &str,
@@ -698,7 +701,7 @@ pub fn select_platform_asset(
 }
 
 /// 判断远端版本是否高于当前版本。
-pub fn is_remote_version_newer(
+pub(crate) fn is_remote_version_newer(
     current_version: &str,
     remote_version: &str,
 ) -> Result<bool, UpgradeError> {
@@ -714,7 +717,7 @@ fn parse_semver(version: &str) -> Result<Version, UpgradeError> {
 }
 
 /// 当前目标系统名称，需和 manifest 中的 `os` 字段保持一致。
-pub fn current_platform_os() -> &'static str {
+pub(crate) fn current_platform_os() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
     } else if cfg!(target_os = "windows") {
@@ -727,7 +730,7 @@ pub fn current_platform_os() -> &'static str {
 }
 
 /// 当前目标架构名称，需和 manifest 中的 `arch` 字段保持一致。
-pub fn current_platform_arch() -> &'static str {
+pub(crate) fn current_platform_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else if cfg!(target_arch = "x86_64") {

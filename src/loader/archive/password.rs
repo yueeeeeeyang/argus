@@ -13,7 +13,7 @@ use crate::utils::path::{archive_virtual_path, normalize_archive_entry_path};
 
 /// 压缩包密码缓存键；同一个真实文件里的不同嵌套容器可能使用不同密码。
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ArchivePasswordKey {
+pub(crate) struct ArchivePasswordKey {
     /// 最外层真实压缩包路径。
     pub archive_path: PathBuf,
     /// 当前需要解锁的容器链路；最外层容器为空，内嵌容器包含从外到内的条目路径。
@@ -22,7 +22,7 @@ pub struct ArchivePasswordKey {
 
 impl ArchivePasswordKey {
     /// 构造密码键，并统一规范化内嵌容器路径。
-    pub fn new(archive_path: impl Into<PathBuf>, container_entries: &[String]) -> Self {
+    pub(crate) fn new(archive_path: impl Into<PathBuf>, container_entries: &[String]) -> Self {
         Self {
             archive_path: archive_path.into(),
             container_entries: container_entries
@@ -33,7 +33,7 @@ impl ArchivePasswordKey {
     }
 
     /// 构造最外层真实压缩包的密码键。
-    pub fn root(archive_path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn root(archive_path: impl Into<PathBuf>) -> Self {
         Self {
             archive_path: archive_path.into(),
             container_entries: Vec::new(),
@@ -41,7 +41,7 @@ impl ArchivePasswordKey {
     }
 
     /// 返回面向用户展示的容器路径。
-    pub fn display_label(&self) -> String {
+    pub(crate) fn display_label(&self) -> String {
         if self.container_entries.is_empty() {
             return self.archive_path.display().to_string();
         }
@@ -55,34 +55,34 @@ impl ArchivePasswordKey {
 
 /// 当前进程内的压缩包密码缓存；只保存在内存，不写入配置文件。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ArchivePasswordStore {
+pub(crate) struct ArchivePasswordStore {
     /// 按容器键保存的明文密码；作用域仅限当前 Argus 进程。
     passwords: HashMap<ArchivePasswordKey, String>,
 }
 
 impl ArchivePasswordStore {
     /// 返回缓存中是否没有任何密码。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.passwords.is_empty()
     }
 
     /// 保存或替换某个压缩包容器的密码。
-    pub fn insert(&mut self, key: ArchivePasswordKey, password: String) {
+    pub(crate) fn insert(&mut self, key: ArchivePasswordKey, password: String) {
         self.passwords.insert(key, password);
     }
 
     /// 移除某个压缩包容器已缓存的密码。
-    pub fn remove(&mut self, key: &ArchivePasswordKey) {
+    pub(crate) fn remove(&mut self, key: &ArchivePasswordKey) {
         self.passwords.remove(key);
     }
 
     /// 读取指定容器的密码。
-    pub fn get(&self, key: &ArchivePasswordKey) -> Option<&str> {
+    pub(crate) fn get(&self, key: &ArchivePasswordKey) -> Option<&str> {
         self.passwords.get(key).map(String::as_str)
     }
 
     /// 根据真实压缩包路径和容器链路读取密码。
-    pub fn get_for_container(
+    pub(crate) fn get_for_container(
         &self,
         archive_path: &Path,
         container_entries: &[String],
@@ -94,7 +94,7 @@ impl ArchivePasswordStore {
 
 /// 压缩包密码失败类型，供 UI 判断应该弹窗还是展示普通错误。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ArchivePasswordErrorKind {
+pub(crate) enum ArchivePasswordErrorKind {
     /// 目标压缩包需要密码，但当前没有可用密码。
     Required,
     /// 已提供密码，但底层解密校验失败。
@@ -105,7 +105,7 @@ pub enum ArchivePasswordErrorKind {
 
 /// 压缩包密码相关错误；key 为空时表示来自格式适配器的底层错误，注册表会补充具体容器键。
 #[derive(Clone, Debug)]
-pub struct ArchivePasswordError {
+pub(crate) struct ArchivePasswordError {
     /// 密码失败类型。
     pub kind: ArchivePasswordErrorKind,
     /// 触发错误的压缩包容器键。
@@ -118,7 +118,7 @@ pub struct ArchivePasswordError {
 
 impl ArchivePasswordError {
     /// 构造缺少密码错误。
-    pub fn required(source_label: impl Into<String>) -> Self {
+    pub(crate) fn required(source_label: impl Into<String>) -> Self {
         Self {
             kind: ArchivePasswordErrorKind::Required,
             key: None,
@@ -128,7 +128,7 @@ impl ArchivePasswordError {
     }
 
     /// 构造密码错误。
-    pub fn invalid(source_label: impl Into<String>) -> Self {
+    pub(crate) fn invalid(source_label: impl Into<String>) -> Self {
         Self {
             kind: ArchivePasswordErrorKind::Invalid,
             key: None,
@@ -138,7 +138,7 @@ impl ArchivePasswordError {
     }
 
     /// 构造不支持的加密算法错误。
-    pub fn unsupported(source_label: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub(crate) fn unsupported(source_label: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             kind: ArchivePasswordErrorKind::Unsupported,
             key: None,
@@ -148,7 +148,7 @@ impl ArchivePasswordError {
     }
 
     /// 给底层密码错误补充容器键和更准确的展示路径。
-    pub fn with_context(
+    pub(crate) fn with_context(
         mut self,
         key: ArchivePasswordKey,
         source_label: impl Into<String>,
@@ -159,7 +159,7 @@ impl ArchivePasswordError {
     }
 
     /// 返回当前错误是否表示密码错误而非首次缺少密码。
-    pub fn is_invalid_password(&self) -> bool {
+    pub(crate) fn is_invalid_password(&self) -> bool {
         self.kind == ArchivePasswordErrorKind::Invalid
     }
 }
@@ -189,14 +189,14 @@ impl fmt::Display for ArchivePasswordError {
 impl Error for ArchivePasswordError {}
 
 /// 从 anyhow 错误链中提取压缩包密码错误。
-pub fn find_archive_password_error(error: &anyhow::Error) -> Option<ArchivePasswordError> {
+pub(crate) fn find_archive_password_error(error: &anyhow::Error) -> Option<ArchivePasswordError> {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ArchivePasswordError>().cloned())
 }
 
 /// 若错误链中包含密码错误，则补充当前容器上下文；否则保留原错误。
-pub fn annotate_archive_password_error(
+pub(crate) fn annotate_archive_password_error(
     error: anyhow::Error,
     key: ArchivePasswordKey,
     source_label: impl Into<String>,

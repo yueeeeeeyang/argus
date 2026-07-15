@@ -127,15 +127,19 @@ mod sql_dialog;
 mod table_parts;
 mod tables;
 
-pub use computation::*;
-pub use filter_bar::*;
-pub use helpers::*;
-pub use sql_dialog::*;
-pub use table_parts::*;
-pub use tables::*;
+pub(crate) use computation::*;
+pub(crate) use filter_bar::*;
+pub(crate) use helpers::*;
+pub(crate) use sql_dialog::*;
+pub(crate) use table_parts::*;
+pub(crate) use tables::*;
 
 /// 渲染 Runtime 分析页签主体。
-pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    analysis_id: usize,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(state) = app.runtime_analysis_state(analysis_id) else {
         return render_missing_state(app, &theme);

@@ -43,7 +43,7 @@ struct SftpInputParts<'a> {
 
 impl ArgusApp {
     /// 在终端正文指定窗口坐标打开右键菜单。
-    pub fn open_terminal_context_menu(&mut self, session_id: usize, anchor: Point<Pixels>) {
+    pub(crate) fn open_terminal_context_menu(&mut self, session_id: usize, anchor: Point<Pixels>) {
         if !self.terminal_sessions.contains_key(&session_id) {
             self.placeholder_notice = "终端会话不存在".to_string();
             return;
@@ -56,7 +56,7 @@ impl ArgusApp {
     }
 
     /// 在远程文件表格行指定窗口坐标打开右键菜单。
-    pub fn open_sftp_entry_context_menu(
+    pub(crate) fn open_sftp_entry_context_menu(
         &mut self,
         session_id: usize,
         remote_path: String,
@@ -86,7 +86,7 @@ impl ArgusApp {
     }
 
     /// 从指定 SSH 终端打开一个新的 SFTP 文件管理标签页。
-    pub fn open_sftp_file_manager_from_terminal(
+    pub(crate) fn open_sftp_file_manager_from_terminal(
         &mut self,
         terminal_session_id: usize,
         cx: &mut Context<Self>,
@@ -103,7 +103,7 @@ impl ArgusApp {
     }
 
     /// 从 SMB 链接树节点打开一个新的 SMB 文件管理标签页。
-    pub fn open_smb_file_manager_from_link(
+    pub(crate) fn open_smb_file_manager_from_link(
         &mut self,
         link_id: crate::remote::connection::ConnectionNodeId,
         cx: &mut Context<Self>,
@@ -112,7 +112,7 @@ impl ArgusApp {
     }
 
     /// 断开并移除指定远程文件管理会话。
-    pub fn disconnect_sftp_session(&mut self, session_id: usize) {
+    pub(crate) fn disconnect_sftp_session(&mut self, session_id: usize) {
         if let Some(session) = self.sftp_sessions.remove(&session_id)
             && let Some(sender) = session.command_sender
         {
@@ -126,7 +126,7 @@ impl ArgusApp {
     }
 
     /// 断开所有远程文件管理会话。
-    pub fn disconnect_all_sftp_sessions(&mut self) {
+    pub(crate) fn disconnect_all_sftp_sessions(&mut self) {
         let session_ids = self.sftp_sessions.keys().copied().collect::<Vec<_>>();
         for session_id in session_ids {
             self.disconnect_sftp_session(session_id);
@@ -134,7 +134,7 @@ impl ArgusApp {
     }
 
     /// 用户确认当前 SSH SFTP 主机指纹可信，并继续后台 worker。
-    pub fn confirm_sftp_host_key(&mut self, session_id: usize) {
+    pub(crate) fn confirm_sftp_host_key(&mut self, session_id: usize) {
         let Some((pending, sender)) = self.sftp_sessions.get(&session_id).and_then(|session| {
             session
                 .pending_host_key
@@ -162,7 +162,7 @@ impl ArgusApp {
     }
 
     /// 用户拒绝当前 SSH SFTP 主机指纹。
-    pub fn reject_sftp_host_key(&mut self, session_id: usize) {
+    pub(crate) fn reject_sftp_host_key(&mut self, session_id: usize) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
             return;
         };
@@ -177,7 +177,10 @@ impl ArgusApp {
     }
 
     /// 通过主机指纹弹窗 owner 分发确认动作。
-    pub fn confirm_connection_host_key_prompt(&mut self, prompt: ConnectionHostKeyPromptState) {
+    pub(crate) fn confirm_connection_host_key_prompt(
+        &mut self,
+        prompt: ConnectionHostKeyPromptState,
+    ) {
         match prompt.owner {
             HostKeyPromptOwner::Terminal { session_id } => {
                 self.confirm_terminal_host_key(session_id)
@@ -187,7 +190,10 @@ impl ArgusApp {
     }
 
     /// 通过主机指纹弹窗 owner 分发拒绝动作。
-    pub fn reject_connection_host_key_prompt(&mut self, prompt: ConnectionHostKeyPromptState) {
+    pub(crate) fn reject_connection_host_key_prompt(
+        &mut self,
+        prompt: ConnectionHostKeyPromptState,
+    ) {
         match prompt.owner {
             HostKeyPromptOwner::Terminal { session_id } => {
                 self.reject_terminal_host_key(session_id)
@@ -197,7 +203,7 @@ impl ArgusApp {
     }
 
     /// 加载远程文件管理地址栏中的目录。
-    pub fn load_sftp_address_directory(&mut self, session_id: usize) {
+    pub(crate) fn load_sftp_address_directory(&mut self, session_id: usize) {
         let Some(path) = self
             .sftp_sessions
             .get(&session_id)
@@ -215,7 +221,7 @@ impl ArgusApp {
     }
 
     /// 刷新当前远程目录。
-    pub fn refresh_sftp_directory(&mut self, session_id: usize) {
+    pub(crate) fn refresh_sftp_directory(&mut self, session_id: usize) {
         self.send_sftp_command(
             session_id,
             SftpCommand::Refresh,
@@ -225,7 +231,7 @@ impl ArgusApp {
     }
 
     /// 进入当前目录的父级目录。
-    pub fn open_sftp_parent_directory(&mut self, session_id: usize) {
+    pub(crate) fn open_sftp_parent_directory(&mut self, session_id: usize) {
         let Some(parent) = self
             .sftp_sessions
             .get(&session_id)
@@ -243,7 +249,7 @@ impl ArgusApp {
     }
 
     /// 双击远程文件表格行；目录进入，可预览的普通文件打开预览。
-    pub fn handle_sftp_entry_double_click(&mut self, session_id: usize, path: String) {
+    pub(crate) fn handle_sftp_entry_double_click(&mut self, session_id: usize, path: String) {
         let Some(entry) = self.sftp_entry(session_id, &path).cloned() else {
             self.placeholder_notice = "未找到远程文件".to_string();
             return;
@@ -261,7 +267,7 @@ impl ArgusApp {
     }
 
     /// 请求读取远程普通文件内容用于预览；超上限或未连接时给出提示。
-    pub fn request_sftp_file_preview(
+    pub(crate) fn request_sftp_file_preview(
         &mut self,
         session_id: usize,
         remote_path: String,
@@ -282,7 +288,7 @@ impl ArgusApp {
     }
 
     /// 右键菜单触发：对当前唯一选中的可预览普通文件发起预览。
-    pub fn preview_sftp_selection(&mut self, session_id: usize) {
+    pub(crate) fn preview_sftp_selection(&mut self, session_id: usize) {
         let Some(session) = self.sftp_sessions.get(&session_id) else {
             self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
@@ -307,7 +313,7 @@ impl ArgusApp {
     }
 
     /// 设置远程文件列表当前选中项。
-    pub fn select_sftp_entry(&mut self, session_id: usize, path: String, extend: bool) {
+    pub(crate) fn select_sftp_entry(&mut self, session_id: usize, path: String, extend: bool) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
             return;
         };
@@ -322,7 +328,11 @@ impl ArgusApp {
     }
 
     /// 切换远程文件列表排序字段与方向；同列点击翻转方向，异列点击切到该列升序。
-    pub fn set_sftp_sort(&mut self, session_id: usize, field: crate::remote::sftp::SftpSortField) {
+    pub(crate) fn set_sftp_sort(
+        &mut self,
+        session_id: usize,
+        field: crate::remote::sftp::SftpSortField,
+    ) {
         let Some(session) = self.sftp_sessions.get_mut(&session_id) else {
             return;
         };
@@ -343,7 +353,7 @@ impl ArgusApp {
     }
 
     /// 打开本地文件选择器，并把选中的普通文件上传到当前远程目录。
-    pub fn choose_sftp_upload_files(&mut self, session_id: usize, cx: &mut Context<Self>) {
+    pub(crate) fn choose_sftp_upload_files(&mut self, session_id: usize, cx: &mut Context<Self>) {
         if !self.sftp_sessions.contains_key(&session_id) {
             self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
@@ -369,7 +379,7 @@ impl ArgusApp {
     }
 
     /// 发送上传文件命令。
-    pub fn upload_sftp_files(&mut self, session_id: usize, paths: Vec<PathBuf>) {
+    pub(crate) fn upload_sftp_files(&mut self, session_id: usize, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             self.placeholder_notice = "未选择要上传的文件".to_string();
             return;
@@ -383,7 +393,11 @@ impl ArgusApp {
     }
 
     /// 打开本地路径选择器，并下载当前选中的远程普通文件。
-    pub fn choose_sftp_download_target(&mut self, session_id: usize, cx: &mut Context<Self>) {
+    pub(crate) fn choose_sftp_download_target(
+        &mut self,
+        session_id: usize,
+        cx: &mut Context<Self>,
+    ) {
         let selected = self.selected_sftp_entries(session_id);
         if selected.is_empty() {
             self.placeholder_notice = "请选择要下载的文件".to_string();
@@ -436,7 +450,7 @@ impl ArgusApp {
     }
 
     /// 发送下载单文件命令。
-    pub fn download_sftp_file(
+    pub(crate) fn download_sftp_file(
         &mut self,
         session_id: usize,
         remote_path: String,
@@ -454,7 +468,7 @@ impl ArgusApp {
     }
 
     /// 发送下载多文件命令。
-    pub fn download_sftp_files(
+    pub(crate) fn download_sftp_files(
         &mut self,
         session_id: usize,
         entries: Vec<SftpEntry>,
@@ -469,7 +483,7 @@ impl ArgusApp {
     }
 
     /// 打开 SFTP 重命名弹窗。
-    pub fn open_sftp_rename_dialog(&mut self, session_id: usize) {
+    pub(crate) fn open_sftp_rename_dialog(&mut self, session_id: usize) {
         let selected = self.selected_sftp_entries(session_id);
         if selected.len() != 1 {
             self.placeholder_notice = "请选择一个文件或目录进行重命名".to_string();
@@ -486,7 +500,7 @@ impl ArgusApp {
     }
 
     /// 请求删除当前选中的远程普通文件或空目录。
-    pub fn request_delete_sftp_entry(&mut self, session_id: usize) {
+    pub(crate) fn request_delete_sftp_entry(&mut self, session_id: usize) {
         let selected = self.selected_sftp_entries(session_id);
         if selected.len() != 1 {
             self.placeholder_notice = "请选择一个文件或空目录进行删除".to_string();
@@ -509,13 +523,13 @@ impl ArgusApp {
     }
 
     /// 关闭当前远程文件管理弹窗。
-    pub fn close_sftp_dialog(&mut self) {
+    pub(crate) fn close_sftp_dialog(&mut self) {
         self.sftp_dialog = None;
         self.placeholder_notice = "已关闭文件管理弹窗".to_string();
     }
 
     /// 提交当前远程文件管理弹窗。
-    pub fn submit_sftp_dialog(&mut self) {
+    pub(crate) fn submit_sftp_dialog(&mut self) {
         match self.sftp_dialog.clone() {
             Some(SftpDialogState::Rename(dialog)) => self.submit_sftp_rename(dialog),
             Some(SftpDialogState::ConfirmDelete(prompt)) => self.confirm_delete_sftp_entry(prompt),
@@ -524,7 +538,7 @@ impl ArgusApp {
     }
 
     /// 确认删除远程普通文件或空目录。
-    pub fn confirm_delete_sftp_entry(&mut self, prompt: SftpDeletePromptState) {
+    pub(crate) fn confirm_delete_sftp_entry(&mut self, prompt: SftpDeletePromptState) {
         let Some(entry) = self
             .sftp_sessions
             .get(&prompt.session_id)
@@ -550,7 +564,7 @@ impl ArgusApp {
     }
 
     /// 返回 SFTP 输入框选区。
-    pub fn sftp_input_selection_range(
+    pub(crate) fn sftp_input_selection_range(
         &self,
         target: AppTextInputTarget,
     ) -> Option<std::ops::Range<usize>> {
@@ -559,7 +573,10 @@ impl ArgusApp {
     }
 
     /// 返回指定 SFTP 输入框状态。
-    pub fn sftp_text_input(&self, target: AppTextInputTarget) -> Option<&SettingsTextInputState> {
+    pub(crate) fn sftp_text_input(
+        &self,
+        target: AppTextInputTarget,
+    ) -> Option<&SettingsTextInputState> {
         match target {
             AppTextInputTarget::SftpAddress { session_id } => self
                 .sftp_sessions
@@ -574,7 +591,7 @@ impl ArgusApp {
     }
 
     /// 返回指定 SFTP 输入框可变状态。
-    pub fn sftp_text_input_mut(
+    pub(crate) fn sftp_text_input_mut(
         &mut self,
         target: AppTextInputTarget,
     ) -> Option<&mut SettingsTextInputState> {
@@ -592,7 +609,7 @@ impl ArgusApp {
     }
 
     /// 聚焦 SFTP 相关输入框，并清理其他 SFTP 输入焦点。
-    pub fn focus_sftp_text_input_target(&mut self, target: AppTextInputTarget) {
+    pub(crate) fn focus_sftp_text_input_target(&mut self, target: AppTextInputTarget) {
         self.clear_sftp_text_input_focuses();
         if let Some(input) = self.sftp_text_input_mut(target) {
             input.is_focused = true;
@@ -604,7 +621,7 @@ impl ArgusApp {
     }
 
     /// 清理远程文件地址栏和弹窗输入框焦点。
-    pub fn clear_sftp_text_input_focuses(&mut self) {
+    pub(crate) fn clear_sftp_text_input_focuses(&mut self) {
         for session in self.sftp_sessions.values_mut() {
             clear_sftp_input_focus(&mut session.address_input);
         }
@@ -614,7 +631,7 @@ impl ArgusApp {
     }
 
     /// 处理远程文件地址栏或重命名输入框按键。
-    pub fn handle_sftp_text_input_key(
+    pub(crate) fn handle_sftp_text_input_key(
         &mut self,
         target: AppTextInputTarget,
         keystroke: &Keystroke,
@@ -662,7 +679,7 @@ impl ArgusApp {
     }
 
     /// 鼠标开始选择 SFTP 输入框文本。
-    pub fn begin_sftp_input_pointer_selection(
+    pub(crate) fn begin_sftp_input_pointer_selection(
         &mut self,
         target: AppTextInputTarget,
         character_index: usize,
@@ -683,7 +700,7 @@ impl ArgusApp {
     }
 
     /// 鼠标拖拽更新 SFTP 输入框选区。
-    pub fn update_sftp_input_pointer_selection(
+    pub(crate) fn update_sftp_input_pointer_selection(
         &mut self,
         target: AppTextInputTarget,
         character_index: usize,
@@ -706,7 +723,7 @@ impl ArgusApp {
     }
 
     /// 鼠标结束 SFTP 输入框文本选择。
-    pub fn finish_sftp_input_pointer_selection(&mut self, target: AppTextInputTarget) {
+    pub(crate) fn finish_sftp_input_pointer_selection(&mut self, target: AppTextInputTarget) {
         if let Some(input) = self.sftp_text_input_mut(target) {
             input.selection_drag = None;
             if normalized_input_selection_range(input).is_none() {
@@ -716,7 +733,11 @@ impl ArgusApp {
     }
 
     /// 应用 SFTP 输入框原生输入法编辑结果。
-    pub fn apply_native_sftp_edit(&mut self, target: AppTextInputTarget, edit: &NativeTextEdit) {
+    pub(crate) fn apply_native_sftp_edit(
+        &mut self,
+        target: AppTextInputTarget,
+        edit: &NativeTextEdit,
+    ) {
         self.focus_sftp_text_input_target(target);
         let Some(input) = self.sftp_text_input_mut(target) else {
             return;
@@ -738,7 +759,7 @@ impl ArgusApp {
     }
 
     /// 返回当前选中的远程文件条目。
-    pub fn selected_sftp_entries(&self, session_id: usize) -> Vec<SftpEntry> {
+    pub(crate) fn selected_sftp_entries(&self, session_id: usize) -> Vec<SftpEntry> {
         self.sftp_sessions
             .get(&session_id)
             .map(SftpSessionState::selected_entries)
@@ -746,14 +767,14 @@ impl ArgusApp {
     }
 
     /// 判断指定远程文件会话是否选中了单个可重命名条目。
-    pub fn can_rename_sftp_selection(&self, session_id: usize) -> bool {
+    pub(crate) fn can_rename_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
             session.status == SftpStatus::Connected && session.selected_entries().len() == 1
         })
     }
 
     /// 判断指定远程文件会话是否选中了可下载的普通文件。
-    pub fn can_download_sftp_selection(&self, session_id: usize) -> bool {
+    pub(crate) fn can_download_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
             let selected = session.selected_entries();
             session.status == SftpStatus::Connected
@@ -763,7 +784,7 @@ impl ArgusApp {
     }
 
     /// 判断指定远程文件会话是否选中了单个可预览的普通文件。
-    pub fn can_preview_sftp_selection(&self, session_id: usize) -> bool {
+    pub(crate) fn can_preview_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
             let selected = session.selected_entries();
             session.status == SftpStatus::Connected
@@ -773,7 +794,7 @@ impl ArgusApp {
     }
 
     /// 判断指定远程文件会话是否选中了单个可删除条目。
-    pub fn can_delete_sftp_selection(&self, session_id: usize) -> bool {
+    pub(crate) fn can_delete_sftp_selection(&self, session_id: usize) -> bool {
         self.sftp_sessions.get(&session_id).is_some_and(|session| {
             let selected = session.selected_entries();
             session.status == SftpStatus::Connected

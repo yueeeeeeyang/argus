@@ -9,11 +9,11 @@ use gpui::FocusHandle;
 use crate::loader::SourceId;
 
 // 从共享类型模块重导出，保持 `crate::app::SettingsTextInputState` 等路径向后兼容。
-pub use crate::types::{InputTextSelectionDrag, SettingsTextInputState};
+pub(crate) use crate::types::{InputTextSelectionDrag, SettingsTextInputState};
 
 /// 当前界面工作区，驱动标题栏入口和左侧侧栏内容。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Workspace {
+pub(crate) enum Workspace {
     /// 日志分析工作区，用于展示来源侧栏和日志内容占位界面。
     LogAnalysis,
     /// 链接工作区，用于展示 SSH/SMB 链接目录树、终端和远程文件管理标签页。
@@ -24,7 +24,7 @@ pub enum Workspace {
 
 /// 设置模态框左侧导航当前选中的分类。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SettingsSection {
+pub(crate) enum SettingsSection {
     /// 关于应用，展示版本和运行平台。
     #[default]
     About,
@@ -40,7 +40,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// 返回设置分类在导航和内容标题中使用的文案。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::About => "关于",
             Self::Appearance => "外观",
@@ -53,7 +53,7 @@ impl SettingsSection {
 
 /// 打开来源占位弹窗中的来源类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlaceholderSourceKind {
+pub(crate) enum PlaceholderSourceKind {
     /// 本地日志文件。
     File,
     /// 本地目录。
@@ -64,7 +64,7 @@ pub enum PlaceholderSourceKind {
 
 impl PlaceholderSourceKind {
     /// 返回来源类型展示文案。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::File => "日志文件",
             Self::Directory => "目录",
@@ -75,14 +75,14 @@ impl PlaceholderSourceKind {
 
 /// 占位弹窗类型，当前仅用于打开来源。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlaceholderDialog {
+pub(crate) enum PlaceholderDialog {
     /// 打开来源弹窗。
     OpenSource,
 }
 
 /// 顶部标签页类型，决定主内容区渲染哪个页面。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TabKind {
+pub(crate) enum TabKind {
     /// 空标签页，用于启动或关闭最后一个标签后的占位状态。
     Empty,
     /// 日志来源标签页；本轮只保存来源身份和展示路径，不读取正文。
@@ -118,7 +118,7 @@ pub enum TabKind {
 
 /// 顶部标签页状态。
 #[derive(Clone, Debug)]
-pub struct ArgusTab {
+pub(crate) struct ArgusTab {
     /// 标签唯一 ID，用于选中、关闭和渲染。
     pub id: usize,
     /// 标签标题。
@@ -129,7 +129,7 @@ pub struct ArgusTab {
 
 /// 子级懒加载完成后需要自动续做的来源树分析动作。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PendingSourceAnalysisAction {
+pub(crate) enum PendingSourceAnalysisAction {
     /// 加载完成后打开 Jstack 线程日志分析。
     Jstack {
         /// 触发右键菜单的来源目录 ID。
@@ -144,7 +144,7 @@ pub enum PendingSourceAnalysisAction {
 
 impl PendingSourceAnalysisAction {
     /// 返回等待加载的来源目录 ID，便于子级加载回调精确匹配。
-    pub fn source_id(self) -> SourceId {
+    pub(crate) fn source_id(self) -> SourceId {
         match self {
             Self::Jstack { source_id } | Self::Runtime { source_id } => source_id,
         }
@@ -153,7 +153,7 @@ impl PendingSourceAnalysisAction {
 
 /// 日志搜索窗口输入框类型，用于复用同一套输入状态处理。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LogSearchInputKind {
+pub(crate) enum LogSearchInputKind {
     /// 关键字输入框。
     Keyword,
     /// 来源树目录输入框。
@@ -162,7 +162,7 @@ pub enum LogSearchInputKind {
 
 /// Runtime 分析页过滤输入框类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeFilterInputKind {
+pub(crate) enum RuntimeFilterInputKind {
     /// 表格任意关键字过滤。
     Keyword,
     /// 用户名模糊过滤。
@@ -175,7 +175,7 @@ pub enum RuntimeFilterInputKind {
 
 /// Runtime 日期时间选择器可调整的时间部分。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeDateTimePart {
+pub(crate) enum RuntimeDateTimePart {
     /// 年。
     Year,
     /// 月。
@@ -192,7 +192,7 @@ pub enum RuntimeDateTimePart {
 
 /// Runtime 日期时间选择器快捷动作。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeDateTimeQuickAction {
+pub(crate) enum RuntimeDateTimeQuickAction {
     /// 设置为今天 00:00:00。
     TodayStart,
     /// 设置为当前本地时间。
@@ -205,7 +205,7 @@ pub enum RuntimeDateTimeQuickAction {
 
 /// 应用内所有自绘单行输入框的原生文本输入目标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AppTextInputTarget {
+pub(crate) enum AppTextInputTarget {
     /// 来源树过滤输入框。
     SourceTreeSearch,
     /// 链接树过滤输入框。
@@ -266,7 +266,7 @@ pub enum AppTextInputTarget {
 
 /// 日志搜索窗口中的单行输入框状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogSearchInputState {
+pub(crate) struct LogSearchInputState {
     /// 输入框当前文本。
     pub value: String,
     /// 光标字符位置。
@@ -297,7 +297,7 @@ impl Default for LogSearchInputState {
 
 /// 主窗口内输入框真实焦点句柄集合。
 #[derive(Clone)]
-pub struct AppInputFocusHandles {
+pub(crate) struct AppInputFocusHandles {
     /// 主窗口根区域焦点，用于点击非输入区域时承接真实键盘焦点。
     pub root: FocusHandle,
     /// 来源树过滤输入框焦点。
@@ -352,7 +352,7 @@ pub struct AppInputFocusHandles {
 
 /// 来源树占位节点，用于模拟文件、目录和压缩包结构。
 #[derive(Clone, Debug)]
-pub struct SourceNode {
+pub(crate) struct SourceNode {
     /// 节点唯一 ID，用于本地选择与展开折叠。
     pub id: usize,
     /// 节点缩进层级，模拟目录树深度。
@@ -369,7 +369,7 @@ pub struct SourceNode {
 
 /// 日志行占位数据，用于模拟 INFO/WARN/ERROR 等等级日志。
 #[derive(Clone, Debug)]
-pub struct LogLine {
+pub(crate) struct LogLine {
     /// 行号。
     pub number: usize,
     /// 日志等级。
@@ -380,7 +380,7 @@ pub struct LogLine {
 
 /// 内容区显示状态；本阶段真实来源只显示未读取提示，不读取日志正文。
 #[derive(Clone, Debug)]
-pub enum ContentState {
+pub(crate) enum ContentState {
     /// 初始样例预览，用于空项目首次启动时展示界面密度。
     PlaceholderPreview,
     /// 已接入真实来源树，但尚未选择日志候选节点。

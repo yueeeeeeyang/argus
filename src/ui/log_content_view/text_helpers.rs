@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn render_log_line(
+pub(crate) fn render_log_line(
     app: &ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
@@ -223,7 +223,7 @@ pub fn render_log_line(
 ///
 /// 说明：GPUI 对超长 `StyledText` 的 shaping 成本很高。分页日志只渲染横向可视范围附近
 /// 的文本片段，选择和复制仍使用完整行文本，避免切 tab 时被超长行拖慢。
-pub fn paged_visible_text_range(
+pub(crate) fn paged_visible_text_range(
     scroll_left: f64,
     viewport_width: gpui::Pixels,
     line_number_width: f32,
@@ -248,12 +248,12 @@ pub fn paged_visible_text_range(
 }
 
 /// 返回日志字体的横向宽度估算，供分页切片和横向滚动范围共用。
-pub fn estimated_log_char_width(font_size: f32) -> f32 {
+pub(crate) fn estimated_log_char_width(font_size: f32) -> f32 {
     (font_size * 0.62).max(6.0)
 }
 
 /// 估算日志正文完整横向宽度，供虚拟列表测量和自绘横向滚动条共用。
-pub fn estimated_log_content_width(
+pub(crate) fn estimated_log_content_width(
     handle: &LogReaderHandle,
     line_number_width: f32,
     font_size: f32,
@@ -267,7 +267,7 @@ pub fn estimated_log_content_width(
 }
 
 /// 从完整展示文本中截取本次真正需要渲染的片段。
-pub fn visible_log_text(
+pub(crate) fn visible_log_text(
     full_text: &str,
     visible_char_range: Option<&Range<usize>>,
 ) -> LogVisibleText {
@@ -293,7 +293,7 @@ pub fn visible_log_text(
 /// - 分页日志常见单行很长，切 tab 或首帧显示时如果先构造整行展示文本，
 ///   即使最终只显示横向可见区域，也会在 UI 线程产生明显停顿。
 /// - 当前日志显示规则只要求 `\t` 展开为 4 个空格，因此可以线性扫描到可见结束列后立即停止。
-pub fn visible_log_text_from_raw(
+pub(crate) fn visible_log_text_from_raw(
     raw_text: &str,
     visible_char_range: Option<&Range<usize>>,
 ) -> LogVisibleText {
@@ -339,7 +339,7 @@ pub fn visible_log_text_from_raw(
 }
 
 /// 将完整展示文本上的 byte range 裁剪并平移到当前可见切片上。
-pub fn clip_display_range_to_visible(
+pub(crate) fn clip_display_range_to_visible(
     full_text: &str,
     visible_text: &LogVisibleText,
     range: Range<usize>,
@@ -365,7 +365,7 @@ pub fn clip_display_range_to_visible(
 }
 
 /// 合并语法高亮、搜索命中和选区高亮；选区优先，避免 GPUI 收到重叠 highlight。
-pub fn merge_log_line_highlights(
+pub(crate) fn merge_log_line_highlights(
     syntax_spans: Vec<HighlightSpan>,
     selection_range: Option<Range<usize>>,
     search_ranges: Option<Vec<Range<usize>>>,
@@ -442,7 +442,7 @@ pub fn merge_log_line_highlights(
 
 /// 保持旧单元测试可读性的二元合并入口。
 #[cfg(test)]
-pub fn merge_syntax_and_selection_highlights(
+pub(crate) fn merge_syntax_and_selection_highlights(
     syntax_spans: Vec<HighlightSpan>,
     selection_range: Option<Range<usize>>,
     theme: &AppTheme,
@@ -455,12 +455,12 @@ pub fn merge_syntax_and_selection_highlights(
 /// 搜索命中行需要有整行定位感，但不能复用 `theme.selection`，否则用户在当前行上
 /// 选择文本时，行背景和选区背景会混在一起。这里用 WARN 色少量混入内容底色，
 /// 让行背景和搜索词高亮保持同一语义，同时把视觉层级让给真正的文本选区。
-pub fn active_search_line_background(theme: &AppTheme) -> u32 {
+pub(crate) fn active_search_line_background(theme: &AppTheme) -> u32 {
     blend_rgb(theme.content, theme.warning, 0.18)
 }
 
 /// 按比例混合两个 RGB 颜色；只处理界面主题常用的低 24 位颜色。
-pub fn blend_rgb(base: u32, overlay: u32, overlay_ratio: f32) -> u32 {
+pub(crate) fn blend_rgb(base: u32, overlay: u32, overlay_ratio: f32) -> u32 {
     let ratio = overlay_ratio.clamp(0.0, 1.0);
     let inverse_ratio = 1.0 - ratio;
     let base_r = ((base >> 16) & 0xff) as f32;
@@ -477,7 +477,7 @@ pub fn blend_rgb(base: u32, overlay: u32, overlay_ratio: f32) -> u32 {
 }
 
 /// 将一段搜索高亮加入现有集合，并避开选区范围。
-pub fn push_non_overlapping_highlight(
+pub(crate) fn push_non_overlapping_highlight(
     highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
     range: Range<usize>,
     selection_range: Option<&Range<usize>>,
@@ -499,7 +499,7 @@ pub fn push_non_overlapping_highlight(
 }
 
 /// 从基础范围中扣除保护范围，返回可以继续使用语法色的非重叠片段。
-pub fn subtract_ranges(
+pub(crate) fn subtract_ranges(
     range: Range<usize>,
     protected_ranges: &[Range<usize>],
 ) -> Vec<Range<usize>> {
@@ -514,7 +514,10 @@ pub fn subtract_ranges(
 }
 
 /// 从单个范围中扣除一个保护范围。
-pub fn subtract_single_range(range: Range<usize>, protected: &Range<usize>) -> Vec<Range<usize>> {
+pub(crate) fn subtract_single_range(
+    range: Range<usize>,
+    protected: &Range<usize>,
+) -> Vec<Range<usize>> {
     if !ranges_overlap(&range, protected) {
         return vec![range];
     }
@@ -530,12 +533,12 @@ pub fn subtract_single_range(range: Range<usize>, protected: &Range<usize>) -> V
 }
 
 /// 判断两个半开区间是否重叠。
-pub fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
+pub(crate) fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start < right.end && right.start < left.end
 }
 
 /// 根据高亮 token 返回当前主题下的显示颜色。
-pub fn color_for_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
+pub(crate) fn color_for_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
     match kind {
         HighlightTokenKind::Trace => theme.foreground_muted,
         HighlightTokenKind::Debug => theme.debug,
@@ -563,7 +566,7 @@ pub fn color_for_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> 
 }
 
 /// 构造搜索结果行预览；长行只截取命中附近文本，避免列表滚动时处理整条超长日志。
-pub fn search_result_preview_text(
+pub(crate) fn search_result_preview_text(
     result: &crate::search::search_engine::SearchResult,
 ) -> (String, Vec<Range<usize>>) {
     let total_chars = character_count(&result.line_text);
@@ -620,7 +623,7 @@ pub fn search_result_preview_text(
 }
 
 /// 将基于原始日志行的搜索字节范围转换为展示文本范围；制表符展开后需要重新映射。
-pub fn search_ranges_for_display(
+pub(crate) fn search_ranges_for_display(
     raw_text: &str,
     display_text: &str,
     ranges: &[Range<usize>],
@@ -640,7 +643,7 @@ pub fn search_ranges_for_display(
 }
 
 /// 根据原始行字符列计算制表符展开后的展示列。
-pub fn display_column_for_raw_column(raw_text: &str, raw_column: usize) -> usize {
+pub(crate) fn display_column_for_raw_column(raw_text: &str, raw_column: usize) -> usize {
     raw_text
         .chars()
         .take(raw_column)

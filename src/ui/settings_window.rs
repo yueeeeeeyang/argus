@@ -179,7 +179,7 @@ impl SettingsModalSnapshot {
 }
 
 /// Jstack 线程段过滤大编辑器窗口；使用独立窗口承载长 textarea，避免设置页行内编辑困难。
-pub struct JstackStackSegmentFilterEditorWindow {
+pub(crate) struct JstackStackSegmentFilterEditorWindow {
     /// 主应用实体，编辑内容直接写回 `ArgusApp` 的设置输入状态。
     app: Entity<ArgusApp>,
     /// 当前编辑器渲染快照。
@@ -213,7 +213,7 @@ impl JstackStackSegmentFilterEditorWindow {
     /// - `cx`：编辑器窗口上下文，用于订阅主应用状态。
     ///
     /// 返回值：可渲染的编辑器窗口视图。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         mut snapshot: JstackStackSegmentFilterEditorSnapshot,
@@ -245,7 +245,7 @@ impl JstackStackSegmentFilterEditorWindow {
     }
 
     /// 从主应用状态提取编辑器渲染快照。
-    pub fn snapshot_from_app(app: &ArgusApp) -> JstackStackSegmentFilterEditorSnapshot {
+    pub(crate) fn snapshot_from_app(app: &ArgusApp) -> JstackStackSegmentFilterEditorSnapshot {
         JstackStackSegmentFilterEditorSnapshot {
             theme: app.theme.clone(),
             input: app.settings_jstack_stack_segment_filter_input.clone(),
@@ -268,7 +268,7 @@ impl Render for JstackStackSegmentFilterEditorWindow {
 
 /// Jstack 线程段过滤编辑器快照。
 #[derive(Clone, Debug, PartialEq)]
-pub struct JstackStackSegmentFilterEditorSnapshot {
+pub(crate) struct JstackStackSegmentFilterEditorSnapshot {
     /// 当前主题令牌。
     pub theme: AppTheme,
     /// 当前线程段过滤输入状态。
@@ -283,7 +283,7 @@ pub struct JstackStackSegmentFilterEditorSnapshot {
 /// - `cx`：主应用上下文，用于更新设置状态并阻断遮罩层事件。
 ///
 /// 返回值：包含遮罩、居中容器、分类导航和设置内容的 GPUI 元素树。
-pub fn render_settings_modal(
+pub(crate) fn render_settings_modal(
     app: &ArgusApp,
     app_focus_handles: &AppInputFocusHandles,
     cx: &mut Context<ArgusApp>,
