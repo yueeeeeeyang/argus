@@ -275,7 +275,7 @@ fn toolbar_button(
         .child(render_icon(icon, foreground, 16.0))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
-            let _ = app_entity.update(cx, |app, app_cx| {
+            app_entity.update(cx, |app, app_cx| {
                 if enabled {
                     on_click(app, app_cx);
                 } else {

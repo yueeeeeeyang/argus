@@ -130,7 +130,7 @@ impl ArgusApp {
             return;
         };
 
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
         self.placeholder_notice = "已复制终端选区".to_string();
     }
@@ -284,7 +284,6 @@ impl ArgusApp {
             .map(ToString::to_string);
         let request = TerminalWorkerRequest {
             session_id,
-            link_id,
             ssh,
             trusted_fingerprint,
             rows: DEFAULT_TERMINAL_ROWS,

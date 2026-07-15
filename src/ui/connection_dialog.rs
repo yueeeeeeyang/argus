@@ -14,12 +14,12 @@ use gpui::{
 
 use crate::app::{
     ArgusApp, ConnectionDeletePromptState, ConnectionDialogState, ConnectionDirectoryFormState,
-    ConnectionHostKeyPromptState, ConnectionLinkFormState, InputTextSelectionDrag, TextInputState,
+    ConnectionHostKeyPromptState, ConnectionLinkFormState, TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
-    slice_character_range, word_range_at,
+    slice_character_range,
 };
 use crate::remote::connection::ConnectionLinkKind;
 use crate::theme::AppTheme;
@@ -648,7 +648,7 @@ fn render_directory_window_content(
         .track_focus(&root_focus_for_track)
         .on_click(move |_, window, cx| {
             root_focus_for_click.focus(window);
-            let _ = close_window_entity.update(cx, |window_state, state_cx| {
+            close_window_entity.update(cx, |window_state, state_cx| {
                 window_state.clear_input_focuses();
                 state_cx.notify();
             });
@@ -748,7 +748,7 @@ fn render_link_window_content(
         .track_focus(&root_focus_for_track)
         .on_click(move |_, window, cx| {
             root_focus_for_click.focus(window);
-            let _ = close_window_entity.update(cx, |window_state, state_cx| {
+            close_window_entity.update(cx, |window_state, state_cx| {
                 window_state.clear_input_focuses();
                 state_cx.notify();
             });
@@ -1011,14 +1011,14 @@ fn render_directory_input_row(
             move |_, window, cx| {
                 cx.stop_propagation();
                 focus_handle.focus(window);
-                let _ = click_window.update(cx, |window_state, state_cx| {
+                click_window.update(cx, |window_state, state_cx| {
                     window_state.focus_input(target);
                     state_cx.notify();
                 });
             },
             move |event: &InputPointerEvent, _, cx| {
                 cx.stop_propagation();
-                let _ = pointer_window.update(cx, |window_state, state_cx| {
+                pointer_window.update(cx, |window_state, state_cx| {
                     match event.action {
                         InputPointerAction::Begin => window_state.begin_pointer_selection(
                             target,
@@ -1102,14 +1102,14 @@ fn render_link_input_row(
             move |_, window, cx| {
                 cx.stop_propagation();
                 focus_handle.focus(window);
-                let _ = click_window.update(cx, |window_state, state_cx| {
+                click_window.update(cx, |window_state, state_cx| {
                     window_state.focus_input(target);
                     state_cx.notify();
                 });
             },
             move |event: &InputPointerEvent, _, cx| {
                 cx.stop_propagation();
-                let _ = pointer_window.update(cx, |window_state, state_cx| {
+                pointer_window.update(cx, |window_state, state_cx| {
                     match event.action {
                         InputPointerAction::Begin => window_state.begin_pointer_selection(
                             target,
@@ -1275,7 +1275,7 @@ fn directory_native_input(
     focus_handle: FocusHandle,
 ) -> NativeInput {
     NativeInput::new(focus_handle, move |edit, _, cx| {
-        let _ = window_entity.update(cx, |window_state, state_cx| {
+        window_entity.update(cx, |window_state, state_cx| {
             window_state.apply_native_edit(target, edit);
             state_cx.notify();
         });
@@ -1289,7 +1289,7 @@ fn link_native_input(
     focus_handle: FocusHandle,
 ) -> NativeInput {
     NativeInput::new(focus_handle, move |edit, _, cx| {
-        let _ = window_entity.update(cx, |window_state, state_cx| {
+        window_entity.update(cx, |window_state, state_cx| {
             window_state.apply_native_edit(target, edit);
             state_cx.notify();
         });
@@ -1417,7 +1417,7 @@ fn set_directory_window_error(
     cx: &mut App,
     message: String,
 ) {
-    let _ = window_entity.update(cx, |window_state, state_cx| {
+    window_entity.update(cx, |window_state, state_cx| {
         window_state.form.error_message = Some(message);
         state_cx.notify();
     });
@@ -1429,7 +1429,7 @@ fn set_link_window_error(
     cx: &mut App,
     message: String,
 ) {
-    let _ = window_entity.update(cx, |window_state, state_cx| {
+    window_entity.update(cx, |window_state, state_cx| {
         window_state.form.error_message = Some(message);
         state_cx.notify();
     });
@@ -1893,15 +1893,6 @@ fn apply_native_edit_to_input(input: &mut TextInputState, edit: &NativeTextEdit)
 /// 返回输入框规范化后的非空选区。
 fn input_selection_range(input: &TextInputState) -> Option<Range<usize>> {
     input.selection_range()
-}
-
-/// 按鼠标点击粒度生成输入框字符范围。
-fn input_range_for_granularity(
-    input: &TextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    input.range_for_granularity(character_index, granularity)
 }
 
 /// 将字符范围夹在文本长度内，并确保起止顺序稳定。

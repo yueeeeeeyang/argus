@@ -261,9 +261,8 @@ pub(crate) fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> 
         ActiveMenuKind::TerminalContext { .. } => TERMINAL_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::SftpEntry { .. } => SFTP_ENTRY_CONTEXT_MENU_WIDTH,
     };
-    let menu_height = (entry_count as f32 * MENU_ROW_HEIGHT)
-        .min(MENU_MAX_HEIGHT)
-        .max(MENU_ROW_HEIGHT);
+    let menu_height =
+        (entry_count as f32 * MENU_ROW_HEIGHT).clamp(MENU_ROW_HEIGHT, MENU_MAX_HEIGHT);
     let scroll_handle = app.tab_menu_scroll.clone();
     let theme = app.theme.clone();
 

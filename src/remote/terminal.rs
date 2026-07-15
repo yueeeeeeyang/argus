@@ -38,8 +38,6 @@ pub(crate) struct TerminalSessionState {
     pub link_id: ConnectionNodeId,
     /// 终端标签标题。
     pub title: String,
-    /// 远程地址展示文案。
-    pub address: String,
     /// 当前终端状态。
     pub status: TerminalStatus,
     /// 终端输出解析器，负责把 ANSI 控制序列还原成屏幕文本。
@@ -79,7 +77,6 @@ impl TerminalSessionState {
             id,
             link_id: link.id,
             title: link.name.clone(),
-            address: link.address_label(),
             status: TerminalStatus::Connecting,
             parser: vt100::Parser::new(
                 DEFAULT_TERMINAL_ROWS,
@@ -104,14 +101,6 @@ impl TerminalSessionState {
     pub(crate) fn process_output(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         self.refresh_max_scrollback_offset();
-    }
-
-    /// 返回终端屏幕当前可见行。
-    pub(crate) fn visible_lines(&self) -> Vec<String> {
-        self.screen_lines()
-            .into_iter()
-            .map(|line| line.text.trim_end().to_string())
-            .collect()
     }
 
     /// 生成当前终端屏幕快照，供 UI 按终端单元格绘制颜色、背景和光标。
@@ -236,6 +225,7 @@ impl TerminalSessionState {
     }
 
     /// 从指定终端行列开始文本选择。
+    #[cfg(test)]
     pub(crate) fn begin_selection(&mut self, position: TerminalGridPosition) {
         self.begin_selection_with_granularity(position, TextSelectionGranularity::Character);
     }
@@ -732,8 +722,6 @@ pub(crate) struct PendingHostKey {
 pub(crate) struct TerminalWorkerRequest {
     /// 终端会话 ID。
     pub session_id: usize,
-    /// 关联链接 ID。
-    pub link_id: ConnectionNodeId,
     /// SSH 配置快照。
     pub ssh: SshLinkConfig,
     /// 已保存的可信指纹；为空表示首次连接需要用户确认。
@@ -1028,7 +1016,6 @@ mod tests {
             id: 1,
             link_id: 1,
             title: "测试终端".to_string(),
-            address: "root@example:22".to_string(),
             status: TerminalStatus::Connected,
             parser: vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_LINES),
             command_sender: Some(sender),
@@ -1234,7 +1221,6 @@ mod tests {
     fn verify_host_key_preserves_resize_before_trust() {
         let request = TerminalWorkerRequest {
             session_id: 7,
-            link_id: 3,
             ssh: SshLinkConfig {
                 host: "10.0.0.1".to_string(),
                 port: 22,

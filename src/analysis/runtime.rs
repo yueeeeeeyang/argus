@@ -246,11 +246,6 @@ impl RuntimeAnalysisFilterCriteria {
             || self.end_timestamp_ms.is_some()
     }
 
-    /// 判断关键字是否为空或命中已经小写化的文本。
-    pub(crate) fn keyword_matches_lowercase(&self, lowercase_text: &str) -> bool {
-        self.keyword.is_empty() || lowercase_text.contains(&self.keyword)
-    }
-
     /// 判断关键字是否为空或命中普通文本；只用于少量汇总字段的回退匹配。
     pub(crate) fn keyword_matches_text(&self, text: &str) -> bool {
         self.keyword.is_empty() || text.to_lowercase().contains(&self.keyword)
@@ -338,6 +333,7 @@ pub(crate) fn analyze_runtime_targets(
 /// - `text`：文件内容。
 ///
 /// 返回值：单个请求日志记录，索引由上层聚合时写入。
+#[cfg(test)]
 pub(crate) fn parse_runtime_request_text(
     source_id: SourceId,
     label: impl Into<String>,
@@ -1216,7 +1212,7 @@ fn read_runtime_requests_parallel(
         outcomes[order] = Some(outcome);
     }
 
-    outcomes.into_iter().filter_map(|outcome| outcome).collect()
+    outcomes.into_iter().flatten().collect()
 }
 
 /// 解析 Runtime 目标的文件名和真实读取位置；失败时生成可展示跳过记录。
@@ -2240,8 +2236,10 @@ mod tests {
         )
         .expect("应能写入 Runtime 日志");
         std::os::unix::fs::symlink(&dir, dir.join("loop")).expect("应能创建目录符号链接回环");
-        let mut config = LoaderConfig::default();
-        config.follow_symlinks = true;
+        let config = LoaderConfig {
+            follow_symlinks: true,
+            ..LoaderConfig::default()
+        };
 
         let targets = collect_runtime_log_files(SourceId(8), &dir, &config)
             .expect("应能在符号链接回环中完成收集");

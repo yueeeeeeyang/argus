@@ -641,7 +641,6 @@ fn creating_jstack_analysis_tab_reuses_empty_tab() {
     let state = app
         .jstack_analysis_state(analysis_id)
         .expect("应保存分析状态");
-    assert_eq!(state.targets.len(), 2);
     assert_eq!(
         state.active_states,
         BTreeSet::from([JstackThreadState::Runnable])
@@ -754,7 +753,6 @@ fn creating_runtime_analysis_tab_reuses_empty_tab() {
     let state = app
         .runtime_analysis_state(analysis_id)
         .expect("应保存 Runtime 分析状态");
-    assert_eq!(state.targets.len(), 2);
     assert_eq!(state.result_type, RuntimeAnalysisResultType::Statistics);
     assert_eq!(state.summary_sort_key, RuntimeSummarySortKey::RequestCount);
     assert_eq!(

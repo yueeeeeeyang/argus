@@ -11,12 +11,10 @@ use gpui::{
     AppContext, Bounds, ClipboardItem, Context, Keystroke, WindowBounds, WindowOptions, px, size,
 };
 
-use crate::app::{
-    AppTextInputTarget, ArgusApp, InputTextSelectionDrag, SettingsSection, TextInputState,
-};
+use crate::app::{AppTextInputTarget, ArgusApp, SettingsSection, TextInputState};
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
-    remove_character_range, slice_character_range, word_range_at,
+    remove_character_range, slice_character_range,
 };
 use crate::platform::open_with_registration::{
     register_open_with, registration_status, unregister_open_with,
@@ -119,7 +117,7 @@ impl ArgusApp {
     /// - `cx`：主应用上下文，用于创建或激活独立编辑窗口。
     pub(crate) fn open_jstack_stack_segment_filter_editor(&mut self, cx: &mut Context<Self>) {
         if self.is_jstack_stack_segment_filter_editor_open {
-            if let Some(window_handle) = self.jstack_stack_segment_filter_editor_handle.clone()
+            if let Some(window_handle) = self.jstack_stack_segment_filter_editor_handle
                 && window_handle
                     .update(cx, |_, window, _| window.activate_window())
                     .is_ok()
@@ -311,7 +309,8 @@ impl ArgusApp {
     }
 
     /// 直接更新快搜关键字配置；测试和未来批量设置入口可复用。
-    pub(crate) fn update_settings_quick_keywords(&mut self, value: String) {
+    #[cfg(test)]
+    pub(super) fn update_settings_quick_keywords(&mut self, value: String) {
         self.settings_quick_keywords_input = TextInputState::from_value(value);
         self.commit_settings_quick_keywords_input();
     }
@@ -500,7 +499,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_quick_keywords_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -512,7 +511,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到设置快搜输入框。
     fn paste_settings_quick_keywords_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -564,7 +563,8 @@ impl ArgusApp {
     }
 
     /// 直接更新 Jstack 线程名过滤配置，便于测试和未来批量导入复用。
-    pub(crate) fn update_settings_jstack_thread_name_filter(&mut self, value: String) {
+    #[cfg(test)]
+    pub(super) fn update_settings_jstack_thread_name_filter(&mut self, value: String) {
         self.settings_jstack_thread_name_filter_input = TextInputState::from_value(value);
         self.commit_settings_jstack_thread_name_filter_input();
     }
@@ -761,7 +761,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_jstack_thread_name_filter_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -773,7 +773,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到 Jstack 线程名过滤输入框。
     fn paste_settings_jstack_thread_name_filter_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -828,7 +828,8 @@ impl ArgusApp {
     }
 
     /// 直接更新 Jstack 完整线程段过滤配置，便于测试和未来批量导入复用。
-    pub(crate) fn update_settings_jstack_stack_segment_filter(&mut self, value: String) {
+    #[cfg(test)]
+    pub(super) fn update_settings_jstack_stack_segment_filter(&mut self, value: String) {
         self.settings_jstack_stack_segment_filter_input = TextInputState::from_value(value);
         self.commit_settings_jstack_stack_segment_filter_input();
     }
@@ -1059,7 +1060,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_jstack_stack_segment_filter_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -1071,7 +1072,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到 Jstack 完整线程段过滤输入框；保留真实换行以匹配完整线程段。
     fn paste_settings_jstack_stack_segment_filter_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -1116,12 +1117,6 @@ impl ArgusApp {
         self.settings_upgrade_server_input.selection_anchor = None;
         self.settings_upgrade_server_input.marked_range = None;
         self.settings_upgrade_server_input.selection_drag = None;
-        self.commit_settings_upgrade_server_input();
-    }
-
-    /// 直接更新升级服务器地址；测试和未来导入配置入口可复用。
-    pub(crate) fn update_settings_upgrade_server_url(&mut self, value: String) {
-        self.settings_upgrade_server_input = TextInputState::from_value(value);
         self.commit_settings_upgrade_server_input();
     }
 
@@ -1305,7 +1300,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_upgrade_server_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -1317,7 +1312,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到升级服务器输入框。
     fn paste_settings_upgrade_server_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -1362,12 +1357,6 @@ impl ArgusApp {
         self.settings_upgrade_public_key_input.selection_anchor = None;
         self.settings_upgrade_public_key_input.marked_range = None;
         self.settings_upgrade_public_key_input.selection_drag = None;
-        self.commit_settings_upgrade_public_key_input();
-    }
-
-    /// 直接更新升级验签公钥；测试和未来导入配置入口可复用。
-    pub(crate) fn update_settings_upgrade_public_key(&mut self, value: String) {
-        self.settings_upgrade_public_key_input = TextInputState::from_value(value);
         self.commit_settings_upgrade_public_key_input();
     }
 
@@ -1562,7 +1551,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_upgrade_public_key_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -1574,7 +1563,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到升级验签公钥输入框；去掉换行以兼容脚本输出和折行 Base64。
     fn paste_settings_upgrade_public_key_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -1596,24 +1585,6 @@ impl ArgusApp {
 /// 返回输入状态中的规范化非空选区。
 fn normalized_input_selection_range(input: &TextInputState) -> Option<Range<usize>> {
     input.selection_range()
-}
-
-/// 根据鼠标选择粒度返回设置输入框目标字符范围。
-fn settings_input_range_for_granularity(
-    input: &TextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    input.range_for_granularity(character_index, granularity)
-}
-
-/// 根据鼠标选择粒度返回多行设置输入框目标字符范围。
-fn settings_textarea_range_for_granularity(
-    input: &TextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    input.range_for_granularity(character_index, granularity)
 }
 
 /// 归一化 textarea 文本，统一系统换行符但保留真实多行结构。
@@ -1677,8 +1648,7 @@ mod tests {
     fn textarea_line_granularity_selects_current_line() {
         let input = TextInputState::from_value("first\nsecond\nthird".to_string());
 
-        let range =
-            settings_textarea_range_for_granularity(&input, 8, TextSelectionGranularity::Line);
+        let range = input.range_for_granularity(8, TextSelectionGranularity::Line);
 
         assert_eq!(slice_character_range(&input.value, range), "second");
     }

@@ -189,9 +189,6 @@ pub(crate) fn render(
                 cx,
             )
             .into_any_element(),
-            RuntimeAnalysisTaskState::Failed { message } => {
-                render_error_state(message, &theme).into_any_element()
-            }
         })
         .into_any_element()
 }
@@ -228,9 +225,7 @@ fn render_header(state: &RuntimeAnalysisState, theme: &AppTheme) -> impl IntoEle
                 result.total_sql_records,
                 result.skipped_count(),
             ),
-            RuntimeAnalysisTaskState::Loading { .. } | RuntimeAnalysisTaskState::Failed { .. } => {
-                (0, 0, 0, 0, 0)
-            }
+            RuntimeAnalysisTaskState::Loading { .. } => (0, 0, 0, 0, 0),
         };
 
     div()
@@ -274,18 +269,6 @@ fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + u
             theme.foreground_muted,
             18.0,
         ))
-        .child(message.to_string())
-}
-
-/// 渲染失败态。
-fn render_error_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(13.0))
-        .text_color(rgb(theme.error))
         .child(message.to_string())
 }
 
@@ -691,9 +674,6 @@ mod tests {
     /// 构造 Runtime 过滤测试用的默认 UI 状态。
     fn runtime_filter_test_state() -> RuntimeAnalysisState {
         RuntimeAnalysisState {
-            id: 1,
-            title: "Runtime分析".to_string(),
-            targets: Vec::new(),
             generation: 1,
             view: RuntimeAnalysisView::Summary,
             result_type: RuntimeAnalysisResultType::Statistics,

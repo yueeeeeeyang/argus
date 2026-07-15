@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -61,12 +61,6 @@ pub(crate) struct ThemeManager {
 pub(crate) struct LoadedUserTheme {
     /// 主题下拉框使用的稳定 ID，当前固定为 TOML 文件名。
     pub id: String,
-    /// 主题名称。
-    pub name: String,
-    /// 主题模式。
-    pub mode: String,
-    /// 主题文件路径。
-    pub path: PathBuf,
     /// 解析后的主题令牌。
     pub theme: AppTheme,
 }
@@ -179,11 +173,6 @@ impl ThemeManager {
             .unwrap_or_else(AppTheme::dark)
     }
 
-    /// 兼容旧调用方的模式入口，`system/light/dark` 都归并到当前暗色主题选择。
-    pub(crate) fn theme_for_mode(&self, mode: &str) -> AppTheme {
-        self.theme_for_id(mode)
-    }
-
     /// 返回可在设置下拉框中展示的主题列表。
     pub(crate) fn theme_options(&self) -> Vec<ThemeOption> {
         let mut options = vec![ThemeOption {
@@ -228,11 +217,13 @@ impl ThemeManager {
     }
 
     /// 返回用户主题加载警告。
+    #[cfg(test)]
     pub(crate) fn warnings(&self) -> &[String] {
         &self.warnings
     }
 
     /// 返回已经通过校验的用户主题列表。
+    #[cfg(test)]
     pub(crate) fn user_themes(&self) -> &[LoadedUserTheme] {
         &self.user_themes
     }
@@ -287,7 +278,7 @@ impl ThemeManager {
                 .map_err(|error| error.to_string())
                 .and_then(|text| parse_theme_toml(&text).map_err(|error| error.to_string()))
             {
-                Ok((file, theme)) => {
+                Ok((_, theme)) => {
                     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                         self.warnings
                             .push(format!("跳过用户主题 {}：文件名无法读取", path.display()));
@@ -304,9 +295,6 @@ impl ThemeManager {
                     }
                     self.user_themes.push(LoadedUserTheme {
                         id: file_name.to_string(),
-                        name: file.name,
-                        mode: file.mode,
-                        path,
                         theme,
                     });
                 }
@@ -315,8 +303,7 @@ impl ThemeManager {
                     .push(format!("跳过用户主题 {}：{error}", path.display())),
             }
         }
-        self.user_themes
-            .sort_by(|left, right| left.id.to_lowercase().cmp(&right.id.to_lowercase()));
+        self.user_themes.sort_by_key(|left| left.id.to_lowercase());
     }
 }
 

@@ -10,8 +10,10 @@ use anyhow::Result;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RegistrationStatus {
     /// 当前系统已经存在 Argus 右键入口。
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     Registered,
     /// 当前系统没有发现 Argus 右键入口。
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     NotRegistered,
     /// 当前运行环境不支持注册，并携带用户可读原因。
     Unsupported(String),
@@ -20,11 +22,6 @@ pub(crate) enum RegistrationStatus {
 }
 
 impl RegistrationStatus {
-    /// 返回是否明确处于已注册状态。
-    pub(crate) fn is_registered(&self) -> bool {
-        matches!(self, Self::Registered)
-    }
-
     /// 返回当前状态是否允许尝试注册。
     pub(crate) fn can_register(&self) -> bool {
         !matches!(self, Self::Registered | Self::Unsupported(_))
@@ -390,10 +387,7 @@ mod platform_impl {
             return Ok(());
         }
 
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
-        )
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim())
     }
 }
 

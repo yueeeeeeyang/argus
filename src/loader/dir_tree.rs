@@ -1755,7 +1755,6 @@ mod tests {
             0,
             vec![ArchiveEntryInfo {
                 path: "inner.zip".to_string(),
-                label: "inner.zip".to_string(),
                 is_dir: false,
                 size: Some(128),
             }],

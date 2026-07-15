@@ -1919,7 +1919,7 @@ fn update_settings_app(
     cx: &mut App,
     update: impl FnOnce(&mut ArgusApp, &mut Context<ArgusApp>),
 ) {
-    let _ = app_handle.update(cx, |app, app_cx| {
+    app_handle.update(cx, |app, app_cx| {
         update(app, app_cx);
         app_cx.notify();
     });

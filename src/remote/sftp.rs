@@ -57,8 +57,6 @@ pub(crate) struct SftpSessionState {
     pub link_id: ConnectionNodeId,
     /// 文件管理标签标题。
     pub title: String,
-    /// 远程地址展示文案。
-    pub address: String,
     /// 当前文件管理会话使用的后端协议。
     pub backend: RemoteFileBackend,
     /// 当前连接和操作状态。
@@ -100,7 +98,6 @@ impl SftpSessionState {
             id,
             link_id: link.id,
             title: format!("文件管理 - {}", link.name),
-            address: link.address_label(),
             backend,
             status: SftpStatus::Connecting,
             command_sender: Some(command_sender),
@@ -258,8 +255,6 @@ pub(crate) struct SftpEntry {
 pub(crate) struct SftpWorkerRequest {
     /// 远程文件管理会话 ID。
     pub session_id: usize,
-    /// 关联链接 ID。
-    pub link_id: ConnectionNodeId,
     /// 后端连接请求快照。
     pub backend: RemoteFileWorkerBackend,
 }
@@ -279,16 +274,6 @@ pub(crate) enum RemoteFileWorkerBackend {
         /// SMB 配置快照。
         smb: SmbLinkConfig,
     },
-}
-
-impl RemoteFileWorkerBackend {
-    /// 返回对应的 UI 后端协议。
-    pub(crate) fn backend(&self) -> RemoteFileBackend {
-        match self {
-            Self::Sftp { .. } => RemoteFileBackend::Sftp,
-            Self::Smb { .. } => RemoteFileBackend::Smb,
-        }
-    }
 }
 
 /// UI 发送给远程文件 worker 的命令。
@@ -394,8 +379,6 @@ pub(crate) enum SftpEvent {
     FileContentLoaded {
         /// 会话 ID。
         session_id: usize,
-        /// 远程文件路径。
-        remote_path: String,
         /// 文件名，用于预览窗口标题。
         file_name: String,
         /// 预览内容。
@@ -585,7 +568,6 @@ fn run_ssh_sftp_worker(
             SftpCommand::ReadFileContent { remote_path } => {
                 send_file_preview_loaded(
                     session_id,
-                    &remote_path,
                     read_sftp_file_preview(&sftp, &remote_path),
                     &event_sender,
                 );
@@ -716,7 +698,6 @@ async fn run_smb_worker_async(
             SftpCommand::ReadFileContent { remote_path } => {
                 send_file_preview_loaded(
                     session_id,
-                    &remote_path,
                     read_smb_file_preview(&mut client, &remote_path).await,
                     &event_sender,
                 );
@@ -1287,7 +1268,6 @@ fn send_operation_result_without_refresh(
 /// 发送远程文件预览内容读取完成事件。
 fn send_file_preview_loaded(
     session_id: usize,
-    remote_path: &str,
     preview: (String, FilePreviewContent),
     event_sender: &Sender<SftpEvent>,
 ) {
@@ -1296,7 +1276,6 @@ fn send_file_preview_loaded(
         event_sender,
         SftpEvent::FileContentLoaded {
             session_id,
-            remote_path: remote_path.to_string(),
             file_name,
             content,
         },

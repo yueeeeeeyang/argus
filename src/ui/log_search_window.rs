@@ -982,7 +982,7 @@ fn render_progress_and_actions(
                 .text_size(px(12.0))
                 .text_color(rgb(theme.foreground_muted))
                 .when(search.task_state.is_running(), |this| {
-                    let progress_text = progress_label(&search);
+                    let progress_text = progress_label(search);
                     this.child(render_loading_spinner(
                         ("log-search-progress-spinner", 0),
                         theme.foreground_muted,
@@ -1155,7 +1155,7 @@ fn update_search_app(
     cx: &mut gpui::App,
     update: impl FnOnce(&mut ArgusApp, &mut Context<ArgusApp>),
 ) {
-    let _ = app_handle.update(cx, |app, app_cx| {
+    app_handle.update(cx, |app, app_cx| {
         update(app, app_cx);
         app_cx.notify();
     });

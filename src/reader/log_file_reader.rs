@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::loader::SourceLocation;
 use crate::loader::archive::ArchivePasswordStore;
-use crate::loader::{SourceId, SourceLocation};
 use crate::reader::encoding_detector::{
     DecodedText, decode_log_bytes, decode_log_bytes_with_known_encoding,
 };
@@ -22,7 +22,6 @@ use crate::reader::line_index::{
     LineIndex, LineIndexEntry, build_line_index_with_encoding, checked_line_span,
 };
 use crate::reader::mmap_backend::MmapBackend;
-use crate::reader::read_mode::ReadMode;
 use crate::reader::spooled_backend::{SpoolCleanup, create_spool_file};
 use crate::reader::stream_backend::ArchiveStreamBackend;
 
@@ -38,8 +37,6 @@ const ENCODING_SAMPLE_BYTES: usize = 4 * 1024 * 1024;
 /// 打开日志的请求模型，隔离 UI 状态和底层读取实现。
 #[derive(Clone, Debug)]
 pub(crate) struct OpenLogRequest {
-    /// 来源树节点 ID，用于读取结果回填和 tab 去重。
-    pub source_id: SourceId,
     /// 来源位置，可能是本地文件，也可能是压缩包内部条目。
     pub location: SourceLocation,
     /// UI 展示名称。
@@ -57,8 +54,6 @@ pub(crate) enum LogOpenState {
     Idle,
     /// 后台任务正在打开或索引日志。
     Loading {
-        /// 当前读取策略。
-        mode: ReadMode,
         /// 读取提示，用于状态栏展示。
         message: String,
     },
@@ -66,51 +61,18 @@ pub(crate) enum LogOpenState {
     Ready(LogReaderHandle),
     /// 打开或读取失败。
     Failed {
-        /// 尝试使用的读取策略。
-        mode: Option<ReadMode>,
         /// 错误详情。
         message: String,
     },
 }
 
-impl LogOpenState {
-    /// 返回状态栏可展示的简短说明。
-    pub(crate) fn status_label(&self) -> String {
-        match self {
-            Self::Idle => "未读取".to_string(),
-            Self::Loading { mode, .. } => format!("{} · 索引中", mode.label()),
-            Self::Ready(handle) => format!(
-                "{} · {} · {} 行",
-                handle.read_mode.label(),
-                handle.encoding(),
-                handle.line_count()
-            ),
-            Self::Failed { mode, .. } => mode
-                .map(|mode| format!("{} · 读取失败", mode.label()))
-                .unwrap_or_else(|| "读取失败".to_string()),
-        }
-    }
-
-    /// 返回失败或加载状态中的详细消息。
-    pub(crate) fn message(&self) -> Option<&str> {
-        match self {
-            Self::Loading { message, .. } | Self::Failed { message, .. } => Some(message.as_str()),
-            Self::Idle | Self::Ready(_) => None,
-        }
-    }
-}
-
 /// 打开后的日志读取句柄，保存统一文档模型并提供状态栏统计。
 #[derive(Clone, Debug)]
 pub(crate) struct LogReaderHandle {
-    /// 来源树节点 ID。
-    pub source_id: SourceId,
     /// UI 展示名称。
     pub label: String,
     /// 来源路径展示文本。
     pub path: String,
-    /// 当前读取模式。
-    pub read_mode: ReadMode,
     /// 当前日志文档。
     document: LogDocument,
 }
@@ -124,11 +86,6 @@ impl LogReaderHandle {
     /// 返回总行数。
     pub(crate) fn line_count(&self) -> usize {
         self.document.line_count()
-    }
-
-    /// 返回实际采用的编码标签。
-    pub(crate) fn encoding(&self) -> &str {
-        self.document.encoding()
     }
 
     /// 返回日志文本是否为空。
@@ -168,11 +125,6 @@ impl LogReaderHandle {
             .all(Option::is_some)
     }
 
-    /// 返回用于横向滚动估算的最长行文本。
-    pub(crate) fn longest_line_text(&self) -> Option<String> {
-        self.document.longest_line_text()
-    }
-
     /// 返回用于横向滚动估算的最长显示列数，不在分页文档中读取正文。
     pub(crate) fn estimated_longest_display_columns(&self) -> usize {
         self.document.estimated_longest_display_columns()
@@ -194,14 +146,6 @@ impl LogDocument {
         match self {
             Self::InMemory(document) => document.line_count(),
             Self::Paged(document) => document.line_count(),
-        }
-    }
-
-    /// 返回当前日志编码标签。
-    pub(crate) fn encoding(&self) -> &str {
-        match self {
-            Self::InMemory(document) => &document.encoding,
-            Self::Paged(document) => &document.encoding,
         }
     }
 
@@ -268,18 +212,6 @@ impl LogDocument {
         }
     }
 
-    /// 读取最长行文本，用于估算横向滚动范围。
-    pub(crate) fn longest_line_text(&self) -> Option<String> {
-        match self {
-            Self::InMemory(document) => document.lines.get(document.longest_line_index).cloned(),
-            Self::Paged(document) => document
-                .read_line(document.longest_line_index())
-                .ok()
-                .flatten()
-                .map(|line| line.text.to_string()),
-        }
-    }
-
     /// 返回最长显示列数估算；分页文档只使用索引元信息，避免 UI 渲染路径读取正文。
     pub(crate) fn estimated_longest_display_columns(&self) -> usize {
         match self {
@@ -294,10 +226,6 @@ impl LogDocument {
 pub(crate) struct InMemoryLogDocument {
     /// 已解码行列表，不包含行尾换行符。
     pub lines: Arc<Vec<String>>,
-    /// 实际采用的编码标签。
-    pub encoding: String,
-    /// 最长行索引。
-    pub longest_line_index: usize,
     /// 最长展示列数，读取阶段预计算，避免 UI 切换页签时重新扫描长行。
     pub longest_display_columns: usize,
 }
@@ -384,16 +312,6 @@ impl PagedLogDocument {
     /// 返回日志行数。
     pub(crate) fn line_count(&self) -> usize {
         self.line_index.len()
-    }
-
-    /// 返回文件总字节数。
-    pub(crate) fn total_bytes(&self) -> u64 {
-        self.line_index.total_bytes()
-    }
-
-    /// 返回最长行索引。
-    pub(crate) fn longest_line_index(&self) -> usize {
-        self.line_index.longest_line_index()
     }
 
     /// 返回最长显示列数估算，不读取最长行正文。
@@ -919,17 +837,11 @@ fn open_local_log(request: OpenLogRequest, path: &Path) -> Result<LogReaderHandl
     let metadata =
         std::fs::metadata(path).with_context(|| format!("无法读取日志文件：{}", path.display()))?;
     if metadata.len() > LARGE_LOG_THRESHOLD_BYTES {
-        return build_paged_handle(
-            request,
-            ReadMode::MmapPaged,
-            path.to_path_buf(),
-            None,
-            metadata.len(),
-        );
+        return build_paged_handle(request, path.to_path_buf(), None, metadata.len());
     }
 
     let bytes = MmapBackend::read_to_bytes(path)?;
-    build_memory_handle(request, ReadMode::MmapPaged, bytes)
+    build_memory_handle(request, bytes)
 }
 
 /// 打开压缩包内部日志；小日志保存在内存，超阈值日志物化后分页。
@@ -981,24 +893,14 @@ fn open_archive_log(request: OpenLogRequest) -> Result<LogReaderHandle> {
             return Err(error);
         }
         drop(file);
-        return build_paged_handle(
-            request,
-            ReadMode::ArchiveSpooledPaged,
-            path,
-            Some(cleanup),
-            total_bytes,
-        );
+        return build_paged_handle(request, path, Some(cleanup), total_bytes);
     }
 
-    build_memory_handle(request, ReadMode::ArchiveStreaming, bytes)
+    build_memory_handle(request, bytes)
 }
 
 /// 从完整字节构建内存行文档。
-fn build_memory_handle(
-    request: OpenLogRequest,
-    read_mode: ReadMode,
-    bytes: Vec<u8>,
-) -> Result<LogReaderHandle> {
+fn build_memory_handle(request: OpenLogRequest, bytes: Vec<u8>) -> Result<LogReaderHandle> {
     let decoded = decode_log_bytes(&bytes, &request.default_encoding);
     let lines = split_decoded_lines(&decoded.text);
     let longest_line_index = longest_line_index(&lines);
@@ -1008,16 +910,12 @@ fn build_memory_handle(
         .unwrap_or_default();
     let document = LogDocument::InMemory(InMemoryLogDocument {
         lines: Arc::new(lines),
-        encoding: decoded.encoding_label,
-        longest_line_index,
         longest_display_columns,
     });
 
     Ok(LogReaderHandle {
-        source_id: request.source_id,
         label: request.label,
         path: request.location.display_path(),
-        read_mode,
         document,
     })
 }
@@ -1025,7 +923,6 @@ fn build_memory_handle(
 /// 从本地可 seek 文件构建分页文档句柄。
 fn build_paged_handle(
     request: OpenLogRequest,
-    read_mode: ReadMode,
     path: PathBuf,
     cleanup: Option<Arc<SpoolCleanup>>,
     _total_bytes: u64,
@@ -1037,10 +934,8 @@ fn build_paged_handle(
     )?);
 
     Ok(LogReaderHandle {
-        source_id: request.source_id,
         label: request.label,
         path: request.location.display_path(),
-        read_mode,
         document,
     })
 }
@@ -1112,12 +1007,11 @@ fn display_column_count(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        LARGE_LOG_THRESHOLD_BYTES, LogDocument, LogFileReader, LogOpenState, OpenLogRequest,
-        PagedLogDocument, split_decoded_lines,
+        LARGE_LOG_THRESHOLD_BYTES, LogDocument, LogFileReader, OpenLogRequest, PagedLogDocument,
+        split_decoded_lines,
     };
+    use crate::loader::SourceLocation;
     use crate::loader::archive::{ArchiveFormat, ArchivePasswordStore};
-    use crate::loader::{SourceId, SourceLocation};
-    use crate::reader::read_mode::ReadMode;
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
@@ -1146,7 +1040,6 @@ mod tests {
         fs::write(&path, []).expect("应能写入空日志文件");
 
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id: SourceId(1),
             location: SourceLocation::LocalPath(path.clone()),
             label: "empty.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1154,7 +1047,6 @@ mod tests {
         })
         .expect("空日志文件应能打开");
 
-        assert_eq!(handle.read_mode, ReadMode::MmapPaged);
         assert_eq!(handle.line_count(), 0);
         assert!(matches!(handle.document(), LogDocument::InMemory(_)));
 
@@ -1173,7 +1065,6 @@ mod tests {
         drop(file);
 
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id: SourceId(3),
             location: SourceLocation::LocalPath(path.clone()),
             label: "large.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1181,7 +1072,6 @@ mod tests {
         })
         .expect("大日志应能以分页模式打开");
 
-        assert_eq!(handle.read_mode, ReadMode::MmapPaged);
         assert!(matches!(handle.document(), LogDocument::Paged(_)));
         assert_eq!(handle.lines(0, 1).unwrap()[0].text, "first line");
 
@@ -1265,7 +1155,6 @@ mod tests {
         writer.finish().expect("应能完成 ZIP 写入");
 
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id: SourceId(2),
             location: SourceLocation::ArchiveEntry {
                 archive_path: path.clone(),
                 root_format: ArchiveFormat::Zip,
@@ -1280,22 +1169,9 @@ mod tests {
         })
         .expect("ZIP 内日志应能直接读取");
 
-        assert_eq!(handle.read_mode, ReadMode::ArchiveStreaming);
         assert_eq!(handle.line_count(), 2);
         assert_eq!(handle.lines(0, 2).unwrap()[1].text, "[ERROR] failed");
 
         let _ = fs::remove_file(path);
-    }
-
-    /// 验证读取状态能生成简短状态栏文案。
-    #[test]
-    fn read_state_reports_status_label() {
-        let state = LogOpenState::Loading {
-            mode: ReadMode::ArchiveStreaming,
-            message: "正在读取".to_string(),
-        };
-
-        assert!(state.status_label().contains("压缩流式"));
-        assert_eq!(state.message(), Some("正在读取"));
     }
 }

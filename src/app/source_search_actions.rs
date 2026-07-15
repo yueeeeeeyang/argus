@@ -9,10 +9,10 @@ use std::collections::HashSet;
 
 use gpui::{ClipboardItem, Context, Keystroke};
 
-use super::{ArgusApp, InputTextSelectionDrag};
+use super::ArgusApp;
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
-    remove_character_range, slice_character_range, word_range_at,
+    remove_character_range, slice_character_range,
 };
 
 impl ArgusApp {
@@ -47,7 +47,8 @@ impl ArgusApp {
     }
 
     /// 更新来源树搜索关键字，并同步重建过滤后的可见节点索引。
-    pub(crate) fn update_source_tree_search_query(&mut self, query: String) {
+    #[cfg(test)]
+    pub(super) fn update_source_tree_search_query(&mut self, query: String) {
         self.source_tree_search_input.value = query;
         self.source_tree_search_input.cursor =
             character_count(&self.source_tree_search_input.value);
@@ -335,7 +336,7 @@ impl ArgusApp {
             return;
         };
 
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
         self.placeholder_notice = "已复制来源树搜索关键字选区".to_string();
     }
@@ -347,7 +348,7 @@ impl ArgusApp {
             return;
         };
 
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
         self.delete_source_tree_search_selection();
         self.rebuild_filtered_source_ids();
@@ -356,7 +357,7 @@ impl ArgusApp {
 
     /// 从系统剪贴板粘贴纯文本到来源树搜索框光标位置。
     fn paste_source_tree_search_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(clipboard_text) = app_context
             .read_from_clipboard()
             .and_then(|clipboard_item| clipboard_item.text())

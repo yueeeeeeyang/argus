@@ -516,7 +516,6 @@ mod tests {
     use crate::app::{ArgusTab, TabKind};
     use crate::config::ConfigManager;
     use crate::loader::SourceId;
-    use crate::reader::read_mode::ReadMode;
     use gpui::{Modifiers, MouseDownEvent, MouseUpEvent, TestAppContext, point, px};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -667,7 +666,6 @@ mod tests {
         app.log_read_states.insert(
             source_id,
             LogOpenState::Loading {
-                mode: ReadMode::MmapPaged,
                 message: "正在读取".to_string(),
             },
         );

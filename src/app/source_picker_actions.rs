@@ -156,7 +156,8 @@ impl SourcePickerState {
     }
 
     /// 判断路径是否已经被加入待加载列表。
-    pub(crate) fn is_selected(&self, path: &Path) -> bool {
+    #[cfg(test)]
+    fn is_selected(&self, path: &Path) -> bool {
         self.selected_paths.iter().any(|selected| selected == path)
     }
 
@@ -322,12 +323,6 @@ impl ArgusApp {
         self.toggle_source_picker_path(path);
     }
 
-    /// 将当前目录加入待加载列表；保留给快捷入口和测试使用。
-    pub(crate) fn select_source_picker_current_directory(&mut self) {
-        let current_dir = self.source_picker.current_dir.clone();
-        self.toggle_source_picker_path(current_dir);
-    }
-
     /// 从待加载列表中移除指定路径。
     pub(crate) fn remove_source_picker_path(&mut self, path: &Path) {
         self.source_picker
@@ -444,11 +439,6 @@ impl ArgusApp {
     ) -> bool {
         // 拖拽事件只提供借用切片；统一加载流程需要拥有路径列表，以便移动到后台任务中。
         self.load_sources_from_paths(paths.to_vec(), ExternalSourceTrigger::DragDrop, cx)
-    }
-
-    /// 返回路径是否在待加载选择列表中。
-    pub(crate) fn is_source_picker_path_selected(&self, path: &Path) -> bool {
-        self.source_picker.is_selected(path)
     }
 
     /// 切换来源选择器目录列表排序字段或方向。

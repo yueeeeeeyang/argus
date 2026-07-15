@@ -16,13 +16,12 @@ pub(crate) const SOURCE_PANEL_MAX_WIDTH: f32 = 520.0;
 pub(crate) const LOG_CONTENT_FONT_SIZE_MIN: f32 = 12.0;
 /// 日志内容字号最大值，避免大字号破坏当前日志行布局。
 pub(crate) const LOG_CONTENT_FONT_SIZE_MAX: f32 = 20.0;
-/// 日志内容默认字号，匹配设计文档要求的高密度 12px 阅读区。
-pub(crate) const LOG_CONTENT_FONT_SIZE_DEFAULT: f32 = 12.0;
 /// 搜索结果面板默认高度。
 pub(crate) const SEARCH_RESULT_PANEL_HEIGHT_DEFAULT: f32 = 220.0;
 /// 搜索结果面板最小高度，保证标题和至少几行结果可见。
 pub(crate) const SEARCH_RESULT_PANEL_HEIGHT_MIN: f32 = 140.0;
 /// 搜索结果面板最大高度兜底值，主要用于单元测试验证 clamp 行为；运行时实际上限随窗口高度动态计算。
+#[cfg(test)]
 pub(crate) const SEARCH_RESULT_PANEL_HEIGHT_MAX: f32 = 520.0;
 /// 搜索结果面板拖拽到最大高度时，为上方日志内容保留的最小可见高度。
 ///

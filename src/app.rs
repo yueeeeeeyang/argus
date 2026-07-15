@@ -76,7 +76,6 @@ use crate::platform::open_with_registration::RegistrationStatus;
 use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
-use crate::reader::read_mode::ReadMode;
 use crate::remote::connection::ConnectionNodeId;
 use crate::remote::sftp::SftpSessionState;
 use crate::remote::terminal::TerminalSessionState;
@@ -793,7 +792,6 @@ impl ArgusApp {
             self.log_read_states.insert(
                 source_id,
                 LogOpenState::Failed {
-                    mode: None,
                     message: "未找到来源节点".to_string(),
                 },
             );
@@ -803,16 +801,13 @@ impl ArgusApp {
             self.log_read_states.insert(
                 source_id,
                 LogOpenState::Failed {
-                    mode: None,
                     message: format!("{} 不是可读取的日志候选", source_node.label),
                 },
             );
             return;
         }
 
-        let read_mode = read_mode_for_location(&source_node.location);
         let request = OpenLogRequest {
-            source_id,
             location: source_node.location.clone(),
             label: source_node.label.clone(),
             default_encoding: self.selected_encoding.clone(),
@@ -822,7 +817,6 @@ impl ArgusApp {
         self.log_read_states.insert(
             source_id,
             LogOpenState::Loading {
-                mode: read_mode,
                 message: format!("正在读取 {}", source_node.location.display_path()),
             },
         );
@@ -871,14 +865,9 @@ impl ArgusApp {
                     self.log_read_states.insert(source_id, LogOpenState::Idle);
                     return;
                 }
-                let read_mode = self
-                    .source_registry
-                    .node(source_id)
-                    .map(|node| read_mode_for_location(&node.location));
                 self.log_read_states.insert(
                     source_id,
                     LogOpenState::Failed {
-                        mode: read_mode,
                         message: error.to_string(),
                     },
                 );
@@ -917,8 +906,10 @@ impl ArgusApp {
             self.archive_passwords.remove(&key);
         }
 
-        let mut input = TextInputState::default();
-        input.is_focused = true;
+        let input = TextInputState {
+            is_focused: true,
+            ..TextInputState::default()
+        };
         self.archive_password_prompt = Some(ArchivePasswordPromptState {
             message: password_error
                 .is_invalid_password()
@@ -1289,15 +1280,6 @@ impl ArgusApp {
     /// 返回指定来源的日志读取状态。
     pub(crate) fn log_read_state(&self, source_id: SourceId) -> Option<&LogOpenState> {
         self.log_read_states.get(&source_id)
-    }
-
-    /// 返回当前激活日志标签的读取状态。
-    pub(crate) fn active_log_read_state(&self) -> Option<&LogOpenState> {
-        let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
-            return None;
-        };
-
-        self.log_read_state(source_id)
     }
 
     /// 返回当前激活日志标签页的读取句柄。
@@ -1707,35 +1689,6 @@ impl ArgusApp {
             .unwrap_or(TabKind::Empty)
     }
 
-    /// 返回内容区路径文案，优先展示真实选中来源。
-    pub(crate) fn content_path_label(&self) -> String {
-        match self.active_tab_kind() {
-            TabKind::LogSource { path, .. } => path,
-            TabKind::JstackAnalysis { analysis_id } => self
-                .jstack_analyses
-                .get(&analysis_id)
-                .map(|state| format!("Argus / {}", state.title))
-                .unwrap_or_else(|| "Argus / Jstack分析".to_string()),
-            TabKind::RuntimeAnalysis { analysis_id } => self
-                .runtime_analyses
-                .get(&analysis_id)
-                .map(|state| format!("Argus / {}", state.title))
-                .unwrap_or_else(|| "Argus / Runtime分析".to_string()),
-            TabKind::SshTerminal { session_id } => self
-                .terminal_sessions
-                .get(&session_id)
-                .map(|state| format!("SSH / {}", state.address))
-                .unwrap_or_else(|| "SSH / 终端".to_string()),
-            TabKind::SftpFileManager { session_id } => self
-                .sftp_sessions
-                .get(&session_id)
-                .map(|state| format!("SFTP / {}:{}", state.address, state.current_dir))
-                .unwrap_or_else(|| "SFTP / 文件管理".to_string()),
-            TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
-            TabKind::Empty => "未选择来源".to_string(),
-        }
-    }
-
     /// 请求来源树滚动到指定可见节点。
     pub(crate) fn scroll_source_into_view(&mut self, source_id: SourceId) {
         let index = if self.is_source_tree_filtering() {
@@ -1799,18 +1752,6 @@ impl ArgusApp {
         self.config.appearance.log_content_font_size = self.log_content_font_size;
         self.placeholder_notice =
             format!("日志内容字号已调整为 {:.0}px", self.log_content_font_size);
-        self.persist_config_or_report();
-    }
-
-    /// 切换编码设置。
-    pub(crate) fn cycle_encoding(&mut self) {
-        self.selected_encoding = match self.selected_encoding.as_str() {
-            "UTF-8" => "GBK".to_string(),
-            "GBK" => "Latin-1".to_string(),
-            _ => "UTF-8".to_string(),
-        };
-        self.config.encoding.selected = self.selected_encoding.clone();
-        self.placeholder_notice = format!("编码设置已切换为 {}", self.selected_encoding);
         self.persist_config_or_report();
     }
 
@@ -1898,19 +1839,6 @@ fn default_runtime_sql_sort_direction(sort_key: RuntimeSqlSortKey) -> RuntimeSor
         | RuntimeSqlSortKey::CommitDuration
         | RuntimeSqlSortKey::ReleaseConnectionDuration
         | RuntimeSqlSortKey::ParseResultDuration => RuntimeSortDirection::Descending,
-    }
-}
-
-/// 生成 Runtime SQL 行展开状态使用的稳定 key。
-pub(crate) fn runtime_sql_row_key(request_index: usize, sql_index: usize) -> String {
-    format!("{request_index}:{sql_index}")
-}
-
-/// 根据来源位置选择读取模式，避免 UI 或状态栏分散判断来源类型。
-fn read_mode_for_location(location: &SourceLocation) -> ReadMode {
-    match location {
-        SourceLocation::LocalPath(_) => ReadMode::MmapPaged,
-        SourceLocation::ArchiveEntry { .. } => ReadMode::ArchiveStreaming,
     }
 }
 

@@ -56,7 +56,6 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: false,
         }
     }
 

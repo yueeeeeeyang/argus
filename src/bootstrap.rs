@@ -305,9 +305,7 @@ fn log_key_probe_if_enabled(
 
 /// 激活最后一个 Argus 主窗口；全部失效时返回 `None`，让调用方重新创建主窗口。
 fn activate_last_argus_main_window(cx: &mut App) -> Option<WindowHandle<ArgusApp>> {
-    let Some(window_stack) = cx.window_stack() else {
-        return None;
-    };
+    let window_stack = cx.window_stack()?;
 
     for window_handle in window_stack.into_iter().rev() {
         let Some(window_handle) = window_handle.downcast::<ArgusApp>() else {

@@ -95,7 +95,7 @@ pub(crate) fn runtime_sql_dialog_character_index_from_pointer(
     if let Ok(mut wrapped_lines) = window.text_system().shape_text(
         SharedString::from(line.to_string()),
         font_size,
-        &[run.clone()],
+        std::slice::from_ref(&run),
         Some(bounds.size.width.max(px(1.0))),
         None,
     ) && let Some(wrapped_line) = wrapped_lines.pop()

@@ -216,7 +216,7 @@ impl JstackThreadDetailWindow {
     /// 复制当前详情窗口的堆栈正文选区；没有选区时不执行复制。
     fn copy_detail_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(stack_text) = self.selected_stack_text() {
-            let app_context: &gpui::App = (&*cx).borrow();
+            let app_context: &gpui::App = (*cx).borrow();
             app_context.write_to_clipboard(ClipboardItem::new_string(stack_text));
         }
     }
@@ -1082,11 +1082,15 @@ fn selected_stack_text_from_lines(
 
     let end_line = end.line_index.min(lines.len().saturating_sub(1));
     let mut selected = String::new();
-    for line_index in start.line_index..=end_line {
+    for (line_index, line) in lines
+        .iter()
+        .enumerate()
+        .take(end_line + 1)
+        .skip(start.line_index)
+    {
         if line_index > start.line_index {
             selected.push('\n');
         }
-        let line = &lines[line_index];
         let line_character_count = character_count(line);
         let start_column = if line_index == start.line_index {
             start.column.min(line_character_count)
@@ -1119,7 +1123,7 @@ fn merge_detail_stack_highlights(
     let mut merged = Vec::new();
     for (range, style) in syntax_highlights {
         for visible_range in subtract_detail_selection_range(range, &selection_range) {
-            merged.push((visible_range, style.clone()));
+            merged.push((visible_range, style));
         }
     }
     merged.push((

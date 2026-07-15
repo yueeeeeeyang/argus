@@ -75,11 +75,6 @@ impl SourceRegistry {
         self.nodes.is_empty()
     }
 
-    /// 返回节点总数。
-    pub(crate) fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
-
     /// 分配新的来源 ID。
     pub(crate) fn allocate_id(&mut self) -> SourceId {
         let id = SourceId(self.next_id);
@@ -118,6 +113,7 @@ impl SourceRegistry {
     }
 
     /// 返回指定节点后方是否还有同级节点，用于目录树连线避免绘制多余竖线。
+    #[cfg(test)]
     pub(crate) fn has_next_sibling(&self, id: SourceId) -> bool {
         self.row_meta
             .get(&id)
@@ -126,6 +122,7 @@ impl SourceRegistry {
     }
 
     /// 返回需要延续竖向连线的祖先层级，供虚拟列表行按需绘制树形上下文。
+    #[cfg(test)]
     pub(crate) fn ancestor_continuation_levels(&self, id: SourceId) -> &[usize] {
         self.row_meta
             .get(&id)
@@ -326,20 +323,6 @@ impl SourceRegistry {
             parent.expanded = false;
         }
         self.rebuild_visible_index();
-    }
-
-    /// 清空注册表并重建可见索引。
-    pub(crate) fn clear(&mut self) {
-        self.root_ids.clear();
-        self.nodes.clear();
-        self.children.clear();
-        self.visible_source_ids.clear();
-        self.visible_source_positions.clear();
-        self.tree_order_source_ids.clear();
-        self.search_keys.clear();
-        self.row_meta.clear();
-        self.selected_id = None;
-        self.next_id = 1;
     }
 
     /// 同时重建树序、行元数据和可见索引，供结构变化后调用。

@@ -11,10 +11,10 @@ use gpui::{AppContext, Context, Keystroke};
 use crate::app::{
     AppTextInputTarget, ArgusApp, ConnectionDeletePromptState, ConnectionDialogState,
     ConnectionDirectoryFormState, ConnectionHostKeyPromptState, ConnectionLinkFormState,
-    InputTextSelectionDrag, TextInputState,
+    TextInputState,
 };
 use crate::infra::text_selection::{
-    TextSelectionGranularity, character_count, replace_character_range, word_range_at,
+    TextSelectionGranularity, character_count, replace_character_range,
 };
 use crate::remote::connection::{
     ConnectionDeletedNodeKind, ConnectionLinkKind, ConnectionNodeId, ConnectionTreeRow,
@@ -1049,15 +1049,6 @@ pub(crate) fn normalized_connection_input_selection_range(
     input: &TextInputState,
 ) -> Option<Range<usize>> {
     input.selection_range()
-}
-
-/// 按鼠标点击粒度生成链接输入框字符范围。
-fn connection_input_range_for_granularity(
-    input: &TextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    input.range_for_granularity(character_index, granularity)
 }
 
 #[cfg(test)]

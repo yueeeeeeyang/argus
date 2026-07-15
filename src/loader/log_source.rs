@@ -37,25 +37,9 @@ pub(crate) enum SourceKind {
     ArchiveFile,
     /// 当前识别但暂不支持的来源。
     Unsupported(String),
-    /// 加载失败时展示的错误节点。
-    Error,
 }
 
 impl SourceKind {
-    /// 返回来源类型的短文案。
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Directory => "目录".to_string(),
-            Self::LogFile => "日志".to_string(),
-            Self::Archive(format) => format.label().to_string(),
-            Self::SingleFileArchive(format) => format.label().to_string(),
-            Self::ArchiveDirectory => "目录".to_string(),
-            Self::ArchiveFile => "条目".to_string(),
-            Self::Unsupported(reason) => reason.clone(),
-            Self::Error => "错误".to_string(),
-        }
-    }
-
     /// 返回节点是否拥有可展开子级。
     pub(crate) fn can_expand(&self) -> bool {
         matches!(
@@ -148,11 +132,4 @@ pub(crate) struct SourceTreeNode {
     pub selected: bool,
     /// 是否展开。
     pub expanded: bool,
-}
-
-impl SourceTreeNode {
-    /// 返回节点类型短文案。
-    pub(crate) fn kind_label(&self) -> String {
-        self.kind.label()
-    }
 }

@@ -33,7 +33,6 @@ impl ArchiveAdapter for GzipArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: false,
         }
     }
 
@@ -145,8 +144,7 @@ impl ArchiveAdapter for GzipArchiveAdapter {
 fn single_gzip_entry(source_label: &str) -> Vec<ArchiveEntryInfo> {
     let label = gzip_payload_label(source_label);
     vec![ArchiveEntryInfo {
-        path: label.clone(),
-        label,
+        path: label,
         is_dir: false,
         size: None,
     }]

@@ -12,7 +12,7 @@ use gpui::{Pixels, ScrollHandle, UniformListScrollHandle};
 
 use crate::analysis::runtime::{
     RuntimeAnalysisFilterRows, RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot,
-    RuntimeAnalysisResult, RuntimeAnalysisTarget, RuntimeRequestSummary, RuntimeSlowSqlSummaryRow,
+    RuntimeAnalysisResult, RuntimeRequestSummary, RuntimeSlowSqlSummaryRow,
     RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
 };
 use crate::infra::text_selection::{
@@ -31,11 +31,6 @@ pub(crate) enum RuntimeAnalysisTaskState {
     },
     /// 分析完成，可渲染三层统计表格。
     Ready(Arc<RuntimeAnalysisResult>),
-    /// 分析任务启动或后台执行失败。
-    Failed {
-        /// 用户可读失败原因。
-        message: String,
-    },
 }
 
 /// Runtime 分析页当前显示层级。
@@ -241,12 +236,6 @@ pub(crate) enum RuntimeSqlSortKey {
 /// 单个 Runtime 分析页签的持久状态。
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeAnalysisState {
-    /// 分析 ID，与 `TabKind::RuntimeAnalysis` 对应。
-    pub id: usize,
-    /// 页签标题。
-    pub title: String,
-    /// 本次分析的来源目标快照，保持创建页签时的来源树顺序。
-    pub targets: Vec<RuntimeAnalysisTarget>,
     /// 后台任务 generation，避免旧任务覆盖新结果。
     pub generation: usize,
     /// 当前三层 drill-down 视图。
@@ -548,11 +537,15 @@ pub(super) fn selected_runtime_sql_text_from_lines(
 
     let end_line = end.line_index.min(lines.len().saturating_sub(1));
     let mut selected = String::new();
-    for line_index in start.line_index..=end_line {
+    for (line_index, line) in lines
+        .iter()
+        .enumerate()
+        .take(end_line + 1)
+        .skip(start.line_index)
+    {
         if line_index > start.line_index {
             selected.push('\n');
         }
-        let line = &lines[line_index];
         let line_character_count = character_count(line);
         let start_column = if line_index == start.line_index {
             start.column.min(line_character_count)
@@ -661,15 +654,6 @@ pub(super) fn normalized_runtime_filter_input_selection_range(
     input.selection_range()
 }
 
-/// 根据鼠标选择粒度返回 Runtime 过滤输入框目标字符范围。
-pub(super) fn runtime_filter_input_range_for_granularity(
-    input: &TextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    input.range_for_granularity(character_index, granularity)
-}
-
 /// 解析 Runtime 时间过滤输入，支持毫秒时间戳和常见本地日期时间格式。
 pub(super) fn parse_runtime_filter_datetime_value(
     raw: &str,
@@ -729,25 +713,15 @@ pub(super) fn runtime_days_in_month(year: i32, month: u32) -> u32 {
 }
 
 /// 按年月调整 Runtime 时间，保留当前时分秒并处理月末越界。
-pub(super) fn adjust_runtime_datetime_year_month(
+pub(super) fn adjust_runtime_datetime_month(
     datetime: chrono::DateTime<Local>,
-    part: RuntimeDateTimePart,
     delta: i32,
 ) -> chrono::DateTime<Local> {
     let mut year = datetime.year();
     let mut month = datetime.month() as i32;
-    match part {
-        RuntimeDateTimePart::Year => year += delta,
-        RuntimeDateTimePart::Month => {
-            let month_index = year * 12 + (month - 1) + delta;
-            year = month_index.div_euclid(12);
-            month = month_index.rem_euclid(12) + 1;
-        }
-        RuntimeDateTimePart::Day
-        | RuntimeDateTimePart::Hour
-        | RuntimeDateTimePart::Minute
-        | RuntimeDateTimePart::Second => return datetime,
-    }
+    let month_index = year * 12 + (month - 1) + delta;
+    year = month_index.div_euclid(12);
+    month = month_index.rem_euclid(12) + 1;
 
     let month = month.clamp(1, 12) as u32;
     let day = datetime.day().min(runtime_days_in_month(year, month));
@@ -771,10 +745,7 @@ pub(super) fn adjust_runtime_datetime_part(
     delta: i32,
 ) -> chrono::DateTime<Local> {
     match part {
-        RuntimeDateTimePart::Year | RuntimeDateTimePart::Month => {
-            adjust_runtime_datetime_year_month(datetime, part, delta)
-        }
-        RuntimeDateTimePart::Day => datetime + chrono::Duration::days(delta as i64),
+        RuntimeDateTimePart::Month => adjust_runtime_datetime_month(datetime, delta),
         RuntimeDateTimePart::Hour => datetime + chrono::Duration::hours(delta as i64),
         RuntimeDateTimePart::Minute => datetime + chrono::Duration::minutes(delta as i64),
         RuntimeDateTimePart::Second => datetime + chrono::Duration::seconds(delta as i64),

@@ -351,8 +351,7 @@ fn source_meta_text(source: &SourceTreeNode, child_count: usize) -> String {
         | SourceKind::Archive(_)
         | SourceKind::SingleFileArchive(_)
         | SourceKind::ArchiveFile
-        | SourceKind::Unsupported(_)
-        | SourceKind::Error => source.metadata.size.map(format_bytes).unwrap_or_default(),
+        | SourceKind::Unsupported(_) => source.metadata.size.map(format_bytes).unwrap_or_default(),
     }
 }
 /// 根据节点层级和兄弟关系渲染目录树连线，避免最后一个子节点下方残留无连接竖线。
@@ -508,6 +507,6 @@ fn icon_for_source(source: &SourceTreeNode) -> ArgusIcon {
         SourceKind::ArchiveDirectory if source.expanded => ArgusIcon::FolderOpen,
         SourceKind::ArchiveDirectory => ArgusIcon::Folder,
         SourceKind::ArchiveFile | SourceKind::LogFile => ArgusIcon::FileText,
-        SourceKind::Unsupported(_) | SourceKind::Error => ArgusIcon::File,
+        SourceKind::Unsupported(_) => ArgusIcon::File,
     }
 }

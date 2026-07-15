@@ -32,7 +32,6 @@ impl ArchiveAdapter for TarArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: false,
         }
     }
 
@@ -153,14 +152,8 @@ where
             continue;
         }
 
-        let label = entry_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry_path.as_str())
-            .to_string();
         let entry_info = ArchiveEntryInfo {
             path: entry_path,
-            label,
             is_dir: entry.header().entry_type().is_dir(),
             size: Some(entry.size()),
         };
@@ -190,14 +183,8 @@ where
             continue;
         }
 
-        let label = entry_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry_path.as_str())
-            .to_string();
         entries.push(ArchiveEntryInfo {
             path: entry_path,
-            label,
             is_dir: entry.header().entry_type().is_dir(),
             size: Some(entry.size()),
         });

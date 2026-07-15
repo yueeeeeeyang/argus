@@ -36,6 +36,9 @@ const TEXTAREA_SCROLLBAR_MIN_THUMB: f32 = 18.0;
 /// 多行文本域滚动条滑块厚度。
 const TEXTAREA_SCROLLBAR_THUMB_SIZE: f32 = 4.0;
 
+/// 原生文本编辑写回回调；单行输入框和文本域共享同一签名。
+type NativeEditCallback = Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>;
+
 /// 输入框尺寸规格，便于不同工具栏复用同一组件。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputSize {
@@ -62,7 +65,7 @@ pub(crate) struct NativeInput {
     /// 当前输入框对应的真实 GPUI 焦点句柄。
     pub focus_handle: FocusHandle,
     /// 系统输入提交后的业务写回回调。
-    pub on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+    pub on_edit: NativeEditCallback,
 }
 
 /// 文本域内部滚动状态，保存滚动条拖拽态等纯 UI 交互数据。
@@ -602,7 +605,7 @@ fn effective_input_focus(
     runtime_focus_handle: Option<&FocusHandle>,
     window: &Window,
 ) -> bool {
-    is_focused && runtime_focus_handle.map_or(true, |focus_handle| focus_handle.is_focused(window))
+    is_focused && runtime_focus_handle.is_none_or(|focus_handle| focus_handle.is_focused(window))
 }
 
 /// 渲染输入框文本、选区和光标；光标通过循环动画实现静止闪烁。
@@ -1785,7 +1788,7 @@ struct NativeInputHandler {
     /// 输入框文本区域绘制边界。
     bounds: Bounds<Pixels>,
     /// 编辑写回回调。
-    on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+    on_edit: NativeEditCallback,
 }
 
 impl NativeInputHandler {
@@ -2038,7 +2041,7 @@ struct NativeTextareaInputHandler {
     /// 当前滚动内容相对可见视口的偏移，GPUI 向右/下滚动时为负值。
     scroll_offset: gpui::Point<Pixels>,
     /// 编辑写回回调。
-    on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+    on_edit: NativeEditCallback,
 }
 
 impl NativeTextareaInputHandler {

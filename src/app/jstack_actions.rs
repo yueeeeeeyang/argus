@@ -298,9 +298,6 @@ impl ArgusApp {
         self.jstack_analyses.insert(
             analysis_id,
             JstackAnalysisState {
-                id: analysis_id,
-                title: title.clone(),
-                targets,
                 generation,
                 active_states: BTreeSet::from([JstackThreadState::Runnable]),
                 is_thread_filter_enabled: true,
@@ -461,7 +458,7 @@ impl ArgusApp {
         };
 
         let selected_text = slice_character_range(&thread_name, range);
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
         self.placeholder_notice = format!("已复制线程名片段：{selected_text}");
     }

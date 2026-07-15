@@ -251,9 +251,7 @@ fn visible_row_capacity(viewport_height: gpui::Pixels) -> usize {
         return DEFAULT_VISIBLE_ROWS;
     }
 
-    ((f32::from(viewport_height) / LOG_VIEWER_ROW_HEIGHT).ceil() as usize + 2)
-        .max(1)
-        .min(400)
+    ((f32::from(viewport_height) / LOG_VIEWER_ROW_HEIGHT).ceil() as usize + 2).clamp(1, 400)
 }
 
 /// 计算分页日志最大纵向滚动像素。

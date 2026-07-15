@@ -20,15 +20,14 @@ use gpui::{
 };
 
 use super::{
-    ArgusApp, InputTextSelectionDrag, LogSearchInputKind, QuickMatchKey,
-    SEARCH_RESULT_PANEL_HEIGHT_MIN, SearchResultGroup, SearchResultListItem,
-    SearchResultPanelResizeDrag, SearchRunKind, TabKind, TextInputState,
+    ArgusApp, LogSearchInputKind, QuickMatchKey, SEARCH_RESULT_PANEL_HEIGHT_MIN, SearchResultGroup,
+    SearchResultListItem, SearchResultPanelResizeDrag, SearchRunKind, TabKind, TextInputState,
 };
 use crate::app::LOG_VIEWER_ROW_HEIGHT;
 use crate::config::SEARCH_RECENT_KEYWORDS_MAX;
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
-    remove_character_range, slice_character_range, word_range_at,
+    remove_character_range, slice_character_range,
 };
 use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceKind, SourceRegistry};
 use crate::search::search_engine::{
@@ -106,7 +105,7 @@ fn centered_paged_scroll_top(line_number: usize, line_count: usize, viewport_hei
 /// 后台搜索线程向 UI 线程回传的事件。
 enum SearchWorkerEvent {
     /// 目录搜索目标发现进度；可能携带补齐后的来源树快照。
-    Prepared(SearchPreparedEvent),
+    Prepared(Box<SearchPreparedEvent>),
     /// 搜索进度更新。
     Progress(SearchProgress),
     /// 搜索结果批次。
@@ -157,7 +156,7 @@ impl ArgusApp {
         }
 
         if self.log_search.is_window_open {
-            if let Some(window_handle) = self.log_search.window_handle.clone()
+            if let Some(window_handle) = self.log_search.window_handle
                 && window_handle
                     .update(cx, |_, window, _| window.activate_window())
                     .is_ok()
@@ -397,14 +396,8 @@ impl ArgusApp {
 
         if let Some((directory_id, registry, loader_config)) = directory_prepare {
             self.log_search.progress.current_path = Some("正在发现目录搜索目标".to_string());
-            let request = SearchRequest::with_queries(
-                generation,
-                scope,
-                queries,
-                Vec::new(),
-                default_encoding,
-            )
-            .with_archive_passwords(archive_passwords);
+            let request = SearchRequest::with_queries(queries, Vec::new(), default_encoding)
+                .with_archive_passwords(archive_passwords);
             spawn_directory_search_worker(
                 directory_id,
                 registry,
@@ -414,30 +407,27 @@ impl ArgusApp {
                 sender,
             );
         } else {
-            let request =
-                SearchRequest::with_queries(generation, scope, queries, targets, default_encoding)
-                    .with_archive_passwords(archive_passwords);
+            let request = SearchRequest::with_queries(queries, targets, default_encoding)
+                .with_archive_passwords(archive_passwords);
             spawn_search_worker(request, cancel_token, sender);
         }
 
         Self::poll_log_search_worker_events(generation, receiver, cx);
 
-        self.placeholder_notice = format!(
-            "{}",
-            if scope == SearchScope::Directory {
-                "正在发现目录搜索目标".to_string()
+        self.placeholder_notice = (if scope == SearchScope::Directory {
+            "正在发现目录搜索目标".to_string()
+        } else {
+            let action = if run_kind == SearchRunKind::QuickKeywords {
+                "正在快搜"
             } else {
-                let action = if run_kind == SearchRunKind::QuickKeywords {
-                    "正在快搜"
-                } else {
-                    "正在搜索"
-                };
-                format!(
-                    "{action} {} 个日志文件",
-                    self.log_search.progress.total_files
-                )
-            }
-        );
+                "正在搜索"
+            };
+            format!(
+                "{action} {} 个日志文件",
+                self.log_search.progress.total_files
+            )
+        })
+        .to_string();
     }
 
     /// 轮询后台搜索线程事件，并把批量结果合并应用到 UI 状态。
@@ -470,7 +460,7 @@ impl ArgusApp {
                                 }
                                 existing.total_files = event.total_files;
                             } else {
-                                prepared_event = Some(event);
+                                prepared_event = Some(*event);
                             }
                         }
                         Ok(SearchWorkerEvent::Progress(progress)) => {
@@ -509,7 +499,7 @@ impl ArgusApp {
                         if let Some(event) = prepared_event {
                             app.apply_search_worker_event(
                                 generation,
-                                SearchWorkerEvent::Prepared(event),
+                                SearchWorkerEvent::Prepared(Box::new(event)),
                             );
                         }
                         if let Some(progress) = latest_progress {
@@ -1355,14 +1345,6 @@ impl ArgusApp {
     ) {
         let input = self.log_search_input_mut(input_kind);
         input.finish_pointer_selection();
-    }
-
-    /// 当前输入框是否正在鼠标拖拽选择。
-    pub(crate) fn is_log_search_input_pointer_selecting(
-        &self,
-        input_kind: LogSearchInputKind,
-    ) -> bool {
-        self.log_search_input(input_kind).selection_drag.is_some()
     }
 
     /// 读取成功后执行等待中的搜索结果跳转。
@@ -2249,7 +2231,7 @@ impl ArgusApp {
         let Some(text) = self.selected_log_search_input_text(input_kind) else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -2269,7 +2251,7 @@ impl ArgusApp {
         input_kind: LogSearchInputKind,
         cx: &mut Context<Self>,
     ) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -2285,43 +2267,6 @@ impl ArgusApp {
             &self.log_search_input(input_kind).value,
             selection_range,
         ))
-    }
-
-    /// 根据选择粒度返回搜索输入框目标范围。
-    fn log_search_input_range_for_granularity(
-        &self,
-        input_kind: LogSearchInputKind,
-        character_index: usize,
-        granularity: TextSelectionGranularity,
-    ) -> Range<usize> {
-        let input = self.log_search_input(input_kind);
-        let text_length = character_count(&input.value);
-        let cursor = character_index.min(text_length);
-        match granularity {
-            TextSelectionGranularity::Character => cursor..cursor,
-            TextSelectionGranularity::Word => {
-                word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-            }
-            TextSelectionGranularity::Line => 0..text_length,
-        }
-    }
-
-    /// 合并输入框鼠标选择范围。
-    fn apply_log_search_input_pointer_range(
-        &mut self,
-        input_kind: LogSearchInputKind,
-        anchor_range: Range<usize>,
-        focus_range: Range<usize>,
-    ) {
-        let input = self.log_search_input_mut(input_kind);
-        if focus_range.end <= anchor_range.start {
-            input.selection_anchor = Some(anchor_range.end);
-            input.cursor = focus_range.start;
-        } else {
-            input.selection_anchor = Some(anchor_range.start);
-            input.cursor = anchor_range.end.max(focus_range.end);
-        }
-        input.marked_range = None;
     }
 }
 
@@ -2504,10 +2449,10 @@ fn send_directory_search_prepared(
     registry: Option<SourceRegistry>,
     total_files: usize,
 ) {
-    let _ = sender.send(SearchWorkerEvent::Prepared(SearchPreparedEvent {
+    let _ = sender.send(SearchWorkerEvent::Prepared(Box::new(SearchPreparedEvent {
         registry,
         total_files,
-    }));
+    })));
 }
 
 /// 搜索当前已经发现的一批目录目标，并把批内进度映射成目录总进度。
@@ -2852,7 +2797,7 @@ mod tests {
             path: "logs/app.log".to_string(),
             line_number: 1,
             line_text: "ERROR".to_string(),
-            match_ranges: vec![0..5],
+            match_ranges: std::iter::once(0..5).collect(),
             matched_keywords: vec!["ERROR".to_string()],
         }
     }
@@ -2947,7 +2892,7 @@ mod tests {
             path: "logs/app.log".to_string(),
             line_number: 1,
             line_text: "ERROR".to_string(),
-            match_ranges: vec![0..5],
+            match_ranges: std::iter::once(0..5).collect(),
             matched_keywords: vec!["ERROR".to_string()],
         });
 
@@ -3063,7 +3008,6 @@ mod tests {
         ));
         std::fs::write(&log_path, "first ERROR line\nsecond line").unwrap();
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id: first_id,
             location: SourceLocation::LocalPath(log_path.clone()),
             label: "app.log".to_string(),
             default_encoding: "utf-8".to_string(),
@@ -3145,7 +3089,7 @@ mod tests {
                 path: "logs/app.log".to_string(),
                 line_number: 2,
                 line_text: "ERROR".to_string(),
-                match_ranges: vec![0..5],
+                match_ranges: std::iter::once(0..5).collect(),
                 matched_keywords: vec!["ERROR".to_string()],
             },
         ];
@@ -3175,7 +3119,7 @@ mod tests {
             path: "logs/app.log".to_string(),
             line_number: 0,
             line_text: "ERROR".to_string(),
-            match_ranges: vec![0..5],
+            match_ranges: std::iter::once(0..5).collect(),
             matched_keywords: vec!["ERROR".to_string()],
         });
 
@@ -3202,7 +3146,7 @@ mod tests {
                     path: "logs/app.log".to_string(),
                     line_number: 1,
                     line_text: "ERROR one".to_string(),
-                    match_ranges: vec![0..5],
+                    match_ranges: std::iter::once(0..5).collect(),
                     matched_keywords: vec!["ERROR".to_string()],
                 },
                 SearchResult {
@@ -3211,7 +3155,7 @@ mod tests {
                     path: "logs/app.log".to_string(),
                     line_number: 2,
                     line_text: "ERROR two".to_string(),
-                    match_ranges: vec![0..5],
+                    match_ranges: std::iter::once(0..5).collect(),
                     matched_keywords: vec!["ERROR".to_string()],
                 },
                 SearchResult {
@@ -3220,7 +3164,7 @@ mod tests {
                     path: "logs/error.log".to_string(),
                     line_number: 3,
                     line_text: "ERROR three".to_string(),
-                    match_ranges: vec![0..5],
+                    match_ranges: std::iter::once(0..5).collect(),
                     matched_keywords: vec!["ERROR".to_string()],
                 },
             ],

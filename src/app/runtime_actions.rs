@@ -104,9 +104,6 @@ impl ArgusApp {
         self.runtime_analyses.insert(
             analysis_id,
             RuntimeAnalysisState {
-                id: analysis_id,
-                title: title.clone(),
-                targets,
                 generation,
                 view: RuntimeAnalysisView::Summary,
                 result_type: RuntimeAnalysisResultType::Statistics,
@@ -1058,7 +1055,7 @@ impl ArgusApp {
         if dialog
             .selection
             .as_ref()
-            .map_or(true, RuntimeSqlTextSelection::is_empty)
+            .is_none_or(RuntimeSqlTextSelection::is_empty)
         {
             dialog.selection = None;
         }
@@ -1086,7 +1083,7 @@ impl ArgusApp {
             return false;
         };
 
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
         self.placeholder_notice = format!("已复制 SQL 文本：{selected_text}");
         true
@@ -1198,7 +1195,7 @@ impl ArgusApp {
         };
 
         let selected_text = slice_character_range(&cell_text, range);
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
         self.placeholder_notice = format!("已复制 Runtime 单元格内容：{selected_text}");
     }
@@ -1565,9 +1562,7 @@ impl ArgusApp {
 
     /// Runtime 过滤条件变化后标记待应用，真正过滤由防抖后台任务完成。
     pub(crate) fn after_runtime_filter_changed(&mut self, analysis_id: usize) -> Option<usize> {
-        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
-            return None;
-        };
+        let state = self.runtime_analyses.get_mut(&analysis_id)?;
         state.filter_input_generation = state.filter_input_generation.saturating_add(1);
         state.is_filter_pending = true;
         state.cell_selection = None;
@@ -1605,7 +1600,7 @@ impl ArgusApp {
         else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
     }
 
@@ -1629,7 +1624,7 @@ impl ArgusApp {
         input_kind: RuntimeFilterInputKind,
         cx: &mut Context<Self>,
     ) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };

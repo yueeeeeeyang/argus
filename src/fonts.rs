@@ -50,7 +50,7 @@ fn load_font_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
         return Ok(None);
     }
 
-    fs::read(&path)
+    fs::read(path)
         .map(Some)
         .map_err(|error| anyhow::anyhow!("无法读取内置字体文件 {}：{}", path.display(), error))
 }

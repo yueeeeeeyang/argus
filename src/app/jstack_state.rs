@@ -9,8 +9,8 @@ use std::ops::Range;
 use gpui::UniformListScrollHandle;
 
 use crate::analysis::jstack::{
-    JstackAnalysisResult, JstackAnalysisTarget, JstackFrequencyRow, JstackThreadFilter,
-    JstackThreadStackOccurrence, JstackThreadState,
+    JstackAnalysisResult, JstackFrequencyRow, JstackThreadFilter, JstackThreadStackOccurrence,
+    JstackThreadState,
 };
 use crate::infra::text_selection::{TextSelectionGranularity, character_count, word_range_at};
 
@@ -24,22 +24,11 @@ pub(crate) enum JstackAnalysisTaskState {
     },
     /// 分析完成，可渲染频率矩阵。
     Ready(JstackAnalysisResult),
-    /// 分析任务启动或后台执行失败。
-    Failed {
-        /// 用户可读失败原因。
-        message: String,
-    },
 }
 
 /// 单个 Jstack 分析页签的持久状态。
 #[derive(Clone, Debug)]
 pub(crate) struct JstackAnalysisState {
-    /// 分析 ID，与 `TabKind::JstackAnalysis` 对应。
-    pub id: usize,
-    /// 页签标题。
-    pub title: String,
-    /// 本次分析的来源目标快照，保持创建页签时的来源树顺序。
-    pub targets: Vec<JstackAnalysisTarget>,
     /// 后台任务 generation，避免旧任务覆盖新结果。
     pub generation: usize,
     /// 当前启用的线程状态筛选项；默认仅展示 RUNNABLE。

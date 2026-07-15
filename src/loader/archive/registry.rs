@@ -417,7 +417,6 @@ mod tests {
         assert!(capabilities.supports_listing);
         assert!(capabilities.supports_entry_reading);
         assert!(capabilities.supports_nested_archives);
-        assert!(capabilities.supports_passwords);
     }
 
     /// 验证普通 gzip 文件不会只因 gzip 魔数被误判成 tar.gz 目录树。

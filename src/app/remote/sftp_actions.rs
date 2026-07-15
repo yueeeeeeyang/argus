@@ -16,7 +16,6 @@ use crate::app::{
 };
 use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
-    slice_character_range, word_range_at,
 };
 use crate::loader::PathBrowser;
 use crate::remote::sftp::{
@@ -359,7 +358,7 @@ impl ArgusApp {
             return;
         }
         let receiver = {
-            let app_context: &gpui::App = (&*cx).borrow();
+            let app_context: &gpui::App = (*cx).borrow();
             app_context.prompt_for_paths(PathPromptOptions {
                 files: true,
                 directories: false,
@@ -412,7 +411,7 @@ impl ArgusApp {
             let entry = selected[0].clone();
             let default_dir = PathBrowser::default_start_directory();
             let receiver = {
-                let app_context: &gpui::App = (&*cx).borrow();
+                let app_context: &gpui::App = (*cx).borrow();
                 app_context.prompt_for_new_path(&default_dir, Some(&entry.name))
             };
             cx.spawn(async move |view, cx| {
@@ -427,7 +426,7 @@ impl ArgusApp {
         } else {
             let entries = selected;
             let receiver = {
-                let app_context: &gpui::App = (&*cx).borrow();
+                let app_context: &gpui::App = (*cx).borrow();
                 app_context.prompt_for_paths(PathPromptOptions {
                     files: false,
                     directories: true,
@@ -830,7 +829,6 @@ impl ArgusApp {
         self.next_sftp_session_id += 1;
         let request = SftpWorkerRequest {
             session_id,
-            link_id,
             backend: worker_backend,
         };
         let (command_sender, event_receiver) = spawn_sftp_worker(request);
@@ -907,7 +905,6 @@ impl ArgusApp {
             }
             SftpEvent::FileContentLoaded {
                 session_id,
-                remote_path: _,
                 file_name,
                 content,
             } => {
@@ -1207,19 +1204,4 @@ fn apply_native_edit_to_sftp_input(input: &mut TextInputState, edit: &NativeText
 /// 返回输入框当前规范化选区。
 fn normalized_input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize>> {
     input.selection_range()
-}
-
-/// 根据选择粒度返回输入框字符范围。
-fn input_range_for_granularity(
-    input: &TextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> std::ops::Range<usize> {
-    input.range_for_granularity(character_index, granularity)
-}
-
-/// 返回输入框指定字符范围的文本。
-#[allow(dead_code)]
-fn selected_sftp_input_text(input: &TextInputState) -> Option<String> {
-    normalized_input_selection_range(input).map(|range| slice_character_range(&input.value, range))
 }

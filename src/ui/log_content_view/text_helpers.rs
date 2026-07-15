@@ -318,7 +318,7 @@ pub(crate) fn visible_log_text_from_raw(
             let start = range.start.max(display_column);
             let end = range.end.min(tab_end);
             if start < end {
-                text.extend(std::iter::repeat(' ').take(end - start));
+                text.extend(std::iter::repeat_n(' ', end - start));
             }
             display_column = tab_end;
             continue;
@@ -396,7 +396,7 @@ pub(crate) fn merge_log_line_highlights(
         };
 
         for visible_range in subtract_ranges(span.range, &protected_ranges) {
-            highlights.push((visible_range, syntax_style.clone()));
+            highlights.push((visible_range, syntax_style));
         }
     }
 
@@ -494,7 +494,7 @@ pub(crate) fn push_non_overlapping_highlight(
         && ranges_overlap(&range, selection)
     {
         if range.start < selection.start {
-            highlights.push((range.start..range.end.min(selection.start), style.clone()));
+            highlights.push((range.start..range.end.min(selection.start), style));
         }
         if selection.end < range.end {
             highlights.push((range.start.max(selection.end)..range.end, style));

@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::utils::path::{archive_virtual_path, normalize_archive_entry_path};
+use crate::utils::path::normalize_archive_entry_path;
 
 /// 压缩包密码缓存键；同一个真实文件里的不同嵌套容器可能使用不同密码。
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -39,18 +39,6 @@ impl ArchivePasswordKey {
             container_entries: Vec::new(),
         }
     }
-
-    /// 返回面向用户展示的容器路径。
-    pub(crate) fn display_label(&self) -> String {
-        if self.container_entries.is_empty() {
-            return self.archive_path.display().to_string();
-        }
-
-        let Some((entry_path, parent_containers)) = self.container_entries.split_last() else {
-            return self.archive_path.display().to_string();
-        };
-        archive_virtual_path(&self.archive_path, parent_containers, entry_path)
-    }
 }
 
 /// 当前进程内的压缩包密码缓存；只保存在内存，不写入配置文件。
@@ -79,16 +67,6 @@ impl ArchivePasswordStore {
     /// 读取指定容器的密码。
     pub(crate) fn get(&self, key: &ArchivePasswordKey) -> Option<&str> {
         self.passwords.get(key).map(String::as_str)
-    }
-
-    /// 根据真实压缩包路径和容器链路读取密码。
-    pub(crate) fn get_for_container(
-        &self,
-        archive_path: &Path,
-        container_entries: &[String],
-    ) -> Option<&str> {
-        let key = ArchivePasswordKey::new(archive_path.to_path_buf(), container_entries);
-        self.get(&key)
     }
 }
 

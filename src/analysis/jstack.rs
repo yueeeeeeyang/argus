@@ -186,13 +186,6 @@ impl JstackThreadDetail {
     }
 }
 
-impl JstackThreadStackOccurrence {
-    /// 返回当前堆栈出现记录的线程身份文本。
-    pub(crate) fn display_label(&self) -> String {
-        thread_display_label(&self.thread_name, &self.thread_id)
-    }
-}
-
 impl JstackFrequencyRow {
     /// 返回矩阵行使用的线程身份文本。
     pub(crate) fn display_label(&self) -> String {
@@ -503,6 +496,7 @@ fn jstack_target_for_local_file(
 /// - `text`：完整日志文本。
 ///
 /// 返回值：一个快照的线程样本列表。
+#[cfg(test)]
 pub(crate) fn parse_jstack_snapshot(
     source_id: SourceId,
     label: impl Into<String>,
@@ -620,7 +614,6 @@ fn read_jstack_snapshot(
 ) -> Result<JstackSnapshot> {
     let location = resolve_jstack_target_location(&target, loader_config)?;
     let handle = LogFileReader::open(OpenLogRequest {
-        source_id: target.source_id,
         location,
         label: target.label.clone(),
         default_encoding: default_encoding.to_string(),
@@ -800,7 +793,7 @@ fn dominant_state(state_counts: &BTreeMap<JstackThreadState, usize>) -> Option<J
 
 /// 解析线程名过滤关键字；过滤适合短词，因此支持常见行内分隔符。
 fn parse_thread_name_filter_patterns(raw: &str) -> Vec<JstackThreadNamePattern> {
-    raw.split(|character: char| matches!(character, ',' | ';' | '|' | '\n' | '\r' | '，' | '；'))
+    raw.split([',', ';', '|', '\n', '\r', '，', '；'])
         .filter_map(|pattern| {
             let pattern = normalized_filter_pattern(pattern)?;
             if pattern.contains('*') || pattern.contains('?') {
@@ -1385,8 +1378,10 @@ mod tests {
         fs::create_dir_all(&dir).expect("应能创建 Jstack 符号链接测试路径");
         fs::write(dir.join("thread-a.log"), sample_jstack_text()).expect("应能写入 Jstack 日志");
         std::os::unix::fs::symlink(&dir, dir.join("loop")).expect("应能创建目录符号链接回环");
-        let mut config = LoaderConfig::default();
-        config.follow_symlinks = true;
+        let config = LoaderConfig {
+            follow_symlinks: true,
+            ..LoaderConfig::default()
+        };
 
         let result = analyze_jstack_targets(
             vec![JstackAnalysisTarget {

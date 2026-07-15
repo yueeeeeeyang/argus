@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：统一真实路径、压缩包内路径和界面文案之间的转换规则。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// 返回路径最后一段作为界面标签；无法取得文件名时退回完整路径。
 pub(crate) fn display_name(path: &Path) -> String {
@@ -41,11 +41,4 @@ pub(crate) fn normalize_archive_entry_path(path: &str) -> String {
         .trim_start_matches('/')
         .trim_end_matches('/')
         .to_string()
-}
-
-/// 返回路径的父目录；没有父目录时返回原路径副本，便于后续状态栏展示。
-pub(crate) fn parent_or_self(path: &Path) -> PathBuf {
-    path.parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| path.to_path_buf())
 }

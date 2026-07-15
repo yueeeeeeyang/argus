@@ -63,8 +63,6 @@ const HOVER_STACK_PREVIEW_LINE_LIMIT: usize = 10;
 /// Jstack 方块悬浮预览数据。
 #[derive(Clone)]
 pub(crate) struct JstackCellPreviewData {
-    /// 当前主题令牌。
-    pub theme: AppTheme,
     /// 快照文件名称。
     pub snapshot_label: String,
     /// 线程名称。
@@ -168,9 +166,6 @@ pub(crate) fn render(
                 cx,
             )
             .into_any_element(),
-            JstackAnalysisTaskState::Failed { message } => {
-                render_error_state(message, &theme).into_any_element()
-            }
         })
         .into_any_element()
 }
@@ -211,9 +206,7 @@ fn render_header(
                 result.skipped_count(),
                 state.filtered_row_count,
             ),
-            JstackAnalysisTaskState::Loading { .. } | JstackAnalysisTaskState::Failed { .. } => {
-                (0, 0, 0, 0, 0)
-            }
+            JstackAnalysisTaskState::Loading { .. } => (0, 0, 0, 0, 0),
         };
     let filter_summary = if filtered_count > 0 {
         format!("，过滤 {filtered_count} 个线程")
@@ -419,18 +412,6 @@ fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + u
             theme.foreground_muted,
             18.0,
         ))
-        .child(message.to_string())
-}
-
-/// 渲染失败态。
-fn render_error_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(13.0))
-        .text_color(rgb(theme.error))
         .child(message.to_string())
 }
 
@@ -894,7 +875,6 @@ fn render_frequency_cell(
     let is_selected_cell = selected_cell_key == Some(cell_key.as_str());
     let preview_key = format!("{analysis_id}:{cell_key}");
     let preview_data = JstackCellPreviewData {
-        theme: theme.clone(),
         snapshot_label,
         thread_name: thread_name.clone(),
         count: cell.count,

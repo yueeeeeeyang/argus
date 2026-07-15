@@ -5,7 +5,7 @@
 //! 主要功能：将不可随机访问的压缩流物化到 `~/.argus/cache/log_pages`，供分页 reader 复用本地文件读取能力。
 
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,11 +35,6 @@ impl SpoolCleanup {
     /// 返回值：可被 reader 句柄共享的清理器。
     pub(crate) fn new(path: PathBuf) -> Arc<Self> {
         Arc::new(Self { path })
-    }
-
-    /// 返回临时分页文件路径。
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
     }
 }
 

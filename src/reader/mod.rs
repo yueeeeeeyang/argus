@@ -8,6 +8,5 @@ pub(crate) mod encoding_detector;
 pub(crate) mod line_index;
 pub(crate) mod log_file_reader;
 pub(crate) mod mmap_backend;
-pub(crate) mod read_mode;
 pub(crate) mod spooled_backend;
 pub(crate) mod stream_backend;

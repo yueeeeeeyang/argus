@@ -74,7 +74,6 @@ impl ArchiveAdapter for RarArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: true,
         }
     }
 
@@ -980,10 +979,8 @@ fn skip_bytes(
 
 /// 构建统一压缩包条目模型。
 fn build_entry(path: String, is_dir: bool, size: Option<u64>) -> ArchiveEntryInfo {
-    let label = path.rsplit('/').next().unwrap_or(path.as_str()).to_string();
     ArchiveEntryInfo {
         path,
-        label,
         is_dir,
         size: if is_dir { None } else { size },
     }

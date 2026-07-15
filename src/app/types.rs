@@ -143,12 +143,8 @@ pub(crate) enum RuntimeFilterInputKind {
 /// Runtime 日期时间选择器可调整的时间部分。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeDateTimePart {
-    /// 年。
-    Year,
     /// 月。
     Month,
-    /// 日。
-    Day,
     /// 时。
     Hour,
     /// 分。

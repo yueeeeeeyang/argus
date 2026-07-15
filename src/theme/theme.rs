@@ -124,15 +124,4 @@ impl AppTheme {
             syntax: SyntaxTheme::dark(),
         }
     }
-
-    /// 根据日志级别返回对应颜色，未知级别回退为主文本颜色。
-    pub(crate) fn color_for_level(&self, level: &str) -> u32 {
-        match level {
-            "DEBUG" => self.debug,
-            "INFO" => self.info,
-            "WARN" => self.warning,
-            "ERROR" => self.error,
-            _ => self.foreground,
-        }
-    }
 }

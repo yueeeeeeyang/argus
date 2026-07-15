@@ -18,8 +18,6 @@ pub(crate) enum IconButtonSize {
     Small,
     /// 来源侧栏工具区中的 14px 图标按钮。
     Tiny,
-    /// 左侧活动栏中的常规按钮。
-    Medium,
 }
 
 /// 图标按钮内容的视觉下移量。
@@ -80,7 +78,6 @@ pub(crate) fn render_icon_button(
     let (button_size, icon_size) = match size {
         IconButtonSize::Small => (28.0, 16.0),
         IconButtonSize::Tiny => (24.0, 14.0),
-        IconButtonSize::Medium => (36.0, 18.0),
     };
     let selected_background = theme.selection;
     let hover_background = if is_selected {

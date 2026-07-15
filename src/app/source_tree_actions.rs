@@ -322,7 +322,8 @@ impl ArgusApp {
     }
 
     /// 应用懒加载子级报告，并挂回指定父节点。
-    pub(crate) fn apply_child_load_report(
+    #[cfg(test)]
+    pub(super) fn apply_child_load_report(
         &mut self,
         parent_id: SourceId,
         load_generation: usize,

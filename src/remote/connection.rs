@@ -866,16 +866,6 @@ impl SmbLinkConfig {
             .unwrap_or_else(|| self.username.clone());
         format!("{user}@{}:{}/{}", self.host, self.port, self.share)
     }
-
-    /// 返回 SMB 客户端需要的服务器地址。
-    pub(crate) fn server_url(&self) -> String {
-        format!("smb://{}:{}", self.host, self.port)
-    }
-
-    /// 返回 SMB 客户端需要的共享名参数。
-    pub(crate) fn share_path(&self) -> String {
-        format!("/{}", self.share.trim_start_matches('/'))
-    }
 }
 
 /// 用户确认可信的 SSH 主机指纹。

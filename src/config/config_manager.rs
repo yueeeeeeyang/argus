@@ -47,16 +47,10 @@ impl ConfigManager {
         Self { settings_path }
     }
 
-    /// 兼容旧调用方的配置加载入口。
-    ///
-    /// 返回值：读取默认路径的配置，失败时回退默认值。
-    pub(crate) fn load_default() -> AppConfig {
-        Self::default_paths().load()
-    }
-
     /// 从当前管理器路径读取配置。
     ///
     /// 返回值：文件不存在或解析失败时返回默认配置，保证应用启动不被坏配置阻塞。
+    #[cfg(test)]
     pub(crate) fn load(&self) -> AppConfig {
         self.load_with_warning().0
     }
@@ -110,6 +104,7 @@ impl ConfigManager {
     }
 
     /// 返回当前设置文件路径，便于测试和诊断输出确认真实落点。
+    #[cfg(test)]
     pub(crate) fn settings_path(&self) -> &Path {
         &self.settings_path
     }

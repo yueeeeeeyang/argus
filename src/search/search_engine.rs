@@ -58,6 +58,7 @@ pub(crate) struct SearchQuery {
 
 impl SearchQuery {
     /// 构造默认大小写不敏感的关键字查询。
+    #[cfg(test)]
     pub(crate) fn new(keyword: String) -> Self {
         Self {
             keyword,
@@ -83,10 +84,6 @@ pub(crate) struct SearchTarget {
 /// 搜索任务请求。
 #[derive(Clone, Debug)]
 pub(crate) struct SearchRequest {
-    /// 搜索 generation，用于 UI 丢弃过期任务事件。
-    pub generation: usize,
-    /// 搜索范围。
-    pub scope: SearchScope,
     /// 搜索关键字集合；普通搜索只有一个查询，快搜会包含多个查询。
     pub queries: Vec<SearchQuery>,
     /// 本次搜索目标。
@@ -99,27 +96,22 @@ pub(crate) struct SearchRequest {
 
 impl SearchRequest {
     /// 构造普通单关键字搜索请求。
+    #[cfg(test)]
     pub(crate) fn new(
-        generation: usize,
-        scope: SearchScope,
         query: SearchQuery,
         targets: Vec<SearchTarget>,
         default_encoding: String,
     ) -> Self {
-        Self::with_queries(generation, scope, vec![query], targets, default_encoding)
+        Self::with_queries(vec![query], targets, default_encoding)
     }
 
     /// 构造多关键字搜索请求，调用方需保证查询集合非空。
     pub(crate) fn with_queries(
-        generation: usize,
-        scope: SearchScope,
         queries: Vec<SearchQuery>,
         targets: Vec<SearchTarget>,
         default_encoding: String,
     ) -> Self {
         Self {
-            generation,
-            scope,
             queries,
             targets,
             default_encoding,
@@ -188,6 +180,7 @@ pub(crate) struct SearchTaskSummary {
 
 /// 当前日志快速查找扫描结果。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg(test)]
 pub(crate) struct CurrentLogMatchScan {
     /// 按行保存的命中结果；单行内可能包含多个命中范围。
     pub matches: Vec<SearchResult>,
@@ -256,6 +249,7 @@ impl SearchEngine {
     /// - `cancel_token`：外部取消标记，旧任务会在行块边界尽快退出。
     ///
     /// 返回值：当前日志所有命中行与出现总次数；不会读取目录或其它日志文件。
+    #[cfg(test)]
     pub(crate) fn scan_current_log_matches(
         target: SearchTarget,
         handle: LogReaderHandle,
@@ -462,7 +456,6 @@ impl SearchEngine {
             progress_callback(progress.clone());
 
             let handle = match LogFileReader::open(OpenLogRequest {
-                source_id: target.source_id,
                 location: target.location.clone(),
                 label: target.label.clone(),
                 default_encoding: request.default_encoding.clone(),
@@ -1283,7 +1276,7 @@ fn last_match_before_index(
         .iter()
         .enumerate()
         .take(clamped_max)
-        .last()
+        .next_back()
         .map(|(index, range)| (index, range.clone()))
 }
 
@@ -1637,7 +1630,7 @@ mod tests {
 
     use super::{
         CurrentLogMatchDirection, CurrentLogMatchPosition, SearchEngine, SearchQuery,
-        SearchRequest, SearchScope, SearchTarget, find_match_ranges,
+        SearchRequest, SearchTarget, find_match_ranges,
     };
     use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
@@ -1711,8 +1704,6 @@ mod tests {
     #[test]
     fn invalid_regex_query_is_reported_without_scanning_files() {
         let request = SearchRequest::new(
-            1,
-            SearchScope::CurrentFile,
             SearchQuery {
                 keyword: "(".to_string(),
                 case_sensitive: false,
@@ -1746,7 +1737,6 @@ mod tests {
         fs::write(&path, "ERROR ERROR\ninfo\nerror\n").unwrap();
         let source_id = SourceId(7);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "count.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1782,9 +1772,7 @@ mod tests {
             6
         ));
         fs::write(&path, "ERROR ERROR\ninfo\nerror\n").unwrap();
-        let source_id = SourceId(11);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "count-only.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1819,7 +1807,6 @@ mod tests {
         fs::write(&path, text).unwrap();
         let source_id = SourceId(8);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "next.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1870,7 +1857,6 @@ mod tests {
         fs::write(&path, "ERROR one ERROR two\n").unwrap();
         let source_id = SourceId(9);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "inline.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1919,7 +1905,6 @@ mod tests {
         fs::write(&path, "ERROR first\nINFO middle\nerror last\n").unwrap();
         let source_id = SourceId(10);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "prev.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1961,8 +1946,6 @@ mod tests {
         ));
         fs::write(&path, "INFO start\nERROR failed\nwarn\nerror again\n").unwrap();
         let request = SearchRequest::new(
-            1,
-            SearchScope::CurrentFile,
             SearchQuery::new("error".to_string()),
             vec![SearchTarget {
                 source_id: SourceId(1),
@@ -2003,8 +1986,6 @@ mod tests {
         ));
         fs::write(&path, "ERROR timeout\nWARN only\nINFO ok\n").unwrap();
         let request = SearchRequest::with_queries(
-            1,
-            SearchScope::CurrentFile,
             vec![
                 SearchQuery::new("ERROR".to_string()),
                 SearchQuery::new("timeout".to_string()),

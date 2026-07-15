@@ -223,20 +223,6 @@ impl ArgusApp {
         LogTextPosition { line_index, column }
     }
 
-    /// 从指定行和鼠标位置开始选择日志文本。
-    pub(crate) fn begin_log_text_selection(
-        &mut self,
-        tab_id: usize,
-        line_index: usize,
-        line: &str,
-        pointer_x: Pixels,
-        window: &mut Window,
-    ) {
-        self.begin_log_text_selection_with_click_count(
-            tab_id, line_index, line, pointer_x, 1, window,
-        );
-    }
-
     /// 从指定行和鼠标位置开始选择日志文本，并根据点击次数选择粒度。
     pub(crate) fn begin_log_text_selection_with_click_count(
         &mut self,
@@ -315,7 +301,8 @@ impl ArgusApp {
     }
 
     /// 在指定日志行内按字符列选中一个词；点到空白时清空选区。
-    pub(crate) fn select_log_word_at(
+    #[cfg(test)]
+    pub(super) fn select_log_word_at(
         &mut self,
         tab_id: usize,
         line_index: usize,
@@ -335,7 +322,8 @@ impl ArgusApp {
     }
 
     /// 在指定日志行选中整行展示文本。
-    pub(crate) fn select_log_text_line(&mut self, tab_id: usize, line_index: usize, line: &str) {
+    #[cfg(test)]
+    pub(super) fn select_log_text_line(&mut self, tab_id: usize, line_index: usize, line: &str) {
         let selection =
             log_text_range_for_granularity(line_index, line, 0, TextSelectionGranularity::Line);
         let state = self.log_tab_view_states.entry(tab_id).or_default();
@@ -471,14 +459,14 @@ impl ArgusApp {
         };
 
         let selected_length = character_count(&selected_text);
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
         self.placeholder_notice = format!("已复制日志文本选区，共 {selected_length} 个字符");
     }
 
     /// 处理日志文本区域的粘贴快捷键；日志查看器只读，因此不会修改真实内容。
     fn paste_log_text_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(clipboard_text) = app_context
             .read_from_clipboard()
             .and_then(|clipboard_item| clipboard_item.text())

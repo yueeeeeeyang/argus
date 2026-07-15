@@ -47,9 +47,6 @@ const UPGRADE_HTTP_TOTAL_TIMEOUT_SECONDS: u64 = 300;
 /// 升级流程错误，UI 层会把它转换为用户可读提示。
 #[derive(Debug, Error)]
 pub(crate) enum UpgradeError {
-    /// 自动升级未启用。
-    #[error("自动升级未启用")]
-    Disabled,
     /// 未配置升级服务器地址。
     #[error("未配置升级服务器地址")]
     MissingServerUrl,
@@ -428,6 +425,7 @@ where
     R: BinaryReplacer,
 {
     /// 构造可注入依赖的升级服务，主要供单元测试复用。
+    #[cfg(test)]
     pub(crate) fn new(http_client: C, verifier: V, replacer: R, updates_dir: PathBuf) -> Self {
         Self {
             http_client,

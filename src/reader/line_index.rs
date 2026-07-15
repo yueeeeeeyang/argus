@@ -28,8 +28,6 @@ pub(crate) struct LineIndexEntry {
 pub(crate) struct LineIndex {
     /// 每一行对应的字节范围。
     entries: Arc<Vec<LineIndexEntry>>,
-    /// 文件总字节数。
-    total_bytes: u64,
     /// 最长行的索引，用于横向滚动范围估算。
     longest_line_index: usize,
 }
@@ -39,18 +37,12 @@ impl LineIndex {
     ///
     /// 参数说明：
     /// - `entries`：按文件顺序排列的行范围。
-    /// - `total_bytes`：文件总字节数。
     /// - `longest_line_index`：最长行下标。
     ///
     /// 返回值：可共享的行索引对象。
-    pub(crate) fn new(
-        entries: Vec<LineIndexEntry>,
-        total_bytes: u64,
-        longest_line_index: usize,
-    ) -> Self {
+    pub(crate) fn new(entries: Vec<LineIndexEntry>, longest_line_index: usize) -> Self {
         Self {
             entries: Arc::new(entries),
-            total_bytes,
             longest_line_index,
         }
     }
@@ -61,16 +53,13 @@ impl LineIndex {
     }
 
     /// 返回索引是否为空。
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// 返回文件总字节数。
-    pub(crate) fn total_bytes(&self) -> u64 {
-        self.total_bytes
-    }
-
     /// 返回最长行索引。
+    #[cfg(test)]
     pub(crate) fn longest_line_index(&self) -> usize {
         self.longest_line_index
     }
@@ -94,6 +83,7 @@ impl LineIndex {
 /// - `path`：需要分页读取的本地日志或已物化压缩日志路径。
 ///
 /// 返回值：完整行索引；空文件返回 0 行。
+#[cfg(test)]
 pub(crate) fn build_line_index(path: &Path) -> Result<LineIndex> {
     build_line_index_with_encoding(path, "UTF-8")
 }
@@ -127,7 +117,7 @@ fn build_byte_line_index(path: &Path) -> Result<LineIndex> {
         .with_context(|| format!("无法读取日志文件元信息：{}", path.display()))?
         .len();
     if total_bytes == 0 {
-        return Ok(LineIndex::new(Vec::new(), 0, 0));
+        return Ok(LineIndex::new(Vec::new(), 0));
     }
 
     let mut reader = BufReader::with_capacity(LINE_INDEX_BLOCK_BYTES, file);
@@ -202,7 +192,7 @@ fn build_byte_line_index(path: &Path) -> Result<LineIndex> {
         )?;
     }
 
-    Ok(LineIndex::new(entries, total_bytes, longest_line_index))
+    Ok(LineIndex::new(entries, longest_line_index))
 }
 
 /// UTF-16 字节序，用于按双字节编码识别 CR/LF。
@@ -222,7 +212,7 @@ fn build_utf16_line_index(path: &Path, endian: Utf16Endian) -> Result<LineIndex>
         .with_context(|| format!("无法读取日志文件元信息：{}", path.display()))?
         .len();
     if total_bytes == 0 {
-        return Ok(LineIndex::new(Vec::new(), 0, 0));
+        return Ok(LineIndex::new(Vec::new(), 0));
     }
 
     let mut reader = BufReader::with_capacity(LINE_INDEX_BLOCK_BYTES, file);
@@ -298,7 +288,7 @@ fn build_utf16_line_index(path: &Path, endian: Utf16Endian) -> Result<LineIndex>
         )?;
     }
 
-    Ok(LineIndex::new(entries, total_bytes, longest_line_index))
+    Ok(LineIndex::new(entries, longest_line_index))
 }
 
 /// 处理一个 UTF-16 码元并在遇到 CR/LF 时追加行索引。
@@ -440,7 +430,6 @@ mod tests {
         let index = build_line_index(&path).expect("应能建立空文件索引");
 
         assert!(index.is_empty());
-        assert_eq!(index.total_bytes(), 0);
 
         let _ = fs::remove_file(path);
     }
