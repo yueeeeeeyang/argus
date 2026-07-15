@@ -1,7 +1,8 @@
 //! 文件职责：提取远程连接和升级弹窗状态类型定义。
 //! 创建日期：2026-07-08
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：定义连接目录表单、SSH/SMB 链接表单、主机指纹确认、SFTP 弹窗和升级弹窗状态。
+//! 主要功能：定义连接目录表单、SSH/SMB/Git/SVN 链接表单、主机指纹确认和文件管理弹窗状态。
 
 use super::types::TextInputState;
 use crate::infra::updater::AvailableUpgrade;
@@ -12,7 +13,7 @@ use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
 pub(crate) enum ConnectionDialogState {
     /// SSH 首次连接未知主机时的指纹确认弹窗。
     ConfirmHostKey(ConnectionHostKeyPromptState),
-    /// 删除链接目录、SSH 链接或 SMB 链接前的二次确认弹窗。
+    /// 删除链接目录或任一协议链接前的二次确认弹窗。
     ConfirmDelete(ConnectionDeletePromptState),
 }
 
@@ -38,6 +39,8 @@ pub(crate) struct ConnectionLinkFormState {
     pub name_input: TextInputState,
     /// SSH 主机输入框。
     pub host_input: TextInputState,
+    /// Git/SVN 仓库 URL 输入框。
+    pub url_input: TextInputState,
     /// SSH 端口输入框。
     pub port_input: TextInputState,
     /// SSH 用户名输入框。
@@ -66,8 +69,8 @@ pub(crate) enum HostKeyPromptOwner {
         /// 终端会话 ID。
         session_id: usize,
     },
-    /// SSH SFTP 文件管理会话触发的主机指纹确认。
-    Sftp {
+    /// SFTP、Git SSH 或 SVN SSH 远程文件会话触发的主机指纹确认。
+    RemoteFile {
         /// 远程文件管理会话 ID。
         session_id: usize,
     },
@@ -103,16 +106,16 @@ pub(crate) struct ConnectionDeletePromptState {
 
 /// 远程文件管理内的应用弹窗。
 #[derive(Clone, Debug)]
-pub(crate) enum SftpDialogState {
+pub(crate) enum RemoteFileDialogState {
     /// 重命名远程文件或目录。
-    Rename(SftpRenameDialogState),
+    Rename(RemoteFileRenameDialogState),
     /// 删除远程普通文件或空目录前的二次确认。
-    ConfirmDelete(SftpDeletePromptState),
+    ConfirmDelete(RemoteFileDeletePromptState),
 }
 
-/// SFTP 重命名弹窗状态。
+/// 可写远程文件后端共用的重命名弹窗状态。
 #[derive(Clone, Debug)]
-pub(crate) struct SftpRenameDialogState {
+pub(crate) struct RemoteFileRenameDialogState {
     /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 原始远程路径。
@@ -125,9 +128,9 @@ pub(crate) struct SftpRenameDialogState {
     pub error_message: Option<String>,
 }
 
-/// SFTP 删除二次确认弹窗状态。
+/// 可写远程文件后端共用的删除二次确认弹窗状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SftpDeletePromptState {
+pub(crate) struct RemoteFileDeletePromptState {
     /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 待删除远程路径。

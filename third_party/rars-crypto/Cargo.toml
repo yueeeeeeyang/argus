@@ -45,9 +45,9 @@ name = "rars_crypto"
 path = "src/lib.rs"
 
 [dependencies.aes]
-# Argus 同时引入 smb2，smb2 固定到 aes 0.9.0-rc.4；这里跟随同一版本以避免 Cargo
-# 在同一个 0.9 系列中同时解析稳定版和预发布版导致依赖冲突。
-version = "=0.9.0-rc.4"
+# Argus 的 SMB 与 russh 使用稳定版 aes 0.9；这里跟随同一版本以避免 Cargo 在同一个
+# 0.9 系列中同时解析稳定版和预发布版导致依赖冲突。
+version = "0.9.1"
 features = ["zeroize"]
 
 [dependencies.hmac]

@@ -1,8 +1,8 @@
 //! 文件职责：集中管理 Argus 用户配置目录路径。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-16
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供 `~/.argus`、主题目录、升级缓存目录和设置文件路径，避免路径规则散落在业务模块中。
+//! 主要功能：提供 `~/.argus`、主题目录、升级缓存、仓库缓存和设置文件路径，避免路径规则散落在业务模块中。
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,12 @@ const ARGUS_THEME_DIR_NAME: &str = "themes";
 const ARGUS_SETTINGS_FILE_NAME: &str = "settings.toml";
 /// Argus 升级缓存目录名称。
 const ARGUS_UPDATES_DIR_NAME: &str = "updates";
+/// Argus 内置仓库缓存目录名称。
+const ARGUS_REPOSITORIES_DIR_NAME: &str = "repositories";
+/// Git 裸仓库缓存子目录名称。
+const ARGUS_GIT_REPOSITORIES_DIR_NAME: &str = "git";
+/// SVN SSH 主机公钥记录文件名称。
+const ARGUS_SVN_KNOWN_HOSTS_FILE_NAME: &str = "svn_known_hosts";
 
 /// 返回当前用户的 Argus 配置目录。
 ///
@@ -47,6 +53,20 @@ pub(crate) fn argus_updates_dir() -> PathBuf {
     argus_updates_dir_from_config(&argus_config_dir())
 }
 
+/// 返回 Git 持久裸仓库缓存根目录。
+///
+/// 返回值：固定为 `~/.argus/repositories/git`，每个 Git 链接在其下使用独立目录。
+pub(crate) fn argus_git_repositories_dir() -> PathBuf {
+    argus_git_repositories_dir_from_config(&argus_config_dir())
+}
+
+/// 返回 SVN Rust SSH 栈专用的 known_hosts 文件路径。
+///
+/// 该文件与用户的 `~/.ssh/known_hosts` 隔离，避免读取系统 SSH 配置或默认身份。
+pub(crate) fn argus_svn_known_hosts_file() -> PathBuf {
+    argus_svn_known_hosts_file_from_config(&argus_config_dir())
+}
+
 /// 根据指定 home 目录构造 Argus 配置目录，供单元测试避免依赖真实用户目录。
 pub(crate) fn argus_config_dir_from_home(home: &Path) -> PathBuf {
     home.join(ARGUS_CONFIG_DIR_NAME)
@@ -65,6 +85,18 @@ pub(crate) fn argus_settings_file_from_config(config_dir: &Path) -> PathBuf {
 /// 根据指定配置目录构造升级缓存目录，供升级模块和测试复用。
 pub(crate) fn argus_updates_dir_from_config(config_dir: &Path) -> PathBuf {
     config_dir.join(ARGUS_UPDATES_DIR_NAME)
+}
+
+/// 根据指定配置目录构造 Git 裸仓库缓存根目录，供实现与测试复用。
+pub(crate) fn argus_git_repositories_dir_from_config(config_dir: &Path) -> PathBuf {
+    config_dir
+        .join(ARGUS_REPOSITORIES_DIR_NAME)
+        .join(ARGUS_GIT_REPOSITORIES_DIR_NAME)
+}
+
+/// 根据指定配置目录构造 SVN 专用 known_hosts 路径，供实现与测试复用。
+pub(crate) fn argus_svn_known_hosts_file_from_config(config_dir: &Path) -> PathBuf {
+    config_dir.join(ARGUS_SVN_KNOWN_HOSTS_FILE_NAME)
 }
 
 /// 获取用户 home 目录；独立成函数便于说明跨平台路径回退策略。

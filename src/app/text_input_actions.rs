@@ -35,7 +35,7 @@ impl ArgusApp {
         self.source_tree_search_input.clear_focus();
 
         self.clear_connection_text_input_focuses();
-        self.clear_sftp_text_input_focuses();
+        self.clear_remote_file_text_input_focuses();
 
         self.source_picker.is_path_input_focused = false;
         self.source_picker.path_input_selection_anchor = None;
@@ -114,8 +114,10 @@ impl ArgusApp {
             AppTextInputTarget::ConnectionTreeSearch => {
                 apply_native_connection_edit(self, target, &edit);
             }
-            AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
-                self.apply_native_sftp_edit(target, &edit);
+            AppTextInputTarget::RemoteFileAddress { .. }
+            | AppTextInputTarget::RemoteFileVersion { .. }
+            | AppTextInputTarget::RemoteFileRenameName => {
+                self.apply_native_remote_file_edit(target, &edit);
             }
             AppTextInputTarget::ArchivePassword => {
                 if let Some(prompt) = self.archive_password_prompt.as_mut() {
@@ -194,8 +196,10 @@ impl ArgusApp {
             AppTextInputTarget::ConnectionTreeSearch => {
                 self.focus_connection_text_input_target(target);
             }
-            AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
-                self.focus_sftp_text_input_target(target);
+            AppTextInputTarget::RemoteFileAddress { .. }
+            | AppTextInputTarget::RemoteFileVersion { .. }
+            | AppTextInputTarget::RemoteFileRenameName => {
+                self.focus_remote_file_text_input_target(target);
             }
             AppTextInputTarget::ArchivePassword => {
                 if let Some(prompt) = self.archive_password_prompt.as_mut() {

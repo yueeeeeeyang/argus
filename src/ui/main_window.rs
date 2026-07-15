@@ -9,8 +9,8 @@ use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::ui::{
     archive_password_dialog, components::context_menu, connection_dialog, custom_title_bar,
-    log_content_view, settings_window, sftp_dialog, source_panel, source_picker, source_resizer,
-    upgrade_dialog,
+    log_content_view, remote_file_dialog, settings_window, source_panel, source_picker,
+    source_resizer, upgrade_dialog,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
@@ -107,8 +107,8 @@ pub(crate) fn render(
         .when(app.connection_dialog.is_some(), |this| {
             this.child(connection_dialog::render(app, cx))
         })
-        .when(app.sftp_dialog.is_some(), |this| {
-            this.child(sftp_dialog::render(app, cx))
+        .when(app.remote_file_dialog.is_some(), |this| {
+            this.child(remote_file_dialog::render(app, cx))
         })
         .when(app.archive_password_prompt.is_some(), |this| {
             this.child(archive_password_dialog::render(app, cx))

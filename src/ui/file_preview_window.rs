@@ -1,6 +1,6 @@
 //! 文件职责：渲染远程文件预览独立窗口。
 //! 创建日期：2026-07-03
-//! 修改日期：2026-07-03
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：在透明标题栏窗口中展示远程普通文件的文本内容，并提示二进制或读取失败。
 
@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::app::{ArgusApp, log_viewer_line_number_width, observe_app_theme};
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
-use crate::remote::sftp::{FilePreviewContent, SFTP_PREVIEW_MAX_READ};
+use crate::remote::remote_file::{FilePreviewContent, REMOTE_FILE_PREVIEW_MAX_READ};
 use crate::theme::AppTheme;
 use crate::ui::components::centered_message::render_centered_message;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -77,14 +77,14 @@ impl FilePreviewWindow {
     ) -> Self {
         let body = match content {
             FilePreviewContent::Text { content, truncated } => {
-                // 使用 `str::lines` 正确处理 `\r\n`/`\r`/`\n` 三种换行，且不产生末尾空行。
+                // 使用 `str::lines` 正确处理 `\r\n`/`\n` 换行，且不产生末尾空行。
                 let lines = content.lines().map(str::to_string).collect();
                 FilePreviewBody::Text { lines, truncated }
             }
             FilePreviewContent::Binary => FilePreviewBody::Binary,
             FilePreviewContent::Error(message) => FilePreviewBody::Error(message),
         };
-        let _app_observer = observe_app_theme(cx, &app, |view, theme, _| {
+        let _app_observer = observe_app_theme(cx, &app, theme.clone(), |view, theme, _| {
             view.theme = theme.clone();
         });
 
@@ -103,9 +103,10 @@ impl FilePreviewWindow {
         let theme = self.theme.clone();
         let file_name = self.file_name.clone();
         let notice = match &self.body {
-            FilePreviewBody::Text { truncated, .. } if *truncated => {
-                Some(format!("仅显示前 {} KB", SFTP_PREVIEW_MAX_READ / 1024))
-            }
+            FilePreviewBody::Text { truncated, .. } if *truncated => Some(format!(
+                "仅显示前 {} KB",
+                REMOTE_FILE_PREVIEW_MAX_READ / 1024
+            )),
             _ => None,
         };
 
@@ -159,6 +160,10 @@ impl FilePreviewWindow {
     fn render_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match &self.body {
             FilePreviewBody::Text { lines, .. } => {
+                // 空文件不应创建 0 行虚拟列表；部分平台在首次布局时会为其生成无效可见区间。
+                if lines.is_empty() {
+                    return render_centered_message("文件内容为空", &self.theme, true);
+                }
                 let line_count = lines.len();
                 // 行号栏宽度随行数自适应（复用日志阅读区算法），避免固定宽度在行号过多时截断。
                 let line_number_width = log_viewer_line_number_width(line_count);
@@ -170,8 +175,11 @@ impl FilePreviewWindow {
                         let FilePreviewBody::Text { lines, .. } = &this.body else {
                             return Vec::new();
                         };
-                        let start = range.start;
-                        lines[range]
+                        // 窗口初始化、缩放或关闭过程中，框架可能传入基于旧布局的区间。
+                        // 先夹到当前行数，避免直接切片越界导致整个应用 panic 退出。
+                        let visible_range = clamp_preview_line_range(range, lines.len());
+                        let start = visible_range.start;
+                        lines[visible_range]
                             .iter()
                             .enumerate()
                             .map(|(offset, line)| {
@@ -197,6 +205,19 @@ impl FilePreviewWindow {
             FilePreviewBody::Error(message) => render_centered_message(message, &self.theme, true),
         }
     }
+}
+
+/// 将虚拟列表请求的行区间夹到当前文本边界内。
+///
+/// 参数说明：
+/// - `range`：GPUI 根据视口估算的行区间。
+/// - `line_count`：当前预览文本的实际行数。
+///
+/// 返回值：可安全用于行向量切片的升序区间；完全越界时返回末尾空区间。
+fn clamp_preview_line_range(range: Range<usize>, line_count: usize) -> Range<usize> {
+    let start = range.start.min(line_count);
+    let end = range.end.min(line_count);
+    start.min(end)..start.max(end)
 }
 
 impl Render for FilePreviewWindow {
@@ -261,4 +282,29 @@ fn render_preview_line(
                 .truncate()
                 .child(line.to_string()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_preview_line_range;
+
+    /// 正常可见区间不应被修改。
+    #[test]
+    fn preview_line_range_keeps_valid_bounds() {
+        assert_eq!(clamp_preview_line_range(2..5, 8), 2..5);
+    }
+
+    /// 框架返回超过当前行数的旧区间时，应夹到向量末尾而非 panic。
+    #[test]
+    fn preview_line_range_clamps_stale_bounds() {
+        assert_eq!(clamp_preview_line_range(3..12, 5), 3..5);
+        assert_eq!(clamp_preview_line_range(8..12, 5), 5..5);
+    }
+
+    /// 即使异常区间的起点大于终点，也必须返回可安全切片的升序区间。
+    #[test]
+    fn preview_line_range_normalizes_reversed_bounds() {
+        let reversed_range = std::ops::Range { start: 6, end: 2 };
+        assert_eq!(clamp_preview_line_range(reversed_range, 8), 2..6);
+    }
 }

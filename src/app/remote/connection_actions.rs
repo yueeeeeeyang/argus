@@ -1,8 +1,8 @@
 //! 文件职责：实现链接工作区的树操作、表单校验、输入框编辑和配置持久化。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：让标题栏链接入口具备新增目录、新增 SSH 链接、过滤和点击打开终端能力。
+//! 主要功能：处理多协议链接新增编辑、树选择与拖放移动、过滤、删除及会话打开能力。
 
 use std::ops::Range;
 
@@ -17,9 +17,10 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range,
 };
 use crate::remote::connection::{
-    ConnectionDeletedNodeKind, ConnectionLinkKind, ConnectionNodeId, ConnectionTreeRow,
-    SmbLinkConfig, SshLinkConfig,
+    ConnectionDeletedNodeKind, ConnectionLinkConfig, ConnectionLinkKind, ConnectionNodeId,
+    ConnectionTreeRow, GitLinkConfig, SmbLinkConfig, SshLinkConfig, SvnLinkConfig,
 };
+use crate::remote::remote_file::RemoteFileBackend;
 use crate::remote::terminal::PendingHostKey;
 use crate::ui::connection_dialog::{
     ConnectionDirectoryWindow, ConnectionDirectoryWindowMode, ConnectionLinkWindow,
@@ -70,6 +71,51 @@ impl ArgusApp {
         };
     }
 
+    /// 清除链接树当前选中节点；供树面板空白区域点击使用。
+    ///
+    /// 返回值：选中状态或活动菜单实际发生变化时返回 `true`，调用方据此刷新界面。
+    pub(crate) fn clear_connection_tree_selection(&mut self) -> bool {
+        let had_selection = self.selected_connection_node_id.take().is_some();
+        let had_menu = self.active_menu.take().is_some();
+        if had_selection {
+            self.placeholder_notice = "已取消链接树选择".to_string();
+        }
+        had_selection || had_menu
+    }
+
+    /// 把已有链接移动到指定目录或根层级，并立即持久化新的树结构。
+    ///
+    /// 参数：`link_id` 是拖动源链接，`parent_id` 为空时表示树根，否则必须是现有目录。
+    /// 返回值：移动实际生效时返回 `true`；同目录放下或校验失败时返回 `false`。
+    pub(crate) fn move_connection_link(
+        &mut self,
+        link_id: ConnectionNodeId,
+        parent_id: Option<ConnectionNodeId>,
+    ) -> bool {
+        let target_label = parent_id
+            .and_then(|directory_id| self.config.connections.directory(directory_id))
+            .map(|directory| format!("目录「{}」", directory.name))
+            .unwrap_or_else(|| "根目录".to_string());
+        match self.config.connections.move_link(link_id, parent_id) {
+            Ok(true) => {
+                self.selected_connection_node_id = Some(link_id);
+                self.placeholder_notice = format!("已将链接移动到{target_label}");
+                self.persist_config_or_report();
+                true
+            }
+            Ok(false) => {
+                self.selected_connection_node_id = Some(link_id);
+                self.placeholder_notice = format!("链接已位于{target_label}");
+                false
+            }
+            Err(error) => {
+                self.selected_connection_node_id = Some(link_id);
+                self.placeholder_notice = format!("无法移动链接：{error}");
+                false
+            }
+        }
+    }
+
     /// 点击链接树节点；目录执行展开折叠，SSH 链接打开终端标签。
     pub(crate) fn handle_connection_tree_click(
         &mut self,
@@ -89,6 +135,12 @@ impl ArgusApp {
         {
             Some(ConnectionLinkKind::Ssh) => self.open_or_focus_ssh_terminal(node_id, cx),
             Some(ConnectionLinkKind::Smb) => self.open_smb_file_manager_from_link(node_id, cx),
+            Some(ConnectionLinkKind::Git) => {
+                self.open_repository_file_manager_from_link(node_id, RemoteFileBackend::Git, cx)
+            }
+            Some(ConnectionLinkKind::Svn) => {
+                self.open_repository_file_manager_from_link(node_id, RemoteFileBackend::Svn, cx)
+            }
             None => self.placeholder_notice = "链接配置不完整，无法打开".to_string(),
         }
     }
@@ -155,6 +207,7 @@ impl ArgusApp {
             parent_id,
             name_input: TextInputState::default(),
             host_input: TextInputState::default(),
+            url_input: TextInputState::default(),
             port_input: TextInputState::from_value("22".to_string()),
             username_input: TextInputState::default(),
             password_input: TextInputState::default(),
@@ -198,6 +251,7 @@ impl ArgusApp {
             parent_id,
             name_input: TextInputState::default(),
             host_input: TextInputState::default(),
+            url_input: TextInputState::default(),
             port_input: TextInputState::from_value("445".to_string()),
             username_input: TextInputState::default(),
             password_input: TextInputState::default(),
@@ -223,6 +277,67 @@ impl ArgusApp {
             return;
         }
 
+        self.open_connection_link_window_with_form(
+            initial_form,
+            ConnectionLinkWindowMode::Create,
+            cx,
+        );
+    }
+
+    /// 打开新增 Git 仓库链接模态框，父目录根据当前选中节点推导。
+    pub(crate) fn open_new_git_link_dialog(&mut self, cx: &mut Context<Self>) {
+        let form = self.new_repository_link_form(ConnectionLinkKind::Git);
+        self.open_or_replace_link_create_modal(form, cx);
+    }
+
+    /// 打开新增 SVN 仓库链接模态框，父目录根据当前选中节点推导。
+    pub(crate) fn open_new_svn_link_dialog(&mut self, cx: &mut Context<Self>) {
+        let form = self.new_repository_link_form(ConnectionLinkKind::Svn);
+        self.open_or_replace_link_create_modal(form, cx);
+    }
+
+    /// 构造 Git/SVN 共用的空仓库链接表单。
+    fn new_repository_link_form(&self, link_kind: ConnectionLinkKind) -> ConnectionLinkFormState {
+        ConnectionLinkFormState {
+            link_kind,
+            parent_id: self
+                .config
+                .connections
+                .parent_for_new_link(self.selected_connection_node_id),
+            name_input: TextInputState::default(),
+            host_input: TextInputState::default(),
+            url_input: TextInputState::default(),
+            port_input: TextInputState::default(),
+            username_input: TextInputState::default(),
+            password_input: TextInputState::default(),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::from_value("/".to_string()),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
+            error_message: None,
+        }
+    }
+
+    /// 复用已存在的链接模态框，或为指定仓库协议创建新的新增模态框。
+    fn open_or_replace_link_create_modal(
+        &mut self,
+        initial_form: ConnectionLinkFormState,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(modal) = self.connection_link_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                if !modal_state.is_mode(ConnectionLinkWindowMode::Create)
+                    || modal_state.link_kind() != initial_form.link_kind
+                {
+                    modal_state
+                        .replace_form(initial_form.clone(), ConnectionLinkWindowMode::Create);
+                    cx.notify();
+                }
+            });
+            self.placeholder_notice = "新增仓库链接模态框已打开".to_string();
+            return;
+        }
         self.open_connection_link_window_with_form(
             initial_form,
             ConnectionLinkWindowMode::Create,
@@ -264,6 +379,8 @@ impl ArgusApp {
             match link.protocol() {
                 Some(ConnectionLinkKind::Ssh) => self.open_edit_ssh_link_window(node_id, cx),
                 Some(ConnectionLinkKind::Smb) => self.open_edit_smb_link_window(node_id, cx),
+                Some(ConnectionLinkKind::Git) => self.open_edit_git_link_window(node_id, cx),
+                Some(ConnectionLinkKind::Svn) => self.open_edit_svn_link_window(node_id, cx),
                 None => self.placeholder_notice = "链接配置不完整，无法编辑".to_string(),
             }
         } else {
@@ -315,6 +432,7 @@ impl ArgusApp {
             parent_id: link.parent_id,
             name_input: TextInputState::from_value(link.name),
             host_input: TextInputState::from_value(ssh.host),
+            url_input: TextInputState::default(),
             port_input: TextInputState::from_value(ssh.port.to_string()),
             username_input: TextInputState::from_value(ssh.username),
             password_input: TextInputState::from_value(ssh.password),
@@ -358,6 +476,7 @@ impl ArgusApp {
             parent_id: link.parent_id,
             name_input: TextInputState::from_value(link.name),
             host_input: TextInputState::from_value(smb.host),
+            url_input: TextInputState::default(),
             port_input: TextInputState::from_value(smb.port.to_string()),
             username_input: TextInputState::from_value(smb.username),
             password_input: TextInputState::from_value(smb.password),
@@ -380,6 +499,71 @@ impl ArgusApp {
         }
 
         self.open_connection_link_window_with_form(initial_form, mode, cx);
+    }
+
+    /// 打开编辑 Git 链接模态框。
+    fn open_edit_git_link_window(&mut self, link_id: ConnectionNodeId, cx: &mut Context<Self>) {
+        let Some(link) = self.config.connections.link(link_id).cloned() else {
+            self.placeholder_notice = "未找到可编辑的 Git 链接".to_string();
+            return;
+        };
+        let Some(git) = link.git_config().cloned() else {
+            self.placeholder_notice = "当前链接不是 Git 链接".to_string();
+            return;
+        };
+        let form = repository_edit_form(
+            ConnectionLinkKind::Git,
+            link.parent_id,
+            link.name,
+            git.url,
+            git.username,
+            git.access_token,
+            git.private_key_path,
+            git.private_key_passphrase,
+        );
+        self.open_or_replace_link_edit_modal(link_id, form, cx);
+    }
+
+    /// 打开编辑 SVN 链接模态框。
+    fn open_edit_svn_link_window(&mut self, link_id: ConnectionNodeId, cx: &mut Context<Self>) {
+        let Some(link) = self.config.connections.link(link_id).cloned() else {
+            self.placeholder_notice = "未找到可编辑的 SVN 链接".to_string();
+            return;
+        };
+        let Some(svn) = link.svn_config().cloned() else {
+            self.placeholder_notice = "当前链接不是 SVN 链接".to_string();
+            return;
+        };
+        let form = repository_edit_form(
+            ConnectionLinkKind::Svn,
+            link.parent_id,
+            link.name,
+            svn.url,
+            svn.username,
+            svn.password,
+            svn.private_key_path,
+            svn.private_key_passphrase,
+        );
+        self.open_or_replace_link_edit_modal(link_id, form, cx);
+    }
+
+    /// 复用已存在的链接模态框，或为指定仓库链接创建编辑模态框。
+    fn open_or_replace_link_edit_modal(
+        &mut self,
+        link_id: ConnectionNodeId,
+        form: ConnectionLinkFormState,
+        cx: &mut Context<Self>,
+    ) {
+        let mode = ConnectionLinkWindowMode::Edit { link_id };
+        if let Some(modal) = self.connection_link_modal.clone() {
+            modal.update(cx, |modal_state, cx| {
+                modal_state.replace_form(form.clone(), mode);
+                cx.notify();
+            });
+            self.placeholder_notice = "已打开仓库链接编辑模态框".to_string();
+            return;
+        }
+        self.open_connection_link_window_with_form(form, mode, cx);
     }
 
     /// 使用指定表单打开目录模态框，供新增和编辑入口复用。
@@ -413,6 +597,8 @@ impl ArgusApp {
         let protocol_label = match initial_form.link_kind {
             ConnectionLinkKind::Ssh => "SSH",
             ConnectionLinkKind::Smb => "SMB",
+            ConnectionLinkKind::Git => "Git",
+            ConnectionLinkKind::Svn => "SVN",
         };
         self.placeholder_notice = match mode {
             ConnectionLinkWindowMode::Create => format!("请输入 {protocol_label} 链接信息"),
@@ -625,6 +811,8 @@ impl ArgusApp {
         match form.link_kind {
             ConnectionLinkKind::Ssh => self.create_ssh_link_from_form(form),
             ConnectionLinkKind::Smb => self.create_smb_link_from_form(form),
+            ConnectionLinkKind::Git => self.create_git_link_from_form(form),
+            ConnectionLinkKind::Svn => self.create_svn_link_from_form(form),
         }
     }
 
@@ -690,6 +878,52 @@ impl ArgusApp {
         Ok(link_id)
     }
 
+    /// 校验并创建 Git 只读仓库链接。
+    pub(crate) fn create_git_link_from_form(
+        &mut self,
+        form: ConnectionLinkFormState,
+    ) -> Result<ConnectionNodeId, String> {
+        let git = git_config_from_form(&form).inspect_err(|message| {
+            self.placeholder_notice = message.clone();
+        })?;
+        let link_id = self
+            .config
+            .connections
+            .add_git_link(form.parent_id, &form.name_input.value, git)
+            .map_err(|error| {
+                let message = error.to_string();
+                self.placeholder_notice = message.clone();
+                message
+            })?;
+        self.selected_connection_node_id = Some(link_id);
+        self.placeholder_notice = "已新增 Git 链接".to_string();
+        self.persist_config_or_report();
+        Ok(link_id)
+    }
+
+    /// 校验并创建 SVN 只读仓库链接。
+    pub(crate) fn create_svn_link_from_form(
+        &mut self,
+        form: ConnectionLinkFormState,
+    ) -> Result<ConnectionNodeId, String> {
+        let svn = svn_config_from_form(&form).inspect_err(|message| {
+            self.placeholder_notice = message.clone();
+        })?;
+        let link_id = self
+            .config
+            .connections
+            .add_svn_link(form.parent_id, &form.name_input.value, svn)
+            .map_err(|error| {
+                let message = error.to_string();
+                self.placeholder_notice = message.clone();
+                message
+            })?;
+        self.selected_connection_node_id = Some(link_id);
+        self.placeholder_notice = "已新增 SVN 链接".to_string();
+        self.persist_config_or_report();
+        Ok(link_id)
+    }
+
     /// 校验并更新链接目录名称。
     pub(crate) fn update_connection_directory_from_form(
         &mut self,
@@ -724,6 +958,8 @@ impl ArgusApp {
         match form.link_kind {
             ConnectionLinkKind::Ssh => self.update_ssh_link_from_form(link_id, form),
             ConnectionLinkKind::Smb => self.update_smb_link_from_form(link_id, form),
+            ConnectionLinkKind::Git => self.update_git_link_from_form(link_id, form),
+            ConnectionLinkKind::Svn => self.update_svn_link_from_form(link_id, form),
         }
     }
 
@@ -791,6 +1027,68 @@ impl ArgusApp {
         }
     }
 
+    /// 校验并更新 Git 仓库链接；成功后关闭该链接的旧文件管理会话。
+    pub(crate) fn update_git_link_from_form(
+        &mut self,
+        link_id: ConnectionNodeId,
+        form: ConnectionLinkFormState,
+    ) -> Result<(), String> {
+        let git = git_config_from_form(&form).inspect_err(|message| {
+            self.placeholder_notice = message.clone();
+        })?;
+        let previous_url = self
+            .config
+            .connections
+            .link(link_id)
+            .and_then(ConnectionLinkConfig::git_config)
+            .map(|old| old.url.clone());
+        let url_changed = previous_url
+            .as_deref()
+            .is_some_and(|old_url| old_url != git.url);
+        self.config
+            .connections
+            .update_git_link(link_id, &form.name_input.value, git)
+            .map_err(|error| error.to_string())?;
+        self.disconnect_remote_file_sessions_for_link(link_id);
+        if url_changed {
+            let cache_root = self
+                .config_manager
+                .settings_path()
+                .parent()
+                .map(crate::config::paths::argus_git_repositories_dir_from_config)
+                .unwrap_or_else(crate::config::paths::argus_git_repositories_dir);
+            let _ = crate::remote::git::schedule_git_cache_removal_at(
+                cache_root,
+                link_id,
+                previous_url,
+            );
+        }
+        self.selected_connection_node_id = Some(link_id);
+        self.placeholder_notice = "已更新 Git 链接".to_string();
+        self.persist_config_or_report();
+        Ok(())
+    }
+
+    /// 校验并更新 SVN 仓库链接；成功后关闭该链接的旧文件管理会话。
+    pub(crate) fn update_svn_link_from_form(
+        &mut self,
+        link_id: ConnectionNodeId,
+        form: ConnectionLinkFormState,
+    ) -> Result<(), String> {
+        let svn = svn_config_from_form(&form).inspect_err(|message| {
+            self.placeholder_notice = message.clone();
+        })?;
+        self.config
+            .connections
+            .update_svn_link(link_id, &form.name_input.value, svn)
+            .map_err(|error| error.to_string())?;
+        self.disconnect_remote_file_sessions_for_link(link_id);
+        self.selected_connection_node_id = Some(link_id);
+        self.placeholder_notice = "已更新 SVN 链接".to_string();
+        self.persist_config_or_report();
+        Ok(())
+    }
+
     /// 请求删除链接目录或 SSH 链接；删除前必须进入二次确认。
     pub(crate) fn request_delete_connection_node(&mut self, node_id: ConnectionNodeId) {
         if let Some(directory) = self.config.connections.directory(node_id) {
@@ -817,6 +1115,8 @@ impl ArgusApp {
             let protocol_label = match link.protocol() {
                 Some(ConnectionLinkKind::Ssh) => "SSH",
                 Some(ConnectionLinkKind::Smb) => "SMB",
+                Some(ConnectionLinkKind::Git) => "Git",
+                Some(ConnectionLinkKind::Svn) => "SVN",
                 None => "远程",
             };
             self.connection_dialog = Some(ConnectionDialogState::ConfirmDelete(
@@ -863,6 +1163,31 @@ impl ArgusApp {
                 }
                 self.persist_config_or_report();
                 self.placeholder_notice = "已删除 SMB 链接".to_string();
+            }
+            Ok(ConnectionDeletedNodeKind::GitLink) => {
+                self.disconnect_remote_file_sessions_for_link(node_id);
+                // 删除缓存时沿用当前设置文件的配置根，避免测试实例或便携配置误删默认用户缓存。
+                let cache_root = self
+                    .config_manager
+                    .settings_path()
+                    .parent()
+                    .map(crate::config::paths::argus_git_repositories_dir_from_config)
+                    .unwrap_or_else(crate::config::paths::argus_git_repositories_dir);
+                let _ =
+                    crate::remote::git::schedule_git_cache_removal_at(cache_root, node_id, None);
+                if self.selected_connection_node_id == Some(node_id) {
+                    self.selected_connection_node_id = fallback_selection;
+                }
+                self.persist_config_or_report();
+                self.placeholder_notice = "已删除 Git 链接".to_string();
+            }
+            Ok(ConnectionDeletedNodeKind::SvnLink) => {
+                self.disconnect_remote_file_sessions_for_link(node_id);
+                if self.selected_connection_node_id == Some(node_id) {
+                    self.selected_connection_node_id = fallback_selection;
+                }
+                self.persist_config_or_report();
+                self.placeholder_notice = "已删除 SVN 链接".to_string();
             }
             Ok(ConnectionDeletedNodeKind::UnknownLink) => {
                 if self.selected_connection_node_id == Some(node_id) {
@@ -988,6 +1313,48 @@ impl ArgusApp {
 }
 
 /// 从新增 SSH 链接表单构造 SSH 配置。
+/// 构造 Git/SVN 编辑表单；两种协议共用 URL、用户名、秘密和私钥输入状态。
+fn repository_edit_form(
+    link_kind: ConnectionLinkKind,
+    parent_id: Option<ConnectionNodeId>,
+    name: String,
+    url: String,
+    username: Option<String>,
+    secret: Option<String>,
+    private_key_path: Option<String>,
+    private_key_passphrase: Option<String>,
+) -> ConnectionLinkFormState {
+    ConnectionLinkFormState {
+        link_kind,
+        parent_id,
+        name_input: TextInputState::from_value(name),
+        host_input: TextInputState::default(),
+        url_input: TextInputState::from_value(url),
+        port_input: TextInputState::default(),
+        username_input: TextInputState::from_value(username.unwrap_or_default()),
+        password_input: TextInputState::from_value(secret.unwrap_or_default()),
+        share_input: TextInputState::default(),
+        initial_dir_input: TextInputState::from_value("/".to_string()),
+        domain_input: TextInputState::default(),
+        private_key_path_input: TextInputState::from_value(private_key_path.unwrap_or_default()),
+        private_key_passphrase_input: TextInputState::from_value(
+            private_key_passphrase.unwrap_or_default(),
+        ),
+        error_message: None,
+    }
+}
+
+/// 将普通表单文本转为可选值；首尾空白在此去除，空值不落盘。
+fn optional_form_text(value: &str) -> Option<String> {
+    let normalized = value.trim();
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
+/// 将敏感表单文本转为可选值；只过滤真正空值，避免改写令牌或口令中的合法空白。
+fn optional_form_secret(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 fn ssh_config_from_form(form: &ConnectionLinkFormState) -> Result<SshLinkConfig, String> {
     let port = form
         .port_input
@@ -1005,6 +1372,58 @@ fn ssh_config_from_form(form: &ConnectionLinkFormState) -> Result<SshLinkConfig,
     }
     .normalized_for_save()
     .map_err(|error| error.to_string())
+}
+
+/// 从通用链接表单提取 Git 配置，最终协议校验由领域模型统一执行。
+fn git_config_from_form(form: &ConnectionLinkFormState) -> Result<GitLinkConfig, String> {
+    let uses_ssh_credentials = git_form_uses_ssh_credentials(&form.url_input.value);
+    GitLinkConfig {
+        url: form.url_input.value.clone(),
+        username: optional_form_text(&form.username_input.value),
+        access_token: (!uses_ssh_credentials)
+            .then(|| optional_form_secret(&form.password_input.value))
+            .flatten(),
+        private_key_path: uses_ssh_credentials
+            .then(|| optional_form_text(&form.private_key_path_input.value))
+            .flatten(),
+        private_key_passphrase: uses_ssh_credentials
+            .then(|| optional_form_secret(&form.private_key_passphrase_input.value))
+            .flatten(),
+    }
+    .normalized_for_save()
+    .map_err(|error| error.to_string())
+}
+
+/// 从通用链接表单提取 SVN 配置，最终协议校验由领域模型统一执行。
+fn svn_config_from_form(form: &ConnectionLinkFormState) -> Result<SvnLinkConfig, String> {
+    let uses_ssh_credentials = svn_form_uses_ssh_credentials(&form.url_input.value);
+    SvnLinkConfig {
+        url: form.url_input.value.clone(),
+        username: optional_form_text(&form.username_input.value),
+        password: optional_form_secret(&form.password_input.value),
+        private_key_path: uses_ssh_credentials
+            .then(|| optional_form_text(&form.private_key_path_input.value))
+            .flatten(),
+        private_key_passphrase: uses_ssh_credentials
+            .then(|| optional_form_secret(&form.private_key_passphrase_input.value))
+            .flatten(),
+    }
+    .normalized_for_save()
+    .map_err(|error| error.to_string())
+}
+
+/// 判断 Git 表单当前 URL 是否使用 SSH 凭据；规则与动态字段显示保持一致。
+fn git_form_uses_ssh_credentials(url: &str) -> bool {
+    let normalized_url = url.trim().to_ascii_lowercase();
+    normalized_url.starts_with("ssh://")
+        || (!normalized_url.starts_with("https://")
+            && normalized_url.contains('@')
+            && normalized_url.contains(':'))
+}
+
+/// 判断 SVN 表单当前 URL 是否使用 SSH 凭据；其他协议必须丢弃隐藏的私钥字段。
+fn svn_form_uses_ssh_credentials(url: &str) -> bool {
+    url.trim().to_ascii_lowercase().starts_with("svn+ssh://")
 }
 
 /// 从新增 SMB 链接表单构造 SMB 配置。
@@ -1066,6 +1485,26 @@ mod tests {
         ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
     }
 
+    /// 构造仓库链接表单，测试可按传输类型覆盖凭据字段。
+    fn repository_link_form(link_kind: ConnectionLinkKind, url: &str) -> ConnectionLinkFormState {
+        ConnectionLinkFormState {
+            link_kind,
+            parent_id: None,
+            name_input: TextInputState::from_value("repository".to_string()),
+            host_input: TextInputState::default(),
+            url_input: TextInputState::from_value(url.to_string()),
+            port_input: TextInputState::default(),
+            username_input: TextInputState::default(),
+            password_input: TextInputState::default(),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::from_value("/".to_string()),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
+            error_message: None,
+        }
+    }
+
     /// 验证新增目录会写入链接配置并选中新目录。
     #[test]
     fn submit_directory_form_creates_directory() {
@@ -1094,6 +1533,7 @@ mod tests {
             parent_id: None,
             name_input: TextInputState::from_value("app-01".to_string()),
             host_input: TextInputState::from_value("10.0.0.1".to_string()),
+            url_input: TextInputState::default(),
             port_input: TextInputState::from_value("70000".to_string()),
             username_input: TextInputState::from_value("deploy".to_string()),
             password_input: TextInputState::from_value("secret".to_string()),
@@ -1118,6 +1558,7 @@ mod tests {
             parent_id: None,
             name_input: TextInputState::from_value("共享日志".to_string()),
             host_input: TextInputState::from_value("10.0.0.2".to_string()),
+            url_input: TextInputState::default(),
             port_input: TextInputState::from_value("445".to_string()),
             username_input: TextInputState::from_value("smbuser".to_string()),
             password_input: TextInputState::from_value(" secret ".to_string()),
@@ -1140,6 +1581,46 @@ mod tests {
         assert_eq!(smb.share, "logs");
         assert_eq!(smb.initial_dir, "/runtime");
         assert_eq!(smb.password, " secret ");
+    }
+
+    /// 仓库传输方式变化后，已隐藏的旧凭据不得阻止新配置保存。
+    #[test]
+    fn repository_form_ignores_credentials_hidden_by_current_transport() {
+        let mut git_ssh = repository_link_form(
+            ConnectionLinkKind::Git,
+            "ssh://git@example.com/team/repository.git",
+        );
+        git_ssh.password_input = TextInputState::from_value("stale-token".to_string());
+        git_ssh.private_key_path_input =
+            TextInputState::from_value("/keys/git_ed25519".to_string());
+        let git_ssh = git_config_from_form(&git_ssh).expect("SSH Git 应忽略隐藏令牌");
+        assert!(git_ssh.access_token.is_none());
+        assert_eq!(
+            git_ssh.private_key_path.as_deref(),
+            Some("/keys/git_ed25519")
+        );
+
+        let mut git_https = repository_link_form(
+            ConnectionLinkKind::Git,
+            "https://example.com/team/repository.git",
+        );
+        git_https.username_input = TextInputState::from_value("reader".to_string());
+        git_https.password_input = TextInputState::from_value("token".to_string());
+        git_https.private_key_path_input = TextInputState::from_value("/keys/stale".to_string());
+        let git_https = git_config_from_form(&git_https).expect("HTTPS Git 应忽略隐藏私钥");
+        assert!(git_https.private_key_path.is_none());
+        assert_eq!(git_https.access_token.as_deref(), Some("token"));
+
+        let mut svn_http = repository_link_form(
+            ConnectionLinkKind::Svn,
+            "https://example.com/svn/repository/",
+        );
+        svn_http.username_input = TextInputState::from_value("reader".to_string());
+        svn_http.password_input = TextInputState::from_value("password".to_string());
+        svn_http.private_key_path_input = TextInputState::from_value("/keys/stale".to_string());
+        let svn_http = svn_config_from_form(&svn_http).expect("HTTP SVN 应忽略隐藏私钥");
+        assert!(svn_http.private_key_path.is_none());
+        assert_eq!(svn_http.password.as_deref(), Some("password"));
     }
 
     /// 验证删除非空目录时不会进入确认弹窗，而是直接给出错误提示。

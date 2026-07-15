@@ -103,8 +103,9 @@ impl ConfigManager {
         Ok(())
     }
 
-    /// 返回当前设置文件路径，便于测试和诊断输出确认真实落点。
-    #[cfg(test)]
+    /// 返回当前设置文件路径，供与配置同根目录的缓存和测试数据保持隔离。
+    ///
+    /// 返回值：创建该管理器时指定的 `settings.toml` 路径，不执行文件系统访问。
     pub(crate) fn settings_path(&self) -> &Path {
         &self.settings_path
     }
@@ -269,6 +270,8 @@ private_key_passphrase = " phrase "
                             private_key_passphrase: Some("phrase".to_string()),
                         }),
                         smb: None,
+                        git: None,
+                        svn: None,
                     },
                     ConnectionLinkConfig {
                         id: 3,
@@ -284,6 +287,8 @@ private_key_passphrase = " phrase "
                             username: "smbuser".to_string(),
                             password: " smb-secret ".to_string(),
                         }),
+                        git: None,
+                        svn: None,
                     },
                 ],
                 trusted_hosts: vec![TrustedHostKeyConfig {

@@ -1,6 +1,6 @@
-//! 文件职责：渲染 SFTP 文件管理相关的应用内模态弹窗。
+//! 文件职责：渲染可写远程文件后端共用的应用内模态弹窗。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：提供远程文件重命名和删除二次确认交互。
 
@@ -9,7 +9,10 @@ use gpui::{
     px, rgb,
 };
 
-use crate::app::{AppTextInputTarget, ArgusApp, SftpDeletePromptState, SftpDialogState};
+use crate::app::{
+    AppTextInputTarget, ArgusApp, RemoteFileDeletePromptState, RemoteFileDialogState,
+};
+use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
@@ -20,40 +23,42 @@ use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 use crate::ui::input_native::app_native_input;
 
 /// 重命名弹窗宽度。
-const SFTP_RENAME_DIALOG_WIDTH: f32 = 560.0;
+const REMOTE_FILE_RENAME_DIALOG_WIDTH: f32 = 560.0;
 /// 重命名弹窗高度。
-const SFTP_RENAME_DIALOG_HEIGHT: f32 = 214.0;
+const REMOTE_FILE_RENAME_DIALOG_HEIGHT: f32 = 214.0;
 /// 删除确认弹窗宽度。
-const SFTP_DELETE_DIALOG_WIDTH: f32 = 500.0;
-/// 删除确认弹窗高度。
-const SFTP_DELETE_DIALOG_HEIGHT: f32 = 188.0;
+const REMOTE_FILE_DELETE_DIALOG_WIDTH: f32 = 500.0;
+/// 删除确认弹窗高度；与连接目录表单使用一致的紧凑布局密度。
+const REMOTE_FILE_DELETE_DIALOG_HEIGHT: f32 = 190.0;
+/// 删除确认弹窗标题栏高度，与新增目录弹窗一致。
+const REMOTE_FILE_DELETE_HEADER_HEIGHT: f32 = 56.0;
 
-/// 渲染当前 SFTP 文件管理弹窗。
+/// 渲染当前远程文件管理弹窗。
 pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
-    let Some(dialog) = app.sftp_dialog.clone() else {
+    let Some(dialog) = app.remote_file_dialog.clone() else {
         return div().into_any_element();
     };
 
     match dialog {
-        SftpDialogState::Rename(dialog) => render_modal_dialog(
+        RemoteFileDialogState::Rename(dialog) => render_modal_dialog(
             ModalDialog {
-                overlay_id: "sftp-rename-dialog-overlay",
-                container_id: "sftp-rename-dialog-container",
-                width: SFTP_RENAME_DIALOG_WIDTH,
-                height: SFTP_RENAME_DIALOG_HEIGHT,
+                overlay_id: "remote-file-rename-dialog-overlay",
+                container_id: "remote-file-rename-dialog-container",
+                width: REMOTE_FILE_RENAME_DIALOG_WIDTH,
+                height: REMOTE_FILE_RENAME_DIALOG_HEIGHT,
                 content: render_rename_dialog(app, dialog, &theme, cx).into_any_element(),
             },
             theme,
             cx,
         )
         .into_any_element(),
-        SftpDialogState::ConfirmDelete(prompt) => render_modal_dialog(
+        RemoteFileDialogState::ConfirmDelete(prompt) => render_modal_dialog(
             ModalDialog {
-                overlay_id: "sftp-delete-dialog-overlay",
-                container_id: "sftp-delete-dialog-container",
-                width: SFTP_DELETE_DIALOG_WIDTH,
-                height: SFTP_DELETE_DIALOG_HEIGHT,
+                overlay_id: "remote-file-delete-dialog-overlay",
+                container_id: "remote-file-delete-dialog-container",
+                width: REMOTE_FILE_DELETE_DIALOG_WIDTH,
+                height: REMOTE_FILE_DELETE_DIALOG_HEIGHT,
                 content: render_delete_dialog(prompt, &theme, cx).into_any_element(),
             },
             theme,
@@ -66,16 +71,16 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
 /// 渲染重命名弹窗。
 fn render_rename_dialog(
     app: &ArgusApp,
-    dialog: crate::app::SftpRenameDialogState,
+    dialog: crate::app::RemoteFileRenameDialogState,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
-    let target = AppTextInputTarget::SftpRenameName;
+    let target = AppTextInputTarget::RemoteFileRenameName;
     let app_entity = cx.entity();
     let focus_handle = app
         .input_focus_handles
         .as_ref()
-        .map(|handles| handles.sftp_rename_name.clone());
+        .map(|handles| handles.remote_file_rename_name.clone());
     let native_input = focus_handle
         .clone()
         .map(|focus_handle| app_native_input(app_entity.clone(), target, focus_handle));
@@ -112,13 +117,13 @@ fn render_rename_dialog(
                 )
                 .child(render_input(
                     Input {
-                        id: "sftp-rename-name-input",
+                        id: "remote-file-rename-name-input",
                         placeholder: "输入新名称",
                         value: input_state.value.clone(),
                         is_disabled: false,
                         is_focused: input_state.is_focused,
                         cursor_index: input_state.cursor,
-                        selection_range: app.sftp_input_selection_range(target),
+                        selection_range: app.remote_file_input_selection_range(target),
                         marked_range: input_state.marked_range.clone(),
                         is_pointer_selecting: input_state.selection_drag.is_some(),
                         is_secret: false,
@@ -131,7 +136,7 @@ fn render_rename_dialog(
                     move |event: &KeyDownEvent, _, cx| {
                         cx.stop_propagation();
                         key_app_entity.update(cx, |app, app_cx| {
-                            app.handle_sftp_text_input_key(target, &event.keystroke);
+                            app.handle_remote_file_text_input_key(target, &event.keystroke);
                             app_cx.notify();
                         });
                     },
@@ -141,7 +146,7 @@ fn render_rename_dialog(
                             focus_handle.focus(window);
                         }
                         click_app_entity.update(cx, |app, app_cx| {
-                            app.focus_sftp_text_input_target(target);
+                            app.focus_remote_file_text_input_target(target);
                             app_cx.notify();
                         });
                     },
@@ -150,18 +155,18 @@ fn render_rename_dialog(
                         pointer_app_entity.update(cx, |app, app_cx| {
                             match event.action {
                                 InputPointerAction::Begin => app
-                                    .begin_sftp_input_pointer_selection(
+                                    .begin_remote_file_input_pointer_selection(
                                         target,
                                         event.character_index,
                                         event.granularity,
                                     ),
                                 InputPointerAction::Extend => app
-                                    .update_sftp_input_pointer_selection(
+                                    .update_remote_file_input_pointer_selection(
                                         target,
                                         event.character_index,
                                     ),
                                 InputPointerAction::Finish => {
-                                    app.finish_sftp_input_pointer_selection(target)
+                                    app.finish_remote_file_input_pointer_selection(target)
                                 }
                             }
                             app_cx.notify();
@@ -184,11 +189,11 @@ fn render_rename_dialog(
                         .justify_end()
                         .gap_2()
                         .child(text_button("取消", false, theme, cx, |app, cx| {
-                            app.close_sftp_dialog();
+                            app.close_remote_file_dialog();
                             cx.notify();
                         }))
                         .child(text_button("保存", true, theme, cx, |app, cx| {
-                            app.submit_sftp_dialog();
+                            app.submit_remote_file_dialog();
                             cx.notify();
                         })),
                 ),
@@ -197,7 +202,7 @@ fn render_rename_dialog(
 
 /// 渲染删除确认弹窗。
 fn render_delete_dialog(
-    prompt: SftpDeletePromptState,
+    prompt: RemoteFileDeletePromptState,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -213,24 +218,25 @@ fn render_delete_dialog(
 
     div()
         .size_full()
+        .relative()
         .flex()
         .flex_col()
         .rounded_lg()
+        .overflow_hidden()
         .bg(rgb(theme.content))
-        .child(dialog_header(
-            "删除确认",
-            ArgusIcon::Trash,
-            "关闭删除确认",
-            theme,
-            cx,
-        ))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .font_family(ARGUS_UI_FONT_FAMILY)
+        .text_color(rgb(theme.foreground))
+        .occlude()
+        .child(delete_dialog_header(theme, cx))
         .child(
             div()
                 .px_5()
-                .pb_4()
+                .pb_5()
                 .flex()
                 .flex_col()
-                .gap_4()
+                .gap_3()
                 .text_size(px(13.0))
                 .text_color(rgb(theme.foreground))
                 .child(description)
@@ -239,15 +245,113 @@ fn render_delete_dialog(
                         .flex()
                         .justify_end()
                         .gap_2()
-                        .child(text_button("取消", false, theme, cx, |app, cx| {
-                            app.close_sftp_dialog();
-                            cx.notify();
-                        }))
-                        .child(text_button("删除", true, theme, cx, move |app, cx| {
-                            app.confirm_delete_sftp_entry(confirm_prompt.clone());
-                            cx.notify();
-                        })),
+                        .child(delete_action_button(
+                            "remote-file-delete-dialog-cancel",
+                            ArgusIcon::Close,
+                            "取消",
+                            false,
+                            theme,
+                            cx,
+                            |app, cx| {
+                                app.close_remote_file_dialog();
+                                cx.notify();
+                            },
+                        ))
+                        .child(delete_action_button(
+                            "remote-file-delete-dialog-submit",
+                            ArgusIcon::Trash,
+                            "确认删除",
+                            true,
+                            theme,
+                            cx,
+                            move |app, cx| {
+                                app.confirm_delete_remote_file_entry(confirm_prompt.clone());
+                                cx.notify();
+                            },
+                        )),
                 ),
+        )
+}
+
+/// 渲染与新增目录弹窗一致的删除确认标题栏。
+fn delete_dialog_header(theme: &AppTheme, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+    div()
+        .h(px(REMOTE_FILE_DELETE_HEADER_HEIGHT))
+        .flex_none()
+        .px_5()
+        .flex()
+        .items_center()
+        .justify_between()
+        .occlude()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(14.0))
+                .line_height(px(18.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.foreground))
+                .child(render_icon(ArgusIcon::Trash, theme.foreground_muted, 16.0))
+                .child("确认删除"),
+        )
+        .child(render_icon_button(
+            "remote-file-delete-dialog-close",
+            ArgusIcon::Close,
+            "关闭删除确认",
+            false,
+            IconButtonSize::Small,
+            theme,
+            cx.listener(|app, _, _, cx| {
+                app.close_remote_file_dialog();
+                cx.notify();
+            }),
+        ))
+}
+
+/// 渲染与新增目录弹窗一致的带图标删除操作按钮。
+#[allow(clippy::too_many_arguments)]
+fn delete_action_button(
+    id: &'static str,
+    icon: ArgusIcon,
+    label: &'static str,
+    is_primary: bool,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+    on_click: impl Fn(&mut ArgusApp, &mut Context<ArgusApp>) + 'static,
+) -> impl IntoElement {
+    let icon_color = if is_primary {
+        theme.foreground
+    } else {
+        theme.foreground_muted
+    };
+    div()
+        .id(id)
+        .h(px(30.0))
+        .when(is_primary, |this| this.px_4())
+        .when(!is_primary, |this| this.px_3())
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.current_line))
+        .text_size(px(12.0))
+        .line_height(px(30.0))
+        .text_color(rgb(theme.foreground))
+        .when(is_primary, |this| this.font_weight(FontWeight::SEMIBOLD))
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(theme.selection)))
+        .child(render_icon(icon, icon_color, 13.0))
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |app, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(app, cx);
+            }),
         )
 }
 
@@ -277,14 +381,14 @@ fn dialog_header(
                 .child(title),
         )
         .child(render_icon_button(
-            "sftp-dialog-close",
+            "remote-file-dialog-close",
             ArgusIcon::Close,
             close_tooltip,
             false,
             IconButtonSize::Small,
             theme,
             cx.listener(|app, _, _, cx| {
-                app.close_sftp_dialog();
+                app.close_remote_file_dialog();
                 cx.notify();
             }),
         ))

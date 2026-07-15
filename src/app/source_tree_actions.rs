@@ -233,7 +233,7 @@ impl ArgusApp {
             .filter(|tab| {
                 matches!(
                     tab.kind,
-                    TabKind::SshTerminal { .. } | TabKind::SftpFileManager { .. }
+                    TabKind::SshTerminal { .. } | TabKind::RemoteFileManager { .. }
                 )
             })
             .cloned()

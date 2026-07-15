@@ -30,6 +30,10 @@ pub(crate) enum ArgusIcon {
     Connection,
     /// 链接节点。
     Link,
+    /// Git 仓库链接节点。
+    GitBranch,
+    /// SVN 仓库链接节点。
+    History,
     /// 终端面板。
     Terminal,
     /// 新增来源或增大数值。
@@ -118,6 +122,8 @@ impl ArgusIcon {
             Self::Filter,
             Self::Connection,
             Self::Link,
+            Self::GitBranch,
+            Self::History,
             Self::Terminal,
             Self::Plus,
             Self::Minus,
@@ -175,6 +181,8 @@ impl ArgusIcon {
             Self::Filter => "icons/filter.svg",
             Self::Connection => "icons/connection.svg",
             Self::Link => "icons/link.svg",
+            Self::GitBranch => "icons/git-branch.svg",
+            Self::History => "icons/history.svg",
             Self::Terminal => "icons/terminal.svg",
             Self::Plus => "icons/plus.svg",
             Self::Minus => "icons/minus.svg",
@@ -249,6 +257,8 @@ impl ArgusIcon {
             Self::Filter => icondata::LuListFilter,
             Self::Connection => icondata::LuPlug,
             Self::Link => icondata::LuLink,
+            Self::GitBranch => icondata::LuGitBranch,
+            Self::History => icondata::LuHistory,
             Self::Terminal => icondata::LuTerminal,
             Self::Plus => icondata::LuPlus,
             Self::Minus => icondata::LuMinus,

@@ -1,10 +1,11 @@
 //! 文件职责：维护链接工作区的持久化配置、目录树索引和表单校验规则。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供 SSH 链接目录、同级重名校验、过滤可见行和受信主机指纹配置。
+//! 主要功能：提供 SSH、SMB、Git、SVN 链接目录、表单校验、过滤索引和受信主机配置。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -66,6 +67,14 @@ impl ConnectionConfig {
                         .smb
                         .clone()
                         .is_some_and(|smb| smb.normalized_for_save().is_ok()),
+                    Some(ConnectionLinkKind::Git) => link
+                        .git
+                        .clone()
+                        .is_some_and(|git| git.normalized_for_save().is_ok()),
+                    Some(ConnectionLinkKind::Svn) => link
+                        .svn
+                        .clone()
+                        .is_some_and(|svn| svn.normalized_for_save().is_ok()),
                     None => false,
                 }
         });
@@ -104,6 +113,12 @@ impl ConnectionConfig {
                 if smb.port == 0 {
                     smb.port = DEFAULT_SMB_PORT;
                 }
+            }
+            if let Some(git) = link.git.take() {
+                link.git = git.normalized_for_save().ok();
+            }
+            if let Some(svn) = link.svn.take() {
+                link.svn = svn.normalized_for_save().ok();
             }
         }
         for directory in &mut self.directories {
@@ -183,6 +198,8 @@ impl ConnectionConfig {
             name,
             ssh: Some(ssh),
             smb: None,
+            git: None,
+            svn: None,
         });
         if let Some(parent_id) = parent_id
             && let Some(parent) = self.directory_mut(parent_id)
@@ -211,6 +228,68 @@ impl ConnectionConfig {
             name,
             ssh: None,
             smb: Some(smb),
+            git: None,
+            svn: None,
+        });
+        if let Some(parent_id) = parent_id
+            && let Some(parent) = self.directory_mut(parent_id)
+        {
+            parent.expanded = true;
+        }
+        Ok(id)
+    }
+
+    /// 创建 Git 仓库链接并返回新链接 ID。
+    pub(crate) fn add_git_link(
+        &mut self,
+        parent_id: Option<ConnectionNodeId>,
+        name: &str,
+        git: GitLinkConfig,
+    ) -> Result<ConnectionNodeId, ConnectionValidationError> {
+        let name = validate_node_name(name)?;
+        let git = git.normalized_for_save()?;
+        self.validate_parent_directory(parent_id)?;
+        self.validate_sibling_name_available(parent_id, &name, None)?;
+
+        let id = self.take_next_id();
+        self.links.push(ConnectionLinkConfig {
+            id,
+            parent_id,
+            name,
+            ssh: None,
+            smb: None,
+            git: Some(git),
+            svn: None,
+        });
+        if let Some(parent_id) = parent_id
+            && let Some(parent) = self.directory_mut(parent_id)
+        {
+            parent.expanded = true;
+        }
+        Ok(id)
+    }
+
+    /// 创建 SVN 仓库链接并返回新链接 ID。
+    pub(crate) fn add_svn_link(
+        &mut self,
+        parent_id: Option<ConnectionNodeId>,
+        name: &str,
+        svn: SvnLinkConfig,
+    ) -> Result<ConnectionNodeId, ConnectionValidationError> {
+        let name = validate_node_name(name)?;
+        let svn = svn.normalized_for_save()?;
+        self.validate_parent_directory(parent_id)?;
+        self.validate_sibling_name_available(parent_id, &name, None)?;
+
+        let id = self.take_next_id();
+        self.links.push(ConnectionLinkConfig {
+            id,
+            parent_id,
+            name,
+            ssh: None,
+            smb: None,
+            git: None,
+            svn: Some(svn),
         });
         if let Some(parent_id) = parent_id
             && let Some(parent) = self.directory_mut(parent_id)
@@ -261,6 +340,8 @@ impl ConnectionConfig {
         link.name = name;
         link.ssh = Some(ssh);
         link.smb = None;
+        link.git = None;
+        link.svn = None;
         Ok(())
     }
 
@@ -286,7 +367,99 @@ impl ConnectionConfig {
         link.name = name;
         link.ssh = None;
         link.smb = Some(smb);
+        link.git = None;
+        link.svn = None;
         Ok(())
+    }
+
+    /// 更新 Git 链接名称和仓库参数；同级重名校验会忽略当前链接自身。
+    pub(crate) fn update_git_link(
+        &mut self,
+        link_id: ConnectionNodeId,
+        name: &str,
+        git: GitLinkConfig,
+    ) -> Result<(), ConnectionValidationError> {
+        let name = validate_node_name(name)?;
+        let git = git.normalized_for_save()?;
+        let parent_id = self
+            .link(link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?
+            .parent_id;
+        self.validate_sibling_name_available(parent_id, &name, Some(link_id))?;
+        let link = self
+            .links
+            .iter_mut()
+            .find(|link| link.id == link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?;
+        link.name = name;
+        link.ssh = None;
+        link.smb = None;
+        link.git = Some(git);
+        link.svn = None;
+        Ok(())
+    }
+
+    /// 更新 SVN 链接名称和仓库参数；同级重名校验会忽略当前链接自身。
+    pub(crate) fn update_svn_link(
+        &mut self,
+        link_id: ConnectionNodeId,
+        name: &str,
+        svn: SvnLinkConfig,
+    ) -> Result<(), ConnectionValidationError> {
+        let name = validate_node_name(name)?;
+        let svn = svn.normalized_for_save()?;
+        let parent_id = self
+            .link(link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?
+            .parent_id;
+        self.validate_sibling_name_available(parent_id, &name, Some(link_id))?;
+        let link = self
+            .links
+            .iter_mut()
+            .find(|link| link.id == link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?;
+        link.name = name;
+        link.ssh = None;
+        link.smb = None;
+        link.git = None;
+        link.svn = Some(svn);
+        Ok(())
+    }
+
+    /// 把已有链接移动到指定目录；`parent_id = None` 表示移动到链接树根层级。
+    ///
+    /// 参数：`link_id` 是待移动链接，`parent_id` 是新的父目录。
+    /// 返回值：父目录实际改变时返回 `true`；原本已位于目标目录时返回 `false`。
+    /// 错误：链接或父目录不存在、目标目录存在同名节点时拒绝移动且不修改配置。
+    pub(crate) fn move_link(
+        &mut self,
+        link_id: ConnectionNodeId,
+        parent_id: Option<ConnectionNodeId>,
+    ) -> Result<bool, ConnectionValidationError> {
+        let link = self
+            .link(link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?;
+        let current_parent_id = link.parent_id;
+        let link_name = link.name.clone();
+        self.validate_parent_directory(parent_id)?;
+        if current_parent_id == parent_id {
+            return Ok(false);
+        }
+        self.validate_sibling_name_available(parent_id, &link_name, Some(link_id))?;
+
+        let link = self
+            .links
+            .iter_mut()
+            .find(|link| link.id == link_id)
+            .ok_or(ConnectionValidationError::NodeNotFound)?;
+        link.parent_id = parent_id;
+        if let Some(parent_id) = parent_id
+            && let Some(parent) = self.directory_mut(parent_id)
+        {
+            // 拖入已收起目录后立即展开，使用户能够看见移动结果。
+            parent.expanded = true;
+        }
+        Ok(true)
     }
 
     /// 删除目录或链接；目录必须为空，避免误删整棵子树。
@@ -637,6 +810,8 @@ impl ConnectionConfig {
                         tooltip: Some(link.address_label()),
                         kind: match link.protocol() {
                             Some(ConnectionLinkKind::Smb) => ConnectionTreeRowKind::SmbLink,
+                            Some(ConnectionLinkKind::Git) => ConnectionTreeRowKind::GitLink,
+                            Some(ConnectionLinkKind::Svn) => ConnectionTreeRowKind::SvnLink,
                             Some(ConnectionLinkKind::Ssh) | None => ConnectionTreeRowKind::SshLink,
                         },
                         expanded: false,
@@ -680,17 +855,29 @@ pub(crate) struct ConnectionLinkConfig {
     /// SMB 连接参数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smb: Option<SmbLinkConfig>,
+    /// Git 仓库连接参数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitLinkConfig>,
+    /// SVN 仓库连接参数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svn: Option<SvnLinkConfig>,
 }
 
 impl ConnectionLinkConfig {
-    /// 返回当前链接协议；异常配置没有可用协议时返回空。
+    /// 返回当前链接协议；缺少协议或同时存在多种协议的损坏配置返回空。
     pub(crate) fn protocol(&self) -> Option<ConnectionLinkKind> {
-        if self.smb.is_some() {
-            Some(ConnectionLinkKind::Smb)
-        } else if self.ssh.is_some() {
-            Some(ConnectionLinkKind::Ssh)
-        } else {
+        let protocols = [
+            self.ssh.is_some().then_some(ConnectionLinkKind::Ssh),
+            self.smb.is_some().then_some(ConnectionLinkKind::Smb),
+            self.git.is_some().then_some(ConnectionLinkKind::Git),
+            self.svn.is_some().then_some(ConnectionLinkKind::Svn),
+        ];
+        let mut present = protocols.into_iter().flatten();
+        let protocol = present.next()?;
+        if present.next().is_some() {
             None
+        } else {
+            Some(protocol)
         }
     }
 
@@ -704,12 +891,40 @@ impl ConnectionLinkConfig {
         self.smb.as_ref()
     }
 
+    /// 返回 Git 配置引用。
+    pub(crate) fn git_config(&self) -> Option<&GitLinkConfig> {
+        self.git.as_ref()
+    }
+
+    /// 返回 SVN 配置引用。
+    pub(crate) fn svn_config(&self) -> Option<&SvnLinkConfig> {
+        self.svn.as_ref()
+    }
+
     /// 返回状态栏、标签和悬浮提示可展示的远程地址。
     pub(crate) fn address_label(&self) -> String {
-        match (&self.ssh, &self.smb) {
-            (_, Some(smb)) => smb.address_label(),
-            (Some(ssh), _) => format!("{}@{}:{}", ssh.username, ssh.host, ssh.port),
-            (None, None) => "未知链接".to_string(),
+        match self.protocol() {
+            Some(ConnectionLinkKind::Ssh) => self
+                .ssh
+                .as_ref()
+                .map(|ssh| format!("{}@{}:{}", ssh.username, ssh.host, ssh.port))
+                .unwrap_or_else(|| "未知链接".to_string()),
+            Some(ConnectionLinkKind::Smb) => self
+                .smb
+                .as_ref()
+                .map(SmbLinkConfig::address_label)
+                .unwrap_or_else(|| "未知链接".to_string()),
+            Some(ConnectionLinkKind::Git) => self
+                .git
+                .as_ref()
+                .map(|git| git.url.clone())
+                .unwrap_or_else(|| "未知链接".to_string()),
+            Some(ConnectionLinkKind::Svn) => self
+                .svn
+                .as_ref()
+                .map(|svn| svn.url.clone())
+                .unwrap_or_else(|| "未知链接".to_string()),
+            None => "未知链接".to_string(),
         }
     }
 
@@ -733,6 +948,20 @@ impl ConnectionLinkConfig {
                     .as_deref()
                     .is_some_and(|domain| domain.to_ascii_lowercase().contains(query));
         }
+        if let Some(git) = &self.git {
+            return git.url.to_ascii_lowercase().contains(query)
+                || git
+                    .username
+                    .as_deref()
+                    .is_some_and(|username| username.to_ascii_lowercase().contains(query));
+        }
+        if let Some(svn) = &self.svn {
+            return svn.url.to_ascii_lowercase().contains(query)
+                || svn
+                    .username
+                    .as_deref()
+                    .is_some_and(|username| username.to_ascii_lowercase().contains(query));
+        }
         false
     }
 }
@@ -744,6 +973,10 @@ pub(crate) enum ConnectionLinkKind {
     Ssh,
     /// SMB 共享链接。
     Smb,
+    /// Git 只读仓库链接。
+    Git,
+    /// SVN 只读仓库链接。
+    Svn,
 }
 
 /// SSH 链接参数；按当前产品选择，密码和私钥口令也会持久化到配置文件。
@@ -868,6 +1101,158 @@ impl SmbLinkConfig {
     }
 }
 
+/// Git 只读仓库链接参数；令牌和私钥口令按现有产品策略持久化到本地配置。
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub(crate) struct GitLinkConfig {
+    /// HTTPS、SSH 或 SCP 风格的远程仓库 URL。
+    pub url: String,
+    /// HTTPS 或 SSH 用户名；SSH URL 已包含用户名时可以为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// HTTPS 访问令牌；公开仓库或 SSH 仓库为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    /// SSH 私钥路径；HTTPS 仓库为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_path: Option<String>,
+    /// 加密 SSH 私钥的可选口令。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_passphrase: Option<String>,
+}
+
+impl fmt::Debug for GitLinkConfig {
+    /// 输出脱敏调试信息，令牌和私钥口令永不进入日志或断言失败文本。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GitLinkConfig")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("private_key_path", &self.private_key_path)
+            .field(
+                "private_key_passphrase",
+                &self.private_key_passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl GitLinkConfig {
+    /// 归一化并校验 Git URL 与对应鉴权字段。
+    pub(crate) fn normalized_for_save(mut self) -> Result<Self, ConnectionValidationError> {
+        self.url = validate_required_text(&self.url, ConnectionValidationError::MissingUrl)?;
+        self.username = normalized_optional_text(self.username.take());
+        self.access_token = normalized_optional_secret_text(self.access_token.take());
+        self.private_key_path = normalized_optional_text(self.private_key_path.take());
+        self.private_key_passphrase =
+            normalized_optional_secret_text(self.private_key_passphrase.take());
+
+        match git_url_kind(&self.url)? {
+            RepositoryUrlKind::Password { embedded_username } => {
+                if self.private_key_path.is_some() || self.private_key_passphrase.is_some() {
+                    return Err(ConnectionValidationError::UnexpectedSshCredential);
+                }
+                let has_username = self.username.is_some() || embedded_username;
+                if has_username != self.access_token.is_some() {
+                    return Err(ConnectionValidationError::IncompleteHttpCredential);
+                }
+            }
+            RepositoryUrlKind::Ssh { embedded_username } => {
+                if self.access_token.is_some() {
+                    return Err(ConnectionValidationError::UnexpectedHttpCredential);
+                }
+                if !embedded_username && self.username.is_none() {
+                    return Err(ConnectionValidationError::MissingUsername);
+                }
+                if self.private_key_path.is_none() {
+                    return Err(ConnectionValidationError::MissingPrivateKey);
+                }
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// SVN 只读仓库链接参数；密码和私钥口令按现有产品策略持久化到本地配置。
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub(crate) struct SvnLinkConfig {
+    /// `http(s)://`、`svn://` 或 `svn+ssh://` 仓库 URL；该位置同时作为浏览根目录。
+    pub url: String,
+    /// SVN 或 SSH 用户名；URL 已包含 SSH 用户名时可以为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// HTTP(S)/`svn://` 仓库密码或 `svn+ssh://` SSH 密码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// `svn+ssh://` SSH 私钥路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_path: Option<String>,
+    /// 加密 SSH 私钥的可选口令。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_passphrase: Option<String>,
+}
+
+impl fmt::Debug for SvnLinkConfig {
+    /// 输出脱敏调试信息，密码和私钥口令只显示占位符。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SvnLinkConfig")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("private_key_path", &self.private_key_path)
+            .field(
+                "private_key_passphrase",
+                &self.private_key_passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl SvnLinkConfig {
+    /// 归一化并校验 SVN URL 与协议对应的鉴权字段。
+    pub(crate) fn normalized_for_save(mut self) -> Result<Self, ConnectionValidationError> {
+        self.url = validate_required_text(&self.url, ConnectionValidationError::MissingUrl)?;
+        self.username = normalized_optional_text(self.username.take());
+        self.password = normalized_optional_secret_text(self.password.take());
+        self.private_key_path = normalized_optional_text(self.private_key_path.take());
+        self.private_key_passphrase =
+            normalized_optional_secret_text(self.private_key_passphrase.take());
+
+        match svn_url_kind(&self.url)? {
+            RepositoryUrlKind::Password { embedded_username } => {
+                // HTTP(S)/svn:// 允许匿名；一旦 URL 或表单提供用户名，就必须同时提供密码，反之亦然。
+                let has_username = embedded_username || self.username.is_some();
+                if has_username != self.password.is_some() {
+                    return Err(ConnectionValidationError::IncompletePasswordCredential);
+                }
+            }
+            RepositoryUrlKind::Ssh {
+                embedded_username: false,
+            } if self.username.is_none() => {
+                return Err(ConnectionValidationError::MissingUsername);
+            }
+            RepositoryUrlKind::Ssh { .. } => {
+                if self.password.is_none() && self.private_key_path.is_none() {
+                    return Err(ConnectionValidationError::MissingCredential);
+                }
+            }
+        }
+        if !self.url.to_ascii_lowercase().starts_with("svn+ssh://")
+            && (self.private_key_path.is_some() || self.private_key_passphrase.is_some())
+        {
+            return Err(ConnectionValidationError::UnexpectedSshCredential);
+        }
+        if self.password.is_some() && self.private_key_path.is_some() {
+            return Err(ConnectionValidationError::ConflictingSshCredential);
+        }
+        Ok(self)
+    }
+}
+
 /// 用户确认可信的 SSH 主机指纹。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct TrustedHostKeyConfig {
@@ -915,6 +1300,10 @@ pub(crate) enum ConnectionTreeRowKind {
     SshLink,
     /// SMB 链接叶子节点。
     SmbLink,
+    /// Git 仓库链接叶子节点。
+    GitLink,
+    /// SVN 仓库链接叶子节点。
+    SvnLink,
 }
 
 /// 删除连接节点后的节点类型，用于应用层展示差异化提示。
@@ -926,6 +1315,10 @@ pub(crate) enum ConnectionDeletedNodeKind {
     SshLink,
     /// 被删除的是 SMB 链接。
     SmbLink,
+    /// 被删除的是 Git 链接。
+    GitLink,
+    /// 被删除的是 SVN 链接。
+    SvnLink,
     /// 被删除的是协议缺失的损坏链接。
     UnknownLink,
 }
@@ -936,6 +1329,8 @@ impl From<ConnectionLinkKind> for ConnectionDeletedNodeKind {
         match value {
             ConnectionLinkKind::Ssh => Self::SshLink,
             ConnectionLinkKind::Smb => Self::SmbLink,
+            ConnectionLinkKind::Git => Self::GitLink,
+            ConnectionLinkKind::Svn => Self::SvnLink,
         }
     }
 }
@@ -964,6 +1359,33 @@ pub(crate) enum ConnectionValidationError {
     /// SMB 密码为空。
     #[error("密码不能为空")]
     MissingPassword,
+    /// Git/SVN 仓库 URL 为空。
+    #[error("仓库 URL 不能为空")]
+    MissingUrl,
+    /// 仓库 URL 协议不在当前内置客户端支持范围内。
+    #[error("不支持该仓库 URL；Git 支持 HTTPS/SSH，SVN 支持 HTTP/HTTPS/svn/svn+ssh")]
+    UnsupportedRepositoryUrl,
+    /// URL 在 authority 中携带密码，可能被日志或提示意外暴露。
+    #[error("仓库 URL 不能内嵌密码，请使用独立凭据字段")]
+    EmbeddedUrlPassword,
+    /// HTTPS 用户名与令牌未成对填写。
+    #[error("HTTPS 用户名与访问令牌必须同时填写或同时留空")]
+    IncompleteHttpCredential,
+    /// SVN 用户名与密码未成对填写。
+    #[error("用户名与密码必须同时填写或同时留空")]
+    IncompletePasswordCredential,
+    /// SSH 仓库未提供私钥。
+    #[error("SSH Git 链接必须填写私钥路径")]
+    MissingPrivateKey,
+    /// 当前 URL 不是 SSH 协议却填写了 SSH 私钥字段。
+    #[error("当前仓库 URL 不能使用 SSH 私钥")]
+    UnexpectedSshCredential,
+    /// 当前 URL 是 SSH 协议却填写了 HTTPS 令牌。
+    #[error("SSH 仓库不能使用 HTTPS 访问令牌")]
+    UnexpectedHttpCredential,
+    /// SVN SSH 同时配置密码和私钥，无法确定使用哪种方式。
+    #[error("SVN SSH 密码和私钥只能选择一种")]
+    ConflictingSshCredential,
     /// 父目录不存在。
     #[error("父目录不存在")]
     ParentNotFound,
@@ -1093,6 +1515,87 @@ pub(crate) fn parse_smb_unc_address(value: &str) -> Option<(String, String, Stri
         "/".to_string()
     };
     Some((host, share, initial_dir))
+}
+
+/// 仓库 URL 的鉴权类别；密码类用于 HTTPS Git 或 HTTP(S)/svn:// SVN，SSH 类用于内置 SSH 传输。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryUrlKind {
+    /// 使用匿名或用户名/密码（令牌）鉴权。
+    Password {
+        /// URL 本身是否已经携带用户名。
+        embedded_username: bool,
+    },
+    /// 使用 SSH 用户名和私钥/密码鉴权。
+    Ssh {
+        /// URL 本身是否已经携带用户名。
+        embedded_username: bool,
+    },
+}
+
+/// 校验 Git URL，只接受 HTTPS、标准 SSH 和 SCP 风格 SSH 地址。
+fn git_url_kind(value: &str) -> Result<RepositoryUrlKind, ConnectionValidationError> {
+    let trimmed = value.trim();
+    if trimmed.to_ascii_lowercase().starts_with("https://") {
+        let parsed = url::Url::parse(trimmed)
+            .map_err(|_| ConnectionValidationError::UnsupportedRepositoryUrl)?;
+        if parsed.password().is_some() {
+            return Err(ConnectionValidationError::EmbeddedUrlPassword);
+        }
+        if parsed.host_str().is_none() {
+            return Err(ConnectionValidationError::UnsupportedRepositoryUrl);
+        }
+        return Ok(RepositoryUrlKind::Password {
+            embedded_username: !parsed.username().is_empty(),
+        });
+    }
+    if trimmed.to_ascii_lowercase().starts_with("ssh://") {
+        let parsed = url::Url::parse(trimmed)
+            .map_err(|_| ConnectionValidationError::UnsupportedRepositoryUrl)?;
+        if parsed.password().is_some() {
+            return Err(ConnectionValidationError::EmbeddedUrlPassword);
+        }
+        if parsed.host_str().is_none() {
+            return Err(ConnectionValidationError::UnsupportedRepositoryUrl);
+        }
+        return Ok(RepositoryUrlKind::Ssh {
+            embedded_username: !parsed.username().is_empty(),
+        });
+    }
+
+    // SCP 风格地址要求 `用户@主机:路径` 三部分齐全；普通本地路径和 file:// 被明确拒绝。
+    let Some((account, repository_path)) = trimmed.split_once(':') else {
+        return Err(ConnectionValidationError::UnsupportedRepositoryUrl);
+    };
+    let Some((username, host)) = account.rsplit_once('@') else {
+        return Err(ConnectionValidationError::UnsupportedRepositoryUrl);
+    };
+    if username.is_empty() || host.is_empty() || repository_path.is_empty() {
+        return Err(ConnectionValidationError::UnsupportedRepositoryUrl);
+    }
+    Ok(RepositoryUrlKind::Ssh {
+        embedded_username: true,
+    })
+}
+
+/// 校验 SVN URL，接受 HTTP(S)、svn 与 svn+ssh，并拒绝 URL 内嵌密码、查询或片段。
+fn svn_url_kind(value: &str) -> Result<RepositoryUrlKind, ConnectionValidationError> {
+    let parsed = url::Url::parse(value.trim())
+        .map_err(|_| ConnectionValidationError::UnsupportedRepositoryUrl)?;
+    if parsed.password().is_some() {
+        return Err(ConnectionValidationError::EmbeddedUrlPassword);
+    }
+    if parsed.host_str().is_none() || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ConnectionValidationError::UnsupportedRepositoryUrl);
+    }
+    match parsed.scheme().to_ascii_lowercase().as_str() {
+        "http" | "https" | "svn" => Ok(RepositoryUrlKind::Password {
+            embedded_username: !parsed.username().is_empty(),
+        }),
+        "svn+ssh" => Ok(RepositoryUrlKind::Ssh {
+            embedded_username: !parsed.username().is_empty(),
+        }),
+        _ => Err(ConnectionValidationError::UnsupportedRepositoryUrl),
+    }
 }
 
 /// 校验必填文本字段。
@@ -1263,6 +1766,63 @@ mod tests {
         assert_eq!(error, ConnectionValidationError::DuplicateName);
         assert_eq!(config.directory(first).unwrap().name, "生产环境");
         assert_eq!(config.directory(second).unwrap().name, "测试环境");
+    }
+
+    /// 验证链接可以在任意目录与根层级之间移动，目标目录会自动展开。
+    #[test]
+    fn move_link_changes_parent_and_expands_target_directory() {
+        let mut config = ConnectionConfig::default();
+        let target = config.add_directory(None, "目标目录").unwrap();
+        config.directory_mut(target).unwrap().expanded = false;
+        let link_id = config
+            .add_ssh_link(
+                None,
+                "app-01",
+                SshLinkConfig {
+                    host: "10.0.0.1".to_string(),
+                    port: 22,
+                    username: "deploy".to_string(),
+                    password: "secret".to_string(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .unwrap();
+
+        assert!(config.move_link(link_id, Some(target)).unwrap());
+        assert_eq!(config.link(link_id).unwrap().parent_id, Some(target));
+        assert!(config.directory(target).unwrap().expanded);
+        assert!(!config.move_link(link_id, Some(target)).unwrap());
+        assert!(config.move_link(link_id, None).unwrap());
+        assert_eq!(config.link(link_id).unwrap().parent_id, None);
+    }
+
+    /// 验证拖动链接不会覆盖目标目录中的同名目录或链接。
+    #[test]
+    fn move_link_rejects_duplicate_name_without_changing_parent() {
+        let mut config = ConnectionConfig::default();
+        let target = config.add_directory(None, "目标目录").unwrap();
+        config.add_directory(Some(target), "app-01").unwrap();
+        let link_id = config
+            .add_ssh_link(
+                None,
+                "app-01",
+                SshLinkConfig {
+                    host: "10.0.0.1".to_string(),
+                    port: 22,
+                    username: "deploy".to_string(),
+                    password: "secret".to_string(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            config.move_link(link_id, Some(target)).unwrap_err(),
+            ConnectionValidationError::DuplicateName
+        );
+        assert_eq!(config.link(link_id).unwrap().parent_id, None);
     }
 
     /// 验证非空目录不能删除，避免右键删除误删整棵子树。
@@ -1457,5 +2017,240 @@ mod tests {
         assert_eq!(host, "host");
         assert_eq!(share, "share");
         assert_eq!(initial_dir, "/dir");
+    }
+
+    /// 验证 Git HTTPS、标准 SSH 与 SCP 风格地址按各自凭据规则通过校验。
+    #[test]
+    fn git_link_validation_accepts_supported_urls_and_credentials() {
+        let public_https = GitLinkConfig {
+            url: "https://example.com/team/repo.git".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("公开 HTTPS Git 仓库应允许匿名读取");
+        assert_eq!(public_https.url, "https://example.com/team/repo.git");
+
+        let private_https = GitLinkConfig {
+            url: "https://example.com/team/repo.git".to_string(),
+            username: Some(" deploy ".to_string()),
+            access_token: Some(" token with spaces ".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("HTTPS 用户名与令牌成对填写时应通过");
+        assert_eq!(private_https.username.as_deref(), Some("deploy"));
+        assert_eq!(
+            private_https.access_token.as_deref(),
+            Some(" token with spaces ")
+        );
+
+        for url in [
+            "ssh://git@example.com:2222/team/repo.git",
+            "git@example.com:team/repo.git",
+        ] {
+            GitLinkConfig {
+                url: url.to_string(),
+                private_key_path: Some(" ~/.ssh/id_ed25519 ".to_string()),
+                ..Default::default()
+            }
+            .normalized_for_save()
+            .expect("带内嵌用户名和私钥的 Git SSH 地址应通过");
+        }
+    }
+
+    /// 验证 Git 拒绝不支持协议、URL 内嵌密码和不完整凭据组合。
+    #[test]
+    fn git_link_validation_rejects_unsafe_or_incomplete_credentials() {
+        let unsupported = GitLinkConfig {
+            url: "file:///tmp/repo.git".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(
+            unsupported,
+            ConnectionValidationError::UnsupportedRepositoryUrl
+        );
+
+        let embedded_password = GitLinkConfig {
+            url: "https://user:secret@example.com/repo.git".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(
+            embedded_password,
+            ConnectionValidationError::EmbeddedUrlPassword
+        );
+
+        let missing_token = GitLinkConfig {
+            url: "https://example.com/repo.git".to_string(),
+            username: Some("deploy".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(
+            missing_token,
+            ConnectionValidationError::IncompleteHttpCredential
+        );
+
+        let missing_key = GitLinkConfig {
+            url: "ssh://git@example.com/repo.git".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(missing_key, ConnectionValidationError::MissingPrivateKey);
+    }
+
+    /// 验证 SVN 接受 HTTP(S)/svn/svn+ssh，且支持匿名、密码和私钥三类明确配置。
+    #[test]
+    fn svn_link_validation_accepts_supported_read_only_transports() {
+        SvnLinkConfig {
+            url: "svn://example.com/repo".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("svn:// 应允许匿名读取");
+
+        SvnLinkConfig {
+            url: "svn://example.com/repo".to_string(),
+            username: Some("reader".to_string()),
+            password: Some(" secret ".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("svn:// 用户名密码成对填写时应通过");
+
+        SvnLinkConfig {
+            url: "svn://reader@example.com/repo".to_string(),
+            password: Some(" secret ".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("svn:// URL 内嵌用户名与表单密码配对时应通过");
+
+        SvnLinkConfig {
+            url: "http://10.1.3.12/svn/example/".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("HTTP SVN 应允许匿名读取");
+
+        SvnLinkConfig {
+            url: "https://reader@example.com/svn/repo".to_string(),
+            password: Some(" secret ".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("HTTPS SVN 应支持用户名密码");
+
+        SvnLinkConfig {
+            url: "svn+ssh://svn@example.com/repo".to_string(),
+            private_key_path: Some("~/.ssh/id_ed25519".to_string()),
+            private_key_passphrase: Some(" phrase ".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .expect("svn+ssh:// 应支持显式私钥");
+    }
+
+    /// 验证 SVN 拒绝不支持的协议、内嵌密码、不完整密码和同时配置两种 SSH 身份。
+    #[test]
+    fn svn_link_validation_rejects_unsupported_or_ambiguous_credentials() {
+        let file = SvnLinkConfig {
+            url: "file:///srv/svn/repo".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(file, ConnectionValidationError::UnsupportedRepositoryUrl);
+
+        let embedded_password = SvnLinkConfig {
+            url: "svn://reader:secret@example.com/repo".to_string(),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(
+            embedded_password,
+            ConnectionValidationError::EmbeddedUrlPassword
+        );
+
+        let incomplete = SvnLinkConfig {
+            url: "svn://example.com/repo".to_string(),
+            username: Some("reader".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(
+            incomplete,
+            ConnectionValidationError::IncompletePasswordCredential
+        );
+
+        let conflicting = SvnLinkConfig {
+            url: "svn+ssh://svn@example.com/repo".to_string(),
+            password: Some("secret".to_string()),
+            private_key_path: Some("~/.ssh/id_ed25519".to_string()),
+            ..Default::default()
+        }
+        .normalized_for_save()
+        .unwrap_err();
+        assert_eq!(
+            conflicting,
+            ConnectionValidationError::ConflictingSshCredential
+        );
+    }
+
+    /// 验证每个链接必须恰好配置一种协议，旧 SSH/SMB TOML 仍能反序列化。
+    #[test]
+    fn link_protocol_is_mutually_exclusive_and_legacy_toml_remains_compatible() {
+        let legacy = r#"
+            id = 7
+            name = "legacy-ssh"
+
+            [ssh]
+            host = "example.com"
+            port = 22
+            username = "deploy"
+            password = "secret"
+        "#;
+        let legacy_link: ConnectionLinkConfig =
+            toml::from_str(legacy).expect("旧 SSH TOML 应继续兼容");
+        assert_eq!(legacy_link.protocol(), Some(ConnectionLinkKind::Ssh));
+        assert!(legacy_link.git.is_none());
+        assert!(legacy_link.svn.is_none());
+
+        let mut invalid = legacy_link;
+        invalid.git = Some(GitLinkConfig {
+            url: "https://example.com/repo.git".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(invalid.protocol(), None);
+    }
+
+    /// 验证仓库秘密会序列化持久化，但过滤与 Debug 输出不会泄漏明文。
+    #[test]
+    fn repository_secrets_are_persisted_but_redacted_from_debug_and_filtering() {
+        let mut config = ConnectionConfig::default();
+        let link_id = config
+            .add_git_link(
+                None,
+                "private-repo",
+                GitLinkConfig {
+                    url: "https://example.com/repo.git".to_string(),
+                    username: Some("reader".to_string()),
+                    access_token: Some("super-secret-token".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let link = config.link(link_id).unwrap();
+        let serialized = toml::to_string(link).expect("Git 链接应能序列化");
+        assert!(serialized.contains("super-secret-token"));
+        assert!(!link.matches_query("super-secret-token"));
+        assert!(!format!("{link:?}").contains("super-secret-token"));
     }
 }

@@ -77,7 +77,7 @@ use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
 use crate::remote::connection::ConnectionNodeId;
-use crate::remote::sftp::SftpSessionState;
+use crate::remote::remote_file::RemoteFileSessionState;
 use crate::remote::terminal::TerminalSessionState;
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
@@ -128,15 +128,19 @@ pub(crate) fn log_viewer_line_number_width(line_count: usize) -> f32 {
 /// 参数说明：
 /// - `cx`：当前视图上下文。
 /// - `app`：主应用实体。
+/// - `initial_theme`：创建视图时由主应用传入的主题快照。
 /// - `apply`：主题变化时更新视图状态的回调，参数为视图、最新主题、上下文。
 ///
 /// 返回值：主题订阅句柄，需由调用者持有以保持订阅存活。
 pub(crate) fn observe_app_theme<V: 'static>(
     cx: &mut Context<V>,
     app: &Entity<ArgusApp>,
+    initial_theme: AppTheme,
     apply: impl Fn(&mut V, &AppTheme, &mut Context<V>) + 'static,
 ) -> Subscription {
-    let mut observed_theme = app.read(cx).theme.clone();
+    // 独立窗口常在 `ArgusApp::update` 内创建，此时立即 `app.read(cx)` 会重入借用同一实体并 panic。
+    // 初始主题由调用方的 `&mut ArgusApp` 直接传入，后续 notify 才在观察回调内安全读取。
+    let mut observed_theme = initial_theme;
     cx.observe(app, move |view, app_entity, cx| {
         let theme = app_entity.read_with(cx, |app, _| app.theme.clone());
         if theme == observed_theme {
@@ -311,11 +315,11 @@ pub(crate) struct ArgusApp {
     /// 下一个 SSH 终端会话 ID。
     pub next_terminal_session_id: usize,
     /// 远程文件管理会话状态表。
-    pub sftp_sessions: HashMap<usize, SftpSessionState>,
+    pub remote_file_sessions: HashMap<usize, RemoteFileSessionState>,
     /// 下一个远程文件管理会话 ID。
-    pub next_sftp_session_id: usize,
+    pub next_remote_file_session_id: usize,
     /// 当前打开的远程文件管理弹窗。
-    pub sftp_dialog: Option<SftpDialogState>,
+    pub remote_file_dialog: Option<RemoteFileDialogState>,
     /// 当前 Jstack 频率方块的内部悬浮气泡数据。
     pub jstack_cell_hover_preview: Option<JstackCellHoverPreview>,
     /// 来源树中用于“选中文件搜索”的多选日志节点。
@@ -407,7 +411,27 @@ impl ArgusApp {
 
     /// 使用指定配置管理器创建应用状态，测试可借此隔离真实用户配置目录。
     pub(crate) fn new_with_config_manager(config_manager: ConfigManager) -> Self {
-        let (mut config, config_warning) = config_manager.load_with_warning();
+        let (mut config, mut config_warning) = config_manager.load_with_warning();
+        // 缓存目录必须从当前设置文件所在目录派生，确保测试或便携配置不会清理真实用户缓存。
+        let git_cache_root = config_manager
+            .settings_path()
+            .parent()
+            .map(crate::config::paths::argus_git_repositories_dir_from_config)
+            .unwrap_or_else(crate::config::paths::argus_git_repositories_dir);
+        let valid_git_link_ids = config
+            .connections
+            .links
+            .iter()
+            .filter(|link| {
+                link.protocol() == Some(crate::remote::connection::ConnectionLinkKind::Git)
+            })
+            .map(|link| link.id)
+            .collect::<BTreeSet<_>>();
+        if let Err(error) =
+            crate::remote::git::cleanup_orphaned_git_caches(&git_cache_root, &valid_git_link_ids)
+        {
+            config_warning.get_or_insert_with(|| format!("清理孤立 Git 缓存失败：{error}"));
+        }
         let theme_manager = ThemeManager::load_default();
         let selected_theme_id = theme_manager.resolve_theme_id(&config.appearance.theme_mode);
         let theme = theme_manager.theme_for_id(&selected_theme_id);
@@ -472,9 +496,9 @@ impl ArgusApp {
             next_runtime_analysis_id: 1,
             terminal_sessions: HashMap::new(),
             next_terminal_session_id: 1,
-            sftp_sessions: HashMap::new(),
-            next_sftp_session_id: 1,
-            sftp_dialog: None,
+            remote_file_sessions: HashMap::new(),
+            next_remote_file_session_id: 1,
+            remote_file_dialog: None,
             jstack_cell_hover_preview: None,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,
@@ -538,8 +562,8 @@ impl ArgusApp {
                 root: cx.focus_handle(),
                 source_tree_search: cx.focus_handle(),
                 connection_tree_search: cx.focus_handle(),
-                sftp_address: cx.focus_handle(),
-                sftp_rename_name: cx.focus_handle(),
+                remote_file_address: cx.focus_handle(),
+                remote_file_rename_name: cx.focus_handle(),
                 archive_password: cx.focus_handle(),
                 settings_quick_keywords: cx.focus_handle(),
                 settings_jstack_thread_names: cx.focus_handle(),
@@ -1180,8 +1204,8 @@ impl ArgusApp {
             TabKind::SshTerminal { session_id } => {
                 self.disconnect_terminal_session(*session_id);
             }
-            TabKind::SftpFileManager { session_id } => {
-                self.disconnect_sftp_session(*session_id);
+            TabKind::RemoteFileManager { session_id } => {
+                self.disconnect_remote_file_session(*session_id);
             }
             TabKind::Empty => {}
         }
@@ -1211,7 +1235,7 @@ impl ArgusApp {
             TabKind::Empty
             | TabKind::LogSource { .. }
             | TabKind::SshTerminal { .. }
-            | TabKind::SftpFileManager { .. }
+            | TabKind::RemoteFileManager { .. }
             | TabKind::RuntimeAnalysis { .. } => {
                 self.jstack_analyses.clear();
             }
@@ -1229,7 +1253,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::SshTerminal { .. }
-            | TabKind::SftpFileManager { .. } => {
+            | TabKind::RemoteFileManager { .. } => {
                 self.runtime_analyses.clear();
             }
         }
@@ -1242,7 +1266,7 @@ impl ArgusApp {
             TabKind::Empty
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
-            | TabKind::SftpFileManager { .. }
+            | TabKind::RemoteFileManager { .. }
             | TabKind::RuntimeAnalysis { .. } => None,
         };
         let sessions_to_disconnect = self
@@ -1257,9 +1281,9 @@ impl ArgusApp {
     }
 
     /// 只保留指定远程文件管理 tab 的会话；非远程文件 tab 会断开全部文件管理会话。
-    fn retain_sftp_session_for_tab_kind(&mut self, kept_kind: &TabKind) {
+    fn retain_remote_file_session_for_tab_kind(&mut self, kept_kind: &TabKind) {
         let kept_session_id = match kept_kind {
-            TabKind::SftpFileManager { session_id } => Some(*session_id),
+            TabKind::RemoteFileManager { session_id } => Some(*session_id),
             TabKind::Empty
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
@@ -1267,13 +1291,13 @@ impl ArgusApp {
             | TabKind::SshTerminal { .. } => None,
         };
         let sessions_to_disconnect = self
-            .sftp_sessions
+            .remote_file_sessions
             .keys()
             .copied()
             .filter(|session_id| Some(*session_id) != kept_session_id)
             .collect::<Vec<_>>();
         for session_id in sessions_to_disconnect {
-            self.disconnect_sftp_session(session_id);
+            self.disconnect_remote_file_session(session_id);
         }
     }
 
@@ -1578,7 +1602,7 @@ impl ArgusApp {
             self.runtime_analyses.clear();
             self.next_runtime_analysis_id = 1;
             self.disconnect_all_terminal_sessions();
-            self.disconnect_all_sftp_sessions();
+            self.disconnect_all_remote_file_sessions();
             self.ensure_log_tab_view_state(self.active_tab_id);
             self.reset_log_text_selection();
             self.log_scrollbar_drag = None;
@@ -1644,7 +1668,7 @@ impl ArgusApp {
         self.retain_jstack_analysis_for_tab_kind(&kept_kind);
         self.retain_runtime_analysis_for_tab_kind(&kept_kind);
         self.retain_terminal_session_for_tab_kind(&kept_kind);
-        self.retain_sftp_session_for_tab_kind(&kept_kind);
+        self.retain_remote_file_session_for_tab_kind(&kept_kind);
         self.active_tab_id = tab_id;
         self.close_log_search_results_for_active_analysis_tab();
         self.sync_source_tree_selection_from_active_tab();
@@ -1680,7 +1704,7 @@ impl ArgusApp {
         self.runtime_analyses.clear();
         self.next_runtime_analysis_id = 1;
         self.disconnect_all_terminal_sessions();
-        self.disconnect_all_sftp_sessions();
+        self.disconnect_all_remote_file_sessions();
         self.ensure_log_tab_view_state(empty_tab_id);
         self.active_tab_id = empty_tab_id;
         self.hovered_tab_id = None;
@@ -1822,7 +1846,7 @@ fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
         | TabKind::JstackAnalysis { .. }
         | TabKind::RuntimeAnalysis { .. }
         | TabKind::SshTerminal { .. }
-        | TabKind::SftpFileManager { .. } => None,
+        | TabKind::RemoteFileManager { .. } => None,
     }
 }
 

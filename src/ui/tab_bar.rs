@@ -253,7 +253,7 @@ fn is_tab_loading(app: &ArgusApp, kind: &TabKind) -> bool {
             .is_some_and(|state| {
                 matches!(state.task_state, RuntimeAnalysisTaskState::Loading { .. })
             }),
-        TabKind::Empty | TabKind::SshTerminal { .. } | TabKind::SftpFileManager { .. } => false,
+        TabKind::Empty | TabKind::SshTerminal { .. } | TabKind::RemoteFileManager { .. } => false,
     }
 }
 

@@ -1,6 +1,6 @@
 //! 文件职责：提取应用通用类型定义。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：定义工作区、标签页、文本输入目标和占位数据等跨功能域共享类型。
 
@@ -76,8 +76,8 @@ pub(crate) enum TabKind {
         /// 终端会话 ID，用于从应用状态表中读取终端输出和连接状态。
         session_id: usize,
     },
-    /// 远程文件管理标签页，可由 SSH SFTP 或 SMB 后端驱动。
-    SftpFileManager {
+    /// 远程文件管理标签页，可由 SFTP、SMB、Git 或 SVN 后端驱动。
+    RemoteFileManager {
         /// 远程文件会话 ID，用于从应用状态表中读取远程文件列表和操作状态。
         session_id: usize,
     },
@@ -174,12 +174,17 @@ pub(crate) enum AppTextInputTarget {
     /// 链接树过滤输入框。
     ConnectionTreeSearch,
     /// 远程文件管理地址栏输入框。
-    SftpAddress {
+    RemoteFileAddress {
+        /// 远程文件管理会话 ID。
+        session_id: usize,
+    },
+    /// SVN 仓库版本输入框。
+    RemoteFileVersion {
         /// 远程文件管理会话 ID。
         session_id: usize,
     },
     /// 远程文件管理重命名弹窗名称输入框。
-    SftpRenameName,
+    RemoteFileRenameName,
     /// 压缩包密码弹窗输入框。
     ArchivePassword,
     /// 来源选择器路径输入框。
@@ -215,9 +220,9 @@ pub(crate) struct AppInputFocusHandles {
     /// 链接树过滤输入框焦点。
     pub connection_tree_search: FocusHandle,
     /// 远程文件管理地址栏焦点。
-    pub sftp_address: FocusHandle,
+    pub remote_file_address: FocusHandle,
     /// 远程文件管理重命名弹窗输入框焦点。
-    pub sftp_rename_name: FocusHandle,
+    pub remote_file_rename_name: FocusHandle,
     /// 压缩包密码弹窗输入框焦点。
     pub archive_password: FocusHandle,
     /// 设置模态框快搜关键字输入框焦点。

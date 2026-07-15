@@ -1,13 +1,13 @@
-//! 文件职责：渲染链接工作区左侧 SSH 链接目录树。
+//! 文件职责：渲染链接工作区左侧远程链接目录树。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：展示目录、SSH 链接、过滤结果和节点点击打开终端交互。
+//! 主要功能：展示目录与多协议链接、处理选择、过滤、打开会话及链接拖放移动。
 
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, Render,
+    AnyElement, ClickEvent, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, Render,
     SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
@@ -39,6 +39,54 @@ struct ConnectionLinkTooltip {
     label: String,
     /// 当前主题令牌。
     theme: AppTheme,
+}
+
+/// 链接树内部拖放载荷；只允许链接叶子节点作为拖动源。
+#[derive(Clone, Debug)]
+struct ConnectionLinkDrag {
+    /// 待移动链接节点 ID。
+    link_id: crate::remote::connection::ConnectionNodeId,
+    /// 拖动浮层展示名称。
+    label: String,
+    /// 拖动浮层使用的协议图标。
+    icon: ArgusIcon,
+}
+
+/// 链接拖动时跟随指针展示的紧凑预览。
+struct ConnectionLinkDragPreview {
+    /// 链接名称。
+    label: String,
+    /// 链接协议图标。
+    icon: ArgusIcon,
+    /// 创建拖动时的主题快照。
+    theme: AppTheme,
+}
+
+impl Render for ConnectionLinkDragPreview {
+    /// 渲染不会参与点击命中的拖动预览条目。
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(CONNECTION_ROW_HEIGHT))
+            .max_w(px(240.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(CONNECTION_ROW_RADIUS))
+            .border_1()
+            .border_color(rgb(self.theme.border))
+            .bg(rgb(self.theme.current_line))
+            .shadow_md()
+            .text_size(px(CONNECTION_TREE_FONT_SIZE))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(self.theme.foreground))
+            .child(render_icon(
+                self.icon,
+                self.theme.foreground_muted,
+                CONNECTION_TREE_ICON_SIZE,
+            ))
+            .child(div().truncate().child(self.label.clone()))
+    }
 }
 
 impl Render for ConnectionLinkTooltip {
@@ -75,11 +123,23 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
     };
 
     div()
+        .id("connection-tree-panel")
         .relative()
         .flex_1()
         .overflow_hidden()
         .pt(px(1.0))
         .pb_2()
+        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+            if app.clear_connection_tree_selection() {
+                cx.notify();
+            }
+        }))
+        .on_drop(cx.listener(|app, drag: &ConnectionLinkDrag, _, cx| {
+            // 目录行会在更内层处理并阻止冒泡；落在列表空白处则移动到根层级。
+            cx.stop_propagation();
+            app.move_connection_link(drag.link_id, None);
+            cx.notify();
+        }))
         .when(rows.is_empty(), |this| {
             this.child(
                 div()
@@ -129,6 +189,8 @@ fn render_row(
         ConnectionTreeRowKind::Directory => ArgusIcon::Folder,
         ConnectionTreeRowKind::SshLink => ArgusIcon::Link,
         ConnectionTreeRowKind::SmbLink => ArgusIcon::Database,
+        ConnectionTreeRowKind::GitLink => ArgusIcon::GitBranch,
+        ConnectionTreeRowKind::SvnLink => ArgusIcon::History,
     };
     let expand_icon = if row.expanded {
         ArgusIcon::Collapse
@@ -139,9 +201,15 @@ fn render_row(
         ConnectionTreeRowKind::Directory => "",
         ConnectionTreeRowKind::SshLink => "ssh",
         ConnectionTreeRowKind::SmbLink => "smb",
+        ConnectionTreeRowKind::GitLink => "git",
+        ConnectionTreeRowKind::SvnLink => "svn",
     };
     let tooltip = row.tooltip.clone();
     let tooltip_theme = theme.clone();
+    let drag_label = row.label.clone();
+    let drag_theme = theme.clone();
+    let drop_background = theme.selection;
+    let drop_border = theme.foreground_muted;
 
     div()
         .id(SharedString::from(format!("connection-node-{node_id}")))
@@ -187,6 +255,40 @@ fn render_row(
                 .when(row.is_selected, |this| this.bg(rgb(theme.selection)))
                 .when(!row.is_selected, |this| {
                     this.hover(|this| this.bg(rgb(theme.current_line)))
+                })
+                .when(row.kind == ConnectionTreeRowKind::Directory, |this| {
+                    this.drag_over::<ConnectionLinkDrag>(move |style, _drag, _window, _cx| {
+                        style
+                            .bg(rgb(drop_background))
+                            .border_1()
+                            .border_color(rgb(drop_border))
+                    })
+                    .on_drop(cx.listener(
+                        move |app, drag: &ConnectionLinkDrag, _, cx| {
+                            cx.stop_propagation();
+                            app.move_connection_link(drag.link_id, Some(node_id));
+                            cx.notify();
+                        },
+                    ))
+                })
+                .when(row.kind != ConnectionTreeRowKind::Directory, |this| {
+                    let drag = ConnectionLinkDrag {
+                        link_id: node_id,
+                        label: drag_label,
+                        icon,
+                    };
+                    this.cursor_move()
+                        .on_drag(drag, move |drag, _position, _window, cx| {
+                            cx.new(|_| ConnectionLinkDragPreview {
+                                label: drag.label.clone(),
+                                icon: drag.icon,
+                                theme: drag_theme.clone(),
+                            })
+                        })
+                        // 放到另一个链接行不是有效目录目标，必须阻止事件落到根面板。
+                        .on_drop(cx.listener(|_app, _drag: &ConnectionLinkDrag, _, cx| {
+                            cx.stop_propagation();
+                        }))
                 })
                 .on_mouse_down(
                     MouseButton::Right,
@@ -243,14 +345,11 @@ fn render_row(
                             .child(meta_text),
                     )
                 })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |app, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        app.handle_connection_tree_click(node_id, cx);
-                        cx.notify();
-                    }),
-                ),
+                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    app.handle_connection_tree_click(node_id, cx);
+                    cx.notify();
+                })),
         )
 }
 

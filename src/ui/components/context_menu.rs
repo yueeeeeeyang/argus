@@ -1,6 +1,6 @@
 //! 文件职责：提供通用上下文菜单与下拉菜单组件。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：按窗口坐标渲染可滚动菜单，并将菜单项动作分发给应用状态。
 
@@ -25,12 +25,14 @@ const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
 const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
 /// 链接树右键菜单宽度，容纳编辑和删除动作。
 const CONNECTION_TREE_CONTEXT_MENU_WIDTH: f32 = 132.0;
-/// 新增链接类型下拉菜单宽度，容纳 SSH/SMB 两种连接类型。
+/// 新增链接类型下拉菜单宽度，容纳 SSH/SMB/Git/SVN 四种连接类型。
 const CONNECTION_LINK_CREATE_MENU_WIDTH: f32 = 156.0;
 /// 终端右键菜单宽度，容纳文件管理动作。
 const TERMINAL_CONTEXT_MENU_WIDTH: f32 = 132.0;
-/// SFTP 文件行右键菜单宽度，容纳下载、重命名和删除动作。
-const SFTP_ENTRY_CONTEXT_MENU_WIDTH: f32 = 132.0;
+/// 远程文件行右键菜单宽度，容纳下载、重命名和删除动作。
+const REMOTE_FILE_ENTRY_CONTEXT_MENU_WIDTH: f32 = 132.0;
+/// Git 版本下拉菜单宽度，兼顾较长分支和标签名。
+const REPOSITORY_VERSION_MENU_WIDTH: f32 = 260.0;
 /// 菜单项固定行高，供 `uniform_list` 稳定计算滚动范围。
 const MENU_ROW_HEIGHT: f32 = 34.0;
 /// 菜单项水平内边距，和标签页右键菜单保持一致的舒展感。
@@ -69,9 +71,14 @@ pub(crate) enum ActiveMenuKind {
         /// 被右键点击的终端会话 ID。
         session_id: usize,
     },
-    /// SFTP 文件管理表格行右键菜单，动作作用于当前选中的远程条目。
-    SftpEntry {
-        /// 被右键点击的 SFTP 会话 ID。
+    /// 远程文件管理表格行右键菜单，动作作用于当前选中的远程条目。
+    RemoteFileEntry {
+        /// 被右键点击的远程文件会话 ID。
+        session_id: usize,
+    },
+    /// Git 分支/标签版本下拉菜单。
+    RepositoryVersions {
+        /// 仓库文件管理会话 ID。
         session_id: usize,
     },
 }
@@ -133,30 +140,41 @@ pub(crate) enum MenuAction {
     NewSshConnectionLink,
     /// 打开新增 SMB 链接窗口。
     NewSmbConnectionLink,
+    /// 打开新增 Git 链接窗口。
+    NewGitConnectionLink,
+    /// 打开新增 SVN 链接窗口。
+    NewSvnConnectionLink,
     /// 从 SSH 终端打开 SFTP 文件管理标签页。
     OpenSftpFileManager {
         /// 终端会话 ID。
         terminal_session_id: usize,
     },
-    /// 下载 SFTP 文件管理中当前选中的普通文件。
-    DownloadSftpSelection {
-        /// SFTP 会话 ID。
+    /// 下载远程文件管理中当前选中的普通文件。
+    DownloadRemoteFileSelection {
+        /// 远程文件会话 ID。
         session_id: usize,
     },
-    /// 预览 SFTP 文件管理中当前选中的普通文件。
-    PreviewSftpSelection {
-        /// SFTP 会话 ID。
+    /// 预览远程文件管理中当前选中的普通文件。
+    PreviewRemoteFileSelection {
+        /// 远程文件会话 ID。
         session_id: usize,
     },
-    /// 重命名 SFTP 文件管理中当前选中的文件或目录。
-    RenameSftpSelection {
-        /// SFTP 会话 ID。
+    /// 重命名远程文件管理中当前选中的文件或目录。
+    RenameRemoteFileSelection {
+        /// 远程文件会话 ID。
         session_id: usize,
     },
-    /// 删除 SFTP 文件管理中当前选中的普通文件或空目录。
-    DeleteSftpSelection {
-        /// SFTP 会话 ID。
+    /// 删除远程文件管理中当前选中的普通文件或空目录。
+    DeleteRemoteFileSelection {
+        /// 远程文件会话 ID。
         session_id: usize,
+    },
+    /// 切换仓库文件管理会话的 Git 分支或标签。
+    SwitchRepositoryVersion {
+        /// 仓库文件管理会话 ID。
+        session_id: usize,
+        /// 后端识别的完整引用 ID。
+        version_id: String,
     },
 }
 
@@ -182,21 +200,30 @@ impl MenuAction {
             }
             Self::NewSshConnectionLink => "new-ssh-connection-link".to_string(),
             Self::NewSmbConnectionLink => "new-smb-connection-link".to_string(),
+            Self::NewGitConnectionLink => "new-git-connection-link".to_string(),
+            Self::NewSvnConnectionLink => "new-svn-connection-link".to_string(),
             Self::OpenSftpFileManager {
                 terminal_session_id,
-            } => format!("open-sftp-file-manager-{terminal_session_id}"),
-            Self::DownloadSftpSelection { session_id } => {
-                format!("download-sftp-selection-{session_id}")
+            } => format!("open-remote-file-manager-{terminal_session_id}"),
+            Self::DownloadRemoteFileSelection { session_id } => {
+                format!("download-remote-file-selection-{session_id}")
             }
-            Self::PreviewSftpSelection { session_id } => {
-                format!("preview-sftp-selection-{session_id}")
+            Self::PreviewRemoteFileSelection { session_id } => {
+                format!("preview-remote-file-selection-{session_id}")
             }
-            Self::RenameSftpSelection { session_id } => {
-                format!("rename-sftp-selection-{session_id}")
+            Self::RenameRemoteFileSelection { session_id } => {
+                format!("rename-remote-file-selection-{session_id}")
             }
-            Self::DeleteSftpSelection { session_id } => {
-                format!("delete-sftp-selection-{session_id}")
+            Self::DeleteRemoteFileSelection { session_id } => {
+                format!("delete-remote-file-selection-{session_id}")
             }
+            Self::SwitchRepositoryVersion {
+                session_id,
+                version_id,
+            } => format!(
+                "switch-repository-version-{session_id}-{}",
+                version_id.replace(['/', ':'], "-")
+            ),
         }
     }
 }
@@ -259,7 +286,8 @@ pub(crate) fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> 
         ActiveMenuKind::ConnectionTree { .. } => CONNECTION_TREE_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::ConnectionLinkCreate => CONNECTION_LINK_CREATE_MENU_WIDTH,
         ActiveMenuKind::TerminalContext { .. } => TERMINAL_CONTEXT_MENU_WIDTH,
-        ActiveMenuKind::SftpEntry { .. } => SFTP_ENTRY_CONTEXT_MENU_WIDTH,
+        ActiveMenuKind::RemoteFileEntry { .. } => REMOTE_FILE_ENTRY_CONTEXT_MENU_WIDTH,
+        ActiveMenuKind::RepositoryVersions { .. } => REPOSITORY_VERSION_MENU_WIDTH,
     };
     let menu_height =
         (entry_count as f32 * MENU_ROW_HEIGHT).clamp(MENU_ROW_HEIGHT, MENU_MAX_HEIGHT);

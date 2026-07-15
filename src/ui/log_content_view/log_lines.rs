@@ -16,8 +16,8 @@ pub(crate) fn render_content_body(
         TabKind::SshTerminal { session_id } => {
             terminal_view::render(app, session_id, window, cx).into_any_element()
         }
-        TabKind::SftpFileManager { session_id } => {
-            sftp_file_manager_view::render(app, session_id, cx).into_any_element()
+        TabKind::RemoteFileManager { session_id } => {
+            remote_file_manager_view::render(app, session_id, cx).into_any_element()
         }
         TabKind::LogSource { source_id, path } => {
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();

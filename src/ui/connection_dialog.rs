@@ -1,8 +1,8 @@
 //! 文件职责：渲染链接工作区的目录、链接和确认模态框。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供链接目录和 SSH/SMB 链接表单模态框，并在首次连接未知主机时展示指纹确认。
+//! 主要功能：提供目录与多协议链接表单、统一删除确认样式，并展示首次连接主机指纹确认。
 
 use std::ops::Range;
 
@@ -40,16 +40,20 @@ const CONNECTION_DIRECTORY_MODAL_WIDTH: f32 = 420.0;
 const CONNECTION_DIRECTORY_MODAL_HEIGHT: f32 = 170.0;
 /// 链接表单模态框宽度，沿用改造前独立窗口尺寸。
 const CONNECTION_LINK_MODAL_WIDTH: f32 = 520.0;
-/// 链接表单模态框高度，沿用改造前独立窗口尺寸。
-const CONNECTION_LINK_MODAL_HEIGHT: f32 = 470.0;
+/// 链接表单除输入行之外的基础高度，包含标题栏、操作区、内边距和模态外壳。
+const CONNECTION_LINK_MODAL_BASE_HEIGHT: f32 = 128.0;
+/// 链接表单每个输入行占用的高度，包含 30px 输入框与 12px 行间距。
+const CONNECTION_LINK_MODAL_INPUT_STRIDE: f32 = 42.0;
+/// 链接表单警告或校验错误的预留高度，包含单行文字与上下间距。
+const CONNECTION_LINK_MODAL_MESSAGE_STRIDE: f32 = 28.0;
 /// 主机指纹确认弹窗宽度。
 const HOST_KEY_DIALOG_WIDTH: f32 = 520.0;
 /// 主机指纹确认弹窗高度。
 const HOST_KEY_DIALOG_HEIGHT: f32 = 280.0;
 /// 删除确认弹窗宽度。
 const DELETE_DIALOG_WIDTH: f32 = 420.0;
-/// 删除确认弹窗高度。
-const DELETE_DIALOG_HEIGHT: f32 = 210.0;
+/// 删除确认弹窗高度；与新增目录弹窗保持相同的紧凑布局密度。
+const DELETE_DIALOG_HEIGHT: f32 = 190.0;
 
 /// 目录窗口模式，区分新增和编辑已有目录。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -284,6 +288,8 @@ struct ConnectionLinkWindowFocusHandles {
     name: FocusHandle,
     /// 主机输入框真实焦点。
     host: FocusHandle,
+    /// 仓库 URL 输入框真实焦点。
+    url: FocusHandle,
     /// 端口输入框真实焦点。
     port: FocusHandle,
     /// 用户名输入框真实焦点。
@@ -338,6 +344,7 @@ impl ConnectionLinkWindow {
                 root: cx.focus_handle(),
                 name: cx.focus_handle(),
                 host: cx.focus_handle(),
+                url: cx.focus_handle(),
                 port: cx.focus_handle(),
                 username: cx.focus_handle(),
                 password: cx.focus_handle(),
@@ -359,6 +366,14 @@ impl ConnectionLinkWindow {
     /// 返回当前链接模态框表单协议，用于重复打开不同协议表单时判断是否需要替换。
     pub(crate) fn link_kind(&self) -> ConnectionLinkKind {
         self.form.link_kind
+    }
+
+    /// 根据当前协议、URL 与校验状态返回模态框应使用的内容高度。
+    ///
+    /// Git/SVN 会随 URL 传输方式增减密码或私钥字段，因此不能按协议使用一个
+    /// 固定高度。返回值包含通用模态外壳的内边距。
+    pub(crate) fn preferred_modal_height(&self) -> f32 {
+        preferred_connection_link_modal_height(&self.form)
     }
 
     /// 替换链接模态框表单和模式，供右键编辑入口复用已经打开的子视图。
@@ -384,6 +399,7 @@ impl ConnectionLinkWindow {
     fn clear_input_focuses(&mut self) {
         clear_input_focus_state(&mut self.form.name_input);
         clear_input_focus_state(&mut self.form.host_input);
+        clear_input_focus_state(&mut self.form.url_input);
         clear_input_focus_state(&mut self.form.port_input);
         clear_input_focus_state(&mut self.form.username_input);
         clear_input_focus_state(&mut self.form.password_input);
@@ -399,6 +415,7 @@ impl ConnectionLinkWindow {
         match target {
             ConnectionFormInputTarget::LinkName => Some(&mut self.form.name_input),
             ConnectionFormInputTarget::LinkHost => Some(&mut self.form.host_input),
+            ConnectionFormInputTarget::LinkUrl => Some(&mut self.form.url_input),
             ConnectionFormInputTarget::LinkPort => Some(&mut self.form.port_input),
             ConnectionFormInputTarget::LinkUsername => Some(&mut self.form.username_input),
             ConnectionFormInputTarget::LinkPassword => Some(&mut self.form.password_input),
@@ -506,6 +523,8 @@ enum ConnectionFormInputTarget {
     LinkName,
     /// SSH 主机输入框。
     LinkHost,
+    /// Git/SVN 仓库 URL 输入框。
+    LinkUrl,
     /// SSH 端口输入框。
     LinkPort,
     /// SSH 用户名输入框。
@@ -598,12 +617,14 @@ pub(crate) fn render_connection_link_modal(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
+    // 高度必须在移交子视图 Entity 前读取；URL 编辑会通知主应用重绘该外壳。
+    let modal_height = modal.read_with(cx, |window_state, _| window_state.preferred_modal_height());
     render_modal_dialog(
         ModalDialog {
             overlay_id: "connection-link-modal-overlay",
             container_id: "connection-link-modal-container",
             width: CONNECTION_LINK_MODAL_WIDTH,
-            height: CONNECTION_LINK_MODAL_HEIGHT,
+            height: modal_height,
             content: modal.into_any_element(),
         },
         theme.clone(),
@@ -694,6 +715,101 @@ fn render_directory_window_content(
         )
 }
 
+/// 链接表单当前需要展示的可变字段与传输提示。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConnectionLinkFieldVisibility {
+    /// 是否使用仓库 URL，而非主机与端口。
+    is_repository: bool,
+    /// 是否需要展示私钥路径和私钥口令。
+    uses_ssh_credentials: bool,
+    /// 是否需要展示密码或 HTTPS 访问令牌。
+    show_secret: bool,
+    /// SVN 明文传输协议的安全提示。
+    svn_transport_warning: Option<&'static str>,
+}
+
+/// 根据链接协议与 URL 推导表单可见字段。
+///
+/// 参数说明：
+/// - `link_kind`：当前表单协议。
+/// - `url`：Git/SVN 仓库地址；SSH/SMB 调用时可为空。
+///
+/// 返回值：渲染和高度计算共用的可见性快照，避免两处规则漂移。
+fn connection_link_field_visibility(
+    link_kind: ConnectionLinkKind,
+    url: &str,
+) -> ConnectionLinkFieldVisibility {
+    let is_repository = matches!(link_kind, ConnectionLinkKind::Git | ConnectionLinkKind::Svn);
+    let normalized_url = url.trim().to_ascii_lowercase();
+    let uses_ssh_credentials = link_kind == ConnectionLinkKind::Ssh
+        || (link_kind == ConnectionLinkKind::Git
+            && (normalized_url.starts_with("ssh://")
+                || (!normalized_url.starts_with("https://")
+                    && normalized_url.contains('@')
+                    && normalized_url.contains(':'))))
+        || (link_kind == ConnectionLinkKind::Svn && normalized_url.starts_with("svn+ssh://"));
+    let show_secret = link_kind != ConnectionLinkKind::Git || !uses_ssh_credentials;
+    let svn_transport_warning = if link_kind != ConnectionLinkKind::Svn {
+        None
+    } else if normalized_url.starts_with("http://") {
+        Some("HTTP SVN 链路不加密，用户名、密码和仓库内容可能被窃听；敏感仓库请使用 HTTPS")
+    } else if normalized_url.starts_with("svn://") {
+        Some("svn:// 链路不加密；敏感仓库请使用 svn+ssh://")
+    } else {
+        None
+    };
+
+    ConnectionLinkFieldVisibility {
+        is_repository,
+        uses_ssh_credentials,
+        show_secret,
+        svn_transport_warning,
+    }
+}
+
+/// 按当前可见输入行和提示行数计算链接模态框高度。
+///
+/// 参数说明：`form` 是当前链接表单快照。
+/// 返回值：刚好容纳当前内容的像素高度，避免短表单底部出现大块空白。
+fn preferred_connection_link_modal_height(form: &ConnectionLinkFormState) -> f32 {
+    preferred_connection_link_modal_height_for(
+        form.link_kind,
+        &form.url_input.value,
+        form.error_message.is_some(),
+    )
+}
+
+/// 使用可单元测试的输入计算链接模态框高度。
+///
+/// 参数说明：
+/// - `link_kind`：链接协议。
+/// - `url`：仓库 URL，用于判断 SSH 凭据和 SVN 安全提示。
+/// - `has_error`：当前是否展示表单校验错误。
+///
+/// 返回值：对应可见行数的模态框像素高度。
+fn preferred_connection_link_modal_height_for(
+    link_kind: ConnectionLinkKind,
+    url: &str,
+    has_error: bool,
+) -> f32 {
+    let visibility = connection_link_field_visibility(link_kind, url);
+    // 名称和用户名始终展示；非仓库链接使用主机+端口，仓库链接使用 URL。
+    let mut input_count = 2 + if visibility.is_repository { 1 } else { 2 };
+    input_count += usize::from(visibility.show_secret);
+    if link_kind == ConnectionLinkKind::Smb {
+        input_count += 3;
+    }
+    if visibility.uses_ssh_credentials {
+        input_count += 2;
+    }
+
+    let message_count =
+        usize::from(visibility.svn_transport_warning.is_some()) + usize::from(has_error);
+    CONNECTION_LINK_MODAL_BASE_HEIGHT
+        + input_count as f32 * CONNECTION_LINK_MODAL_INPUT_STRIDE
+        + message_count as f32 * CONNECTION_LINK_MODAL_MESSAGE_STRIDE
+}
+
 /// 渲染 SSH/SMB 链接表单模态框内容。
 fn render_link_window_content(
     app_handle: Entity<ArgusApp>,
@@ -714,21 +830,41 @@ fn render_link_window_content(
         (ConnectionLinkWindowMode::Create, ConnectionLinkKind::Smb) => {
             ("新增 SMB 链接", "关闭新增链接")
         }
+        (ConnectionLinkWindowMode::Create, ConnectionLinkKind::Git) => {
+            ("新增 Git 链接", "关闭新增链接")
+        }
+        (ConnectionLinkWindowMode::Create, ConnectionLinkKind::Svn) => {
+            ("新增 SVN 链接", "关闭新增链接")
+        }
         (ConnectionLinkWindowMode::Edit { .. }, ConnectionLinkKind::Ssh) => {
             ("编辑 SSH 链接", "关闭编辑链接")
         }
         (ConnectionLinkWindowMode::Edit { .. }, ConnectionLinkKind::Smb) => {
             ("编辑 SMB 链接", "关闭编辑链接")
         }
+        (ConnectionLinkWindowMode::Edit { .. }, ConnectionLinkKind::Git) => {
+            ("编辑 Git 链接", "关闭编辑链接")
+        }
+        (ConnectionLinkWindowMode::Edit { .. }, ConnectionLinkKind::Svn) => {
+            ("编辑 SVN 链接", "关闭编辑链接")
+        }
     };
     let port_placeholder = match form.link_kind {
         ConnectionLinkKind::Ssh => "22",
         ConnectionLinkKind::Smb => "445",
+        ConnectionLinkKind::Git | ConnectionLinkKind::Svn => "",
     };
-    let password_placeholder = match form.link_kind {
-        ConnectionLinkKind::Ssh => "可选",
-        ConnectionLinkKind::Smb => "必填",
+    let (password_label, password_placeholder) = match form.link_kind {
+        ConnectionLinkKind::Ssh => ("密码", "可选"),
+        ConnectionLinkKind::Smb => ("密码", "必填"),
+        ConnectionLinkKind::Git => ("访问令牌", "HTTPS 私有仓库填写"),
+        ConnectionLinkKind::Svn => ("密码", "匿名仓库可留空"),
     };
+    let visibility = connection_link_field_visibility(form.link_kind, &form.url_input.value);
+    let is_repository = visibility.is_repository;
+    let uses_ssh_credentials = visibility.uses_ssh_credentials;
+    let show_secret = visibility.show_secret;
+    let svn_transport_warning = visibility.svn_transport_warning;
 
     div()
         .id("connection-link-window-root")
@@ -787,28 +923,47 @@ fn render_link_window_content(
                     &window_entity,
                     &app_handle,
                 ))
-                .child(render_link_input_row(
-                    "主机",
-                    ConnectionFormInputTarget::LinkHost,
-                    &form.host_input,
-                    focus_handles.host.clone(),
-                    "10.0.0.1",
-                    false,
-                    &theme,
-                    &window_entity,
-                    &app_handle,
-                ))
-                .child(render_link_input_row(
-                    "端口",
-                    ConnectionFormInputTarget::LinkPort,
-                    &form.port_input,
-                    focus_handles.port.clone(),
-                    port_placeholder,
-                    false,
-                    &theme,
-                    &window_entity,
-                    &app_handle,
-                ))
+                .when(!is_repository, |this| {
+                    this.child(render_link_input_row(
+                        "主机",
+                        ConnectionFormInputTarget::LinkHost,
+                        &form.host_input,
+                        focus_handles.host.clone(),
+                        "10.0.0.1",
+                        false,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                    .child(render_link_input_row(
+                        "端口",
+                        ConnectionFormInputTarget::LinkPort,
+                        &form.port_input,
+                        focus_handles.port.clone(),
+                        port_placeholder,
+                        false,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                })
+                .when(is_repository, |this| {
+                    this.child(render_link_input_row(
+                        "仓库 URL",
+                        ConnectionFormInputTarget::LinkUrl,
+                        &form.url_input,
+                        focus_handles.url.clone(),
+                        if form.link_kind == ConnectionLinkKind::Git {
+                            "https://host/team/repository.git"
+                        } else {
+                            "http://host/svn/repository/"
+                        },
+                        false,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                })
                 .child(render_link_input_row(
                     "用户名",
                     ConnectionFormInputTarget::LinkUsername,
@@ -820,17 +975,19 @@ fn render_link_window_content(
                     &window_entity,
                     &app_handle,
                 ))
-                .child(render_link_input_row(
-                    "密码",
-                    ConnectionFormInputTarget::LinkPassword,
-                    &form.password_input,
-                    focus_handles.password.clone(),
-                    password_placeholder,
-                    true,
-                    &theme,
-                    &window_entity,
-                    &app_handle,
-                ))
+                .when(show_secret, |this| {
+                    this.child(render_link_input_row(
+                        password_label,
+                        ConnectionFormInputTarget::LinkPassword,
+                        &form.password_input,
+                        focus_handles.password.clone(),
+                        password_placeholder,
+                        true,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                })
                 .when(form.link_kind == ConnectionLinkKind::Smb, |this| {
                     this.child(render_link_input_row(
                         "共享名称",
@@ -866,7 +1023,7 @@ fn render_link_window_content(
                         &app_handle,
                     ))
                 })
-                .when(form.link_kind == ConnectionLinkKind::Ssh, |this| {
+                .when(uses_ssh_credentials, |this| {
                     this.child(render_link_input_row(
                         "私钥路径",
                         ConnectionFormInputTarget::LinkPrivateKeyPath,
@@ -889,6 +1046,14 @@ fn render_link_window_content(
                         &window_entity,
                         &app_handle,
                     ))
+                })
+                .when_some(svn_transport_warning, |this, warning| {
+                    this.child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.warning))
+                            .child(warning),
+                    )
                 })
                 .when_some(form.error_message, |this, message| {
                     this.child(error_text(message, &theme))
@@ -1050,12 +1215,18 @@ fn render_link_input_row(
     window_entity: &Entity<ConnectionLinkWindow>,
     app_handle: &Entity<ArgusApp>,
 ) -> impl IntoElement {
-    let native_input = link_native_input(window_entity.clone(), target, focus_handle.clone());
+    let native_input = link_native_input(
+        window_entity.clone(),
+        target,
+        focus_handle.clone(),
+        app_handle.clone(),
+    );
     let key_window = window_entity.clone();
     let click_window = window_entity.clone();
     let pointer_window = window_entity.clone();
     let submit_window = window_entity.clone();
     let submit_app = app_handle.clone();
+    let layout_app = app_handle.clone();
     let close_app = app_handle.clone();
 
     div()
@@ -1094,6 +1265,10 @@ fn render_link_input_row(
                     state_cx.notify();
                     action
                 });
+                if action == ConnectionWindowInputAction::Changed {
+                    // URL 传输方式或错误状态变化后，主视图需要重算模态外壳高度。
+                    notify_connection_link_modal_layout(&layout_app, cx);
+                }
                 handle_link_window_action(action, &submit_app, &submit_window, window, cx);
                 if action == ConnectionWindowInputAction::Close {
                     close_link_window(&close_app, window, cx);
@@ -1287,12 +1462,15 @@ fn link_native_input(
     window_entity: Entity<ConnectionLinkWindow>,
     target: ConnectionFormInputTarget,
     focus_handle: FocusHandle,
+    app_handle: Entity<ArgusApp>,
 ) -> NativeInput {
     NativeInput::new(focus_handle, move |edit, _, cx| {
         window_entity.update(cx, |window_state, state_cx| {
             window_state.apply_native_edit(target, edit);
             state_cx.notify();
         });
+        // IME 和系统粘贴走原生编辑回调，同样要刷新随 URL 变化的外壳高度。
+        notify_connection_link_modal_layout(&app_handle, cx);
     })
 }
 
@@ -1302,6 +1480,7 @@ fn input_id_for_target(target: ConnectionFormInputTarget) -> &'static str {
         ConnectionFormInputTarget::DirectoryName => "connection-directory-name-input",
         ConnectionFormInputTarget::LinkName => "connection-link-name-input",
         ConnectionFormInputTarget::LinkHost => "connection-link-host-input",
+        ConnectionFormInputTarget::LinkUrl => "connection-link-url-input",
         ConnectionFormInputTarget::LinkPort => "connection-link-port-input",
         ConnectionFormInputTarget::LinkUsername => "connection-link-username-input",
         ConnectionFormInputTarget::LinkPassword => "connection-link-password-input",
@@ -1429,10 +1608,21 @@ fn set_link_window_error(
     cx: &mut App,
     message: String,
 ) {
+    let app_handle = window_entity.read_with(cx, |window_state, _| window_state.app.clone());
     window_entity.update(cx, |window_state, state_cx| {
         window_state.form.error_message = Some(message);
         state_cx.notify();
     });
+    notify_connection_link_modal_layout(&app_handle, cx);
+}
+
+/// 通知主视图重绘链接模态外壳，以应用子表单的最新自适应高度。
+///
+/// 参数说明：
+/// - `app_handle`：持有模态框的主应用实体。
+/// - `cx`：当前应用上下文。
+fn notify_connection_link_modal_layout(app_handle: &Entity<ArgusApp>, cx: &mut App) {
+    app_handle.update(cx, |_, app_cx| app_cx.notify());
 }
 
 /// 统一更新主应用状态；创建窗口只负责表现，配置写入仍集中在 `ArgusApp`。
@@ -1520,15 +1710,33 @@ fn render_delete_prompt(
     let node_kind = if prompt.is_directory {
         "目录"
     } else {
-        "SSH 链接"
+        "链接"
     };
     div()
         .size_full()
+        .relative()
         .flex()
         .flex_col()
         .rounded_lg()
+        .overflow_hidden()
         .bg(rgb(theme.content))
-        .child(dialog_header("确认删除", ArgusIcon::Close, theme, cx))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .font_family(ARGUS_UI_FONT_FAMILY)
+        .text_color(rgb(theme.foreground))
+        .occlude()
+        .child(render_connection_window_header(
+            "确认删除",
+            ArgusIcon::Trash,
+            "connection-delete-dialog-close",
+            "关闭删除确认",
+            theme,
+            cx.listener(|app, _, _, cx| {
+                cx.stop_propagation();
+                app.close_connection_dialog();
+                cx.notify();
+            }),
+        ))
         .child(
             div()
                 .px_5()
@@ -1551,19 +1759,29 @@ fn render_delete_prompt(
                         .flex()
                         .justify_end()
                         .gap_2()
-                        .child(action_button("取消", false, theme, cx, |app, cx| {
-                            app.close_connection_dialog();
-                            cx.notify();
-                        }))
-                        .child(action_button(
+                        .child(window_action_button(
+                            "connection-delete-dialog-cancel",
+                            ArgusIcon::Close,
+                            "取消",
+                            false,
+                            theme,
+                            cx.listener(|app, _, _, cx| {
+                                cx.stop_propagation();
+                                app.close_connection_dialog();
+                                cx.notify();
+                            }),
+                        ))
+                        .child(window_action_button(
+                            "connection-delete-dialog-submit",
+                            ArgusIcon::Trash,
                             "确认删除",
                             true,
                             theme,
-                            cx,
-                            move |app, cx| {
+                            cx.listener(move |app, _, _, cx| {
+                                cx.stop_propagation();
                                 app.confirm_delete_connection_node(node_id);
                                 cx.notify();
-                            },
+                            }),
                         )),
                 ),
         )
@@ -1900,4 +2118,65 @@ fn clamp_range(range: Range<usize>, text_length: usize) -> Range<usize> {
     let start = range.start.min(text_length);
     let end = range.end.min(text_length);
     start.min(end)..start.max(end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preferred_connection_link_modal_height_for;
+    use crate::remote::connection::ConnectionLinkKind;
+
+    /// 短的 HTTPS 仓库表单应明显低于 SSH/SMB 长表单，不再保留固定空白。
+    #[test]
+    fn repository_modal_height_matches_visible_fields() {
+        assert_eq!(
+            preferred_connection_link_modal_height_for(
+                ConnectionLinkKind::Git,
+                "https://host/team/repository.git",
+                false,
+            ),
+            296.0
+        );
+        assert_eq!(
+            preferred_connection_link_modal_height_for(
+                ConnectionLinkKind::Git,
+                "git@host:team/repository.git",
+                false,
+            ),
+            338.0
+        );
+    }
+
+    /// SSH 和 SMB 的高度应分别容纳其 7 行与 8 行输入项。
+    #[test]
+    fn server_modal_height_matches_protocol_fields() {
+        assert_eq!(
+            preferred_connection_link_modal_height_for(ConnectionLinkKind::Ssh, "", false),
+            422.0
+        );
+        assert_eq!(
+            preferred_connection_link_modal_height_for(ConnectionLinkKind::Smb, "", false),
+            464.0
+        );
+    }
+
+    /// SVN 明文传输提示和校验错误应各自增加一行高度。
+    #[test]
+    fn repository_modal_height_reserves_messages() {
+        assert_eq!(
+            preferred_connection_link_modal_height_for(
+                ConnectionLinkKind::Svn,
+                "http://host/svn/repository/",
+                false,
+            ),
+            324.0
+        );
+        assert_eq!(
+            preferred_connection_link_modal_height_for(
+                ConnectionLinkKind::Svn,
+                "http://host/svn/repository/",
+                true,
+            ),
+            352.0
+        );
+    }
 }

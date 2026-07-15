@@ -135,9 +135,9 @@ name = "zip"
 path = "src/lib.rs"
 
 [dependencies.aes]
-# Argus 同时引入 smb2，smb2 固定到 aes 0.9.0-rc.4；这里跟随同一版本以避免 Cargo
-# 在同一个 0.9 系列中同时解析稳定版和预发布版导致依赖冲突，同时保留 ZIP AES 解密能力。
-version = "=0.9.0-rc.4"
+# Argus 的 SMB 与 russh 使用稳定版 aes 0.9；这里跟随同一版本以避免 Cargo 在同一个
+# 0.9 系列中同时解析稳定版和预发布版导致依赖冲突，同时保留 ZIP AES 解密能力。
+version = "0.9.1"
 optional = true
 
 [dependencies.arbitrary]
@@ -208,8 +208,8 @@ optional = true
 default-features = false
 
 [dependencies.pbkdf2]
-# 跟随 smb2 的预发布版本，避免 Cargo 在 0.13 系列内解析出互斥版本。
-version = "=0.13.0-rc.10"
+# 跟随 SMB 与 russh 的稳定版本，避免 Cargo 在 0.13 系列内解析出互斥版本。
+version = "0.13.0"
 optional = true
 
 [dependencies.ppmd-rust]

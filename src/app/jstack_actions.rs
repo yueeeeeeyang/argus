@@ -210,7 +210,7 @@ impl ArgusApp {
     pub(crate) fn open_file_preview_window(
         &mut self,
         file_name: String,
-        content: crate::remote::sftp::FilePreviewContent,
+        content: crate::remote::remote_file::FilePreviewContent,
         cx: &mut Context<Self>,
     ) {
         let initial_theme = self.theme.clone();

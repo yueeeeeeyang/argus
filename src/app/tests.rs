@@ -63,7 +63,7 @@ fn insert_test_sftp_session(
     app: &mut ArgusApp,
     session_id: usize,
     link_id: ConnectionNodeId,
-) -> std::sync::mpsc::Receiver<crate::remote::sftp::SftpCommand> {
+) -> std::sync::mpsc::Receiver<crate::remote::remote_file::RemoteFileCommand> {
     let link = app
         .config
         .connections
@@ -71,16 +71,16 @@ fn insert_test_sftp_session(
         .expect("应存在测试链接")
         .clone();
     let (sender, receiver) = std::sync::mpsc::channel();
-    let mut session = crate::remote::sftp::SftpSessionState::connecting(
+    let mut session = crate::remote::remote_file::RemoteFileSessionState::connecting(
         session_id,
         &link,
-        crate::remote::sftp::RemoteFileBackend::Sftp,
+        crate::remote::remote_file::RemoteFileBackend::Sftp,
         sender,
     );
-    session.status = crate::remote::sftp::SftpStatus::Connected;
+    session.status = crate::remote::remote_file::RemoteFileStatus::Connected;
     session.current_dir = "/home/tester".to_string();
     session.address_input = TextInputState::from_value(session.current_dir.clone());
-    app.sftp_sessions.insert(session_id, session);
+    app.remote_file_sessions.insert(session_id, session);
     receiver
 }
 
@@ -297,6 +297,59 @@ fn terminal_context_menu_shows_file_manager_action() {
     ));
 }
 
+/// 验证新增链接菜单同时展示 SSH、SMB、Git 和 SVN 四种协议入口。
+#[test]
+fn connection_link_create_menu_shows_four_protocols() {
+    let mut app = test_app();
+    app.open_connection_link_create_menu(gpui::point(gpui::px(1.0), gpui::px(1.0)));
+
+    let actions = app
+        .active_menu_entries()
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect::<Vec<_>>();
+    assert_eq!(actions.len(), 4);
+    assert!(actions.contains(&MenuAction::NewSshConnectionLink));
+    assert!(actions.contains(&MenuAction::NewSmbConnectionLink));
+    assert!(actions.contains(&MenuAction::NewGitConnectionLink));
+    assert!(actions.contains(&MenuAction::NewSvnConnectionLink));
+}
+
+/// 验证点击链接树空白区域会同时取消节点选中并关闭残留菜单。
+#[test]
+fn connection_tree_blank_click_clears_selection() {
+    let mut app = test_app();
+    let link_id = add_test_ssh_link(&mut app);
+    app.open_connection_tree_context_menu(link_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+    assert_eq!(app.selected_connection_node_id, Some(link_id));
+    assert!(app.active_menu.is_some());
+
+    assert!(app.clear_connection_tree_selection());
+    assert_eq!(app.selected_connection_node_id, None);
+    assert!(app.active_menu.is_none());
+    assert!(!app.clear_connection_tree_selection());
+}
+
+/// 验证应用层拖放动作会移动链接、保留选中状态并持久化目标目录。
+#[test]
+fn connection_tree_drop_moves_link_to_directory() {
+    let mut app = test_app();
+    let target = app
+        .config
+        .connections
+        .add_directory(None, "归档目录")
+        .unwrap();
+    let link_id = add_test_ssh_link(&mut app);
+
+    assert!(app.move_connection_link(link_id, Some(target)));
+    assert_eq!(
+        app.config.connections.link(link_id).unwrap().parent_id,
+        Some(target)
+    );
+    assert_eq!(app.selected_connection_node_id, Some(link_id));
+    assert!(app.placeholder_notice.contains("归档目录"));
+}
+
 /// 验证 SFTP 文件行右键菜单展示下载、重命名和删除动作。
 #[test]
 fn sftp_entry_context_menu_shows_file_actions() {
@@ -304,18 +357,18 @@ fn sftp_entry_context_menu_shows_file_actions() {
     let link_id = add_test_ssh_link(&mut app);
     let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
     let remote_path = "/home/tester/app.log".to_string();
-    if let Some(session) = app.sftp_sessions.get_mut(&1) {
-        session.entries = vec![crate::remote::sftp::SftpEntry {
+    if let Some(session) = app.remote_file_sessions.get_mut(&1) {
+        session.entries = vec![crate::remote::remote_file::RemoteFileEntry {
             name: "app.log".to_string(),
             path: remote_path.clone(),
-            kind: crate::remote::sftp::SftpEntryKind::RegularFile,
+            kind: crate::remote::remote_file::RemoteFileEntryKind::RegularFile,
             size: Some(128),
             mtime: None,
             permissions: Some(0o100644),
         }];
     }
 
-    app.open_sftp_entry_context_menu(
+    app.open_remote_file_entry_context_menu(
         1,
         remote_path.clone(),
         gpui::point(gpui::px(2.0), gpui::px(3.0)),
@@ -323,10 +376,10 @@ fn sftp_entry_context_menu_shows_file_actions() {
 
     assert!(matches!(
         app.active_menu.as_ref().map(|menu| &menu.kind),
-        Some(ActiveMenuKind::SftpEntry { session_id }) if *session_id == 1
+        Some(ActiveMenuKind::RemoteFileEntry { session_id }) if *session_id == 1
     ));
     assert_eq!(
-        app.sftp_sessions
+        app.remote_file_sessions
             .get(&1)
             .expect("应存在 SFTP 会话")
             .selected_paths
@@ -339,21 +392,114 @@ fn sftp_entry_context_menu_shows_file_actions() {
     assert_eq!(entries.len(), 4);
     assert!(matches!(
         entries[0].action,
-        MenuAction::PreviewSftpSelection { session_id } if session_id == 1
+        MenuAction::PreviewRemoteFileSelection { session_id } if session_id == 1
     ));
     assert!(matches!(
         entries[1].action,
-        MenuAction::DownloadSftpSelection { session_id } if session_id == 1
+        MenuAction::DownloadRemoteFileSelection { session_id } if session_id == 1
     ));
     assert!(matches!(
         entries[2].action,
-        MenuAction::RenameSftpSelection { session_id } if session_id == 1
+        MenuAction::RenameRemoteFileSelection { session_id } if session_id == 1
     ));
     assert!(matches!(
         entries[3].action,
-        MenuAction::DeleteSftpSelection { session_id } if session_id == 1
+        MenuAction::DeleteRemoteFileSelection { session_id } if session_id == 1
     ));
     assert!(entries[3].is_danger);
+}
+
+/// 验证 Git/SVN 只读会话的右键菜单和动作层都不会生成任何写命令。
+#[test]
+fn repository_file_actions_hide_and_reject_all_writes() {
+    let mut app = test_app();
+    let link_id = app
+        .config
+        .connections
+        .add_git_link(
+            None,
+            "测试仓库",
+            crate::remote::connection::GitLinkConfig {
+                url: "https://example.com/repo.git".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let link = app.config.connections.link(link_id).unwrap().clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut session = crate::remote::remote_file::RemoteFileSessionState::connecting(
+        9,
+        &link,
+        crate::remote::remote_file::RemoteFileBackend::Git,
+        sender,
+    );
+    let remote_path = "/README.md".to_string();
+    session.status = crate::remote::remote_file::RemoteFileStatus::Connected;
+    session.entries = vec![crate::remote::remote_file::RemoteFileEntry {
+        name: "README.md".to_string(),
+        path: remote_path.clone(),
+        kind: crate::remote::remote_file::RemoteFileEntryKind::RegularFile,
+        size: Some(128),
+        mtime: None,
+        permissions: Some(0o644),
+    }];
+    app.remote_file_sessions.insert(9, session);
+
+    app.open_remote_file_entry_context_menu(
+        9,
+        remote_path,
+        gpui::point(gpui::px(2.0), gpui::px(3.0)),
+    );
+    let entries = app.active_menu_entries();
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(
+        entries[0].action,
+        MenuAction::PreviewRemoteFileSelection { session_id: 9 }
+    ));
+    assert!(matches!(
+        entries[1].action,
+        MenuAction::DownloadRemoteFileSelection { session_id: 9 }
+    ));
+    assert!(!app.can_rename_remote_file_selection(9));
+    assert!(!app.can_delete_remote_file_selection(9));
+
+    app.upload_remote_files(9, vec![PathBuf::from("README.md")]);
+    app.open_remote_file_rename_dialog(9);
+    app.request_delete_remote_file_entry(9);
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}
+
+/// 验证 Git 版本菜单按 worker 返回的稳定 ID 切换，并标记当前分支。
+#[test]
+fn repository_version_menu_dispatches_selected_reference() {
+    let mut app = test_app();
+    let link_id = add_test_ssh_link(&mut app);
+    let receiver = insert_test_sftp_session(&mut app, 12, link_id);
+    let session = app.remote_file_sessions.get_mut(&12).unwrap();
+    session.backend = crate::remote::remote_file::RemoteFileBackend::Git;
+    session.capabilities = session.backend.capabilities();
+    session.repository_versions = vec![crate::remote::remote_file::RepositoryVersion {
+        id: "refs/remotes/origin/main".to_string(),
+        label: "main（默认分支）".to_string(),
+        kind: crate::remote::remote_file::RepositoryVersionKind::GitBranch,
+    }];
+    session.selected_repository_version = Some("refs/remotes/origin/main".to_string());
+
+    app.open_repository_version_menu(12, gpui::point(gpui::px(3.0), gpui::px(4.0)));
+    let entries = app.active_menu_entries();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].is_selected);
+    let action = entries[0].action.clone();
+    app.handle_menu_action(action);
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::remote::remote_file::RemoteFileCommand::SwitchRepositoryVersion { version_id })
+            if version_id == "refs/remotes/origin/main"
+    ));
 }
 
 /// 验证右键已选集合内文件时保留多选，方便从菜单下载多个文件。
@@ -364,20 +510,20 @@ fn sftp_entry_context_menu_preserves_existing_multi_selection() {
     let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
     let first_path = "/home/tester/app.log".to_string();
     let second_path = "/home/tester/error.log".to_string();
-    if let Some(session) = app.sftp_sessions.get_mut(&1) {
+    if let Some(session) = app.remote_file_sessions.get_mut(&1) {
         session.entries = vec![
-            crate::remote::sftp::SftpEntry {
+            crate::remote::remote_file::RemoteFileEntry {
                 name: "app.log".to_string(),
                 path: first_path.clone(),
-                kind: crate::remote::sftp::SftpEntryKind::RegularFile,
+                kind: crate::remote::remote_file::RemoteFileEntryKind::RegularFile,
                 size: Some(128),
                 mtime: None,
                 permissions: Some(0o100644),
             },
-            crate::remote::sftp::SftpEntry {
+            crate::remote::remote_file::RemoteFileEntry {
                 name: "error.log".to_string(),
                 path: second_path.clone(),
-                kind: crate::remote::sftp::SftpEntryKind::RegularFile,
+                kind: crate::remote::remote_file::RemoteFileEntryKind::RegularFile,
                 size: Some(256),
                 mtime: None,
                 permissions: Some(0o100644),
@@ -387,10 +533,14 @@ fn sftp_entry_context_menu_preserves_existing_multi_selection() {
         session.selected_paths.insert(second_path.clone());
     }
 
-    app.open_sftp_entry_context_menu(1, second_path, gpui::point(gpui::px(2.0), gpui::px(3.0)));
+    app.open_remote_file_entry_context_menu(
+        1,
+        second_path,
+        gpui::point(gpui::px(2.0), gpui::px(3.0)),
+    );
 
     let selected_paths = &app
-        .sftp_sessions
+        .remote_file_sessions
         .get(&1)
         .expect("应存在 SFTP 会话")
         .selected_paths;
@@ -407,18 +557,20 @@ fn sftp_file_manager_tabs_allow_multiple_same_link() {
     let _first_receiver = insert_test_sftp_session(&mut app, 1, link_id);
     let _second_receiver = insert_test_sftp_session(&mut app, 2, link_id);
 
-    app.create_sftp_tab_for_session(1);
-    app.create_sftp_tab_for_session(2);
+    app.create_remote_file_tab_for_session(1);
+    app.create_remote_file_tab_for_session(2);
 
     assert_eq!(app.tabs.len(), 2);
     assert!(matches!(
         app.tabs[0].kind,
-        TabKind::SftpFileManager { session_id } if session_id == 1
+        TabKind::RemoteFileManager { session_id } if session_id == 1
     ));
     assert!(matches!(
         app.tabs[1].kind,
-        TabKind::SftpFileManager { session_id } if session_id == 2
+        TabKind::RemoteFileManager { session_id } if session_id == 2
     ));
+    assert_eq!(app.tabs[0].title, "SFTP - 测试服务器");
+    assert_eq!(app.tabs[1].title, "SFTP - 测试服务器");
     assert_eq!(app.active_tab_id, app.tabs[1].id);
 }
 
@@ -428,16 +580,16 @@ fn close_sftp_tab_disconnects_session() {
     let mut app = test_app();
     let link_id = add_test_ssh_link(&mut app);
     let receiver = insert_test_sftp_session(&mut app, 1, link_id);
-    app.tabs[0].title = "文件管理 - 测试服务器".to_string();
-    app.tabs[0].kind = TabKind::SftpFileManager { session_id: 1 };
+    app.tabs[0].title = "SFTP - 测试服务器".to_string();
+    app.tabs[0].kind = TabKind::RemoteFileManager { session_id: 1 };
     app.active_tab_id = app.tabs[0].id;
 
     app.close_tab(app.tabs[0].id);
 
-    assert!(app.sftp_sessions.is_empty());
+    assert!(app.remote_file_sessions.is_empty());
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::remote::sftp::SftpCommand::Disconnect)
+        Ok(crate::remote::remote_file::RemoteFileCommand::Disconnect)
     ));
     assert!(matches!(app.tabs[0].kind, TabKind::Empty));
 }
@@ -449,11 +601,11 @@ fn sftp_delete_selection_rejects_special_entries() {
     let link_id = add_test_ssh_link(&mut app);
     let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
     let remote_path = "/home/tester/current".to_string();
-    if let Some(session) = app.sftp_sessions.get_mut(&1) {
-        session.entries = vec![crate::remote::sftp::SftpEntry {
+    if let Some(session) = app.remote_file_sessions.get_mut(&1) {
+        session.entries = vec![crate::remote::remote_file::RemoteFileEntry {
             name: "current".to_string(),
             path: remote_path.clone(),
-            kind: crate::remote::sftp::SftpEntryKind::Symlink,
+            kind: crate::remote::remote_file::RemoteFileEntryKind::Symlink,
             size: None,
             mtime: None,
             permissions: None,
@@ -461,10 +613,10 @@ fn sftp_delete_selection_rejects_special_entries() {
         session.selected_paths.insert(remote_path);
     }
 
-    assert!(!app.can_delete_sftp_selection(1));
-    app.request_delete_sftp_entry(1);
+    assert!(!app.can_delete_remote_file_selection(1));
+    app.request_delete_remote_file_entry(1);
 
-    assert!(app.sftp_dialog.is_none());
+    assert!(app.remote_file_dialog.is_none());
     assert!(
         app.placeholder_notice
             .contains("仅支持删除普通文件或空目录")
@@ -478,22 +630,22 @@ fn sftp_file_actions_are_disabled_while_busy() {
     let link_id = add_test_ssh_link(&mut app);
     let _receiver = insert_test_sftp_session(&mut app, 1, link_id);
     let remote_path = "/home/tester/app.log".to_string();
-    if let Some(session) = app.sftp_sessions.get_mut(&1) {
-        session.entries = vec![crate::remote::sftp::SftpEntry {
+    if let Some(session) = app.remote_file_sessions.get_mut(&1) {
+        session.entries = vec![crate::remote::remote_file::RemoteFileEntry {
             name: "app.log".to_string(),
             path: remote_path.clone(),
-            kind: crate::remote::sftp::SftpEntryKind::RegularFile,
+            kind: crate::remote::remote_file::RemoteFileEntryKind::RegularFile,
             size: Some(128),
             mtime: None,
             permissions: Some(0o100644),
         }];
         session.selected_paths.insert(remote_path);
-        session.status = crate::remote::sftp::SftpStatus::Transferring;
+        session.status = crate::remote::remote_file::RemoteFileStatus::Transferring;
     }
 
-    assert!(!app.can_download_sftp_selection(1));
-    assert!(!app.can_rename_sftp_selection(1));
-    assert!(!app.can_delete_sftp_selection(1));
+    assert!(!app.can_download_remote_file_selection(1));
+    assert!(!app.can_rename_remote_file_selection(1));
+    assert!(!app.can_delete_remote_file_selection(1));
 }
 
 /// 验证单文件探测未完成的压缩包已被选中时，也能立即打开 Jstack 分析右键菜单。
@@ -2075,7 +2227,7 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
         ArgusTab {
             id: 5,
             title: "SFTP 测试服务器".to_string(),
-            kind: TabKind::SftpFileManager { session_id: 9 },
+            kind: TabKind::RemoteFileManager { session_id: 9 },
         },
         ArgusTab {
             id: 8,
@@ -2104,14 +2256,14 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
         })
     );
     assert!(app.tabs.iter().any(|tab| {
-        tab.id == 5 && matches!(tab.kind, TabKind::SftpFileManager { session_id: 9 })
+        tab.id == 5 && matches!(tab.kind, TabKind::RemoteFileManager { session_id: 9 })
     }));
     assert!(!app.tabs.iter().any(|tab| tab.id == 8));
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     assert_eq!(app.active_tab_id, 10);
     assert_eq!(app.next_tab_id, 11);
     assert!(app.terminal_sessions.contains_key(&7));
-    assert!(app.sftp_sessions.contains_key(&9));
+    assert!(app.remote_file_sessions.contains_key(&9));
 
     let app_log_id = app
         .source_registry
@@ -2139,7 +2291,7 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
     assert_eq!(app.active_tab_id, 10);
     assert_eq!(app.next_tab_id, 11);
     assert!(app.terminal_sessions.contains_key(&7));
-    assert!(app.sftp_sessions.contains_key(&9));
+    assert!(app.remote_file_sessions.contains_key(&9));
 }
 
 /// 验证来源树搜索只匹配日志候选节点，并保留其祖先目录上下文。

@@ -1,8 +1,8 @@
-//! 文件职责：封装 SSH SFTP/SMB 文件管理会话、后台 worker 与远程文件元数据。
+//! 文件职责：封装 SFTP、SMB、Git、SVN 通用远程文件会话、后台 worker 与文件元数据。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：使用内嵌 SSH SFTP 或 SMB 客户端读取远程目录，并支持普通文件上传、下载、重命名和删除。
+//! 主要功能：以统一命令事件模型驱动可写文件协议和只读仓库协议的浏览、预览与下载。
 
 use std::collections::BTreeSet;
 use std::fs::File as LocalFile;
@@ -22,9 +22,12 @@ use smb2::{
 
 use crate::infra::text_input::TextInputState;
 use crate::remote::connection::{
-    ConnectionLinkConfig, ConnectionNodeId, SmbLinkConfig, SshLinkConfig,
+    ConnectionLinkConfig, ConnectionNodeId, GitLinkConfig, SmbLinkConfig, SshLinkConfig,
+    SvnLinkConfig,
 };
+use crate::remote::git::run_git_worker;
 use crate::remote::ssh::{authenticate_ssh_session, connect_ssh_session};
+use crate::remote::svn::run_svn_worker;
 use crate::remote::terminal::PendingHostKey;
 
 /// 远程 Unix 文件类型掩码。
@@ -36,21 +39,21 @@ const SFTP_MODE_DIRECTORY: u32 = 0o040000;
 /// 远程符号链接类型位。
 const SFTP_MODE_SYMLINK: u32 = 0o120000;
 /// 允许预览的文件总大小上限，超过则不发起预览读取。
-pub(crate) const SFTP_PREVIEW_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
+pub(crate) const REMOTE_FILE_PREVIEW_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
 /// 预览单次读取的字节上限，超出部分截断并提示。
-pub(crate) const SFTP_PREVIEW_MAX_READ: usize = 512 * 1024;
+pub(crate) const REMOTE_FILE_PREVIEW_MAX_READ: usize = 512 * 1024;
 
 /// 判断远程条目是否允许文本预览：普通文件且总大小不超过预览上限。
-pub(crate) fn is_sftp_entry_previewable(entry: &SftpEntry) -> bool {
-    if entry.kind != SftpEntryKind::RegularFile {
+pub(crate) fn is_remote_file_entry_previewable(entry: &RemoteFileEntry) -> bool {
+    if entry.kind != RemoteFileEntryKind::RegularFile {
         return false;
     }
     entry
         .size
-        .is_none_or(|size| size <= SFTP_PREVIEW_MAX_FILE_SIZE)
+        .is_none_or(|size| size <= REMOTE_FILE_PREVIEW_MAX_FILE_SIZE)
 }
 /// 远程文件管理会话运行期状态，存放在 `ArgusApp` 中并由 UI 渲染。
-pub(crate) struct SftpSessionState {
+pub(crate) struct RemoteFileSessionState {
     /// 远程文件管理会话 ID，与标签页中的 `session_id` 对应。
     pub id: usize,
     /// 关联的链接节点 ID。
@@ -59,10 +62,18 @@ pub(crate) struct SftpSessionState {
     pub title: String,
     /// 当前文件管理会话使用的后端协议。
     pub backend: RemoteFileBackend,
+    /// 后端暴露给应用与 UI 的操作能力，写操作必须在两层共同校验。
+    pub capabilities: RemoteFileCapabilities,
+    /// Git 分支/标签或 SVN 修订版本列表；普通文件协议为空。
+    pub repository_versions: Vec<RepositoryVersion>,
+    /// 当前仓库版本的稳定 ID；普通文件协议为空。
+    pub selected_repository_version: Option<String>,
+    /// SVN 修订号输入框；Git 使用版本下拉菜单，因此保持为空状态。
+    pub version_input: TextInputState,
     /// 当前连接和操作状态。
-    pub status: SftpStatus,
+    pub status: RemoteFileStatus,
     /// 发送给远程文件后台线程的命令通道。
-    pub command_sender: Option<mpsc::Sender<SftpCommand>>,
+    pub command_sender: Option<mpsc::Sender<RemoteFileCommand>>,
     /// 等待用户确认的主机指纹；没有待确认时为空。
     pub pending_host_key: Option<PendingHostKey>,
     /// 当前远程目录。
@@ -70,36 +81,40 @@ pub(crate) struct SftpSessionState {
     /// 地址栏输入框状态。
     pub address_input: TextInputState,
     /// 当前目录文件列表。
-    pub entries: Vec<SftpEntry>,
+    pub entries: Vec<RemoteFileEntry>,
     /// 已按当前排序字段排序的文件列表快照，供 UI 切换页签时直接复用。
-    pub sorted_entries: Arc<Vec<SftpEntry>>,
+    pub sorted_entries: Arc<Vec<RemoteFileEntry>>,
     /// 当前选中的远程路径集合。
     pub selected_paths: BTreeSet<String>,
     /// 文件列表滚动句柄。
     pub list_scroll: UniformListScrollHandle,
     /// 当前排序字段。
-    pub sort_field: SftpSortField,
+    pub sort_field: RemoteFileSortField,
     /// 当前排序方向。
-    pub sort_direction: SftpSortDirection,
+    pub sort_direction: RemoteFileSortDirection,
     /// 最近一次提示或错误。
     pub message: Option<String>,
 }
 
-impl SftpSessionState {
+impl RemoteFileSessionState {
     /// 创建一个处于“连接中”的远程文件管理会话状态。
     pub(crate) fn connecting(
         id: usize,
         link: &ConnectionLinkConfig,
         backend: RemoteFileBackend,
-        command_sender: mpsc::Sender<SftpCommand>,
+        command_sender: mpsc::Sender<RemoteFileCommand>,
     ) -> Self {
         let protocol_label = backend.label();
         Self {
             id,
             link_id: link.id,
-            title: format!("文件管理 - {}", link.name),
+            title: format!("{protocol_label} - {}", link.name),
             backend,
-            status: SftpStatus::Connecting,
+            capabilities: backend.capabilities(),
+            repository_versions: Vec::new(),
+            selected_repository_version: None,
+            version_input: TextInputState::default(),
+            status: RemoteFileStatus::Connecting,
             command_sender: Some(command_sender),
             pending_host_key: None,
             current_dir: String::new(),
@@ -108,31 +123,35 @@ impl SftpSessionState {
             sorted_entries: Arc::new(Vec::new()),
             selected_paths: BTreeSet::new(),
             list_scroll: UniformListScrollHandle::new(),
-            sort_field: SftpSortField::Name,
-            sort_direction: SftpSortDirection::Asc,
+            sort_field: RemoteFileSortField::Name,
+            sort_direction: RemoteFileSortDirection::Asc,
             message: Some(format!("正在建立 {protocol_label} 文件管理连接...")),
         }
     }
 
     /// 同步当前目录和文件列表，成功加载后清理旧选择。
-    pub(crate) fn apply_directory_listing(&mut self, current_dir: String, entries: Vec<SftpEntry>) {
+    pub(crate) fn apply_directory_listing(
+        &mut self,
+        current_dir: String,
+        entries: Vec<RemoteFileEntry>,
+    ) {
         self.current_dir = current_dir.clone();
         self.address_input = TextInputState::from_value(current_dir);
         self.entries = entries;
         self.rebuild_sorted_entries();
         self.selected_paths.clear();
-        self.status = SftpStatus::Connected;
+        self.status = RemoteFileStatus::Connected;
     }
 
     /// 根据当前排序字段重建 UI 使用的有序列表快照。
     pub(crate) fn rebuild_sorted_entries(&mut self) {
         let mut entries = self.entries.clone();
-        sort_sftp_entries(&mut entries, self.sort_field, self.sort_direction);
+        sort_remote_file_entries(&mut entries, self.sort_field, self.sort_direction);
         self.sorted_entries = Arc::new(entries);
     }
 
     /// 返回当前选中的文件条目。
-    pub(crate) fn selected_entries(&self) -> Vec<SftpEntry> {
+    pub(crate) fn selected_entries(&self) -> Vec<RemoteFileEntry> {
         self.entries
             .iter()
             .filter(|entry| self.selected_paths.contains(&entry.path))
@@ -148,6 +167,10 @@ pub(crate) enum RemoteFileBackend {
     Sftp,
     /// SMB 共享文件管理。
     Smb,
+    /// Git 仓库只读文件管理。
+    Git,
+    /// SVN 仓库只读文件管理。
+    Svn,
 }
 
 impl RemoteFileBackend {
@@ -156,13 +179,98 @@ impl RemoteFileBackend {
         match self {
             Self::Sftp => "SFTP",
             Self::Smb => "SMB",
+            Self::Git => "Git",
+            Self::Svn => "SVN",
+        }
+    }
+
+    /// 返回当前后端允许的文件操作能力。
+    pub(crate) fn capabilities(self) -> RemoteFileCapabilities {
+        match self {
+            Self::Sftp | Self::Smb => RemoteFileCapabilities::writable(),
+            Self::Git | Self::Svn => RemoteFileCapabilities::repository_read_only(),
         }
     }
 }
 
+/// 文件管理后端能力；UI 展示与动作层授权必须同时依据该结构。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteFileCapabilities {
+    /// 是否允许浏览和刷新目录。
+    pub browse: bool,
+    /// 是否允许读取普通文件预览。
+    pub preview: bool,
+    /// 是否允许下载普通文件。
+    pub download: bool,
+    /// 是否具备任何远程写能力。
+    pub write: bool,
+    /// 是否允许上传本地文件。
+    pub upload: bool,
+    /// 是否允许重命名条目。
+    pub rename: bool,
+    /// 是否允许删除条目。
+    pub delete: bool,
+    /// 是否允许切换仓库分支、标签或修订号。
+    pub switch_version: bool,
+}
+
+impl RemoteFileCapabilities {
+    /// 构造 SFTP/SMB 使用的完整文件管理能力。
+    const fn writable() -> Self {
+        Self {
+            browse: true,
+            preview: true,
+            download: true,
+            write: true,
+            upload: true,
+            rename: true,
+            delete: true,
+            switch_version: false,
+        }
+    }
+
+    /// 构造 Git/SVN 使用的严格只读仓库能力。
+    const fn repository_read_only() -> Self {
+        Self {
+            browse: true,
+            preview: true,
+            download: true,
+            write: false,
+            upload: false,
+            rename: false,
+            delete: false,
+            switch_version: true,
+        }
+    }
+}
+
+/// 仓库版本选项类别，用于 Git 下拉菜单分组和 SVN 当前修订展示。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepositoryVersionKind {
+    /// Git 远程分支。
+    GitBranch,
+    /// Git 标签。
+    GitTag,
+    /// 跟随 SVN HEAD。
+    SvnHead,
+    /// 固定 SVN 数字修订。
+    SvnRevision,
+}
+
+/// 一个可切换的仓库版本。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepositoryVersion {
+    /// 发给 worker 的稳定版本 ID，例如完整 Git ref 或 `HEAD`/`r123`。
+    pub id: String,
+    /// UI 展示名称。
+    pub label: String,
+    /// 版本类别。
+    pub kind: RepositoryVersionKind,
+}
+
 /// 远程文件管理会话状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SftpStatus {
+pub(crate) enum RemoteFileStatus {
     /// 正在连接服务器。
     Connecting,
     /// 已拿到未知主机指纹，等待用户确认。
@@ -181,7 +289,7 @@ pub(crate) enum SftpStatus {
 
 /// 远程文件条目类型。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum SftpEntryKind {
+pub(crate) enum RemoteFileEntryKind {
     /// 目录。
     Directory,
     /// 普通文件。
@@ -192,7 +300,7 @@ pub(crate) enum SftpEntryKind {
     Other,
 }
 
-impl SftpEntryKind {
+impl RemoteFileEntryKind {
     /// 返回 UI 展示用中文类型。
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -211,7 +319,7 @@ impl SftpEntryKind {
 
 /// 远程文件列表排序字段，对应表头各列。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SftpSortField {
+pub(crate) enum RemoteFileSortField {
     /// 名称列。
     Name,
     /// 类型列。
@@ -226,7 +334,7 @@ pub(crate) enum SftpSortField {
 
 /// 远程文件列表排序方向。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SftpSortDirection {
+pub(crate) enum RemoteFileSortDirection {
     /// 升序。
     Asc,
     /// 降序。
@@ -235,13 +343,13 @@ pub(crate) enum SftpSortDirection {
 
 /// 远程目录中的单个文件条目。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SftpEntry {
+pub(crate) struct RemoteFileEntry {
     /// 文件名。
     pub name: String,
     /// 完整远程路径。
     pub path: String,
     /// 文件类型。
-    pub kind: SftpEntryKind,
+    pub kind: RemoteFileEntryKind,
     /// 文件大小；目录和部分服务器可能不返回。
     pub size: Option<u64>,
     /// Unix 修改时间秒级时间戳。
@@ -252,7 +360,7 @@ pub(crate) struct SftpEntry {
 
 /// 启动远程文件 worker 时需要的不可变请求数据。
 #[derive(Clone, Debug)]
-pub(crate) struct SftpWorkerRequest {
+pub(crate) struct RemoteFileWorkerRequest {
     /// 远程文件管理会话 ID。
     pub session_id: usize,
     /// 后端连接请求快照。
@@ -274,11 +382,27 @@ pub(crate) enum RemoteFileWorkerBackend {
         /// SMB 配置快照。
         smb: SmbLinkConfig,
     },
+    /// 通过本地裸仓库缓存浏览 Git 对象。
+    Git {
+        /// 链接 ID，用于生成稳定缓存目录。
+        link_id: ConnectionNodeId,
+        /// Git 链接配置快照。
+        git: GitLinkConfig,
+        /// 已确认可信的 SSH 主机指纹。
+        trusted_fingerprint: Option<String>,
+    },
+    /// 通过 ra_svn 会话浏览 SVN 仓库。
+    Svn {
+        /// SVN 链接配置快照。
+        svn: SvnLinkConfig,
+        /// 已确认可信的 SSH 主机指纹；`svn://` 时为空。
+        trusted_fingerprint: Option<String>,
+    },
 }
 
 /// UI 发送给远程文件 worker 的命令。
 #[derive(Clone, Debug)]
-pub(crate) enum SftpCommand {
+pub(crate) enum RemoteFileCommand {
     /// 用户确认当前未知主机指纹可信。
     TrustHostKey,
     /// 用户拒绝当前未知主机指纹。
@@ -287,6 +411,11 @@ pub(crate) enum SftpCommand {
     LoadDirectory(String),
     /// 刷新当前目录。
     Refresh,
+    /// 切换 Git 分支/标签或 SVN HEAD/数字修订号。
+    SwitchRepositoryVersion {
+        /// 版本稳定 ID。
+        version_id: String,
+    },
     /// 上传本地普通文件到当前远程目录。
     UploadFiles {
         /// 本地普通文件路径。
@@ -302,7 +431,7 @@ pub(crate) enum SftpCommand {
     /// 下载多个远程普通文件到本地目录。
     DownloadFiles {
         /// 远程文件条目。
-        entries: Vec<SftpEntry>,
+        entries: Vec<RemoteFileEntry>,
         /// 本地保存目录。
         local_dir: PathBuf,
     },
@@ -321,7 +450,7 @@ pub(crate) enum SftpCommand {
     /// 删除远程普通文件或空目录。
     Delete {
         /// 待删除条目。
-        entry: SftpEntry,
+        entry: RemoteFileEntry,
     },
     /// 主动断开远程文件通道。
     Disconnect,
@@ -345,7 +474,7 @@ pub(crate) enum FilePreviewContent {
 
 /// 远程文件 worker 回传给 UI 的事件。
 #[derive(Clone, Debug)]
-pub(crate) enum SftpEvent {
+pub(crate) enum RemoteFileEvent {
     /// 发现未知主机指纹，需要 UI 弹窗确认。
     HostKeyVerification {
         /// 会话 ID。
@@ -364,7 +493,7 @@ pub(crate) enum SftpEvent {
         /// 当前目录。
         current_dir: String,
         /// 当前目录条目。
-        entries: Vec<SftpEntry>,
+        entries: Vec<RemoteFileEntry>,
     },
     /// 目录读取完成。
     DirectoryLoaded {
@@ -373,7 +502,27 @@ pub(crate) enum SftpEvent {
         /// 当前目录。
         current_dir: String,
         /// 当前目录条目。
-        entries: Vec<SftpEntry>,
+        entries: Vec<RemoteFileEntry>,
+    },
+    /// 仓库版本列表或当前版本发生变化。
+    RepositoryVersionsLoaded {
+        /// 会话 ID。
+        session_id: usize,
+        /// 当前可选版本；SVN 至少包含 HEAD 和当前固定修订。
+        versions: Vec<RepositoryVersion>,
+        /// 当前版本稳定 ID。
+        selected_version: String,
+        /// 当前版本输入框展示文本。
+        input_value: String,
+        /// 可选状态提示，例如 Git 离线缓存警告。
+        message: Option<String>,
+    },
+    /// 网络获取或对象索引进度更新。
+    TransferProgress {
+        /// 会话 ID。
+        session_id: usize,
+        /// 面向用户的简短进度文本。
+        message: String,
     },
     /// 远程文件预览内容读取完成。
     FileContentLoaded {
@@ -405,7 +554,7 @@ pub(crate) enum SftpEvent {
         /// 用户可读原因。
         message: String,
     },
-    /// SFTP worker 连接级失败。
+    /// 任一远程文件 worker 的连接级失败。
     Failed {
         /// 会话 ID。
         session_id: usize,
@@ -414,18 +563,19 @@ pub(crate) enum SftpEvent {
     },
 }
 
-/// 启动 SFTP 后台线程，并返回命令发送端与事件接收端。
-pub(crate) fn spawn_sftp_worker(
-    request: SftpWorkerRequest,
-) -> (mpsc::Sender<SftpCommand>, Receiver<SftpEvent>) {
+/// 启动通用远程文件后台线程，并返回命令发送端与事件接收端。
+pub(crate) fn spawn_remote_file_worker(
+    request: RemoteFileWorkerRequest,
+) -> (mpsc::Sender<RemoteFileCommand>, Receiver<RemoteFileEvent>) {
     let (command_sender, command_receiver) = mpsc::channel();
     let (event_sender, event_receiver) = async_channel::unbounded();
     thread::spawn(move || {
-        if let Err(error) = run_sftp_worker(request.clone(), command_receiver, event_sender.clone())
+        if let Err(error) =
+            run_remote_file_worker(request.clone(), command_receiver, event_sender.clone())
         {
             send_event_blocking(
                 &event_sender,
-                SftpEvent::Failed {
+                RemoteFileEvent::Failed {
                     session_id: request.session_id,
                     message: error.to_string(),
                 },
@@ -436,7 +586,7 @@ pub(crate) fn spawn_sftp_worker(
 }
 
 /// 校验远程文件重命名的新名称，第一版不允许跨目录移动。
-pub(crate) fn validate_sftp_rename_name(name: &str) -> Result<String, String> {
+pub(crate) fn validate_remote_file_rename_name(name: &str) -> Result<String, String> {
     let normalized = name.trim();
     if normalized.is_empty() {
         return Err("名称不能为空".to_string());
@@ -449,6 +599,22 @@ pub(crate) fn validate_sftp_rename_name(name: &str) -> Result<String, String> {
         return Err("名称不能包含路径分隔符".to_string());
     }
     Ok(normalized.to_string())
+}
+
+/// 为多文件下载构造不会逃逸目标目录的本地文件路径。
+///
+/// 参数：`local_dir` 为用户选择的目标目录，`file_name` 为远端条目的原始名称。
+/// 返回值：名称是单个普通路径组件时返回目标路径；空名称、父目录或任一平台分隔符会被拒绝。
+pub(crate) fn local_download_path(local_dir: &Path, file_name: &str) -> Result<PathBuf> {
+    if file_name.is_empty()
+        || file_name == "."
+        || file_name == ".."
+        || file_name.contains('/')
+        || file_name.contains('\\')
+    {
+        bail!("远程文件名包含不安全的路径字符，无法下载：{file_name}");
+    }
+    Ok(local_dir.join(file_name))
 }
 
 /// 返回指定远程目录的父目录。
@@ -475,10 +641,10 @@ pub(crate) fn remote_child_path(directory: &str, name: &str) -> String {
 }
 
 /// 文件管理 worker 主流程：按后端协议连接并串行执行文件操作。
-fn run_sftp_worker(
-    request: SftpWorkerRequest,
-    command_receiver: mpsc::Receiver<SftpCommand>,
-    event_sender: Sender<SftpEvent>,
+fn run_remote_file_worker(
+    request: RemoteFileWorkerRequest,
+    command_receiver: mpsc::Receiver<RemoteFileCommand>,
+    event_sender: Sender<RemoteFileEvent>,
 ) -> Result<()> {
     match request.backend.clone() {
         RemoteFileWorkerBackend::Sftp {
@@ -494,6 +660,28 @@ fn run_sftp_worker(
         RemoteFileWorkerBackend::Smb { smb } => {
             run_smb_worker(request.session_id, smb, command_receiver, event_sender)
         }
+        RemoteFileWorkerBackend::Git {
+            link_id,
+            git,
+            trusted_fingerprint,
+        } => run_git_worker(
+            request.session_id,
+            link_id,
+            git,
+            trusted_fingerprint,
+            command_receiver,
+            event_sender,
+        ),
+        RemoteFileWorkerBackend::Svn {
+            svn,
+            trusted_fingerprint,
+        } => run_svn_worker(
+            request.session_id,
+            svn,
+            trusted_fingerprint,
+            command_receiver,
+            event_sender,
+        ),
     }
 }
 
@@ -502,8 +690,8 @@ fn run_ssh_sftp_worker(
     session_id: usize,
     ssh: SshLinkConfig,
     trusted_fingerprint: Option<String>,
-    command_receiver: mpsc::Receiver<SftpCommand>,
-    event_sender: Sender<SftpEvent>,
+    command_receiver: mpsc::Receiver<RemoteFileCommand>,
+    event_sender: Sender<RemoteFileEvent>,
 ) -> Result<()> {
     let (session, fingerprint) = connect_ssh_session(&ssh)?;
     verify_host_key(
@@ -522,7 +710,7 @@ fn run_ssh_sftp_worker(
     let entries = read_remote_directory(&sftp, &current_dir)?;
     send_event_blocking(
         &event_sender,
-        SftpEvent::Connected {
+        RemoteFileEvent::Connected {
             session_id,
             current_dir: current_dir.clone(),
             entries,
@@ -531,29 +719,36 @@ fn run_ssh_sftp_worker(
 
     while let Ok(command) = command_receiver.recv() {
         match command {
-            SftpCommand::TrustHostKey | SftpCommand::RejectHostKey => {}
-            SftpCommand::LoadDirectory(path) => match load_directory(&sftp, &current_dir, &path) {
-                Ok((next_dir, entries)) => {
-                    current_dir = next_dir;
-                    send_event_blocking(
-                        &event_sender,
-                        SftpEvent::DirectoryLoaded {
-                            session_id,
-                            current_dir: current_dir.clone(),
-                            entries,
-                        },
-                    );
+            RemoteFileCommand::TrustHostKey | RemoteFileCommand::RejectHostKey => {}
+            RemoteFileCommand::LoadDirectory(path) => {
+                match load_directory(&sftp, &current_dir, &path) {
+                    Ok((next_dir, entries)) => {
+                        current_dir = next_dir;
+                        send_event_blocking(
+                            &event_sender,
+                            RemoteFileEvent::DirectoryLoaded {
+                                session_id,
+                                current_dir: current_dir.clone(),
+                                entries,
+                            },
+                        );
+                    }
+                    Err(error) => send_operation_failed(&event_sender, session_id, error),
                 }
-                Err(error) => send_operation_failed(&event_sender, session_id, error),
-            },
-            SftpCommand::Refresh => {
+            }
+            RemoteFileCommand::Refresh => {
                 send_directory_listing(&sftp, &current_dir, session_id, &event_sender);
             }
-            SftpCommand::UploadFiles { local_paths } => {
+            RemoteFileCommand::SwitchRepositoryVersion { .. } => send_operation_failed(
+                &event_sender,
+                session_id,
+                anyhow!("SFTP 不支持仓库版本切换"),
+            ),
+            RemoteFileCommand::UploadFiles { local_paths } => {
                 let result = upload_files(&sftp, &current_dir, &local_paths);
                 send_operation_result(&sftp, &current_dir, session_id, &event_sender, result);
             }
-            SftpCommand::DownloadFile {
+            RemoteFileCommand::DownloadFile {
                 remote_path,
                 local_path,
             } => {
@@ -561,32 +756,32 @@ fn run_ssh_sftp_worker(
                     .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
-            SftpCommand::DownloadFiles { entries, local_dir } => {
+            RemoteFileCommand::DownloadFiles { entries, local_dir } => {
                 let result = download_files(&sftp, &entries, &local_dir);
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
-            SftpCommand::ReadFileContent { remote_path } => {
+            RemoteFileCommand::ReadFileContent { remote_path } => {
                 send_file_preview_loaded(
                     session_id,
                     read_sftp_file_preview(&sftp, &remote_path),
                     &event_sender,
                 );
             }
-            SftpCommand::Rename {
+            RemoteFileCommand::Rename {
                 remote_path,
                 new_name,
             } => {
                 let result = rename_entry(&sftp, &remote_path, &new_name);
                 send_operation_result(&sftp, &current_dir, session_id, &event_sender, result);
             }
-            SftpCommand::Delete { entry } => {
+            RemoteFileCommand::Delete { entry } => {
                 let result = delete_entry(&sftp, &entry);
                 send_operation_result(&sftp, &current_dir, session_id, &event_sender, result);
             }
-            SftpCommand::Disconnect => {
+            RemoteFileCommand::Disconnect => {
                 send_event_blocking(
                     &event_sender,
-                    SftpEvent::Disconnected {
+                    RemoteFileEvent::Disconnected {
                         session_id,
                         message: "SFTP 连接已断开".to_string(),
                     },
@@ -598,7 +793,7 @@ fn run_ssh_sftp_worker(
 
     send_event_blocking(
         &event_sender,
-        SftpEvent::Disconnected {
+        RemoteFileEvent::Disconnected {
             session_id,
             message: "SFTP 连接已断开".to_string(),
         },
@@ -610,8 +805,8 @@ fn run_ssh_sftp_worker(
 fn run_smb_worker(
     session_id: usize,
     smb: SmbLinkConfig,
-    command_receiver: mpsc::Receiver<SftpCommand>,
-    event_sender: Sender<SftpEvent>,
+    command_receiver: mpsc::Receiver<RemoteFileCommand>,
+    event_sender: Sender<RemoteFileEvent>,
 ) -> Result<()> {
     // 使用多线程运行时：命令循环在 block_on 线程上通过同步 recv() 阻塞等待用户操作，
     // 期间 smb2 客户端派生的后台任务（socket 读取循环、oplock/lease 通知）仍能在
@@ -633,15 +828,15 @@ fn run_smb_worker(
 async fn run_smb_worker_async(
     session_id: usize,
     smb: SmbLinkConfig,
-    command_receiver: mpsc::Receiver<SftpCommand>,
-    event_sender: Sender<SftpEvent>,
+    command_receiver: mpsc::Receiver<RemoteFileCommand>,
+    event_sender: Sender<RemoteFileEvent>,
 ) -> Result<()> {
     let mut client = create_smb_client(&smb).await?;
     let mut current_dir = crate::remote::connection::normalized_smb_initial_dir(&smb.initial_dir);
     let entries = read_smb_directory(&mut client, &current_dir).await?;
     send_event_blocking(
         &event_sender,
-        SftpEvent::Connected {
+        RemoteFileEvent::Connected {
             session_id,
             current_dir: current_dir.clone(),
             entries,
@@ -650,14 +845,14 @@ async fn run_smb_worker_async(
 
     while let Ok(command) = command_receiver.recv() {
         match command {
-            SftpCommand::TrustHostKey | SftpCommand::RejectHostKey => {}
-            SftpCommand::LoadDirectory(path) => {
+            RemoteFileCommand::TrustHostKey | RemoteFileCommand::RejectHostKey => {}
+            RemoteFileCommand::LoadDirectory(path) => {
                 match load_smb_directory(&mut client, &current_dir, &path).await {
                     Ok((next_dir, entries)) => {
                         current_dir = next_dir;
                         send_event_blocking(
                             &event_sender,
-                            SftpEvent::DirectoryLoaded {
+                            RemoteFileEvent::DirectoryLoaded {
                                 session_id,
                                 current_dir: current_dir.clone(),
                                 entries,
@@ -667,11 +862,14 @@ async fn run_smb_worker_async(
                     Err(error) => send_operation_failed(&event_sender, session_id, error),
                 }
             }
-            SftpCommand::Refresh => {
+            RemoteFileCommand::Refresh => {
                 send_smb_directory_listing(&mut client, &current_dir, session_id, &event_sender)
                     .await;
             }
-            SftpCommand::UploadFiles { local_paths } => {
+            RemoteFileCommand::SwitchRepositoryVersion { .. } => {
+                send_operation_failed(&event_sender, session_id, anyhow!("SMB 不支持仓库版本切换"))
+            }
+            RemoteFileCommand::UploadFiles { local_paths } => {
                 let result = upload_smb_files(&mut client, &current_dir, &local_paths).await;
                 send_smb_operation_result(
                     &mut client,
@@ -682,7 +880,7 @@ async fn run_smb_worker_async(
                 )
                 .await;
             }
-            SftpCommand::DownloadFile {
+            RemoteFileCommand::DownloadFile {
                 remote_path,
                 local_path,
             } => {
@@ -691,18 +889,18 @@ async fn run_smb_worker_async(
                     .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
-            SftpCommand::DownloadFiles { entries, local_dir } => {
+            RemoteFileCommand::DownloadFiles { entries, local_dir } => {
                 let result = download_smb_files(&mut client, &entries, &local_dir).await;
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
-            SftpCommand::ReadFileContent { remote_path } => {
+            RemoteFileCommand::ReadFileContent { remote_path } => {
                 send_file_preview_loaded(
                     session_id,
                     read_smb_file_preview(&mut client, &remote_path).await,
                     &event_sender,
                 );
             }
-            SftpCommand::Rename {
+            RemoteFileCommand::Rename {
                 remote_path,
                 new_name,
             } => {
@@ -716,7 +914,7 @@ async fn run_smb_worker_async(
                 )
                 .await;
             }
-            SftpCommand::Delete { entry } => {
+            RemoteFileCommand::Delete { entry } => {
                 let result = delete_smb_entry(&mut client, &entry).await;
                 send_smb_operation_result(
                     &mut client,
@@ -727,11 +925,11 @@ async fn run_smb_worker_async(
                 )
                 .await;
             }
-            SftpCommand::Disconnect => {
+            RemoteFileCommand::Disconnect => {
                 close_smb_client(&mut client).await;
                 send_event_blocking(
                     &event_sender,
-                    SftpEvent::Disconnected {
+                    RemoteFileEvent::Disconnected {
                         session_id,
                         message: "SMB 连接已断开".to_string(),
                     },
@@ -744,7 +942,7 @@ async fn run_smb_worker_async(
     close_smb_client(&mut client).await;
     send_event_blocking(
         &event_sender,
-        SftpEvent::Disconnected {
+        RemoteFileEvent::Disconnected {
             session_id,
             message: "SMB 连接已断开".to_string(),
         },
@@ -757,7 +955,7 @@ fn load_directory(
     sftp: &ssh2::Sftp,
     current_dir: &str,
     input: &str,
-) -> Result<(String, Vec<SftpEntry>)> {
+) -> Result<(String, Vec<RemoteFileEntry>)> {
     let target = resolve_remote_path(current_dir, input)?;
     let current_dir = normalize_remote_path(
         sftp.realpath(Path::new(&target))
@@ -768,7 +966,7 @@ fn load_directory(
 }
 
 /// 读取远程目录条目，并按目录优先、名称升序排序。
-fn read_remote_directory(sftp: &ssh2::Sftp, directory: &str) -> Result<Vec<SftpEntry>> {
+fn read_remote_directory(sftp: &ssh2::Sftp, directory: &str) -> Result<Vec<RemoteFileEntry>> {
     let mut entries = sftp
         .readdir(Path::new(directory))
         .with_context(|| format!("无法读取目录 {directory}"))?
@@ -780,13 +978,17 @@ fn read_remote_directory(sftp: &ssh2::Sftp, directory: &str) -> Result<Vec<SftpE
 }
 
 /// 将 ssh2 的目录项转换为 UI 需要的远程文件条目。
-fn sftp_entry_from_stat(directory: &str, path: PathBuf, stat: ssh2::FileStat) -> Option<SftpEntry> {
+fn sftp_entry_from_stat(
+    directory: &str,
+    path: PathBuf,
+    stat: ssh2::FileStat,
+) -> Option<RemoteFileEntry> {
     let name = path.file_name()?.to_string_lossy().to_string();
     if name == "." || name == ".." {
         return None;
     }
     let kind = sftp_entry_kind(stat.perm);
-    Some(SftpEntry {
+    Some(RemoteFileEntry {
         path: remote_child_path(directory, &name),
         name,
         kind,
@@ -797,12 +999,12 @@ fn sftp_entry_from_stat(directory: &str, path: PathBuf, stat: ssh2::FileStat) ->
 }
 
 /// 根据 Unix mode 判断远程文件类型。
-fn sftp_entry_kind(permissions: Option<u32>) -> SftpEntryKind {
+fn sftp_entry_kind(permissions: Option<u32>) -> RemoteFileEntryKind {
     match permissions.map(|perm| perm & SFTP_MODE_TYPE_MASK) {
-        Some(SFTP_MODE_DIRECTORY) => SftpEntryKind::Directory,
-        Some(SFTP_MODE_REGULAR_FILE) => SftpEntryKind::RegularFile,
-        Some(SFTP_MODE_SYMLINK) => SftpEntryKind::Symlink,
-        _ => SftpEntryKind::Other,
+        Some(SFTP_MODE_DIRECTORY) => RemoteFileEntryKind::Directory,
+        Some(SFTP_MODE_REGULAR_FILE) => RemoteFileEntryKind::RegularFile,
+        Some(SFTP_MODE_SYMLINK) => RemoteFileEntryKind::Symlink,
+        _ => RemoteFileEntryKind::Other,
     }
 }
 
@@ -846,7 +1048,7 @@ async fn load_smb_directory(
     client: &mut SmbShareClient,
     current_dir: &str,
     input: &str,
-) -> Result<(String, Vec<SftpEntry>)> {
+) -> Result<(String, Vec<RemoteFileEntry>)> {
     let target = crate::remote::connection::normalized_smb_initial_dir(&resolve_remote_path(
         current_dir,
         input,
@@ -859,7 +1061,7 @@ async fn load_smb_directory(
 async fn read_smb_directory(
     client: &mut SmbShareClient,
     directory: &str,
-) -> Result<Vec<SftpEntry>> {
+) -> Result<Vec<RemoteFileEntry>> {
     let mut entries = client
         .client
         .list_directory(&mut client.tree, &smb_relative_path(directory))
@@ -873,17 +1075,20 @@ async fn read_smb_directory(
 }
 
 /// 将 SMB 目录枚举条目转换为 UI 需要的远程文件条目。
-fn smb_entry_from_directory_info(directory: &str, entry: SmbDirectoryEntry) -> Option<SftpEntry> {
+fn smb_entry_from_directory_info(
+    directory: &str,
+    entry: SmbDirectoryEntry,
+) -> Option<RemoteFileEntry> {
     let name = entry.name;
     if name == "." || name == ".." {
         return None;
     }
     let kind = if entry.is_directory {
-        SftpEntryKind::Directory
+        RemoteFileEntryKind::Directory
     } else {
-        SftpEntryKind::RegularFile
+        RemoteFileEntryKind::RegularFile
     };
-    Some(SftpEntry {
+    Some(RemoteFileEntry {
         name: name.clone(),
         path: remote_child_path(directory, &name),
         kind,
@@ -970,7 +1175,7 @@ async fn download_smb_file(
 /// 下载多个 SMB 远程普通文件到本地目录。
 async fn download_smb_files(
     client: &mut SmbShareClient,
-    entries: &[SftpEntry],
+    entries: &[RemoteFileEntry],
     local_dir: &Path,
 ) -> Result<String> {
     if entries.is_empty() {
@@ -980,11 +1185,17 @@ async fn download_smb_files(
         bail!("请选择有效的本地目录");
     }
 
-    for entry in entries {
-        if !entry.kind.is_regular_file() {
-            bail!("仅支持下载普通文件：{}", entry.name);
-        }
-        download_smb_file(client, &entry.path, &local_dir.join(&entry.name)).await?;
+    let targets = entries
+        .iter()
+        .map(|entry| {
+            if !entry.kind.is_regular_file() {
+                bail!("仅支持下载普通文件：{}", entry.name);
+            }
+            Ok((entry, local_download_path(local_dir, &entry.name)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (entry, local_path) in targets {
+        download_smb_file(client, &entry.path, &local_path).await?;
     }
 
     Ok(format!("已下载 {} 个文件", entries.len()))
@@ -996,7 +1207,7 @@ async fn rename_smb_entry(
     remote_path: &str,
     new_name: &str,
 ) -> Result<String> {
-    let new_name = validate_sftp_rename_name(new_name).map_err(anyhow::Error::msg)?;
+    let new_name = validate_remote_file_rename_name(new_name).map_err(anyhow::Error::msg)?;
     let parent = remote_parent_dir(remote_path).ok_or_else(|| anyhow!("无法解析远程父目录"))?;
     let next_path = remote_child_path(&parent, &new_name);
     client
@@ -1012,15 +1223,15 @@ async fn rename_smb_entry(
 }
 
 /// 删除 SMB 远程普通文件或空目录。
-async fn delete_smb_entry(client: &mut SmbShareClient, entry: &SftpEntry) -> Result<String> {
+async fn delete_smb_entry(client: &mut SmbShareClient, entry: &RemoteFileEntry) -> Result<String> {
     match entry.kind {
-        SftpEntryKind::RegularFile => client
+        RemoteFileEntryKind::RegularFile => client
             .client
             .delete_file(&mut client.tree, &smb_relative_path(&entry.path))
             .await
             .with_context(|| format!("删除文件失败：{}", entry.name))
             .map(|_| format!("已删除 {}", entry.name)),
-        SftpEntryKind::Directory => {
+        RemoteFileEntryKind::Directory => {
             match client
                 .client
                 .delete_directory(&mut client.tree, &smb_relative_path(&entry.path))
@@ -1049,7 +1260,7 @@ async fn delete_smb_entry(client: &mut SmbShareClient, entry: &SftpEntry) -> Res
                 }
             }
         }
-        SftpEntryKind::Symlink | SftpEntryKind::Other => {
+        RemoteFileEntryKind::Symlink | RemoteFileEntryKind::Other => {
             Err(anyhow!("仅支持删除普通文件或空目录：{}", entry.name))
         }
     }
@@ -1098,7 +1309,11 @@ fn download_file(sftp: &ssh2::Sftp, remote_path: &str, local_path: &Path) -> Res
 }
 
 /// 下载多个远程普通文件到本地目录。
-fn download_files(sftp: &ssh2::Sftp, entries: &[SftpEntry], local_dir: &Path) -> Result<String> {
+fn download_files(
+    sftp: &ssh2::Sftp,
+    entries: &[RemoteFileEntry],
+    local_dir: &Path,
+) -> Result<String> {
     if entries.is_empty() {
         bail!("未选择要下载的文件");
     }
@@ -1106,11 +1321,17 @@ fn download_files(sftp: &ssh2::Sftp, entries: &[SftpEntry], local_dir: &Path) ->
         bail!("请选择有效的本地目录");
     }
 
-    for entry in entries {
-        if !entry.kind.is_regular_file() {
-            bail!("仅支持下载普通文件：{}", entry.name);
-        }
-        download_file(sftp, &entry.path, &local_dir.join(&entry.name))?;
+    let targets = entries
+        .iter()
+        .map(|entry| {
+            if !entry.kind.is_regular_file() {
+                bail!("仅支持下载普通文件：{}", entry.name);
+            }
+            Ok((entry, local_download_path(local_dir, &entry.name)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (entry, local_path) in targets {
+        download_file(sftp, &entry.path, &local_path)?;
     }
 
     Ok(format!("已下载 {} 个文件", entries.len()))
@@ -1118,7 +1339,7 @@ fn download_files(sftp: &ssh2::Sftp, entries: &[SftpEntry], local_dir: &Path) ->
 
 /// 在当前目录内重命名远程条目。
 fn rename_entry(sftp: &ssh2::Sftp, remote_path: &str, new_name: &str) -> Result<String> {
-    let new_name = validate_sftp_rename_name(new_name).map_err(anyhow::Error::msg)?;
+    let new_name = validate_remote_file_rename_name(new_name).map_err(anyhow::Error::msg)?;
     let parent = remote_parent_dir(remote_path).ok_or_else(|| anyhow!("无法解析远程父目录"))?;
     let next_path = remote_child_path(&parent, &new_name);
     sftp.rename(Path::new(remote_path), Path::new(&next_path), None)
@@ -1127,19 +1348,19 @@ fn rename_entry(sftp: &ssh2::Sftp, remote_path: &str, new_name: &str) -> Result<
 }
 
 /// 删除远程普通文件或空目录。
-fn delete_entry(sftp: &ssh2::Sftp, entry: &SftpEntry) -> Result<String> {
+fn delete_entry(sftp: &ssh2::Sftp, entry: &RemoteFileEntry) -> Result<String> {
     match entry.kind {
-        SftpEntryKind::RegularFile => {
+        RemoteFileEntryKind::RegularFile => {
             sftp.unlink(Path::new(&entry.path))
                 .with_context(|| format!("删除文件失败：{}", entry.name))?;
             Ok(format!("已删除 {}", entry.name))
         }
-        SftpEntryKind::Directory => {
+        RemoteFileEntryKind::Directory => {
             sftp.rmdir(Path::new(&entry.path))
                 .map_err(|error| describe_sftp_rmdir_error(&entry.name, error))?;
             Ok(format!("已删除目录 {}", entry.name))
         }
-        SftpEntryKind::Symlink | SftpEntryKind::Other => {
+        RemoteFileEntryKind::Symlink | RemoteFileEntryKind::Other => {
             bail!("仅支持删除普通文件或空目录：{}", entry.name)
         }
     }
@@ -1166,12 +1387,12 @@ fn send_directory_listing(
     sftp: &ssh2::Sftp,
     current_dir: &str,
     session_id: usize,
-    event_sender: &Sender<SftpEvent>,
+    event_sender: &Sender<RemoteFileEvent>,
 ) {
     match read_remote_directory(sftp, current_dir) {
         Ok(entries) => send_event_blocking(
             event_sender,
-            SftpEvent::DirectoryLoaded {
+            RemoteFileEvent::DirectoryLoaded {
                 session_id,
                 current_dir: current_dir.to_string(),
                 entries,
@@ -1186,12 +1407,12 @@ async fn send_smb_directory_listing(
     client: &mut SmbShareClient,
     current_dir: &str,
     session_id: usize,
-    event_sender: &Sender<SftpEvent>,
+    event_sender: &Sender<RemoteFileEvent>,
 ) {
     match read_smb_directory(client, current_dir).await {
         Ok(entries) => send_event_blocking(
             event_sender,
-            SftpEvent::DirectoryLoaded {
+            RemoteFileEvent::DirectoryLoaded {
                 session_id,
                 current_dir: current_dir.to_string(),
                 entries,
@@ -1206,14 +1427,14 @@ fn send_operation_result(
     sftp: &ssh2::Sftp,
     current_dir: &str,
     session_id: usize,
-    event_sender: &Sender<SftpEvent>,
+    event_sender: &Sender<RemoteFileEvent>,
     result: Result<String>,
 ) {
     match result {
         Ok(message) => {
             send_event_blocking(
                 event_sender,
-                SftpEvent::OperationSucceeded {
+                RemoteFileEvent::OperationSucceeded {
                     session_id,
                     message,
                 },
@@ -1229,14 +1450,14 @@ async fn send_smb_operation_result(
     client: &mut SmbShareClient,
     current_dir: &str,
     session_id: usize,
-    event_sender: &Sender<SftpEvent>,
+    event_sender: &Sender<RemoteFileEvent>,
     result: Result<String>,
 ) {
     match result {
         Ok(message) => {
             send_event_blocking(
                 event_sender,
-                SftpEvent::OperationSucceeded {
+                RemoteFileEvent::OperationSucceeded {
                     session_id,
                     message,
                 },
@@ -1250,13 +1471,13 @@ async fn send_smb_operation_result(
 /// 发送无需刷新目录的操作结果。
 fn send_operation_result_without_refresh(
     session_id: usize,
-    event_sender: &Sender<SftpEvent>,
+    event_sender: &Sender<RemoteFileEvent>,
     result: Result<String>,
 ) {
     match result {
         Ok(message) => send_event_blocking(
             event_sender,
-            SftpEvent::OperationSucceeded {
+            RemoteFileEvent::OperationSucceeded {
                 session_id,
                 message,
             },
@@ -1266,15 +1487,15 @@ fn send_operation_result_without_refresh(
 }
 
 /// 发送远程文件预览内容读取完成事件。
-fn send_file_preview_loaded(
+pub(crate) fn send_file_preview_loaded(
     session_id: usize,
     preview: (String, FilePreviewContent),
-    event_sender: &Sender<SftpEvent>,
+    event_sender: &Sender<RemoteFileEvent>,
 ) {
     let (file_name, content) = preview;
     send_event_blocking(
         event_sender,
-        SftpEvent::FileContentLoaded {
+        RemoteFileEvent::FileContentLoaded {
             session_id,
             file_name,
             content,
@@ -1283,7 +1504,7 @@ fn send_file_preview_loaded(
 }
 
 /// 把读取到的字节转换为预览内容；含空字节判定为二进制，否则按 UTF-8 失败安全解码。
-fn preview_content_from_bytes(buf: Vec<u8>, truncated: bool) -> FilePreviewContent {
+pub(crate) fn preview_content_from_bytes(buf: Vec<u8>, truncated: bool) -> FilePreviewContent {
     if buf.contains(&0) {
         FilePreviewContent::Binary
     } else {
@@ -1307,9 +1528,9 @@ fn read_sftp_file_preview(sftp: &ssh2::Sftp, remote_path: &str) -> (String, File
         }
     };
     // 多读 1 字节用于判断是否达到读取上限被截断。
-    let mut buf = Vec::with_capacity(SFTP_PREVIEW_MAX_READ + 1);
+    let mut buf = Vec::with_capacity(REMOTE_FILE_PREVIEW_MAX_READ + 1);
     if let Err(error) = (&mut remote)
-        .take((SFTP_PREVIEW_MAX_READ + 1) as u64)
+        .take((REMOTE_FILE_PREVIEW_MAX_READ + 1) as u64)
         .read_to_end(&mut buf)
     {
         return (
@@ -1317,9 +1538,9 @@ fn read_sftp_file_preview(sftp: &ssh2::Sftp, remote_path: &str) -> (String, File
             FilePreviewContent::Error(format!("读取文件失败：{error}")),
         );
     }
-    let truncated = buf.len() > SFTP_PREVIEW_MAX_READ;
+    let truncated = buf.len() > REMOTE_FILE_PREVIEW_MAX_READ;
     if truncated {
-        buf.truncate(SFTP_PREVIEW_MAX_READ);
+        buf.truncate(REMOTE_FILE_PREVIEW_MAX_READ);
     }
     (file_name, preview_content_from_bytes(buf, truncated))
 }
@@ -1343,8 +1564,8 @@ async fn read_smb_file_preview(
             );
         }
     };
-    let mut buf = Vec::with_capacity(SFTP_PREVIEW_MAX_READ + 1);
-    while buf.len() <= SFTP_PREVIEW_MAX_READ {
+    let mut buf = Vec::with_capacity(REMOTE_FILE_PREVIEW_MAX_READ + 1);
+    while buf.len() <= REMOTE_FILE_PREVIEW_MAX_READ {
         match download.next_chunk().await {
             Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
             Some(Err(error)) => {
@@ -1356,22 +1577,22 @@ async fn read_smb_file_preview(
             None => break,
         }
     }
-    let truncated = buf.len() > SFTP_PREVIEW_MAX_READ;
+    let truncated = buf.len() > REMOTE_FILE_PREVIEW_MAX_READ;
     if truncated {
-        buf.truncate(SFTP_PREVIEW_MAX_READ);
+        buf.truncate(REMOTE_FILE_PREVIEW_MAX_READ);
     }
     (file_name, preview_content_from_bytes(buf, truncated))
 }
 
 /// 发送可恢复的操作失败事件。
-fn send_operation_failed(
-    event_sender: &Sender<SftpEvent>,
+pub(crate) fn send_operation_failed(
+    event_sender: &Sender<RemoteFileEvent>,
     session_id: usize,
     error: anyhow::Error,
 ) {
     send_event_blocking(
         event_sender,
-        SftpEvent::OperationFailed {
+        RemoteFileEvent::OperationFailed {
             session_id,
             message: error.to_string(),
         },
@@ -1379,7 +1600,7 @@ fn send_operation_failed(
 }
 
 /// 把用户输入的远程目录解析为绝对路径文本。
-fn resolve_remote_path(current_dir: &str, input: &str) -> Result<String> {
+pub(crate) fn resolve_remote_path(current_dir: &str, input: &str) -> Result<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         bail!("远程目录不能为空");
@@ -1420,10 +1641,10 @@ fn smb_filetime_to_unix_seconds(file_time: smb2::pack::FileTime) -> Option<u64> 
 }
 
 /// 按目录优先和名称升序排序远程文件条目。
-fn sort_remote_entries(entries: &mut [SftpEntry]) {
+fn sort_remote_entries(entries: &mut [RemoteFileEntry]) {
     // 使用 sort_by_cached_key，每个条目只计算一次小写键，避免比较时反复分配。
     entries.sort_by_cached_key(|entry| {
-        let group = if entry.kind == SftpEntryKind::Directory {
+        let group = if entry.kind == RemoteFileEntryKind::Directory {
             0_u8
         } else {
             1_u8
@@ -1433,25 +1654,25 @@ fn sort_remote_entries(entries: &mut [SftpEntry]) {
 }
 
 /// 按指定字段和方向排序远程文件条目；目录始终分组靠前，方向只在各自分组内生效。
-pub(crate) fn sort_sftp_entries(
-    entries: &mut [SftpEntry],
-    field: SftpSortField,
-    direction: SftpSortDirection,
+pub(crate) fn sort_remote_file_entries(
+    entries: &mut [RemoteFileEntry],
+    field: RemoteFileSortField,
+    direction: RemoteFileSortDirection,
 ) {
     entries.sort_by(|a, b| {
-        let group_a = if a.kind == SftpEntryKind::Directory {
+        let group_a = if a.kind == RemoteFileEntryKind::Directory {
             0_u8
         } else {
             1_u8
         };
-        let group_b = if b.kind == SftpEntryKind::Directory {
+        let group_b = if b.kind == RemoteFileEntryKind::Directory {
             0_u8
         } else {
             1_u8
         };
         group_a.cmp(&group_b).then_with(|| {
-            let order = compare_sftp_entries(a, b, field);
-            if direction == SftpSortDirection::Desc {
+            let order = compare_remote_file_entries(a, b, field);
+            if direction == RemoteFileSortDirection::Desc {
                 order.reverse()
             } else {
                 order
@@ -1461,33 +1682,40 @@ pub(crate) fn sort_sftp_entries(
 }
 
 /// 按排序字段比较两个条目；同列相等时回退名称，保证排序稳定可预期。
-fn compare_sftp_entries(a: &SftpEntry, b: &SftpEntry, field: SftpSortField) -> std::cmp::Ordering {
+fn compare_remote_file_entries(
+    a: &RemoteFileEntry,
+    b: &RemoteFileEntry,
+    field: RemoteFileSortField,
+) -> std::cmp::Ordering {
     match field {
-        SftpSortField::Name => a
+        RemoteFileSortField::Name => a
             .name
             .to_ascii_lowercase()
             .cmp(&b.name.to_ascii_lowercase())
             .then_with(|| a.name.cmp(&b.name)),
-        SftpSortField::Type => a.kind.cmp(&b.kind).then_with(|| {
+        RemoteFileSortField::Type => a.kind.cmp(&b.kind).then_with(|| {
             a.name
                 .to_ascii_lowercase()
                 .cmp(&b.name.to_ascii_lowercase())
         }),
-        SftpSortField::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)).then_with(|| {
-            a.name
-                .to_ascii_lowercase()
-                .cmp(&b.name.to_ascii_lowercase())
-        }),
-        SftpSortField::Mtime => a
-            .mtime
-            .unwrap_or(0)
-            .cmp(&b.mtime.unwrap_or(0))
-            .then_with(|| {
+        RemoteFileSortField::Size => {
+            a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)).then_with(|| {
                 a.name
                     .to_ascii_lowercase()
                     .cmp(&b.name.to_ascii_lowercase())
-            }),
-        SftpSortField::Permissions => a
+            })
+        }
+        RemoteFileSortField::Mtime => {
+            a.mtime
+                .unwrap_or(0)
+                .cmp(&b.mtime.unwrap_or(0))
+                .then_with(|| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                })
+        }
+        RemoteFileSortField::Permissions => a
             .permissions
             .unwrap_or(0)
             .cmp(&b.permissions.unwrap_or(0))
@@ -1500,7 +1728,7 @@ fn compare_sftp_entries(a: &SftpEntry, b: &SftpEntry, field: SftpSortField) -> s
 }
 
 /// 返回远程路径中的文件名。
-fn remote_file_name(path: &str) -> String {
+pub(crate) fn remote_file_name(path: &str) -> String {
     path.rsplit('/')
         .next()
         .filter(|name| !name.is_empty())
@@ -1513,8 +1741,8 @@ fn verify_host_key(
     session_id: usize,
     ssh: &SshLinkConfig,
     trusted_fingerprint: Option<&str>,
-    command_receiver: &mpsc::Receiver<SftpCommand>,
-    event_sender: &Sender<SftpEvent>,
+    command_receiver: &mpsc::Receiver<RemoteFileCommand>,
+    event_sender: &Sender<RemoteFileEvent>,
     fingerprint: &str,
 ) -> Result<()> {
     match trusted_fingerprint {
@@ -1523,7 +1751,7 @@ fn verify_host_key(
         None => {
             send_event_blocking(
                 event_sender,
-                SftpEvent::HostKeyVerification {
+                RemoteFileEvent::HostKeyVerification {
                     session_id,
                     host: ssh.host.clone(),
                     port: ssh.port,
@@ -1532,18 +1760,19 @@ fn verify_host_key(
             );
             loop {
                 match command_receiver.recv() {
-                    Ok(SftpCommand::TrustHostKey) => return Ok(()),
-                    Ok(SftpCommand::RejectHostKey) => bail!("用户拒绝信任 SSH 主机指纹"),
-                    Ok(SftpCommand::Disconnect) | Err(_) => bail!("SFTP 连接已取消"),
+                    Ok(RemoteFileCommand::TrustHostKey) => return Ok(()),
+                    Ok(RemoteFileCommand::RejectHostKey) => bail!("用户拒绝信任 SSH 主机指纹"),
+                    Ok(RemoteFileCommand::Disconnect) | Err(_) => bail!("SFTP 连接已取消"),
                     Ok(
-                        SftpCommand::LoadDirectory(_)
-                        | SftpCommand::Refresh
-                        | SftpCommand::UploadFiles { .. }
-                        | SftpCommand::DownloadFile { .. }
-                        | SftpCommand::DownloadFiles { .. }
-                        | SftpCommand::ReadFileContent { .. }
-                        | SftpCommand::Rename { .. }
-                        | SftpCommand::Delete { .. },
+                        RemoteFileCommand::LoadDirectory(_)
+                        | RemoteFileCommand::Refresh
+                        | RemoteFileCommand::SwitchRepositoryVersion { .. }
+                        | RemoteFileCommand::UploadFiles { .. }
+                        | RemoteFileCommand::DownloadFile { .. }
+                        | RemoteFileCommand::DownloadFiles { .. }
+                        | RemoteFileCommand::ReadFileContent { .. }
+                        | RemoteFileCommand::Rename { .. }
+                        | RemoteFileCommand::Delete { .. },
                     ) => {}
                 }
             }
@@ -1552,13 +1781,53 @@ fn verify_host_key(
 }
 
 /// 后台线程向 UI 事件通道发送消息；接收端关闭时直接忽略。
-fn send_event_blocking(event_sender: &Sender<SftpEvent>, event: SftpEvent) {
+pub(crate) fn send_event_blocking(event_sender: &Sender<RemoteFileEvent>, event: RemoteFileEvent) {
     let _ = event_sender.send_blocking(event);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 验证文件管理标签使用实际后端协议名称，不再统一显示“文件管理”。
+    #[test]
+    fn remote_file_session_title_uses_backend_protocol() {
+        let link = ConnectionLinkConfig {
+            id: 7,
+            parent_id: None,
+            name: "测试链接".to_string(),
+            ssh: None,
+            smb: None,
+            git: None,
+            svn: None,
+        };
+        for (backend, expected) in [
+            (RemoteFileBackend::Sftp, "SFTP - 测试链接"),
+            (RemoteFileBackend::Smb, "SMB - 测试链接"),
+            (RemoteFileBackend::Git, "Git - 测试链接"),
+            (RemoteFileBackend::Svn, "SVN - 测试链接"),
+        ] {
+            let (sender, _receiver) = mpsc::channel();
+            let session = RemoteFileSessionState::connecting(1, &link, backend, sender);
+            assert_eq!(session.title, expected);
+        }
+    }
+
+    /// 验证仓库后端只开放浏览、预览、下载和版本切换，所有写能力均关闭。
+    #[test]
+    fn repository_capabilities_are_strictly_read_only() {
+        for backend in [RemoteFileBackend::Git, RemoteFileBackend::Svn] {
+            let capabilities = backend.capabilities();
+            assert!(capabilities.browse);
+            assert!(capabilities.preview);
+            assert!(capabilities.download);
+            assert!(capabilities.switch_version);
+            assert!(!capabilities.write);
+            assert!(!capabilities.upload);
+            assert!(!capabilities.rename);
+            assert!(!capabilities.delete);
+        }
+    }
 
     /// 验证远程父目录解析覆盖根目录和普通路径。
     #[test]
@@ -1573,11 +1842,27 @@ mod tests {
 
     /// 验证重命名名称不能为空或包含路径分隔符。
     #[test]
-    fn validate_sftp_rename_name_rejects_empty_and_paths() {
-        assert_eq!(validate_sftp_rename_name(" app.log ").unwrap(), "app.log");
-        assert!(validate_sftp_rename_name("").is_err());
-        assert!(validate_sftp_rename_name("../app.log").is_err());
-        assert!(validate_sftp_rename_name("dir/app.log").is_err());
+    fn validate_remote_file_rename_name_rejects_empty_and_paths() {
+        assert_eq!(
+            validate_remote_file_rename_name(" app.log ").unwrap(),
+            "app.log"
+        );
+        assert!(validate_remote_file_rename_name("").is_err());
+        assert!(validate_remote_file_rename_name("../app.log").is_err());
+        assert!(validate_remote_file_rename_name("dir/app.log").is_err());
+    }
+
+    /// 验证多文件下载保留安全文件名，并在 Unix/Windows 分隔符下都无法逃逸目标目录。
+    #[test]
+    fn local_download_path_rejects_cross_platform_path_escape() {
+        let root = Path::new("/tmp/downloads");
+        assert_eq!(
+            local_download_path(root, " app.log ").unwrap(),
+            root.join(" app.log ")
+        );
+        assert!(local_download_path(root, "../outside.log").is_err());
+        assert!(local_download_path(root, "..\\outside.log").is_err());
+        assert!(local_download_path(root, ".").is_err());
     }
 
     /// 验证远程子路径拼接使用 POSIX 分隔符。
@@ -1593,11 +1878,11 @@ mod tests {
     /// 构造一个最小可用的远程文件条目用于排序测试。
     fn make_entry(
         name: &str,
-        kind: SftpEntryKind,
+        kind: RemoteFileEntryKind,
         size: Option<u64>,
         mtime: Option<u64>,
-    ) -> SftpEntry {
-        SftpEntry {
+    ) -> RemoteFileEntry {
+        RemoteFileEntry {
             name: name.to_string(),
             path: format!("/{name}"),
             kind,
@@ -1609,20 +1894,28 @@ mod tests {
 
     /// 验证排序始终把目录置于文件之前，即使降序也不改变分组顺序。
     #[test]
-    fn sort_sftp_entries_keeps_directories_first_regardless_of_direction() {
+    fn sort_remote_file_entries_keeps_directories_first_regardless_of_direction() {
         let mut entries = vec![
-            make_entry("app.log", SftpEntryKind::RegularFile, Some(10), None),
-            make_entry("configs", SftpEntryKind::Directory, None, None),
-            make_entry("z-dir", SftpEntryKind::Directory, None, None),
+            make_entry("app.log", RemoteFileEntryKind::RegularFile, Some(10), None),
+            make_entry("configs", RemoteFileEntryKind::Directory, None, None),
+            make_entry("z-dir", RemoteFileEntryKind::Directory, None, None),
         ];
 
-        sort_sftp_entries(&mut entries, SftpSortField::Name, SftpSortDirection::Asc);
+        sort_remote_file_entries(
+            &mut entries,
+            RemoteFileSortField::Name,
+            RemoteFileSortDirection::Asc,
+        );
         assert_eq!(entries[0].name, "configs");
         assert_eq!(entries[1].name, "z-dir");
         assert_eq!(entries[2].name, "app.log");
 
         // 降序只在目录组内反转，文件仍排在所有目录之后。
-        sort_sftp_entries(&mut entries, SftpSortField::Name, SftpSortDirection::Desc);
+        sort_remote_file_entries(
+            &mut entries,
+            RemoteFileSortField::Name,
+            RemoteFileSortDirection::Desc,
+        );
         assert_eq!(entries[0].name, "z-dir");
         assert_eq!(entries[1].name, "configs");
         assert_eq!(entries[2].name, "app.log");
@@ -1630,20 +1923,33 @@ mod tests {
 
     /// 验证按大小排序在文件组内正确升降序，并以名称作为稳定回退。
     #[test]
-    fn sort_sftp_entries_orders_by_size_within_file_group() {
+    fn sort_remote_file_entries_orders_by_size_within_file_group() {
         let mut entries = vec![
-            make_entry("big.log", SftpEntryKind::RegularFile, Some(300), None),
-            make_entry("small.log", SftpEntryKind::RegularFile, Some(10), None),
-            make_entry("mid.log", SftpEntryKind::RegularFile, Some(100), None),
+            make_entry("big.log", RemoteFileEntryKind::RegularFile, Some(300), None),
+            make_entry(
+                "small.log",
+                RemoteFileEntryKind::RegularFile,
+                Some(10),
+                None,
+            ),
+            make_entry("mid.log", RemoteFileEntryKind::RegularFile, Some(100), None),
         ];
 
-        sort_sftp_entries(&mut entries, SftpSortField::Size, SftpSortDirection::Asc);
+        sort_remote_file_entries(
+            &mut entries,
+            RemoteFileSortField::Size,
+            RemoteFileSortDirection::Asc,
+        );
         assert_eq!(
             entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
             vec!["small.log", "mid.log", "big.log"]
         );
 
-        sort_sftp_entries(&mut entries, SftpSortField::Size, SftpSortDirection::Desc);
+        sort_remote_file_entries(
+            &mut entries,
+            RemoteFileSortField::Size,
+            RemoteFileSortDirection::Desc,
+        );
         assert_eq!(
             entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
             vec!["big.log", "mid.log", "small.log"]
@@ -1652,14 +1958,18 @@ mod tests {
 
     /// 验证名称排序大小写不敏感，并保留原大小写形式。
     #[test]
-    fn sort_sftp_entries_sorts_names_case_insensitively() {
+    fn sort_remote_file_entries_sorts_names_case_insensitively() {
         let mut entries = vec![
-            make_entry("Banana", SftpEntryKind::RegularFile, None, None),
-            make_entry("apple", SftpEntryKind::RegularFile, None, None),
-            make_entry("Cherry", SftpEntryKind::RegularFile, None, None),
+            make_entry("Banana", RemoteFileEntryKind::RegularFile, None, None),
+            make_entry("apple", RemoteFileEntryKind::RegularFile, None, None),
+            make_entry("Cherry", RemoteFileEntryKind::RegularFile, None, None),
         ];
 
-        sort_sftp_entries(&mut entries, SftpSortField::Name, SftpSortDirection::Asc);
+        sort_remote_file_entries(
+            &mut entries,
+            RemoteFileSortField::Name,
+            RemoteFileSortDirection::Asc,
+        );
         assert_eq!(
             entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
             vec!["apple", "Banana", "Cherry"]
@@ -1668,13 +1978,17 @@ mod tests {
 
     /// 验证缺少大小信息的条目按 0 参与比较，不会导致排序崩溃。
     #[test]
-    fn sort_sftp_entries_treats_missing_size_as_zero() {
+    fn sort_remote_file_entries_treats_missing_size_as_zero() {
         let mut entries = vec![
-            make_entry("with-size", SftpEntryKind::RegularFile, Some(5), None),
-            make_entry("no-size", SftpEntryKind::RegularFile, None, None),
+            make_entry("with-size", RemoteFileEntryKind::RegularFile, Some(5), None),
+            make_entry("no-size", RemoteFileEntryKind::RegularFile, None, None),
         ];
 
-        sort_sftp_entries(&mut entries, SftpSortField::Size, SftpSortDirection::Asc);
+        sort_remote_file_entries(
+            &mut entries,
+            RemoteFileSortField::Size,
+            RemoteFileSortDirection::Asc,
+        );
         // 两条目大小同为 0，回退名称升序。
         assert_eq!(entries[0].name, "no-size");
         assert_eq!(entries[1].name, "with-size");

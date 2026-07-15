@@ -155,6 +155,8 @@ impl ArgusApp {
             ActiveMenuKind::ConnectionLinkCreate => vec![
                 MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink),
                 MenuEntry::new("新建 SMB 链接", MenuAction::NewSmbConnectionLink),
+                MenuEntry::new("新建 Git 链接", MenuAction::NewGitConnectionLink),
+                MenuEntry::new("新建 SVN 链接", MenuAction::NewSvnConnectionLink),
             ],
             ActiveMenuKind::TerminalContext { session_id } => vec![MenuEntry::new(
                 "文件管理",
@@ -162,27 +164,63 @@ impl ArgusApp {
                     terminal_session_id: session_id,
                 },
             )],
-            ActiveMenuKind::SftpEntry { session_id } => {
+            ActiveMenuKind::RemoteFileEntry { session_id } => {
                 let mut entries = Vec::new();
-                if self.can_preview_sftp_selection(session_id) {
+                if self.can_preview_remote_file_selection(session_id) {
                     entries.push(MenuEntry::new(
                         "预览",
-                        MenuAction::PreviewSftpSelection { session_id },
+                        MenuAction::PreviewRemoteFileSelection { session_id },
                     ));
                 }
-                entries.push(MenuEntry::new(
-                    "下载",
-                    MenuAction::DownloadSftpSelection { session_id },
-                ));
-                entries.push(MenuEntry::new(
-                    "重命名",
-                    MenuAction::RenameSftpSelection { session_id },
-                ));
-                entries.push(
-                    MenuEntry::new("删除", MenuAction::DeleteSftpSelection { session_id }).danger(),
-                );
+                if self.can_download_remote_file_selection(session_id) {
+                    entries.push(MenuEntry::new(
+                        "下载",
+                        MenuAction::DownloadRemoteFileSelection { session_id },
+                    ));
+                }
+                if self.can_rename_remote_file_selection(session_id) {
+                    entries.push(MenuEntry::new(
+                        "重命名",
+                        MenuAction::RenameRemoteFileSelection { session_id },
+                    ));
+                }
+                if self.can_delete_remote_file_selection(session_id) {
+                    entries.push(
+                        MenuEntry::new("删除", MenuAction::DeleteRemoteFileSelection { session_id })
+                            .danger(),
+                    );
+                }
                 entries
             }
+            ActiveMenuKind::RepositoryVersions { session_id } => self
+                .remote_file_sessions
+                .get(&session_id)
+                .map(|session| {
+                    session
+                        .repository_versions
+                        .iter()
+                        .map(|version| {
+                            let prefix = match version.kind {
+                                crate::remote::remote_file::RepositoryVersionKind::GitBranch => "分支 · ",
+                                crate::remote::remote_file::RepositoryVersionKind::GitTag => "标签 · ",
+                                crate::remote::remote_file::RepositoryVersionKind::SvnHead
+                                | crate::remote::remote_file::RepositoryVersionKind::SvnRevision => "",
+                            };
+                            MenuEntry::new(
+                                format!("{prefix}{}", version.label),
+                                MenuAction::SwitchRepositoryVersion {
+                                    session_id,
+                                    version_id: version.id.clone(),
+                                },
+                            )
+                            .selected(
+                                session.selected_repository_version.as_deref()
+                                    == Some(version.id.as_str()),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -207,24 +245,31 @@ impl ArgusApp {
             MenuAction::DeleteConnectionNode { node_id } => {
                 self.request_delete_connection_node(node_id);
             }
-            MenuAction::NewSshConnectionLink | MenuAction::NewSmbConnectionLink => {
+            MenuAction::NewSshConnectionLink
+            | MenuAction::NewSmbConnectionLink
+            | MenuAction::NewGitConnectionLink
+            | MenuAction::NewSvnConnectionLink => {
                 self.placeholder_notice = "新增链接需要从界面菜单触发".to_string();
             }
             MenuAction::OpenSftpFileManager { .. } => {
                 self.placeholder_notice = "文件管理需要从界面菜单触发".to_string();
             }
-            MenuAction::DownloadSftpSelection { .. } => {
+            MenuAction::DownloadRemoteFileSelection { .. } => {
                 self.placeholder_notice = "文件下载需要从界面菜单触发".to_string();
             }
-            MenuAction::PreviewSftpSelection { .. } => {
+            MenuAction::PreviewRemoteFileSelection { .. } => {
                 self.placeholder_notice = "文件预览需要从界面菜单触发".to_string();
             }
-            MenuAction::RenameSftpSelection { session_id } => {
-                self.open_sftp_rename_dialog(session_id);
+            MenuAction::RenameRemoteFileSelection { session_id } => {
+                self.open_remote_file_rename_dialog(session_id);
             }
-            MenuAction::DeleteSftpSelection { session_id } => {
-                self.request_delete_sftp_entry(session_id);
+            MenuAction::DeleteRemoteFileSelection { session_id } => {
+                self.request_delete_remote_file_entry(session_id);
             }
+            MenuAction::SwitchRepositoryVersion {
+                session_id,
+                version_id,
+            } => self.switch_repository_version(session_id, version_id),
         }
 
         self.close_active_menu();
@@ -277,26 +322,41 @@ impl ArgusApp {
                 self.open_new_smb_link_dialog(cx);
                 self.close_active_menu();
             }
+            MenuAction::NewGitConnectionLink => {
+                self.open_new_git_link_dialog(cx);
+                self.close_active_menu();
+            }
+            MenuAction::NewSvnConnectionLink => {
+                self.open_new_svn_link_dialog(cx);
+                self.close_active_menu();
+            }
             MenuAction::OpenSftpFileManager {
                 terminal_session_id,
             } => {
                 self.open_sftp_file_manager_from_terminal(terminal_session_id, cx);
                 self.close_active_menu();
             }
-            MenuAction::DownloadSftpSelection { session_id } => {
-                self.choose_sftp_download_target(session_id, cx);
+            MenuAction::DownloadRemoteFileSelection { session_id } => {
+                self.choose_remote_file_download_target(session_id, cx);
                 self.close_active_menu();
             }
-            MenuAction::PreviewSftpSelection { session_id } => {
-                self.preview_sftp_selection(session_id);
+            MenuAction::PreviewRemoteFileSelection { session_id } => {
+                self.preview_remote_file_selection(session_id);
                 self.close_active_menu();
             }
-            MenuAction::RenameSftpSelection { session_id } => {
-                self.open_sftp_rename_dialog(session_id);
+            MenuAction::RenameRemoteFileSelection { session_id } => {
+                self.open_remote_file_rename_dialog(session_id);
                 self.close_active_menu();
             }
-            MenuAction::DeleteSftpSelection { session_id } => {
-                self.request_delete_sftp_entry(session_id);
+            MenuAction::DeleteRemoteFileSelection { session_id } => {
+                self.request_delete_remote_file_entry(session_id);
+                self.close_active_menu();
+            }
+            MenuAction::SwitchRepositoryVersion {
+                session_id,
+                version_id,
+            } => {
+                self.switch_repository_version(session_id, version_id);
                 self.close_active_menu();
             }
             other => self.handle_menu_action(other),

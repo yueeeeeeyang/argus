@@ -30,20 +30,29 @@ gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 hex = "0.4.3"
 icondata = { version = "0.7.0", default-features = false, features = ["lucide"] }
 memmap2 = "0.9.10"
+percent-encoding = "2.3.2"
 rars = "0.2.0"
 regex = "1.12.3"
+roxmltree = "0.20.0"
+# SVN SSH 主机指纹预检直接复用与 svn crate 相同的纯 Rust russh 栈，不启动系统 ssh。
+russh = { version = "0.62.2", default-features = false, features = ["ring", "rsa"] }
 self-replace = "1.5.0"
 semver = "1.0.28"
 sevenz-rust = "0.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"
-smb2 = "0.11.4"
+# 0.13 使用稳定版 aes 0.9，与 svn 的 russh 加密栈兼容；API 保持现有 SMB 行为不变。
+smb2 = "0.13.0"
+# SVN 的 svn/svn+ssh 传输使用纯 Rust ra_svn，HTTP(S) 只读传输使用内置 DAV 客户端；
+# ssh 特性通过 russh 建立隧道，不调用本机 svn/ssh，也不启用系统 libsasl2。
+svn = { version = "0.1.13", features = ["ssh"] }
 tar = "0.4.46"
 thiserror = "2.0.18"
 toml = "0.8.23"
 tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "fs"] }
-ureq = "2.12.1"
+# SVN HTTPS 使用操作系统信任根，兼容由企业 CA 签发且已安装到系统证书库的内网仓库。
+ureq = { version = "2.12.1", features = ["native-certs"] }
 url = "2.5.8"
 vt100 = "0.16.2"
 walkdir = "2.5.0"
@@ -51,6 +60,8 @@ xz2 = "0.1.7"
 zip = { version = "8.6.0", default-features = false, features = ["aes-crypto", "bzip2", "deflate64", "deflate", "lzma", "ppmd", "time", "zstd", "xz"] }
 
 [target.'cfg(windows)'.dependencies]
+# Windows 由 libgit2 使用平台原生 TLS/加密能力，避免引入额外 OpenSSL 动态库。
+git2 = { version = "0.21.0", features = ["https", "ssh", "vendored-libgit2"] }
 # libssh2 在 Windows 默认使用系统 WinCNG。避免启用 vendored-openssl，才能从非 Windows
 # 主机交叉编译 MSVC 目标，同时无需随应用分发额外的 OpenSSL 动态库。
 ssh2 = "0.9.5"
@@ -64,6 +75,8 @@ windows-sys = { version = "0.60.2", features = [
 ] }
 
 [target.'cfg(not(windows))'.dependencies]
+# macOS/Linux 静态构建 libgit2 与 OpenSSL，确保安装包不依赖目标机预装开发库。
+git2 = { version = "0.21.0", features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"] }
 # macOS/Linux 延续原有的 vendored OpenSSL 策略，避免依赖开发机预装的 OpenSSL 版本。
 ssh2 = { version = "0.9.5", features = ["vendored-openssl"] }
 
@@ -81,12 +94,15 @@ embed-resource = "3.0.9"
 [dev-dependencies]
 # 标题栏和模态框等 GPUI 交互需要真实 hitbox/input 回归测试，测试构建开启官方测试上下文。
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
+tempfile = "3.27.0"
 
 [patch.crates-io]
 # GPUI 0.2.2 的 Windows release shader 构建仅能在 Windows 主机运行；本地补丁复用
 # runtime_shaders 特性，将内嵌 HLSL 交给 Windows D3DCompiler，支持 macOS/Linux 交叉编译。
 gpui = { path = "third_party/gpui" }
-# smb2 固定依赖 aes 0.9.0-rc.4；本地补丁让 rars-crypto 复用同一 aes 版本，避免同一 0.9 系列的
-# 稳定版与预发布版在 Cargo 解析时冲突，同时保留现有 RAR 解密能力。
+# Git/SVN 引入后，SMB 与 russh 统一使用稳定版 aes 0.9；本地补丁让压缩格式实现复用同一版本，
+# 避免 Cargo 在同一个 0.9 系列中混用预发布版，同时保留现有 ZIP/RAR AES 解密能力。
 rars-crypto = { path = "third_party/rars-crypto" }
 zip = { path = "third_party/zip" }
+# svn 仍保持 0.1.13 API；本地补丁仅升级其纯 Rust russh 传输依赖，统一稳定加密栈。
+svn = { path = "third_party/svn" }
