@@ -17,8 +17,9 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range,
 };
 use crate::remote::connection::{
-    ConnectionDeletedNodeKind, ConnectionLinkConfig, ConnectionLinkKind, ConnectionNodeId,
-    ConnectionTreeRow, GitLinkConfig, SmbLinkConfig, SshLinkConfig, SvnLinkConfig,
+    ConnectionConfig, ConnectionDeletedNodeKind, ConnectionLinkConfig, ConnectionLinkKind,
+    ConnectionNodeId, ConnectionTreeRow, GitLinkConfig, SmbLinkConfig, SshLinkConfig,
+    SvnLinkConfig,
 };
 use crate::remote::remote_file::RemoteFileBackend;
 use crate::remote::terminal::PendingHostKey;
@@ -785,6 +786,8 @@ impl ArgusApp {
         &mut self,
         form: ConnectionDirectoryFormState,
     ) -> Result<ConnectionNodeId, String> {
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         let directory_id = match self
             .config
             .connections
@@ -799,7 +802,7 @@ impl ArgusApp {
         };
         self.selected_connection_node_id = Some(directory_id);
         self.placeholder_notice = "已新增链接目录".to_string();
-        self.persist_config_or_report();
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
         Ok(directory_id)
     }
 
@@ -828,6 +831,8 @@ impl ArgusApp {
                 return Err(message);
             }
         };
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         let link_id =
             match self
                 .config
@@ -843,7 +848,7 @@ impl ArgusApp {
             };
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已新增 SSH 链接".to_string();
-        self.persist_config_or_report();
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
         Ok(link_id)
     }
 
@@ -859,6 +864,8 @@ impl ArgusApp {
                 return Err(message);
             }
         };
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         let link_id =
             match self
                 .config
@@ -874,7 +881,7 @@ impl ArgusApp {
             };
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已新增 SMB 链接".to_string();
-        self.persist_config_or_report();
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
         Ok(link_id)
     }
 
@@ -886,6 +893,8 @@ impl ArgusApp {
         let git = git_config_from_form(&form).inspect_err(|message| {
             self.placeholder_notice = message.clone();
         })?;
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         let link_id = self
             .config
             .connections
@@ -897,7 +906,7 @@ impl ArgusApp {
             })?;
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已新增 Git 链接".to_string();
-        self.persist_config_or_report();
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
         Ok(link_id)
     }
 
@@ -909,6 +918,8 @@ impl ArgusApp {
         let svn = svn_config_from_form(&form).inspect_err(|message| {
             self.placeholder_notice = message.clone();
         })?;
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         let link_id = self
             .config
             .connections
@@ -920,7 +931,7 @@ impl ArgusApp {
             })?;
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已新增 SVN 链接".to_string();
-        self.persist_config_or_report();
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
         Ok(link_id)
     }
 
@@ -930,6 +941,8 @@ impl ArgusApp {
         directory_id: ConnectionNodeId,
         form: ConnectionDirectoryFormState,
     ) -> Result<(), String> {
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         match self
             .config
             .connections
@@ -938,8 +951,10 @@ impl ArgusApp {
             Ok(()) => {
                 self.selected_connection_node_id = Some(directory_id);
                 self.placeholder_notice = "已更新链接目录".to_string();
-                self.persist_config_or_report();
-                Ok(())
+                self.persist_connection_form_change_or_rollback(
+                    previous_connections,
+                    previous_selection,
+                )
             }
             Err(error) => {
                 let message = error.to_string();
@@ -976,6 +991,8 @@ impl ArgusApp {
                 return Err(message);
             }
         };
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         match self
             .config
             .connections
@@ -984,8 +1001,10 @@ impl ArgusApp {
             Ok(()) => {
                 self.selected_connection_node_id = Some(link_id);
                 self.placeholder_notice = "已更新 SSH 链接".to_string();
-                self.persist_config_or_report();
-                Ok(())
+                self.persist_connection_form_change_or_rollback(
+                    previous_connections,
+                    previous_selection,
+                )
             }
             Err(error) => {
                 let message = error.to_string();
@@ -1008,6 +1027,8 @@ impl ArgusApp {
                 return Err(message);
             }
         };
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         match self
             .config
             .connections
@@ -1016,8 +1037,10 @@ impl ArgusApp {
             Ok(()) => {
                 self.selected_connection_node_id = Some(link_id);
                 self.placeholder_notice = "已更新 SMB 链接".to_string();
-                self.persist_config_or_report();
-                Ok(())
+                self.persist_connection_form_change_or_rollback(
+                    previous_connections,
+                    previous_selection,
+                )
             }
             Err(error) => {
                 let message = error.to_string();
@@ -1036,6 +1059,8 @@ impl ArgusApp {
         let git = git_config_from_form(&form).inspect_err(|message| {
             self.placeholder_notice = message.clone();
         })?;
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         let previous_url = self
             .config
             .connections
@@ -1049,6 +1074,9 @@ impl ArgusApp {
             .connections
             .update_git_link(link_id, &form.name_input.value, git)
             .map_err(|error| error.to_string())?;
+        self.selected_connection_node_id = Some(link_id);
+        self.placeholder_notice = "已更新 Git 链接".to_string();
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
         self.disconnect_remote_file_sessions_for_link(link_id);
         if url_changed {
             let cache_root = self
@@ -1063,9 +1091,6 @@ impl ArgusApp {
                 previous_url,
             );
         }
-        self.selected_connection_node_id = Some(link_id);
-        self.placeholder_notice = "已更新 Git 链接".to_string();
-        self.persist_config_or_report();
         Ok(())
     }
 
@@ -1078,14 +1103,35 @@ impl ArgusApp {
         let svn = svn_config_from_form(&form).inspect_err(|message| {
             self.placeholder_notice = message.clone();
         })?;
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
         self.config
             .connections
             .update_svn_link(link_id, &form.name_input.value, svn)
             .map_err(|error| error.to_string())?;
-        self.disconnect_remote_file_sessions_for_link(link_id);
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已更新 SVN 链接".to_string();
-        self.persist_config_or_report();
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
+        self.disconnect_remote_file_sessions_for_link(link_id);
+        Ok(())
+    }
+
+    /// 持久化由模态表单触发的连接配置变更；失败时恢复提交前状态并让对话框继续显示错误。
+    ///
+    /// 参数：`previous_connections` 和 `previous_selection` 是提交表单前的完整连接状态。
+    /// 返回值：设置文件原子写入成功时返回成功；失败时回滚并返回可直接展示的错误文案。
+    fn persist_connection_form_change_or_rollback(
+        &mut self,
+        previous_connections: ConnectionConfig,
+        previous_selection: Option<ConnectionNodeId>,
+    ) -> Result<(), String> {
+        if let Err(error) = self.config_manager.save(&self.config) {
+            self.config.connections = previous_connections;
+            self.selected_connection_node_id = previous_selection;
+            let message = format!("设置保存失败，连接配置更改已回滚：{error}");
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
         Ok(())
     }
 
@@ -1621,6 +1667,55 @@ mod tests {
         let svn_http = svn_config_from_form(&svn_http).expect("HTTP SVN 应忽略隐藏私钥");
         assert!(svn_http.private_key_path.is_none());
         assert_eq!(svn_http.password.as_deref(), Some("password"));
+    }
+
+    /// 新增 SVN 链接必须真实写入设置文件，并在重新创建应用后恢复。
+    #[test]
+    fn svn_link_survives_application_restart() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "argus-connection-actions-test-{}-svn-restart",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let manager = ConfigManager::new(config_dir.join("settings.toml"));
+        let mut app = ArgusApp::new_with_config_manager(manager.clone());
+        let form = repository_link_form(ConnectionLinkKind::Svn, "http://10.1.3.12/svn/example/");
+
+        let link_id = app
+            .create_svn_link_from_form(form)
+            .expect("有效 SVN 表单应创建并保存成功");
+        drop(app);
+
+        let restarted = ArgusApp::new_with_config_manager(manager);
+        let svn = restarted
+            .config
+            .connections
+            .link(link_id)
+            .and_then(ConnectionLinkConfig::svn_config)
+            .expect("重新启动后应恢复 SVN 链接");
+        assert_eq!(svn.url, "http://10.1.3.12/svn/example/");
+    }
+
+    /// 设置文件无法写入时，SVN 表单必须返回错误并回滚内存链接，避免制造重启后消失的假成功。
+    #[test]
+    fn svn_link_save_failure_is_reported_and_rolled_back() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "argus-connection-actions-test-{}-svn-save-failure",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let settings_path = config_dir.join("settings.toml");
+        std::fs::create_dir_all(&settings_path).expect("应创建用于触发保存失败的同名目录");
+        let mut app = ArgusApp::new_with_config_manager(ConfigManager::new(settings_path));
+        let form = repository_link_form(ConnectionLinkKind::Svn, "http://10.1.3.12/svn/example/");
+
+        let error = app
+            .create_svn_link_from_form(form)
+            .expect_err("设置文件不可写时必须拒绝关闭表单");
+
+        assert!(error.contains("设置保存失败"));
+        assert!(app.config.connections.links.is_empty());
+        assert!(app.selected_connection_node_id.is_none());
     }
 
     /// 验证删除非空目录时不会进入确认弹窗，而是直接给出错误提示。
