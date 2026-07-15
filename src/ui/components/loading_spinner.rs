@@ -21,7 +21,7 @@ const LOADING_SPINNER_DURATION_MS: u64 = 850;
 /// - `size`：图标尺寸，按所在 UI 区域传入。
 ///
 /// 返回值：带无限旋转动画的 SVG 元素。
-pub fn render_loading_spinner(
+pub(crate) fn render_loading_spinner(
     animation_key: (&'static str, usize),
     color: u32,
     size: f32,

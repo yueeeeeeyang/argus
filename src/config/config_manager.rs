@@ -14,7 +14,7 @@ use crate::config::paths::argus_settings_file;
 
 /// 配置读写错误，调用方可据此显示非阻塞提示。
 #[derive(Debug, Error)]
-pub enum ConfigError {
+pub(crate) enum ConfigError {
     /// 配置文件读写失败。
     #[error("配置文件 IO 失败：{0}")]
     Io(#[from] std::io::Error),
@@ -28,14 +28,14 @@ pub enum ConfigError {
 
 /// 配置管理器，持有当前设置文件路径，便于生产和测试环境复用同一套读写逻辑。
 #[derive(Clone, Debug)]
-pub struct ConfigManager {
+pub(crate) struct ConfigManager {
     /// 当前配置文件路径，生产环境固定为 `~/.argus/settings.toml`。
     settings_path: PathBuf,
 }
 
 impl ConfigManager {
     /// 构造使用默认用户配置路径的配置管理器。
-    pub fn default_paths() -> Self {
+    pub(crate) fn default_paths() -> Self {
         Self::new(argus_settings_file())
     }
 
@@ -43,28 +43,22 @@ impl ConfigManager {
     ///
     /// 参数说明：
     /// - `settings_path`：设置文件路径，测试可注入临时目录避免污染真实用户配置。
-    pub fn new(settings_path: PathBuf) -> Self {
+    pub(crate) fn new(settings_path: PathBuf) -> Self {
         Self { settings_path }
-    }
-
-    /// 兼容旧调用方的配置加载入口。
-    ///
-    /// 返回值：读取默认路径的配置，失败时回退默认值。
-    pub fn load_default() -> AppConfig {
-        Self::default_paths().load()
     }
 
     /// 从当前管理器路径读取配置。
     ///
     /// 返回值：文件不存在或解析失败时返回默认配置，保证应用启动不被坏配置阻塞。
-    pub fn load(&self) -> AppConfig {
+    #[cfg(test)]
+    pub(crate) fn load(&self) -> AppConfig {
         self.load_with_warning().0
     }
 
     /// 从当前管理器路径读取配置，并返回非阻塞 warning。
     ///
     /// 返回值：第一项为可用配置，第二项为坏配置或 IO 异常导致回退默认值时的说明。
-    pub fn load_with_warning(&self) -> (AppConfig, Option<String>) {
+    pub(crate) fn load_with_warning(&self) -> (AppConfig, Option<String>) {
         match Self::load_from_path(&self.settings_path) {
             Ok(config) => (config, None),
             Err(error) => (
@@ -80,12 +74,12 @@ impl ConfigManager {
     /// 将配置保存到当前管理器路径。
     ///
     /// 返回值：写入失败时返回错误，调用方负责显示提示但不回滚 UI 状态。
-    pub fn save(&self, config: &AppConfig) -> Result<(), ConfigError> {
+    pub(crate) fn save(&self, config: &AppConfig) -> Result<(), ConfigError> {
         Self::save_to_path(&self.settings_path, config)
     }
 
     /// 从指定路径读取配置，供单元测试和未来迁移逻辑复用。
-    pub fn load_from_path(path: &Path) -> Result<AppConfig, ConfigError> {
+    pub(crate) fn load_from_path(path: &Path) -> Result<AppConfig, ConfigError> {
         if !path.exists() {
             return Ok(AppConfig::default());
         }
@@ -96,7 +90,7 @@ impl ConfigManager {
     }
 
     /// 将配置写入指定路径，先写临时文件再 rename，降低异常退出造成半文件的概率。
-    pub fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
+    pub(crate) fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -110,7 +104,8 @@ impl ConfigManager {
     }
 
     /// 返回当前设置文件路径，便于测试和诊断输出确认真实落点。
-    pub fn settings_path(&self) -> &Path {
+    #[cfg(test)]
+    pub(crate) fn settings_path(&self) -> &Path {
         &self.settings_path
     }
 }
@@ -126,11 +121,8 @@ impl Default for ConfigManager {
 mod tests {
     use super::*;
     use crate::config::app_config::{
-        DEFAULT_JSTACK_STACK_SEGMENT_FILTERS, DEFAULT_JSTACK_THREAD_NAME_FILTERS,
-    };
-    use crate::config::{
-        AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogDisplayConfig,
-        LogSearchConfig, UpgradeConfig,
+        AppearanceConfig, DEFAULT_JSTACK_STACK_SEGMENT_FILTERS, DEFAULT_JSTACK_THREAD_NAME_FILTERS,
+        EncodingConfig, LoaderConfig, LogDisplayConfig, LogSearchConfig, UpgradeConfig,
     };
     use crate::remote::connection::{
         ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SmbLinkConfig,
@@ -303,10 +295,6 @@ private_key_passphrase = " phrase "
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
             },
-            cache: CacheConfig {
-                enabled: false,
-                limit_mb: 1024,
-            },
             upgrade: UpgradeConfig {
                 enabled: true,
                 server_url: "https://updates.example.com/argus".to_string(),
@@ -345,8 +333,6 @@ private_key_passphrase = " phrase "
             "SHA256:test"
         );
         assert_eq!(loaded.encoding.selected, "GBK");
-        assert!(!loaded.cache.enabled);
-        assert_eq!(loaded.cache.limit_mb, 1024);
         assert!(loaded.upgrade.enabled);
         assert_eq!(
             loaded.upgrade.server_url,
@@ -354,6 +340,28 @@ private_key_passphrase = " phrase "
         );
         assert_eq!(loaded.upgrade.public_key_base64, "TEST_PUBLIC_KEY_BASE64");
         assert_eq!(loaded.upgrade.skipped_version.as_deref(), Some("0.2.0"));
+    }
+
+    /// 验证旧版无效缓存配置可以被忽略，并在下一次保存时从设置文件中清除。
+    #[test]
+    fn legacy_cache_section_is_ignored_and_removed_on_save() {
+        let path = test_settings_path("legacy-cache");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("旧配置迁移测试目录应可创建");
+        }
+        let mut config = AppConfig::default();
+        config.encoding.selected = "GBK".to_string();
+        let mut text = toml::to_string_pretty(&config).expect("默认配置应可序列化");
+        text.push_str("\n[cache]\nenabled = false\nlimit_mb = 1024\n");
+        fs::write(&path, text).expect("应能写入带旧缓存段的设置文件");
+
+        let loaded = ConfigManager::load_from_path(&path).expect("旧缓存段不应阻断配置加载");
+        assert_eq!(loaded.encoding.selected, "GBK");
+
+        ConfigManager::save_to_path(&path, &loaded).expect("迁移后的配置应可保存");
+        let saved = fs::read_to_string(&path).expect("应能读取迁移后的配置");
+        assert!(!saved.contains("[cache]"));
+        assert!(saved.contains("selected = \"GBK\""));
     }
 
     /// 验证坏 TOML 会暴露解析错误，让默认加载入口决定是否回退。

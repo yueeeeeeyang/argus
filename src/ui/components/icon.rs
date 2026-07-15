@@ -9,7 +9,7 @@ use icondata::Icon;
 
 /// Argus UI 中允许使用的图标语义枚举。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ArgusIcon {
+pub(crate) enum ArgusIcon {
     /// 日志分析工作区。
     Logs,
     /// 设置工作区。
@@ -102,7 +102,7 @@ pub enum ArgusIcon {
 
 impl ArgusIcon {
     /// 返回所有可由内存资产源加载的图标。
-    pub fn all() -> &'static [Self] {
+    pub(crate) fn all() -> &'static [Self] {
         &[
             Self::Logs,
             Self::Settings,
@@ -152,12 +152,12 @@ impl ArgusIcon {
     }
 
     /// 根据 GPUI 请求路径反查图标。
-    pub fn from_path(path: &str) -> Option<Self> {
+    pub(crate) fn from_path(path: &str) -> Option<Self> {
         Self::all().iter().copied().find(|icon| icon.path() == path)
     }
 
     /// 返回 GPUI SVG 元素使用的资产路径。
-    pub fn path(self) -> &'static str {
+    pub(crate) fn path(self) -> &'static str {
         match self {
             Self::Logs => "icons/logs.svg",
             Self::Settings => "icons/settings.svg",
@@ -207,12 +207,12 @@ impl ArgusIcon {
     }
 
     /// 返回资产目录列表使用的文件名。
-    pub fn file_name(self) -> &'static str {
+    pub(crate) fn file_name(self) -> &'static str {
         self.path().trim_start_matches("icons/")
     }
 
     /// 将 icondata 的路径片段包装为完整 SVG 文档。
-    pub fn to_svg_string(self) -> String {
+    pub(crate) fn to_svg_string(self) -> String {
         let icon = self.icon_data();
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="{view_box}" fill="{fill}" stroke="{stroke}" stroke-width="{stroke_width}" stroke-linecap="{stroke_linecap}" stroke-linejoin="{stroke_linejoin}">{data}</svg>"#,
@@ -287,7 +287,7 @@ impl ArgusIcon {
 /// - `size`：图标边长，单位为逻辑像素。
 ///
 /// 返回值：GPUI SVG 元素；图标内容由内存资产源提供。
-pub fn render_icon(icon: ArgusIcon, color: u32, size: f32) -> impl IntoElement {
+pub(crate) fn render_icon(icon: ArgusIcon, color: u32, size: f32) -> impl IntoElement {
     svg()
         .path(icon.path())
         .size(px(size))

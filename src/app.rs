@@ -1,8 +1,8 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供工作区切换、真实来源树、Jstack 分析、升级状态、未读取内容提示和保留的日志样例数据。
+//! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime 分析及远程连接状态。
 
 mod log_search_actions;
 mod log_text;
@@ -26,13 +26,13 @@ mod source_tree_actions;
 mod types;
 mod upgrade_actions;
 
-pub use constants::*;
-pub use jstack_state::*;
-pub use log_state::*;
-pub use remote_state::*;
-pub use runtime_state::*;
-pub use search_state::*;
-pub use types::*;
+pub(crate) use constants::*;
+pub(crate) use jstack_state::*;
+pub(crate) use log_state::*;
+pub(crate) use remote_state::*;
+pub(crate) use runtime_state::*;
+pub(crate) use search_state::*;
+pub(crate) use types::*;
 
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
@@ -76,7 +76,6 @@ use crate::platform::open_with_registration::RegistrationStatus;
 use crate::reader::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
-use crate::reader::read_mode::ReadMode;
 use crate::remote::connection::ConnectionNodeId;
 use crate::remote::sftp::SftpSessionState;
 use crate::remote::terminal::TerminalSessionState;
@@ -99,13 +98,13 @@ use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 #[cfg(test)]
-use placeholder_data::{placeholder_logs, placeholder_source_registry};
-pub use source_picker_actions::{
+use placeholder_data::placeholder_source_registry;
+pub(crate) use source_picker_actions::{
     ExternalSourceTrigger, SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState,
 };
 
 /// 兼容 UI 层既有命名：Runtime SQL 分析缓存使用的过滤快照。
-pub use crate::analysis::runtime::RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot;
+pub(crate) use crate::analysis::runtime::RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot;
 
 /// 根据日志总行数计算行号栏宽度。
 ///
@@ -113,7 +112,7 @@ pub use crate::analysis::runtime::RuntimeAnalysisFilterSnapshot as RuntimeSqlAna
 /// - `line_count`：当前日志文档的总行数。
 ///
 /// 返回值：可直接用于日志渲染和鼠标命中的行号栏像素宽度。
-pub fn log_viewer_line_number_width(line_count: usize) -> f32 {
+pub(crate) fn log_viewer_line_number_width(line_count: usize) -> f32 {
     let display_line_count = line_count.max(1);
     let digits = display_line_count.ilog10() as f32 + 1.0;
     (digits * LOG_VIEWER_LINE_NUMBER_DIGIT_WIDTH + LOG_VIEWER_LINE_NUMBER_PADDING).clamp(
@@ -132,7 +131,7 @@ pub fn log_viewer_line_number_width(line_count: usize) -> f32 {
 /// - `apply`：主题变化时更新视图状态的回调，参数为视图、最新主题、上下文。
 ///
 /// 返回值：主题订阅句柄，需由调用者持有以保持订阅存活。
-pub fn observe_app_theme<V: 'static>(
+pub(crate) fn observe_app_theme<V: 'static>(
     cx: &mut Context<V>,
     app: &Entity<ArgusApp>,
     apply: impl Fn(&mut V, &AppTheme, &mut Context<V>) + 'static,
@@ -155,7 +154,7 @@ pub fn observe_app_theme<V: 'static>(
 /// - `text`：读取器返回的原始单行日志文本。
 ///
 /// 返回值：没有制表符时借用原文本；存在制表符时返回已展开为 4 个空格的新字符串。
-pub fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
+pub(crate) fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
     if text.contains('\t') {
         Cow::Owned(text.replace('\t', LOG_VIEWER_TAB_DISPLAY_SPACES))
     } else {
@@ -165,7 +164,7 @@ pub fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
 
 /// 压缩包密码提交后需要重试的用户动作。
 #[derive(Clone, Debug)]
-pub enum ArchivePasswordRetryAction {
+pub(crate) enum ArchivePasswordRetryAction {
     /// 重试根来源加载。
     LoadPaths {
         /// 原始来源路径列表。
@@ -187,11 +186,11 @@ pub enum ArchivePasswordRetryAction {
 
 /// 压缩包密码输入弹窗状态；密码只保存在进程内缓存，不写入配置。
 #[derive(Clone, Debug)]
-pub struct ArchivePasswordPromptState {
+pub(crate) struct ArchivePasswordPromptState {
     /// 底层压缩包适配器报告的密码错误。
     pub error: ArchivePasswordError,
     /// 密码输入框状态。
-    pub input: SettingsTextInputState,
+    pub input: TextInputState,
     /// 用户提交密码后需要重试的原始动作。
     pub retry_action: ArchivePasswordRetryAction,
     /// 弹窗中的额外错误提示。
@@ -199,11 +198,8 @@ pub struct ArchivePasswordPromptState {
 }
 
 /// 返回单行输入框当前选区；无有效选区时返回 `None`。
-fn input_selection_range(input: &SettingsTextInputState) -> Option<std::ops::Range<usize>> {
-    let anchor = input.selection_anchor?;
-    let start = anchor.min(input.cursor);
-    let end = anchor.max(input.cursor);
-    (start < end).then_some(start..end)
+fn input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize>> {
+    input.selection_range()
 }
 
 /// 构建无系统标题栏但保留可缩放能力的窗口标题栏选项。
@@ -221,7 +217,7 @@ fn frameless_resizable_titlebar() -> TitlebarOptions {
 }
 
 /// Argus 根视图状态，驱动界面、真实来源加载和本地 UI 行为。
-pub struct ArgusApp {
+pub(crate) struct ArgusApp {
     /// 应用运行期配置。
     pub config: AppConfig,
     /// 应用配置管理器，负责读取和保存 `~/.argus/settings.toml`。
@@ -246,18 +242,8 @@ pub struct ArgusApp {
     pub source_scrollbar_drag_position: Option<Point<Pixels>>,
     /// 来源树搜索工具栏是否处于输入模式。
     pub is_source_tree_search_open: bool,
-    /// 来源树搜索框输入内容，仅过滤已加载的日志候选节点。
-    pub source_tree_search_query: String,
-    /// 来源树搜索框光标位置，使用字符索引而非字节索引以兼容中文。
-    pub source_tree_search_cursor: usize,
-    /// 来源树搜索框选区锚点；与光标不一致时表示存在选区。
-    pub source_tree_search_selection_anchor: Option<usize>,
-    /// 来源树搜索框输入法 marked text 字符范围。
-    pub source_tree_search_marked_range: Option<std::ops::Range<usize>>,
-    /// 来源树搜索框鼠标拖拽选择状态；鼠标释放后清空。
-    pub source_tree_search_selection_drag: Option<InputTextSelectionDrag>,
-    /// 来源树搜索框是否处于聚焦状态，用于展示光标和选区。
-    pub is_source_tree_search_focused: bool,
+    /// 来源树搜索框通用输入状态，仅过滤已加载的日志候选节点。
+    pub source_tree_search_input: TextInputState,
     /// 来源树搜索框显隐动画序号，每次开关递增以重启动画。
     pub source_tree_search_animation_generation: usize,
     /// 来源树过滤后的可见节点 ID，包含命中日志和必要祖先目录。
@@ -269,7 +255,7 @@ pub struct ArgusApp {
     /// 链接树搜索工具栏是否处于输入模式。
     pub is_connection_tree_search_open: bool,
     /// 链接树过滤输入框状态。
-    pub connection_tree_search_input: SettingsTextInputState,
+    pub connection_tree_search_input: TextInputState,
     /// 当前打开的链接工作区弹窗。
     pub connection_dialog: Option<ConnectionDialogState>,
     /// 新增或编辑链接目录模态框子视图。
@@ -302,10 +288,6 @@ pub struct ArgusApp {
     pub source_picker: SourcePickerState,
     /// 日志来源选择器模态框子视图。
     pub source_picker_modal: Option<Entity<SourcePickerWindow>>,
-    /// 当前内容区状态。
-    pub content_state: ContentState,
-    /// 日志行占位数据。
-    pub logs: Vec<LogLine>,
     /// 日志读取状态，以来源 ID 为键复用已打开的 reader。
     pub log_read_states: HashMap<SourceId, LogOpenState>,
     /// 日志读取 generation，用于丢弃后台任务返回的过期结果。
@@ -372,36 +354,20 @@ pub struct ArgusApp {
     pub source_panel_animation_from_width: f32,
     /// 来源侧栏动画目标宽度。
     pub source_panel_animation_to_width: f32,
-    /// 搜索面板是否打开。
-    pub is_search_panel_open: bool,
-    /// 搜索框本地输入内容。
-    pub search_query: String,
-    /// 是否启用大小写敏感搜索。
-    pub is_case_sensitive: bool,
-    /// 是否启用正则搜索。
-    pub is_regex_enabled: bool,
-    /// 是否启用全词匹配。
-    pub is_whole_word_enabled: bool,
-    /// 当前选中日志行。
-    pub selected_log_line: Option<usize>,
-    /// 当前弹出的占位弹窗。
-    pub active_dialog: Option<PlaceholderDialog>,
-    /// 打开来源弹窗中选中的来源类型。
-    pub selected_placeholder_source: PlaceholderSourceKind,
     /// 当前选择的主题 ID；内置和用户主题都使用 TOML 文件名。
     pub selected_theme_id: String,
     /// 设置模态框主题下拉框是否展开。
     pub is_theme_dropdown_open: bool,
     /// 设置模态框“快搜关键字”输入框状态。
-    pub settings_quick_keywords_input: SettingsTextInputState,
+    pub settings_quick_keywords_input: TextInputState,
     /// 设置模态框“Jstack 线程名过滤”输入框状态。
-    pub settings_jstack_thread_name_filter_input: SettingsTextInputState,
+    pub settings_jstack_thread_name_filter_input: TextInputState,
     /// 设置模态框“Jstack 线程段过滤”输入框状态。
-    pub settings_jstack_stack_segment_filter_input: SettingsTextInputState,
+    pub settings_jstack_stack_segment_filter_input: TextInputState,
     /// 设置模态框“升级服务器”输入框状态。
-    pub settings_upgrade_server_input: SettingsTextInputState,
+    pub settings_upgrade_server_input: TextInputState,
     /// 设置模态框“升级验签公钥”输入框状态。
-    pub settings_upgrade_public_key_input: SettingsTextInputState,
+    pub settings_upgrade_public_key_input: TextInputState,
     /// 设置模态框是否处于打开状态。
     pub is_settings_modal_open: bool,
     /// 设置模态框左侧导航当前选中的分类。
@@ -421,10 +387,6 @@ pub struct ArgusApp {
     pub log_content_font_size: f32,
     /// 设置页编码选项。
     pub selected_encoding: String,
-    /// 是否启用临时缓存。
-    pub is_cache_enabled: bool,
-    /// 缓存上限，单位 MB。
-    pub cache_limit_mb: usize,
     /// 是否正在后台检查升级。
     pub is_upgrade_checking: bool,
     /// 是否正在下载、替换或重启升级版本。
@@ -439,12 +401,12 @@ pub struct ArgusApp {
 
 impl ArgusApp {
     /// 创建界面占位版应用状态。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::new_with_config_manager(ConfigManager::default())
     }
 
     /// 使用指定配置管理器创建应用状态，测试可借此隔离真实用户配置目录。
-    pub fn new_with_config_manager(config_manager: ConfigManager) -> Self {
+    pub(crate) fn new_with_config_manager(config_manager: ConfigManager) -> Self {
         let (mut config, config_warning) = config_manager.load_with_warning();
         let theme_manager = ThemeManager::load_default();
         let selected_theme_id = theme_manager.resolve_theme_id(&config.appearance.theme_mode);
@@ -454,8 +416,6 @@ impl ArgusApp {
             .log_content_font_size
             .clamp(LOG_CONTENT_FONT_SIZE_MIN, LOG_CONTENT_FONT_SIZE_MAX);
         let selected_encoding = config.encoding.selected.clone();
-        let is_cache_enabled = config.cache.enabled;
-        let cache_limit_mb = config.cache.limit_mb.clamp(128, 2048);
         let quick_keywords_input_value = config.log_search.quick_keywords.clone();
         let jstack_thread_name_filter_input_value =
             config.log_display.jstack_thread_name_filters.clone();
@@ -465,7 +425,6 @@ impl ArgusApp {
         let upgrade_public_key_input_value = config.upgrade.public_key_base64.clone();
         config.appearance.theme_mode = selected_theme_id.clone();
         config.appearance.log_content_font_size = log_content_font_size;
-        config.cache.limit_mb = cache_limit_mb;
         Self {
             config,
             config_manager,
@@ -479,18 +438,13 @@ impl ArgusApp {
             source_tree_scroll: UniformListScrollHandle::new(),
             source_scrollbar_drag_position: None,
             is_source_tree_search_open: false,
-            source_tree_search_query: String::new(),
-            source_tree_search_cursor: 0,
-            source_tree_search_selection_anchor: None,
-            source_tree_search_marked_range: None,
-            source_tree_search_selection_drag: None,
-            is_source_tree_search_focused: false,
+            source_tree_search_input: TextInputState::default(),
             source_tree_search_animation_generation: 0,
             filtered_source_ids: Vec::new(),
             connection_tree_scroll: UniformListScrollHandle::new(),
             selected_connection_node_id: None,
             is_connection_tree_search_open: false,
-            connection_tree_search_input: SettingsTextInputState::default(),
+            connection_tree_search_input: TextInputState::default(),
             connection_dialog: None,
             connection_directory_modal: None,
             connection_link_modal: None,
@@ -507,8 +461,6 @@ impl ArgusApp {
             archive_password_prompt: None,
             source_picker: SourcePickerState::default(),
             source_picker_modal: None,
-            content_state: ContentState::SourceNotSelected,
-            logs: Vec::new(),
             log_read_states: HashMap::new(),
             log_reader_generations: HashMap::new(),
             log_tab_view_states: HashMap::new(),
@@ -546,29 +498,17 @@ impl ArgusApp {
             source_panel_animation_generation: 0,
             source_panel_animation_from_width: SOURCE_PANEL_DEFAULT_WIDTH,
             source_panel_animation_to_width: SOURCE_PANEL_DEFAULT_WIDTH,
-            is_search_panel_open: false,
-            search_query: String::new(),
-            is_case_sensitive: false,
-            is_regex_enabled: false,
-            is_whole_word_enabled: false,
-            selected_log_line: None,
-            active_dialog: None,
-            selected_placeholder_source: PlaceholderSourceKind::File,
             selected_theme_id,
             is_theme_dropdown_open: false,
-            settings_quick_keywords_input: SettingsTextInputState::from_value(
-                quick_keywords_input_value,
-            ),
-            settings_jstack_thread_name_filter_input: SettingsTextInputState::from_value(
+            settings_quick_keywords_input: TextInputState::from_value(quick_keywords_input_value),
+            settings_jstack_thread_name_filter_input: TextInputState::from_value(
                 jstack_thread_name_filter_input_value,
             ),
-            settings_jstack_stack_segment_filter_input: SettingsTextInputState::from_value(
+            settings_jstack_stack_segment_filter_input: TextInputState::from_value(
                 jstack_stack_segment_filter_input_value,
             ),
-            settings_upgrade_server_input: SettingsTextInputState::from_value(
-                upgrade_server_input_value,
-            ),
-            settings_upgrade_public_key_input: SettingsTextInputState::from_value(
+            settings_upgrade_server_input: TextInputState::from_value(upgrade_server_input_value),
+            settings_upgrade_public_key_input: TextInputState::from_value(
                 upgrade_public_key_input_value,
             ),
             is_settings_modal_open: false,
@@ -580,8 +520,6 @@ impl ArgusApp {
             open_with_registration_message: None,
             log_content_font_size,
             selected_encoding,
-            is_cache_enabled,
-            cache_limit_mb,
             is_upgrade_checking: false,
             is_upgrade_installing: false,
             upgrade_message: None,
@@ -591,20 +529,15 @@ impl ArgusApp {
     }
 
     /// 确保主窗口输入框焦点句柄已创建，并返回可复制的句柄集合。
-    pub fn ensure_input_focus_handles(&mut self, cx: &mut Context<Self>) -> AppInputFocusHandles {
+    pub(crate) fn ensure_input_focus_handles(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> AppInputFocusHandles {
         if self.input_focus_handles.is_none() {
             self.input_focus_handles = Some(AppInputFocusHandles {
                 root: cx.focus_handle(),
                 source_tree_search: cx.focus_handle(),
                 connection_tree_search: cx.focus_handle(),
-                connection_directory_name: cx.focus_handle(),
-                connection_link_name: cx.focus_handle(),
-                connection_link_host: cx.focus_handle(),
-                connection_link_port: cx.focus_handle(),
-                connection_link_username: cx.focus_handle(),
-                connection_link_password: cx.focus_handle(),
-                connection_link_private_key_path: cx.focus_handle(),
-                connection_link_private_key_passphrase: cx.focus_handle(),
                 sftp_address: cx.focus_handle(),
                 sftp_rename_name: cx.focus_handle(),
                 archive_password: cx.focus_handle(),
@@ -628,12 +561,7 @@ impl ArgusApp {
     }
 
     /// 切换标题栏工作区入口，并更新状态提示。
-    pub fn switch_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
-        if workspace == Workspace::Settings {
-            self.open_settings_modal(cx);
-            return;
-        }
-
+    pub(crate) fn switch_workspace(&mut self, workspace: Workspace) {
         self.workspace = workspace;
         self.sync_source_panel_animation_to_current_width();
         if workspace == Workspace::Connections && self.is_source_panel_collapsed {
@@ -642,7 +570,6 @@ impl ArgusApp {
         self.placeholder_notice = match workspace {
             Workspace::LogAnalysis => "已切换到日志分析占位工作区".to_string(),
             Workspace::Connections => "已切换到链接工作区".to_string(),
-            Workspace::Settings => "已切换到设置占位工作区".to_string(),
         };
     }
 
@@ -653,12 +580,12 @@ impl ArgusApp {
         }
     }
 
-    pub fn mark_placeholder_action(&mut self, action_name: &str) {
+    pub(crate) fn mark_placeholder_action(&mut self, action_name: &str) {
         self.placeholder_notice = format!("{action_name} 功能暂未实现，仅保留界面占位");
     }
 
     /// 返回当前激活标签页标题。
-    pub fn active_tab_title(&self) -> &str {
+    pub(crate) fn active_tab_title(&self) -> &str {
         self.tabs
             .iter()
             .find(|tab| tab.id == self.active_tab_id)
@@ -666,41 +593,13 @@ impl ArgusApp {
             .unwrap_or("未命名日志")
     }
 
-    /// 打开或关闭搜索面板。
-    pub fn toggle_search_panel(&mut self) {
-        self.is_search_panel_open = !self.is_search_panel_open;
-        self.placeholder_notice = if self.is_search_panel_open {
-            "已打开本地搜索面板，占位搜索不会扫描真实文件".to_string()
-        } else {
-            "已关闭本地搜索面板".to_string()
-        };
-    }
-
-    /// 打开来源占位弹窗。
-    pub fn open_source_dialog(&mut self) {
-        self.active_dialog = Some(PlaceholderDialog::OpenSource);
-        self.placeholder_notice = "请使用来源工具栏的加载日志按钮打开自定义来源选择器".to_string();
-    }
-
     /// 打开自定义跨平台来源选择器，后续由选择器确认按钮触发真实加载。
-    pub fn request_load_sources(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_load_sources(&mut self, cx: &mut Context<Self>) {
         self.open_source_picker(cx);
     }
 
-    /// 关闭当前占位弹窗。
-    pub fn close_dialog(&mut self) {
-        self.active_dialog = None;
-        self.placeholder_notice = "已关闭占位弹窗".to_string();
-    }
-
-    /// 选择打开来源弹窗中的来源类型。
-    pub fn select_placeholder_source(&mut self, source_kind: PlaceholderSourceKind) {
-        self.selected_placeholder_source = source_kind;
-        self.placeholder_notice = format!("已选择{}占位来源", source_kind.label());
-    }
-
     /// 切换来源侧栏折叠状态。
-    pub fn toggle_source_panel(&mut self) {
+    pub(crate) fn toggle_source_panel(&mut self) {
         let was_collapsed = self.is_source_panel_collapsed;
         let current_width = self.current_source_panel_width();
         self.is_source_panel_collapsed = !self.is_source_panel_collapsed;
@@ -722,10 +621,10 @@ impl ArgusApp {
     }
 
     /// 返回当前工作区对应的侧栏宽度，日志与链接互不影响。
-    pub fn current_source_panel_width(&self) -> f32 {
+    pub(crate) fn current_source_panel_width(&self) -> f32 {
         match self.workspace {
             Workspace::Connections => self.connection_source_panel_width,
-            Workspace::LogAnalysis | Workspace::Settings => self.source_panel_width,
+            Workspace::LogAnalysis => self.source_panel_width,
         }
     }
 
@@ -733,7 +632,7 @@ impl ArgusApp {
     fn set_current_source_panel_width(&mut self, width: f32) {
         match self.workspace {
             Workspace::Connections => self.connection_source_panel_width = width,
-            Workspace::LogAnalysis | Workspace::Settings => self.source_panel_width = width,
+            Workspace::LogAnalysis => self.source_panel_width = width,
         }
     }
 
@@ -749,7 +648,7 @@ impl ArgusApp {
     }
 
     /// 开始拖拽来源侧栏分割线，记录初始鼠标位置和宽度。
-    pub fn begin_source_panel_resize(&mut self, pointer_x: f32) {
+    pub(crate) fn begin_source_panel_resize(&mut self, pointer_x: f32) {
         self.is_source_panel_resizing = true;
         self.is_source_resizer_hovered = true;
         self.source_resize_start_x = pointer_x;
@@ -757,7 +656,7 @@ impl ArgusApp {
     }
 
     /// 更新来源侧栏分割线悬停状态。
-    pub fn set_source_resizer_hovered(&mut self, is_hovered: bool) -> bool {
+    pub(crate) fn set_source_resizer_hovered(&mut self, is_hovered: bool) -> bool {
         if self.is_source_resizer_hovered == is_hovered {
             return false;
         }
@@ -767,7 +666,7 @@ impl ArgusApp {
     }
 
     /// 根据当前鼠标位置更新来源侧栏宽度。
-    pub fn resize_source_panel(&mut self, pointer_x: f32) -> bool {
+    pub(crate) fn resize_source_panel(&mut self, pointer_x: f32) -> bool {
         if !self.is_source_panel_resizing {
             return false;
         }
@@ -786,7 +685,7 @@ impl ArgusApp {
     }
 
     /// 结束来源侧栏宽度拖拽，并写入占位状态提示。
-    pub fn finish_source_panel_resize(&mut self) -> bool {
+    pub(crate) fn finish_source_panel_resize(&mut self) -> bool {
         if !self.is_source_panel_resizing {
             return false;
         }
@@ -799,13 +698,8 @@ impl ArgusApp {
         true
     }
 
-    /// 兼容旧测试入口：设置页已迁移为模态框，标签页路径不再由 UI 触发。
-    pub fn open_or_focus_settings_tab(&mut self) {
-        self.placeholder_notice = "设置已迁移到模态框，请从标题栏设置按钮打开".to_string();
-    }
-
     /// 打开或聚焦指定日志来源标签页；读取正文由 UI 入口随后触发后台任务。
-    pub fn open_or_focus_log_tab(&mut self, source_id: SourceId) {
+    pub(crate) fn open_or_focus_log_tab(&mut self, source_id: SourceId) {
         let Some(selected_node) = self.source_registry.node(source_id).cloned() else {
             self.placeholder_notice = "未找到来源节点".to_string();
             return;
@@ -886,7 +780,7 @@ impl ArgusApp {
     /// 参数说明：
     /// - `source_id`：来源树中的日志候选节点 ID。
     /// - `cx`：GPUI 上下文，用于把耗时读取派发到后台线程。
-    pub fn request_open_log_content(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+    pub(crate) fn request_open_log_content(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
         if matches!(
             self.log_read_states.get(&source_id),
             Some(LogOpenState::Loading { .. } | LogOpenState::Ready(_))
@@ -898,7 +792,6 @@ impl ArgusApp {
             self.log_read_states.insert(
                 source_id,
                 LogOpenState::Failed {
-                    mode: None,
                     message: "未找到来源节点".to_string(),
                 },
             );
@@ -908,16 +801,13 @@ impl ArgusApp {
             self.log_read_states.insert(
                 source_id,
                 LogOpenState::Failed {
-                    mode: None,
                     message: format!("{} 不是可读取的日志候选", source_node.label),
                 },
             );
             return;
         }
 
-        let read_mode = read_mode_for_location(&source_node.location);
         let request = OpenLogRequest {
-            source_id,
             location: source_node.location.clone(),
             label: source_node.label.clone(),
             default_encoding: self.selected_encoding.clone(),
@@ -927,7 +817,6 @@ impl ArgusApp {
         self.log_read_states.insert(
             source_id,
             LogOpenState::Loading {
-                mode: read_mode,
                 message: format!("正在读取 {}", source_node.location.display_path()),
             },
         );
@@ -976,14 +865,9 @@ impl ArgusApp {
                     self.log_read_states.insert(source_id, LogOpenState::Idle);
                     return;
                 }
-                let read_mode = self
-                    .source_registry
-                    .node(source_id)
-                    .map(|node| read_mode_for_location(&node.location));
                 self.log_read_states.insert(
                     source_id,
                     LogOpenState::Failed {
-                        mode: read_mode,
                         message: error.to_string(),
                     },
                 );
@@ -1022,8 +906,10 @@ impl ArgusApp {
             self.archive_passwords.remove(&key);
         }
 
-        let mut input = SettingsTextInputState::default();
-        input.is_focused = true;
+        let input = TextInputState {
+            is_focused: true,
+            ..TextInputState::default()
+        };
         self.archive_password_prompt = Some(ArchivePasswordPromptState {
             message: password_error
                 .is_invalid_password()
@@ -1037,13 +923,13 @@ impl ArgusApp {
     }
 
     /// 关闭压缩包密码弹窗，不保存输入内容。
-    pub fn cancel_archive_password_prompt(&mut self) {
+    pub(crate) fn cancel_archive_password_prompt(&mut self) {
         self.archive_password_prompt = None;
         self.placeholder_notice = "已取消压缩包密码输入".to_string();
     }
 
     /// 提交压缩包密码并重试原始用户动作。
-    pub fn submit_archive_password_prompt(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_archive_password_prompt(&mut self, cx: &mut Context<Self>) {
         let Some(mut prompt) = self.archive_password_prompt.take() else {
             return;
         };
@@ -1086,7 +972,7 @@ impl ArgusApp {
     }
 
     /// 聚焦压缩包密码输入框。
-    pub fn focus_archive_password_input(&mut self) {
+    pub(crate) fn focus_archive_password_input(&mut self) {
         if let Some(prompt) = self.archive_password_prompt.as_mut() {
             prompt.input.is_focused = true;
             prompt.input.marked_range = None;
@@ -1094,13 +980,17 @@ impl ArgusApp {
     }
 
     /// 返回压缩包密码输入框选区。
-    pub fn archive_password_input_selection_range(&self) -> Option<std::ops::Range<usize>> {
+    pub(crate) fn archive_password_input_selection_range(&self) -> Option<std::ops::Range<usize>> {
         let prompt = self.archive_password_prompt.as_ref()?;
         input_selection_range(&prompt.input)
     }
 
     /// 处理压缩包密码输入框键盘操作。
-    pub fn handle_archive_password_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    pub(crate) fn handle_archive_password_key(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
         match keystroke.key.as_str() {
             "enter" => self.submit_archive_password_prompt(cx),
             "escape" => self.cancel_archive_password_prompt(),
@@ -1122,7 +1012,7 @@ impl ArgusApp {
     }
 
     /// 开始密码输入框鼠标选择。
-    pub fn begin_archive_password_pointer_selection(
+    pub(crate) fn begin_archive_password_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
@@ -1149,7 +1039,7 @@ impl ArgusApp {
     }
 
     /// 更新密码输入框鼠标拖拽选择。
-    pub fn update_archive_password_pointer_selection(&mut self, character_index: usize) {
+    pub(crate) fn update_archive_password_pointer_selection(&mut self, character_index: usize) {
         let Some(prompt) = self.archive_password_prompt.as_mut() else {
             return;
         };
@@ -1171,7 +1061,7 @@ impl ArgusApp {
     }
 
     /// 结束密码输入框鼠标选择。
-    pub fn finish_archive_password_pointer_selection(&mut self) {
+    pub(crate) fn finish_archive_password_pointer_selection(&mut self) {
         if let Some(prompt) = self.archive_password_prompt.as_mut() {
             prompt.input.selection_drag = None;
         }
@@ -1293,7 +1183,7 @@ impl ArgusApp {
             TabKind::SftpFileManager { session_id } => {
                 self.disconnect_sftp_session(*session_id);
             }
-            TabKind::Empty | TabKind::Settings => {}
+            TabKind::Empty => {}
         }
     }
 
@@ -1322,8 +1212,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::SshTerminal { .. }
             | TabKind::SftpFileManager { .. }
-            | TabKind::RuntimeAnalysis { .. }
-            | TabKind::Settings => {
+            | TabKind::RuntimeAnalysis { .. } => {
                 self.jstack_analyses.clear();
             }
         }
@@ -1340,8 +1229,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::SshTerminal { .. }
-            | TabKind::SftpFileManager { .. }
-            | TabKind::Settings => {
+            | TabKind::SftpFileManager { .. } => {
                 self.runtime_analyses.clear();
             }
         }
@@ -1355,8 +1243,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::SftpFileManager { .. }
-            | TabKind::RuntimeAnalysis { .. }
-            | TabKind::Settings => None,
+            | TabKind::RuntimeAnalysis { .. } => None,
         };
         let sessions_to_disconnect = self
             .terminal_sessions
@@ -1377,8 +1264,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::RuntimeAnalysis { .. }
-            | TabKind::SshTerminal { .. }
-            | TabKind::Settings => None,
+            | TabKind::SshTerminal { .. } => None,
         };
         let sessions_to_disconnect = self
             .sftp_sessions
@@ -1392,21 +1278,12 @@ impl ArgusApp {
     }
 
     /// 返回指定来源的日志读取状态。
-    pub fn log_read_state(&self, source_id: SourceId) -> Option<&LogOpenState> {
+    pub(crate) fn log_read_state(&self, source_id: SourceId) -> Option<&LogOpenState> {
         self.log_read_states.get(&source_id)
     }
 
-    /// 返回当前激活日志标签的读取状态。
-    pub fn active_log_read_state(&self) -> Option<&LogOpenState> {
-        let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
-            return None;
-        };
-
-        self.log_read_state(source_id)
-    }
-
     /// 返回当前激活日志标签页的读取句柄。
-    pub fn active_log_handle(&self) -> Option<&LogReaderHandle> {
+    pub(crate) fn active_log_handle(&self) -> Option<&LogReaderHandle> {
         let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
             return None;
         };
@@ -1418,17 +1295,17 @@ impl ArgusApp {
     }
 
     /// 确保指定 tab 拥有日志阅读区视图状态。
-    pub fn ensure_log_tab_view_state(&mut self, tab_id: usize) {
+    pub(crate) fn ensure_log_tab_view_state(&mut self, tab_id: usize) {
         self.log_tab_view_states.entry(tab_id).or_default();
     }
 
     /// 返回指定 tab 的阅读区视图状态。
-    pub fn log_tab_view_state(&self, tab_id: usize) -> Option<&LogTabViewState> {
+    pub(crate) fn log_tab_view_state(&self, tab_id: usize) -> Option<&LogTabViewState> {
         self.log_tab_view_states.get(&tab_id)
     }
 
     /// 返回指定 tab 的可变阅读区视图状态。
-    pub fn log_tab_view_state_mut(&mut self, tab_id: usize) -> Option<&mut LogTabViewState> {
+    pub(crate) fn log_tab_view_state_mut(&mut self, tab_id: usize) -> Option<&mut LogTabViewState> {
         self.log_tab_view_states.get_mut(&tab_id)
     }
 
@@ -1441,7 +1318,7 @@ impl ArgusApp {
     /// - `first_line_index`：当前视口首行 0 基行号。
     /// - `visible_rows`：当前视口行容量。
     /// - `cx`：应用上下文，用于调度后台读取并通知 UI 刷新。
-    pub fn request_paged_log_prefetch(
+    pub(crate) fn request_paged_log_prefetch(
         &mut self,
         tab_id: usize,
         source_id: SourceId,
@@ -1535,7 +1412,7 @@ impl ArgusApp {
     /// - `language`：当前日志识别出的语法高亮语言。
     /// - `lines`：需要补算高亮的可见文本切片。
     /// - `cx`：应用上下文，用于调度后台高亮并通知 UI 刷新。
-    pub fn request_log_highlight_prefetch(
+    pub(crate) fn request_log_highlight_prefetch(
         &mut self,
         tab_id: usize,
         source_id: SourceId,
@@ -1606,7 +1483,7 @@ impl ArgusApp {
     }
 
     /// 切换到指定标签页。
-    pub fn activate_tab(&mut self, tab_id: usize) {
+    pub(crate) fn activate_tab(&mut self, tab_id: usize) {
         let _span = PerfSpan::new("activate_tab");
         if self.active_tab_id == tab_id {
             return;
@@ -1619,7 +1496,7 @@ impl ArgusApp {
     }
 
     /// 在 UI 事件中切换标签页，并同步清理 Jstack 方块悬浮气泡。
-    pub fn activate_tab_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
+    pub(crate) fn activate_tab_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
         self.clear_jstack_cell_hover_preview();
         self.activate_tab(tab_id);
     }
@@ -1652,7 +1529,7 @@ impl ArgusApp {
         }
     }
 
-    pub fn set_hovered_tab(&mut self, tab_id: usize, is_hovered: bool) -> bool {
+    pub(crate) fn set_hovered_tab(&mut self, tab_id: usize, is_hovered: bool) -> bool {
         if is_hovered {
             if self.hovered_tab_id == Some(tab_id) {
                 return false;
@@ -1668,7 +1545,7 @@ impl ArgusApp {
     }
 
     /// 关闭指定标签页，至少保留一个空标签。
-    pub fn close_tab(&mut self, tab_id: usize) {
+    pub(crate) fn close_tab(&mut self, tab_id: usize) {
         self.close_active_menu();
 
         if self.tabs.len() == 1 {
@@ -1677,8 +1554,6 @@ impl ArgusApp {
                 tab.kind = TabKind::Empty;
             }
             self.active_tab_id = self.tabs[0].id;
-            self.content_state = ContentState::SourceNotSelected;
-            self.logs.clear();
             self.log_read_states.clear();
             self.log_reader_generations.clear();
             self.log_tab_view_states.clear();
@@ -1729,13 +1604,13 @@ impl ArgusApp {
     }
 
     /// 在 UI 事件中关闭指定标签页，并同步清理 Jstack 方块悬浮气泡。
-    pub fn close_tab_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
+    pub(crate) fn close_tab_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
         self.clear_jstack_cell_hover_preview();
         self.close_tab(tab_id);
     }
 
     /// 关闭指定标签之外的其他标签，并激活保留标签。
-    pub fn close_other_tabs(&mut self, tab_id: usize) {
+    pub(crate) fn close_other_tabs(&mut self, tab_id: usize) {
         let Some(kept_tab) = self.tabs.iter().find(|tab| tab.id == tab_id).cloned() else {
             self.placeholder_notice = "未找到需要保留的标签页".to_string();
             return;
@@ -1765,13 +1640,13 @@ impl ArgusApp {
     }
 
     /// 在 UI 事件中关闭其他标签页，并同步清理 Jstack 方块悬浮气泡。
-    pub fn close_other_tabs_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
+    pub(crate) fn close_other_tabs_with_context(&mut self, tab_id: usize, _cx: &mut Context<Self>) {
         self.clear_jstack_cell_hover_preview();
         self.close_other_tabs(tab_id);
     }
 
     /// 关闭全部标签，并创建一个新的空标签保持界面可用。
-    pub fn close_all_tabs(&mut self) {
+    pub(crate) fn close_all_tabs(&mut self) {
         let empty_tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         self.tabs = vec![ArgusTab {
@@ -1794,59 +1669,28 @@ impl ArgusApp {
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
         self.reset_log_search_runtime_state();
-        self.content_state = ContentState::SourceNotSelected;
         self.placeholder_notice = "已关闭全部标签".to_string();
     }
 
     /// 在 UI 事件中关闭全部标签页，并同步清理 Jstack 方块悬浮气泡。
-    pub fn close_all_tabs_with_context(&mut self, _cx: &mut Context<Self>) {
+    pub(crate) fn close_all_tabs_with_context(&mut self, _cx: &mut Context<Self>) {
         self.clear_jstack_cell_hover_preview();
         self.close_all_tabs();
     }
 
-    pub fn active_tab(&self) -> Option<&ArgusTab> {
+    pub(crate) fn active_tab(&self) -> Option<&ArgusTab> {
         self.tabs.iter().find(|tab| tab.id == self.active_tab_id)
     }
 
     /// 返回当前激活标签类型；缺失时按空标签兜底。
-    pub fn active_tab_kind(&self) -> TabKind {
+    pub(crate) fn active_tab_kind(&self) -> TabKind {
         self.active_tab()
             .map(|tab| tab.kind.clone())
             .unwrap_or(TabKind::Empty)
     }
 
-    /// 返回内容区路径文案，优先展示真实选中来源。
-    pub fn content_path_label(&self) -> String {
-        match self.active_tab_kind() {
-            TabKind::LogSource { path, .. } => path,
-            TabKind::JstackAnalysis { analysis_id } => self
-                .jstack_analyses
-                .get(&analysis_id)
-                .map(|state| format!("Argus / {}", state.title))
-                .unwrap_or_else(|| "Argus / Jstack分析".to_string()),
-            TabKind::RuntimeAnalysis { analysis_id } => self
-                .runtime_analyses
-                .get(&analysis_id)
-                .map(|state| format!("Argus / {}", state.title))
-                .unwrap_or_else(|| "Argus / Runtime分析".to_string()),
-            TabKind::SshTerminal { session_id } => self
-                .terminal_sessions
-                .get(&session_id)
-                .map(|state| format!("SSH / {}", state.address))
-                .unwrap_or_else(|| "SSH / 终端".to_string()),
-            TabKind::SftpFileManager { session_id } => self
-                .sftp_sessions
-                .get(&session_id)
-                .map(|state| format!("SFTP / {}:{}", state.address, state.current_dir))
-                .unwrap_or_else(|| "SFTP / 文件管理".to_string()),
-            TabKind::Settings => "Argus / 设置".to_string(),
-            TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
-            TabKind::Empty => "未选择来源".to_string(),
-        }
-    }
-
     /// 请求来源树滚动到指定可见节点。
-    pub fn scroll_source_into_view(&mut self, source_id: SourceId) {
+    pub(crate) fn scroll_source_into_view(&mut self, source_id: SourceId) {
         let index = if self.is_source_tree_filtering() {
             self.filtered_source_ids
                 .iter()
@@ -1861,86 +1705,22 @@ impl ArgusApp {
         }
     }
 
-    /// 选择日志行，仅更新本地高亮状态。
-    pub fn select_log_line(&mut self, line_number: usize) {
-        self.selected_log_line = Some(line_number);
-        self.placeholder_notice = format!("已选择第 {line_number} 行日志");
-    }
-
-    /// 切换大小写、正则或全词匹配等搜索开关。
-    pub fn toggle_search_option(&mut self, option_name: &str) {
-        match option_name {
-            "case" => {
-                self.is_case_sensitive = !self.is_case_sensitive;
-                self.placeholder_notice = "已切换大小写匹配选项".to_string();
-            }
-            "regex" => {
-                self.is_regex_enabled = !self.is_regex_enabled;
-                self.placeholder_notice = "已切换正则搜索选项".to_string();
-            }
-            "whole" => {
-                self.is_whole_word_enabled = !self.is_whole_word_enabled;
-                self.placeholder_notice = "已切换全词匹配选项".to_string();
-            }
-            _ => self.mark_placeholder_action("搜索选项"),
-        }
-    }
-
-    /// 处理搜索框按键输入，当前只维护本地字符串。
-    pub fn handle_search_key(&mut self, keystroke: &Keystroke) {
-        match keystroke.key.as_str() {
-            "backspace" => {
-                self.search_query.pop();
-            }
-            "escape" => {
-                self.is_search_panel_open = false;
-                self.placeholder_notice = "已关闭本地搜索面板".to_string();
-                return;
-            }
-            "enter" => {
-                self.placeholder_notice =
-                    format!("搜索「{}」为占位操作，未扫描真实日志", self.search_query);
-                return;
-            }
-            _ => {
-                if let Some(key_char) = keystroke.key_char.as_ref()
-                    && !keystroke.modifiers.platform
-                    && !key_char.chars().any(char::is_control)
-                {
-                    self.search_query.push_str(key_char);
-                }
-            }
-        }
-
-        if self.search_query.is_empty() {
-            self.placeholder_notice = "搜索框为空，占位搜索未执行".to_string();
-        } else {
-            self.placeholder_notice = format!("已输入搜索关键字：{}", self.search_query);
-        }
-    }
-
-    /// 清空搜索关键字。
-    pub fn clear_search_query(&mut self) {
-        self.search_query.clear();
-        self.placeholder_notice = "已清空搜索关键字".to_string();
-    }
-
     /// 在主窗口渲染前保留主题同步入口；当前仅支持暗色主题，因此不随系统外观切换。
-    pub fn sync_window_appearance_theme(&mut self, _window: &Window) {}
+    pub(crate) fn sync_window_appearance_theme(&mut self, _window: &Window) {}
 
     /// 返回设置下拉框中的主题选项。
-    pub fn theme_options(&self) -> Vec<ThemeOption> {
+    pub(crate) fn theme_options(&self) -> Vec<ThemeOption> {
         self.theme_manager.theme_options()
     }
 
     /// 返回当前主题在下拉框中的展示文案。
-    pub fn selected_theme_label(&self) -> String {
+    pub(crate) fn selected_theme_label(&self) -> String {
         self.theme_manager
             .label_for_theme_id(&self.selected_theme_id)
     }
 
     /// 切换设置模态框中的主题下拉框展开状态。
-    pub fn toggle_theme_dropdown(&mut self) {
+    pub(crate) fn toggle_theme_dropdown(&mut self) {
         if self.is_theme_dropdown_open {
             self.close_theme_dropdown();
             return;
@@ -1950,12 +1730,12 @@ impl ArgusApp {
     }
 
     /// 关闭设置模态框中的主题下拉框。
-    pub fn close_theme_dropdown(&mut self) {
+    pub(crate) fn close_theme_dropdown(&mut self) {
         self.is_theme_dropdown_open = false;
     }
 
     /// 按主题 TOML 文件名选择主题，并立即持久化设置。
-    pub fn select_theme(&mut self, theme_id: String) {
+    pub(crate) fn select_theme(&mut self, theme_id: String) {
         let resolved_theme_id = self.theme_manager.resolve_theme_id(&theme_id);
         self.selected_theme_id = resolved_theme_id.clone();
         self.theme = self.theme_manager.theme_for_id(&resolved_theme_id);
@@ -1966,7 +1746,7 @@ impl ArgusApp {
     }
 
     /// 调整日志内容字号，并限制在外观设置允许的可读范围内。
-    pub fn adjust_log_content_font_size(&mut self, delta: f32) {
+    pub(crate) fn adjust_log_content_font_size(&mut self, delta: f32) {
         self.log_content_font_size = (self.log_content_font_size + delta)
             .clamp(LOG_CONTENT_FONT_SIZE_MIN, LOG_CONTENT_FONT_SIZE_MAX);
         self.config.appearance.log_content_font_size = self.log_content_font_size;
@@ -1975,42 +1755,7 @@ impl ArgusApp {
         self.persist_config_or_report();
     }
 
-    /// 切换编码设置。
-    pub fn cycle_encoding(&mut self) {
-        self.selected_encoding = match self.selected_encoding.as_str() {
-            "UTF-8" => "GBK".to_string(),
-            "GBK" => "Latin-1".to_string(),
-            _ => "UTF-8".to_string(),
-        };
-        self.config.encoding.selected = self.selected_encoding.clone();
-        self.placeholder_notice = format!("编码设置已切换为 {}", self.selected_encoding);
-        self.persist_config_or_report();
-    }
-
-    /// 切换临时缓存开关。
-    pub fn toggle_cache_enabled(&mut self) {
-        self.is_cache_enabled = !self.is_cache_enabled;
-        self.config.cache.enabled = self.is_cache_enabled;
-        self.placeholder_notice = if self.is_cache_enabled {
-            "已启用临时缓存占位设置".to_string()
-        } else {
-            "已关闭临时缓存占位设置".to_string()
-        };
-        self.persist_config_or_report();
-    }
-
-    /// 调整缓存上限，始终限制在占位设置页可展示范围内。
-    pub fn adjust_cache_limit(&mut self, delta: isize) {
-        self.cache_limit_mb = self
-            .cache_limit_mb
-            .saturating_add_signed(delta)
-            .clamp(128, 2048);
-        self.config.cache.limit_mb = self.cache_limit_mb;
-        self.placeholder_notice = format!("缓存上限已调整为 {} MB", self.cache_limit_mb);
-        self.persist_config_or_report();
-    }
-
-    pub fn adjust_max_archive_depth(&mut self, delta: isize) {
+    pub(crate) fn adjust_max_archive_depth(&mut self, delta: isize) {
         self.config.loader.max_archive_depth = self
             .config
             .loader
@@ -2025,7 +1770,7 @@ impl ArgusApp {
     }
 
     /// 调整当前目录层单文件压缩包探测并发数，设置会影响后续来源加载任务。
-    pub fn adjust_archive_probe_concurrency(&mut self, delta: isize) {
+    pub(crate) fn adjust_archive_probe_concurrency(&mut self, delta: isize) {
         self.config.loader.archive_probe_concurrency = self
             .config
             .loader
@@ -2040,7 +1785,7 @@ impl ArgusApp {
     }
 
     /// 切换符号链接跟随策略，设置会影响后续目录来源加载任务。
-    pub fn toggle_follow_symlinks(&mut self) {
+    pub(crate) fn toggle_follow_symlinks(&mut self) {
         self.config.loader.follow_symlinks = !self.config.loader.follow_symlinks;
         self.placeholder_notice = if self.config.loader.follow_symlinks {
             "日志加载已允许跟随符号链接".to_string()
@@ -2059,8 +1804,7 @@ fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
         | TabKind::JstackAnalysis { .. }
         | TabKind::RuntimeAnalysis { .. }
         | TabKind::SshTerminal { .. }
-        | TabKind::SftpFileManager { .. }
-        | TabKind::Settings => None,
+        | TabKind::SftpFileManager { .. } => None,
     }
 }
 
@@ -2095,19 +1839,6 @@ fn default_runtime_sql_sort_direction(sort_key: RuntimeSqlSortKey) -> RuntimeSor
         | RuntimeSqlSortKey::CommitDuration
         | RuntimeSqlSortKey::ReleaseConnectionDuration
         | RuntimeSqlSortKey::ParseResultDuration => RuntimeSortDirection::Descending,
-    }
-}
-
-/// 生成 Runtime SQL 行展开状态使用的稳定 key。
-pub fn runtime_sql_row_key(request_index: usize, sql_index: usize) -> String {
-    format!("{request_index}:{sql_index}")
-}
-
-/// 根据来源位置选择读取模式，避免 UI 或状态栏分散判断来源类型。
-fn read_mode_for_location(location: &SourceLocation) -> ReadMode {
-    match location {
-        SourceLocation::LocalPath(_) => ReadMode::MmapPaged,
-        SourceLocation::ArchiveEntry { .. } => ReadMode::ArchiveStreaming,
     }
 }
 

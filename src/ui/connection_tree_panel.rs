@@ -60,7 +60,7 @@ impl Render for ConnectionLinkTooltip {
 }
 
 /// 渲染链接目录树面板。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let rows = app.visible_connection_rows();
     let empty_message = if app.is_connection_tree_filtering() {

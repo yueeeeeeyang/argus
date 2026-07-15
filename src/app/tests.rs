@@ -78,7 +78,7 @@ fn insert_test_sftp_session(
     );
     session.status = crate::remote::sftp::SftpStatus::Connected;
     session.current_dir = "/home/tester".to_string();
-    session.address_input = SettingsTextInputState::from_value(session.current_dir.clone());
+    session.address_input = TextInputState::from_value(session.current_dir.clone());
     app.sftp_sessions.insert(session_id, session);
     receiver
 }
@@ -641,7 +641,6 @@ fn creating_jstack_analysis_tab_reuses_empty_tab() {
     let state = app
         .jstack_analysis_state(analysis_id)
         .expect("应保存分析状态");
-    assert_eq!(state.targets.len(), 2);
     assert_eq!(
         state.active_states,
         BTreeSet::from([JstackThreadState::Runnable])
@@ -754,7 +753,6 @@ fn creating_runtime_analysis_tab_reuses_empty_tab() {
     let state = app
         .runtime_analysis_state(analysis_id)
         .expect("应保存 Runtime 分析状态");
-    assert_eq!(state.targets.len(), 2);
     assert_eq!(state.result_type, RuntimeAnalysisResultType::Statistics);
     assert_eq!(state.summary_sort_key, RuntimeSummarySortKey::RequestCount);
     assert_eq!(
@@ -1509,7 +1507,7 @@ fn shift_range_selection_fills_pending_archives_from_tree_order_during_probe() {
     registry.rebuild_all_indices();
     app.source_registry = registry;
     app.is_source_tree_search_open = true;
-    app.source_tree_search_query = "thread".to_string();
+    app.source_tree_search_input.value = "thread".to_string();
     app.filtered_source_ids = vec![root_id, source_ids[0], source_ids[4]];
     app.source_archive_probe_queue
         .extend(source_ids.iter().copied());
@@ -1551,28 +1549,13 @@ fn new_app_starts_with_empty_source_tree() {
     assert!(app.visible_source_ids().is_empty());
 }
 
-/// 验证正式启动时内容区只展示提示信息，不渲染样例日志行。
+/// 验证正式启动时内容区只保留空标签，不注入样例日志标签。
 #[test]
-fn new_app_starts_without_placeholder_log_rows() {
+fn new_app_starts_with_empty_log_tab() {
     let app = test_app();
 
-    assert!(app.logs.is_empty());
-    assert!(app.selected_log_line.is_none());
     assert_eq!(app.active_tab_title(), "未选择日志");
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert!(matches!(app.content_state, ContentState::SourceNotSelected));
-}
-
-/// 验证旧设置标签入口不再创建设置标签页。
-#[test]
-fn legacy_settings_tab_entry_does_not_create_tab() {
-    let mut app = test_app();
-
-    app.open_or_focus_settings_tab();
-
-    assert_eq!(app.tabs.len(), 1);
-    assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert!(app.placeholder_notice.contains("模态框"));
 }
 
 /// 验证设置分类切换会更新右侧内容状态，并关闭上一分类的临时交互状态。
@@ -1600,26 +1583,6 @@ fn closing_settings_modal_clears_modal_state() {
 
     assert!(!app.is_settings_modal_open);
     assert!(!app.settings_jstack_thread_name_filter_input.is_focused);
-}
-
-/// 验证旧设置标签入口不会影响当前日志标签。
-#[test]
-fn legacy_settings_tab_entry_keeps_active_log_tab() {
-    let mut app = app_with_placeholder_sources();
-    let app_log_id = source_id_by_label(&app, "app.log");
-
-    app.select_source(app_log_id);
-    let app_tab_id = app.active_tab_id;
-    app.open_or_focus_settings_tab();
-
-    assert_eq!(app.active_tab_id, app_tab_id);
-    assert_eq!(
-        app.tabs
-            .iter()
-            .filter(|tab| matches!(tab.kind, TabKind::Settings))
-            .count(),
-        0
-    );
 }
 
 /// 验证同一日志来源重复点击时复用已有标签页。
@@ -1973,7 +1936,6 @@ fn settings_changes_are_persisted_to_config_file() {
 fn applying_new_load_report_replaces_old_log_workspace() {
     let mut app = app_with_placeholder_sources();
     app.has_loaded_real_sources = true;
-    app.logs = placeholder_logs();
     app.tabs.push(ArgusTab {
         id: 2,
         title: "old.log".to_string(),
@@ -2016,14 +1978,12 @@ fn applying_new_load_report_replaces_old_log_workspace() {
     });
 
     assert_eq!(visible_labels(&app), vec!["new.log"]);
-    assert!(app.logs.is_empty());
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.active_tab_title(), "未选择日志");
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     assert_eq!(app.next_tab_id, 2);
-    assert!(matches!(app.content_state, ContentState::SourceNotSelected));
     assert!(!app.is_source_tree_search_open);
-    assert!(app.source_tree_search_query.is_empty());
+    assert!(app.source_tree_search_input.value.is_empty());
     assert!(app.filtered_source_ids.is_empty());
 }
 
@@ -2154,7 +2114,7 @@ fn activating_hidden_log_tab_keeps_source_tree_filter_and_updates_selection() {
 
     assert_eq!(app.active_tab_id, app_tab_id);
     assert!(app.is_source_tree_search_open);
-    assert_eq!(app.source_tree_search_query, "error");
+    assert_eq!(app.source_tree_search_input.value, "error");
     assert!(!app.visible_source_ids().contains(&app_log_id));
     assert!(
         app.source_registry
@@ -2179,12 +2139,12 @@ fn source_tree_search_editing_uses_character_indices() {
     app.move_source_tree_search_left(false);
     app.move_source_tree_search_left(true);
 
-    assert_eq!(app.source_tree_search_cursor, 1);
+    assert_eq!(app.source_tree_search_input.cursor, 1);
     assert_eq!(app.source_tree_search_selection_range(), Some(1..2));
 
     app.insert_source_tree_search_text("b");
-    assert_eq!(app.source_tree_search_query, "日b志");
-    assert_eq!(app.source_tree_search_cursor, 2);
+    assert_eq!(app.source_tree_search_input.value, "日b志");
+    assert_eq!(app.source_tree_search_input.cursor, 2);
 }
 
 /// 验证全选和删除操作会同步维护光标和选区。
@@ -2196,8 +2156,8 @@ fn source_tree_search_selection_delete_updates_cursor() {
     app.select_all_source_tree_search();
     app.delete_source_tree_search_backward();
 
-    assert!(app.source_tree_search_query.is_empty());
-    assert_eq!(app.source_tree_search_cursor, 0);
+    assert!(app.source_tree_search_input.value.is_empty());
+    assert_eq!(app.source_tree_search_input.cursor, 0);
     assert!(app.source_tree_search_selection_range().is_none());
 }
 

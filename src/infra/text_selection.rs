@@ -8,7 +8,7 @@ use std::ops::Range;
 
 /// 文本选择粒度，用于统一日志正文和输入框的单击、双击、三击行为。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TextSelectionGranularity {
+pub(crate) enum TextSelectionGranularity {
     /// 字符级选择，通常由单击拖拽触发。
     Character,
     /// 词级选择，通常由双击触发。
@@ -18,12 +18,12 @@ pub enum TextSelectionGranularity {
 }
 
 /// 返回字符串的字符数量，避免中文等多字节字符破坏光标位置。
-pub fn character_count(text: &str) -> usize {
+pub(crate) fn character_count(text: &str) -> usize {
     text.chars().count()
 }
 
 /// 将字符索引转换为 UTF-16 偏移；系统输入法回调使用 UTF-16 范围。
-pub fn utf16_offset_for_character_index(text: &str, character_index: usize) -> usize {
+pub(crate) fn utf16_offset_for_character_index(text: &str, character_index: usize) -> usize {
     text.chars()
         .take(character_index)
         .map(char::len_utf16)
@@ -31,7 +31,7 @@ pub fn utf16_offset_for_character_index(text: &str, character_index: usize) -> u
 }
 
 /// 将 UTF-16 偏移转换为字符索引；越界时返回字符串末尾字符位置。
-pub fn character_index_for_utf16_offset(text: &str, utf16_offset: usize) -> usize {
+pub(crate) fn character_index_for_utf16_offset(text: &str, utf16_offset: usize) -> usize {
     let mut consumed_units = 0_usize;
     for (character_index, character) in text.chars().enumerate() {
         if consumed_units >= utf16_offset {
@@ -43,20 +43,20 @@ pub fn character_index_for_utf16_offset(text: &str, utf16_offset: usize) -> usiz
 }
 
 /// 将字符范围转换为 UTF-16 范围。
-pub fn utf16_range_for_character_range(text: &str, range: Range<usize>) -> Range<usize> {
+pub(crate) fn utf16_range_for_character_range(text: &str, range: Range<usize>) -> Range<usize> {
     utf16_offset_for_character_index(text, range.start)
         ..utf16_offset_for_character_index(text, range.end)
 }
 
 /// 将 UTF-16 范围转换为字符范围，并自动夹在当前文本长度内。
-pub fn character_range_for_utf16_range(text: &str, range: Range<usize>) -> Range<usize> {
+pub(crate) fn character_range_for_utf16_range(text: &str, range: Range<usize>) -> Range<usize> {
     let start = character_index_for_utf16_offset(text, range.start);
     let end = character_index_for_utf16_offset(text, range.end);
     start.min(end)..start.max(end)
 }
 
 /// 将字符索引转换为 UTF-8 字节索引；越界时返回字符串末尾。
-pub fn byte_index_for_character(text: &str, character_index: usize) -> usize {
+pub(crate) fn byte_index_for_character(text: &str, character_index: usize) -> usize {
     text.char_indices()
         .map(|(byte_index, _)| byte_index)
         .nth(character_index)
@@ -64,7 +64,7 @@ pub fn byte_index_for_character(text: &str, character_index: usize) -> usize {
 }
 
 /// 将 UTF-8 字节下标转换为字符列，避免 GPUI 命中结果落在多字节字符中间。
-pub fn char_column_for_byte_index(text: &str, byte_index: usize) -> usize {
+pub(crate) fn char_column_for_byte_index(text: &str, byte_index: usize) -> usize {
     let byte_index = byte_index.min(text.len());
     let safe_byte_index = if text.is_char_boundary(byte_index) {
         byte_index
@@ -80,14 +80,14 @@ pub fn char_column_for_byte_index(text: &str, byte_index: usize) -> usize {
 }
 
 /// 截取指定字符范围内的文本，供复制和选区渲染复用。
-pub fn slice_character_range(text: &str, range: Range<usize>) -> String {
+pub(crate) fn slice_character_range(text: &str, range: Range<usize>) -> String {
     let start = byte_index_for_character(text, range.start);
     let end = byte_index_for_character(text, range.end);
     text[start..end].to_string()
 }
 
 /// 删除指定字符范围内的文本，并返回新字符串。
-pub fn remove_character_range(text: &str, range: Range<usize>) -> String {
+pub(crate) fn remove_character_range(text: &str, range: Range<usize>) -> String {
     let start = byte_index_for_character(text, range.start);
     let end = byte_index_for_character(text, range.end);
     let mut next_text = String::with_capacity(text.len().saturating_sub(end - start));
@@ -97,7 +97,7 @@ pub fn remove_character_range(text: &str, range: Range<usize>) -> String {
 }
 
 /// 在指定字符位置插入文本，并返回新字符串。
-pub fn insert_text_at_character_index(
+pub(crate) fn insert_text_at_character_index(
     text: &str,
     character_index: usize,
     inserted_text: &str,
@@ -111,7 +111,11 @@ pub fn insert_text_at_character_index(
 }
 
 /// 替换指定字符范围内的文本，并返回新字符串。
-pub fn replace_character_range(text: &str, range: Range<usize>, replacement: &str) -> String {
+pub(crate) fn replace_character_range(
+    text: &str,
+    range: Range<usize>,
+    replacement: &str,
+) -> String {
     let start = byte_index_for_character(text, range.start);
     let end = byte_index_for_character(text, range.end);
     let mut next_text = String::with_capacity(text.len() + replacement.len());
@@ -123,7 +127,7 @@ pub fn replace_character_range(text: &str, range: Range<usize>, replacement: &st
 
 /// 系统文本输入提交的一次编辑，范围均已转换为项目内部字符索引。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NativeTextEdit {
+pub(crate) struct NativeTextEdit {
     /// 被替换的旧文本字符范围。
     pub replacement_range: Range<usize>,
     /// 写入的新文本。
@@ -135,7 +139,7 @@ pub struct NativeTextEdit {
 }
 
 /// 返回指定字符列所在的词范围；点到空白或标点时返回 `None`。
-pub fn word_range_at(text: &str, character_index: usize) -> Option<Range<usize>> {
+pub(crate) fn word_range_at(text: &str, character_index: usize) -> Option<Range<usize>> {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {
         return None;

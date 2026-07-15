@@ -12,7 +12,7 @@ const LOG_ENCODING_SAMPLE_BYTES: usize = 4 * 1024 * 1024;
 
 /// 解码后的日志文本和实际采用的编码标签。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DecodedText {
+pub(crate) struct DecodedText {
     /// 解码后的完整文本。
     pub text: String,
     /// 实际采用的编码名称，用于状态栏展示。
@@ -26,7 +26,7 @@ pub struct DecodedText {
 /// - `preferred_encoding`：自动识别完全失败时使用的用户配置兜底编码。
 ///
 /// 返回值：解码文本与实际编码标签；无法精确识别时使用 UTF-8 有损兜底。
-pub fn decode_log_bytes(bytes: &[u8], preferred_encoding: &str) -> DecodedText {
+pub(crate) fn decode_log_bytes(bytes: &[u8], preferred_encoding: &str) -> DecodedText {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return decode_with_encoding(UTF_8, &bytes[3..], "UTF-8");
     }
@@ -80,7 +80,7 @@ pub fn decode_log_bytes(bytes: &[u8], preferred_encoding: &str) -> DecodedText {
 /// - `fallback_encoding`：编码名称无法识别时使用的兜底编码。
 ///
 /// 返回值：解码文本与实际编码标签。
-pub fn decode_log_bytes_with_known_encoding(
+pub(crate) fn decode_log_bytes_with_known_encoding(
     bytes: &[u8],
     encoding_label: &str,
     fallback_encoding: &str,

@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::app::{
-    AppTextInputTarget, ArgusApp, LogSearchInputKind, LogSearchInputState, LogSearchState,
+    AppTextInputTarget, ArgusApp, LogSearchInputKind, LogSearchState, TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::search::search_engine::{SearchProgress, SearchScope};
@@ -32,7 +32,7 @@ const LOG_SEARCH_BUTTON_CONTENT_Y_OFFSET: f32 = 1.0;
 const LOG_SEARCH_TITLE_ICON_SIZE: f32 = 16.0;
 
 /// 搜索窗口根视图；业务状态仍保存在主应用实体中。
-pub struct LogSearchWindow {
+pub(crate) struct LogSearchWindow {
     /// 主应用实体。
     app: Entity<ArgusApp>,
     /// 搜索窗口根焦点句柄，用于窗口打开后直接接收键盘输入。
@@ -67,7 +67,7 @@ impl LogSearchWindow {
     /// - `cx`：搜索窗口上下文。
     ///
     /// 返回值：可渲染搜索窗口视图。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         log_search: LogSearchState,
@@ -191,13 +191,13 @@ struct LogSearchWindowStateSnapshot {
     /// 当前搜索范围。
     scope: SearchScope,
     /// 关键字输入框状态。
-    keyword_input: LogSearchInputState,
+    keyword_input: TextInputState,
     /// 关键字历史下拉菜单是否展开。
     keyword_history_open: bool,
     /// 关键字历史下拉菜单当前高亮项索引。
     keyword_history_highlight: Option<usize>,
     /// 目录输入框状态。
-    directory_input: LogSearchInputState,
+    directory_input: TextInputState,
     /// 是否区分大小写。
     case_sensitive: bool,
     /// 是否启用正则搜索。
@@ -982,7 +982,7 @@ fn render_progress_and_actions(
                 .text_size(px(12.0))
                 .text_color(rgb(theme.foreground_muted))
                 .when(search.task_state.is_running(), |this| {
-                    let progress_text = progress_label(&search);
+                    let progress_text = progress_label(search);
                     this.child(render_loading_spinner(
                         ("log-search-progress-spinner", 0),
                         theme.foreground_muted,
@@ -1119,9 +1119,7 @@ fn button_label(label: &'static str) -> impl IntoElement {
 }
 
 /// 计算输入框选区范围。
-fn selection_range_for_input(
-    input: &crate::app::LogSearchInputState,
-) -> Option<std::ops::Range<usize>> {
+fn selection_range_for_input(input: &crate::app::TextInputState) -> Option<std::ops::Range<usize>> {
     let anchor = input.selection_anchor?;
     if anchor == input.cursor {
         return None;
@@ -1157,7 +1155,7 @@ fn update_search_app(
     cx: &mut gpui::App,
     update: impl FnOnce(&mut ArgusApp, &mut Context<ArgusApp>),
 ) {
-    let _ = app_handle.update(cx, |app, app_cx| {
+    app_handle.update(cx, |app, app_cx| {
         update(app, app_cx);
         app_cx.notify();
     });

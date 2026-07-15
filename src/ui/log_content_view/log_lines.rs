@@ -1,13 +1,12 @@
 use super::*;
 
-pub fn render_content_body(
+pub(crate) fn render_content_body(
     app: &mut ArgusApp,
     theme: &AppTheme,
     window: &mut Window,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
     match app.active_tab_kind() {
-        TabKind::Settings => settings_page::render(app, cx).into_any_element(),
         TabKind::JstackAnalysis { analysis_id } => {
             jstack_analysis_view::render(app, analysis_id, cx).into_any_element()
         }
@@ -42,7 +41,7 @@ pub fn render_content_body(
 }
 
 /// 渲染当前日志 tab 对应的读取状态或真实日志文本。
-pub fn render_log_source_content(
+pub(crate) fn render_log_source_content(
     app: &mut ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
@@ -77,7 +76,7 @@ pub fn render_log_source_content(
 }
 
 /// 渲染日志文档；小文件走 uniform_list，大文件走分页窗口。
-pub fn render_log_document(
+pub(crate) fn render_log_document(
     app: &mut ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
@@ -97,7 +96,7 @@ pub fn render_log_document(
 }
 
 /// 渲染小日志内存文档，使用 GPUI 虚拟列表只创建可见行元素。
-pub fn render_in_memory_log(
+pub(crate) fn render_in_memory_log(
     app: &ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
@@ -172,7 +171,7 @@ pub fn render_in_memory_log(
 }
 
 /// 渲染分页大日志；只读取当前视口附近的真实行。
-pub fn render_paged_log(
+pub(crate) fn render_paged_log(
     app: &mut ArgusApp,
     theme: &AppTheme,
     tab_id: usize,
@@ -315,7 +314,7 @@ pub fn render_paged_log(
 }
 
 /// 渲染分页日志缓存缺失行的轻量占位，避免首帧为了读取磁盘阻塞 UI。
-pub fn render_paged_log_placeholder_line(
+pub(crate) fn render_paged_log_placeholder_line(
     theme: &AppTheme,
     line_number: usize,
     line_number_width: f32,
@@ -341,7 +340,7 @@ pub fn render_paged_log_placeholder_line(
 }
 
 /// 通过当前 app 状态读取并渲染一个虚拟列表范围。
-pub fn render_log_line_range(
+pub(crate) fn render_log_line_range(
     app: &ArgusApp,
     source_id: crate::loader::SourceId,
     tab_id: usize,

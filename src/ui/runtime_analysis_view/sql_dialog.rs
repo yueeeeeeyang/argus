@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn render_runtime_sql_text_dialog(
+pub(crate) fn render_runtime_sql_text_dialog(
     analysis_id: usize,
     dialog: RuntimeSqlTextDialog,
     analysis_focus_handle: Option<FocusHandle>,
@@ -105,7 +105,7 @@ pub fn render_runtime_sql_text_dialog(
 }
 
 /// 渲染 SQL 弹窗右上角关闭按钮。
-pub fn render_sql_dialog_close_button(
+pub(crate) fn render_sql_dialog_close_button(
     analysis_id: usize,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
@@ -129,7 +129,7 @@ pub fn render_sql_dialog_close_button(
 }
 
 /// 渲染完整 SQL 代码块，按原始换行拆行以避开 GPUI 单文本节点换行限制。
-pub fn render_sql_dialog_code_block(
+pub(crate) fn render_sql_dialog_code_block(
     analysis_id: usize,
     sql_text: &str,
     selection: Option<&RuntimeSqlTextSelection>,
@@ -201,7 +201,7 @@ pub fn render_sql_dialog_code_block(
 /// 首帧渲染时滚动句柄尚未布局，`bounds` 为零导致 `scrollbar_metrics` 返回 `None`，
 /// 此时返回一个透明哨兵元素：其 paint 回调在布局完成后执行，若检测到内容已溢出则触发一次重绘，
 /// 下一帧即可用有效 bounds 渲染真实滑块。滑块出现后哨兵不再渲染，自然收敛，不会无限重绘。
-pub fn render_sql_dialog_scrollbar(
+pub(crate) fn render_sql_dialog_scrollbar(
     analysis_id: usize,
     scroll_handle: &ScrollHandle,
     theme: &AppTheme,
@@ -233,7 +233,7 @@ pub fn render_sql_dialog_scrollbar(
 }
 
 /// 渲染首帧哨兵：在滚动句柄完成布局前占位，布局完成后触发一次重绘以显示真实滑块。
-pub fn render_sql_dialog_scrollbar_sentinel(
+pub(crate) fn render_sql_dialog_scrollbar_sentinel(
     scroll_handle: ScrollHandle,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
@@ -258,7 +258,7 @@ pub fn render_sql_dialog_scrollbar_sentinel(
 /// 文本外层套一层 `min_w(0)+w_full` 容器以限定宽度：长 SQL 行会在弹窗宽度内自动折行，
 /// 配合代码块的 `overflow_y_scroll` 实现完整展示与垂直滚动；选区命中测试同样按折行后的
 /// 视觉布局计算（见 `runtime_sql_dialog_character_index_from_pointer`）。
-pub fn render_sql_dialog_line(
+pub(crate) fn render_sql_dialog_line(
     analysis_id: usize,
     line_index: usize,
     line: String,
@@ -299,7 +299,7 @@ pub fn render_sql_dialog_line(
 }
 
 /// 渲染 SQL 弹窗单行透明命中层，将鼠标拖拽转换成跨行文本选区。
-pub fn render_sql_dialog_line_pointer_layer(
+pub(crate) fn render_sql_dialog_line_pointer_layer(
     analysis_id: usize,
     line_index: usize,
     line: String,

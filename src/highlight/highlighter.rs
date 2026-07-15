@@ -10,7 +10,7 @@ use crate::highlight::span::{HighlightSpan, SpanBuilder, capped_scan_len};
 
 /// 纯逻辑高亮入口。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct SyntaxHighlighter;
+pub(crate) struct SyntaxHighlighter;
 
 impl SyntaxHighlighter {
     /// 对单行展示文本执行高亮。
@@ -20,7 +20,7 @@ impl SyntaxHighlighter {
     /// - `language`：当前 tab 根据文件名和路径识别出的语言。
     ///
     /// 返回值：不重叠且按起点排序的高亮范围。
-    pub fn highlight(line: &str, language: HighlightLanguage) -> Vec<HighlightSpan> {
+    pub(crate) fn highlight(line: &str, language: HighlightLanguage) -> Vec<HighlightSpan> {
         if line.is_empty() || language == HighlightLanguage::Plain {
             return Vec::new();
         }

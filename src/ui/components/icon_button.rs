@@ -13,13 +13,11 @@ use gpui::{
 
 /// 图标按钮尺寸。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IconButtonSize {
+pub(crate) enum IconButtonSize {
     /// 标题栏和内容工具栏中的小按钮。
     Small,
     /// 来源侧栏工具区中的 14px 图标按钮。
     Tiny,
-    /// 左侧活动栏中的常规按钮。
-    Medium,
 }
 
 /// 图标按钮内容的视觉下移量。
@@ -68,7 +66,7 @@ impl Render for TooltipView {
 /// - `on_click`：点击回调，可操作应用状态或窗口 API。
 ///
 /// 返回值：GPUI 元素树；不会直接触发真实业务功能。
-pub fn render_icon_button(
+pub(crate) fn render_icon_button(
     id: impl Into<ElementId>,
     icon: ArgusIcon,
     tooltip: &'static str,
@@ -80,7 +78,6 @@ pub fn render_icon_button(
     let (button_size, icon_size) = match size {
         IconButtonSize::Small => (28.0, 16.0),
         IconButtonSize::Tiny => (24.0, 14.0),
-        IconButtonSize::Medium => (36.0, 18.0),
     };
     let selected_background = theme.selection;
     let hover_background = if is_selected {

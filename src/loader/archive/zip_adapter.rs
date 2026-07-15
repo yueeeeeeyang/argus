@@ -22,7 +22,7 @@ use crate::utils::path::normalize_archive_entry_path;
 
 /// ZIP 适配器，当前只做条目枚举，不读取日志正文。
 #[derive(Debug, Default)]
-pub struct ZipArchiveAdapter;
+pub(crate) struct ZipArchiveAdapter;
 
 impl ArchiveAdapter for ZipArchiveAdapter {
     /// 声明 ZIP 格式的识别规则和可用能力。
@@ -35,7 +35,6 @@ impl ArchiveAdapter for ZipArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: true,
         }
     }
 
@@ -142,7 +141,7 @@ impl ArchiveAdapter for ZipArchiveAdapter {
 }
 
 /// 从任意可读可 seek 的 ZIP 输入中短路探测根层单文件。
-pub fn probe_zip_single_file_root_from_reader<R>(
+pub(crate) fn probe_zip_single_file_root_from_reader<R>(
     reader: R,
     source_label: &str,
     password: Option<&str>,
@@ -166,14 +165,8 @@ where
             continue;
         }
 
-        let label = entry_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry_path.as_str())
-            .to_string();
         let entry = ArchiveEntryInfo {
             path: entry_path,
-            label,
             is_dir,
             size: Some(size),
         };
@@ -195,7 +188,7 @@ where
 ///
 /// 说明：同一 ZIP 内加密条目通常共用密码，密码校验只需在首个加密条目上执行一次，
 /// 后续条目直接信任已验证的密码，避免 AES 密钥派生在大压缩包上重复执行。
-pub fn list_zip_entries_from_reader<R>(
+pub(crate) fn list_zip_entries_from_reader<R>(
     reader: R,
     source_label: &str,
     password: Option<&str>,
@@ -219,14 +212,8 @@ where
             continue;
         }
 
-        let label = entry_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry_path.as_str())
-            .to_string();
         entries.push(ArchiveEntryInfo {
             path: entry_path,
-            label,
             is_dir,
             size: Some(size),
         });
@@ -238,7 +225,7 @@ where
 /// 从本地 ZIP 压缩包读取指定条目的完整字节。
 ///
 /// 返回值：条目内容字节；用于内嵌 ZIP 的内存枚举，不落盘解压。
-pub fn read_zip_entry_bytes(
+pub(crate) fn read_zip_entry_bytes(
     path: &Path,
     entry_path: &str,
     password: Option<&str>,
@@ -254,7 +241,7 @@ pub fn read_zip_entry_bytes(
 /// - `reader`：ZIP 数据来源，可为本地文件或内存 Cursor。
 /// - `entry_path`：需要读取的内部条目路径。
 /// - `source_label`：错误提示中的来源名称。
-pub fn read_zip_entry_bytes_from_reader<R>(
+pub(crate) fn read_zip_entry_bytes_from_reader<R>(
     reader: R,
     entry_path: &str,
     source_label: &str,
@@ -278,7 +265,7 @@ where
 /// - `entry_path`：需要读取的内部条目路径。
 /// - `source_label`：错误提示中的来源名称。
 /// - `consumer`：接收解压后字节分片的回调。
-pub fn stream_zip_entry_from_reader<R>(
+pub(crate) fn stream_zip_entry_from_reader<R>(
     reader: R,
     entry_path: &str,
     source_label: &str,

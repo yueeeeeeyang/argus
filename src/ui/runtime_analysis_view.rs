@@ -27,7 +27,7 @@ use crate::app::{
     RuntimeSortDirection, RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey,
     RuntimeSqlFrequencyDetailRowsCache, RuntimeSqlIndicesCache, RuntimeSqlSortKey,
     RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummaryRowsCache, RuntimeSummarySortKey,
-    RuntimeTableCellSelection, SettingsTextInputState,
+    RuntimeTableCellSelection, TextInputState,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::infra::perf::PerfSpan;
@@ -127,15 +127,19 @@ mod sql_dialog;
 mod table_parts;
 mod tables;
 
-pub use computation::*;
-pub use filter_bar::*;
-pub use helpers::*;
-pub use sql_dialog::*;
-pub use table_parts::*;
-pub use tables::*;
+pub(crate) use computation::*;
+pub(crate) use filter_bar::*;
+pub(crate) use helpers::*;
+pub(crate) use sql_dialog::*;
+pub(crate) use table_parts::*;
+pub(crate) use tables::*;
 
 /// 渲染 Runtime 分析页签主体。
-pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    analysis_id: usize,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(state) = app.runtime_analysis_state(analysis_id) else {
         return render_missing_state(app, &theme);
@@ -185,9 +189,6 @@ pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) ->
                 cx,
             )
             .into_any_element(),
-            RuntimeAnalysisTaskState::Failed { message } => {
-                render_error_state(message, &theme).into_any_element()
-            }
         })
         .into_any_element()
 }
@@ -224,9 +225,7 @@ fn render_header(state: &RuntimeAnalysisState, theme: &AppTheme) -> impl IntoEle
                 result.total_sql_records,
                 result.skipped_count(),
             ),
-            RuntimeAnalysisTaskState::Loading { .. } | RuntimeAnalysisTaskState::Failed { .. } => {
-                (0, 0, 0, 0, 0)
-            }
+            RuntimeAnalysisTaskState::Loading { .. } => (0, 0, 0, 0, 0),
         };
 
     div()
@@ -270,18 +269,6 @@ fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + u
             theme.foreground_muted,
             18.0,
         ))
-        .child(message.to_string())
-}
-
-/// 渲染失败态。
-fn render_error_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(13.0))
-        .text_color(rgb(theme.error))
         .child(message.to_string())
 }
 
@@ -687,9 +674,6 @@ mod tests {
     /// 构造 Runtime 过滤测试用的默认 UI 状态。
     fn runtime_filter_test_state() -> RuntimeAnalysisState {
         RuntimeAnalysisState {
-            id: 1,
-            title: "Runtime分析".to_string(),
-            targets: Vec::new(),
             generation: 1,
             view: RuntimeAnalysisView::Summary,
             result_type: RuntimeAnalysisResultType::Statistics,
@@ -699,10 +683,10 @@ mod tests {
             request_sort_direction: RuntimeSortDirection::Descending,
             sql_sort_key: RuntimeSqlSortKey::ExecuteDuration,
             sql_sort_direction: RuntimeSortDirection::Descending,
-            filter_keyword_input: SettingsTextInputState::default(),
-            filter_username_input: SettingsTextInputState::default(),
-            filter_start_time_input: SettingsTextInputState::default(),
-            filter_end_time_input: SettingsTextInputState::default(),
+            filter_keyword_input: TextInputState::default(),
+            filter_username_input: TextInputState::default(),
+            filter_start_time_input: TextInputState::default(),
+            filter_end_time_input: TextInputState::default(),
             applied_filter_keyword: String::new(),
             applied_filter_username: String::new(),
             applied_filter_start_time: String::new(),
@@ -1064,7 +1048,7 @@ mod tests {
     /// 验证时间选择器展示值与过滤输入框解析口径保持一致。
     #[test]
     fn runtime_datetime_picker_value_reads_filter_input() {
-        let input = SettingsTextInputState::from_value("2026-06-25 14:25:03".to_string());
+        let input = TextInputState::from_value("2026-06-25 14:25:03".to_string());
 
         let value = runtime_datetime_picker_value(&input, false);
 

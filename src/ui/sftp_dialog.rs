@@ -29,7 +29,7 @@ const SFTP_DELETE_DIALOG_WIDTH: f32 = 500.0;
 const SFTP_DELETE_DIALOG_HEIGHT: f32 = 188.0;
 
 /// 渲染当前 SFTP 文件管理弹窗。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(dialog) = app.sftp_dialog.clone() else {
         return div().into_any_element();

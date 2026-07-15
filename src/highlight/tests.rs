@@ -5,6 +5,7 @@
 //! 主要功能：覆盖语言识别、各格式核心 token、范围合法性和超长行扫描上限。
 
 use super::*;
+use crate::highlight::span::MAX_HIGHLIGHT_BYTES;
 
 /// 验证 Properties 注释、键和值均能高亮。
 #[test]

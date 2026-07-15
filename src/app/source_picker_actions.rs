@@ -21,7 +21,7 @@ use crate::utils::path::display_path;
 
 /// 来源选择器列表支持的排序字段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SourcePickerSortKey {
+pub(crate) enum SourcePickerSortKey {
     /// 按条目名称排序。
     Name,
     /// 按文件系统修改日期排序。
@@ -30,7 +30,7 @@ pub enum SourcePickerSortKey {
 
 /// 来源选择器列表排序方向。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SourcePickerSortDirection {
+pub(crate) enum SourcePickerSortDirection {
     /// 升序排列。
     Ascending,
     /// 降序排列。
@@ -49,7 +49,7 @@ impl SourcePickerSortDirection {
 
 /// 日志来源加载触发入口，用于让选择器、启动参数和系统右键复用同一条后台流程。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExternalSourceTrigger {
+pub(crate) enum ExternalSourceTrigger {
     /// 用户在 Argus 自定义来源选择器中点击“加载”。
     SourcePicker,
     /// 操作系统通过“用 Argus 打开”或 Open With 传入路径。
@@ -74,7 +74,7 @@ impl ExternalSourceTrigger {
 
 /// 自定义来源选择器状态；所有字段只描述 UI 和待加载路径，不持有文件句柄。
 #[derive(Clone, Debug)]
-pub struct SourcePickerState {
+pub(crate) struct SourcePickerState {
     /// 选择器是否打开。
     pub is_open: bool,
     /// 当前正在浏览的目录。
@@ -145,7 +145,7 @@ impl Default for SourcePickerState {
 
 impl SourcePickerState {
     /// 返回输入框当前选区范围，空选区返回 `None`。
-    pub fn path_input_selection_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn path_input_selection_range(&self) -> Option<Range<usize>> {
         let anchor = self.path_input_selection_anchor?;
         let cursor = self.path_input_cursor;
         if anchor == cursor {
@@ -156,7 +156,8 @@ impl SourcePickerState {
     }
 
     /// 判断路径是否已经被加入待加载列表。
-    pub fn is_selected(&self, path: &Path) -> bool {
+    #[cfg(test)]
+    fn is_selected(&self, path: &Path) -> bool {
         self.selected_paths.iter().any(|selected| selected == path)
     }
 
@@ -200,7 +201,7 @@ impl SourcePickerState {
 
 impl ArgusApp {
     /// 打开主窗口内的自定义来源选择器模态框，并在后台刷新当前目录条目。
-    pub fn open_source_picker(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_source_picker(&mut self, cx: &mut Context<Self>) {
         if self.is_source_loading {
             self.placeholder_notice = "日志来源正在加载中，请稍候".to_string();
             return;
@@ -227,7 +228,7 @@ impl ArgusApp {
     }
 
     /// 关闭自定义来源选择器，不影响已经加载的来源树。
-    pub fn close_source_picker(&mut self) {
+    pub(crate) fn close_source_picker(&mut self) {
         self.source_picker.is_open = false;
         self.source_picker_modal = None;
         self.source_picker.is_loading = false;
@@ -239,7 +240,7 @@ impl ArgusApp {
     }
 
     /// 后台浏览指定目录；成功后替换当前目录列表，失败时保留原目录。
-    pub fn navigate_source_picker(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_source_picker(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.source_picker.is_open = true;
         self.source_picker.is_loading = true;
         self.source_picker.error_message = None;
@@ -297,7 +298,7 @@ impl ArgusApp {
     }
 
     /// 切换一个可选文件或压缩包路径的选中状态。
-    pub fn toggle_source_picker_file(&mut self, path: PathBuf) {
+    pub(crate) fn toggle_source_picker_file(&mut self, path: PathBuf) {
         let Some(entry) = self
             .source_picker
             .entries
@@ -318,18 +319,12 @@ impl ArgusApp {
     }
 
     /// 切换目录行的选中状态；目录行双击才会进入浏览。
-    pub fn toggle_source_picker_directory(&mut self, path: PathBuf) {
+    pub(crate) fn toggle_source_picker_directory(&mut self, path: PathBuf) {
         self.toggle_source_picker_path(path);
     }
 
-    /// 将当前目录加入待加载列表；保留给快捷入口和测试使用。
-    pub fn select_source_picker_current_directory(&mut self) {
-        let current_dir = self.source_picker.current_dir.clone();
-        self.toggle_source_picker_path(current_dir);
-    }
-
     /// 从待加载列表中移除指定路径。
-    pub fn remove_source_picker_path(&mut self, path: &Path) {
+    pub(crate) fn remove_source_picker_path(&mut self, path: &Path) {
         self.source_picker
             .selected_paths
             .retain(|selected| selected != path);
@@ -337,13 +332,13 @@ impl ArgusApp {
     }
 
     /// 清空选择器里的所有待加载路径。
-    pub fn clear_source_picker_selection(&mut self) {
+    pub(crate) fn clear_source_picker_selection(&mut self) {
         self.source_picker.selected_paths.clear();
         self.source_picker.error_message = None;
     }
 
     /// 确认选择器路径并复用现有来源加载流程，返回是否成功进入加载状态。
-    pub fn confirm_source_picker_selection(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn confirm_source_picker_selection(&mut self, cx: &mut Context<Self>) -> bool {
         let paths = self.source_picker.selected_paths.clone();
         if paths.is_empty() {
             self.source_picker.error_message = Some("请至少选择一个文件、压缩包或目录".to_string());
@@ -365,7 +360,7 @@ impl ArgusApp {
     /// - `cx`：应用上下文，用于派发后台加载任务。
     ///
     /// 返回值：成功启动后台任务返回 `true`；已有加载任务或路径为空返回 `false`。
-    pub fn load_sources_from_paths(
+    pub(crate) fn load_sources_from_paths(
         &mut self,
         paths: Vec<PathBuf>,
         trigger: ExternalSourceTrigger,
@@ -437,18 +432,17 @@ impl ArgusApp {
     /// - `cx`：应用上下文，用于启动统一来源加载任务。
     ///
     /// 返回值：成功启动后台加载任务返回 `true`；无路径或已有任务时返回 `false`。
-    pub fn load_dropped_sources(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
+    pub(crate) fn load_dropped_sources(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> bool {
         // 拖拽事件只提供借用切片；统一加载流程需要拥有路径列表，以便移动到后台任务中。
         self.load_sources_from_paths(paths.to_vec(), ExternalSourceTrigger::DragDrop, cx)
     }
 
-    /// 返回路径是否在待加载选择列表中。
-    pub fn is_source_picker_path_selected(&self, path: &Path) -> bool {
-        self.source_picker.is_selected(path)
-    }
-
     /// 切换来源选择器目录列表排序字段或方向。
-    pub fn set_source_picker_sort(&mut self, sort_key: SourcePickerSortKey) {
+    pub(crate) fn set_source_picker_sort(&mut self, sort_key: SourcePickerSortKey) {
         if self.source_picker.sort_key == sort_key {
             self.source_picker.sort_direction = self.source_picker.sort_direction.toggled();
         } else {
@@ -467,7 +461,7 @@ impl ArgusApp {
     }
 
     /// 设置选择器路径输入框聚焦状态。
-    pub fn set_source_picker_path_input_focused(&mut self, is_focused: bool) {
+    pub(crate) fn set_source_picker_path_input_focused(&mut self, is_focused: bool) {
         self.source_picker.is_path_input_focused = is_focused;
         if !is_focused {
             self.source_picker.path_input_marked_range = None;
@@ -476,7 +470,11 @@ impl ArgusApp {
     }
 
     /// 处理选择器路径输入框键盘输入。
-    pub fn handle_source_picker_path_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    pub(crate) fn handle_source_picker_path_key(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
         match keystroke.key.as_str() {
             "enter" => {
                 let path = PathBuf::from(self.source_picker.path_input.trim());
@@ -501,7 +499,7 @@ impl ArgusApp {
     }
 
     /// 开始路径输入框鼠标选择。
-    pub fn begin_source_picker_path_pointer_selection(
+    pub(crate) fn begin_source_picker_path_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
@@ -528,7 +526,7 @@ impl ArgusApp {
     }
 
     /// 更新路径输入框鼠标拖拽选择。
-    pub fn update_source_picker_path_pointer_selection(&mut self, character_index: usize) {
+    pub(crate) fn update_source_picker_path_pointer_selection(&mut self, character_index: usize) {
         let Some(selection_drag) = self.source_picker.path_input_selection_drag.clone() else {
             return;
         };
@@ -552,7 +550,7 @@ impl ArgusApp {
     }
 
     /// 结束路径输入框鼠标拖拽选择。
-    pub fn finish_source_picker_path_pointer_selection(&mut self) {
+    pub(crate) fn finish_source_picker_path_pointer_selection(&mut self) {
         self.source_picker.path_input_selection_drag = None;
     }
 

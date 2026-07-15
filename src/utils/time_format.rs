@@ -14,7 +14,7 @@ use chrono::{DateTime, Local};
 /// - `time`：来自文件系统元数据的系统时间。
 ///
 /// 返回值：`YYYY-MM-DD HH:mm` 格式的本地时间文本。
-pub fn format_modified_time(time: SystemTime) -> String {
+pub(crate) fn format_modified_time(time: SystemTime) -> String {
     let datetime = DateTime::<Local>::from(time);
     datetime.format("%Y-%m-%d %H:%M").to_string()
 }

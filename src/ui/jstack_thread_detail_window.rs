@@ -20,6 +20,7 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::scrollbar::{
     ScrollbarMetrics, scrollbar_metrics, scrollbar_scroll_for_drag,
 };
+use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
 use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, FocusHandle, FontWeight, HighlightStyle,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -114,7 +115,7 @@ struct StackTextSelectionDrag {
 }
 
 /// Jstack 线程详情窗口根视图。
-pub struct JstackThreadDetailWindow {
+pub(crate) struct JstackThreadDetailWindow {
     /// 打开窗口时的主题快照。
     theme: AppTheme,
     /// 当前线程的跨快照堆栈记录。
@@ -145,7 +146,7 @@ impl JstackThreadDetailWindow {
     /// - `active_occurrence_index`：同快照内的线程出现序号，用于重复线程名时精确定位。
     ///
     /// 返回值：可由 GPUI 独立窗口渲染的详情视图。
-    pub fn new(
+    pub(crate) fn new(
         theme: AppTheme,
         detail: JstackThreadDetail,
         active_snapshot_index: usize,
@@ -215,7 +216,7 @@ impl JstackThreadDetailWindow {
     /// 复制当前详情窗口的堆栈正文选区；没有选区时不执行复制。
     fn copy_detail_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(stack_text) = self.selected_stack_text() {
-            let app_context: &gpui::App = (&*cx).borrow();
+            let app_context: &gpui::App = (*cx).borrow();
             app_context.write_to_clipboard(ClipboardItem::new_string(stack_text));
         }
     }
@@ -1081,11 +1082,15 @@ fn selected_stack_text_from_lines(
 
     let end_line = end.line_index.min(lines.len().saturating_sub(1));
     let mut selected = String::new();
-    for line_index in start.line_index..=end_line {
+    for (line_index, line) in lines
+        .iter()
+        .enumerate()
+        .take(end_line + 1)
+        .skip(start.line_index)
+    {
         if line_index > start.line_index {
             selected.push('\n');
         }
-        let line = &lines[line_index];
         let line_character_count = character_count(line);
         let start_column = if line_index == start.line_index {
             start.column.min(line_character_count)
@@ -1118,7 +1123,7 @@ fn merge_detail_stack_highlights(
     let mut merged = Vec::new();
     for (range, style) in syntax_highlights {
         for visible_range in subtract_detail_selection_range(range, &selection_range) {
-            merged.push((visible_range, style.clone()));
+            merged.push((visible_range, style));
         }
     }
     merged.push((
@@ -1162,39 +1167,18 @@ fn highlight_style_for_span(
         (
             range,
             HighlightStyle {
-                color: Some(rgb(color_for_detail_highlight_token(kind, theme)).into()),
+                color: Some(
+                    rgb(color_for_highlight_token(
+                        kind,
+                        theme,
+                        HighlightColorContext::Jstack,
+                    ))
+                    .into(),
+                ),
                 ..Default::default()
             },
         )
     })
-}
-
-/// 返回详情窗口专用高亮色；线程状态使用成功色，更接近线程分析语义。
-fn color_for_detail_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
-    match kind {
-        HighlightTokenKind::Trace => theme.foreground_muted,
-        HighlightTokenKind::Debug => theme.debug,
-        HighlightTokenKind::Info => theme.info,
-        HighlightTokenKind::Warning => theme.warning,
-        HighlightTokenKind::Error | HighlightTokenKind::Fatal => theme.error,
-        HighlightTokenKind::Timestamp => theme.syntax.timestamp,
-        HighlightTokenKind::Comment => theme.syntax.comment,
-        HighlightTokenKind::Key => theme.syntax.key,
-        HighlightTokenKind::Value => theme.syntax.string,
-        HighlightTokenKind::String => theme.syntax.string,
-        HighlightTokenKind::Number => theme.syntax.number,
-        HighlightTokenKind::Boolean => theme.syntax.boolean,
-        HighlightTokenKind::Punctuation => theme.syntax.punctuation,
-        HighlightTokenKind::Tag => theme.syntax.tag,
-        HighlightTokenKind::Attribute => theme.syntax.attribute,
-        HighlightTokenKind::ThreadName => theme.info,
-        HighlightTokenKind::ThreadState => theme.success,
-        HighlightTokenKind::StackClass => theme.syntax.class,
-        HighlightTokenKind::StackMethod => theme.info,
-        HighlightTokenKind::StackLocation => theme.syntax.string,
-        HighlightTokenKind::Lock => theme.syntax.lock,
-        HighlightTokenKind::Exception => theme.syntax.exception,
-    }
 }
 
 /// 默认高亮第一条 `at ...` 栈帧，便于打开窗口后快速定位代码路径。

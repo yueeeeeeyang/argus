@@ -15,7 +15,7 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 /// - `cx`：应用上下文，用于局部工具栏占位按钮回调。
 ///
 /// 返回值：GPUI 元素树；当前只展示固定来源数据。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
 
     div()

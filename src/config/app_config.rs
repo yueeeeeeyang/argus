@@ -1,17 +1,17 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-25
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供外观、日志加载、日志搜索、链接、编码、缓存和升级设置的默认值、校验和 TOML 序列化结构。
+//! 主要功能：提供外观、日志加载、日志搜索、链接、编码和升级设置的默认值、校验及 TOML 模型。
 
 use crate::remote::connection::ConnectionConfig;
 use serde::{Deserialize, Serialize};
 
 /// 默认 Jstack 线程名过滤规则，隐藏常见编译线程和 JVM 附加监听线程。
-pub const DEFAULT_JSTACK_THREAD_NAME_FILTERS: &str =
+pub(crate) const DEFAULT_JSTACK_THREAD_NAME_FILTERS: &str =
     "C1 CompilerThread*,C2 CompilerThread*,Attach Listener";
 /// 默认 Jstack 完整线程段过滤规则，隐藏常见 Resin keepalive socket 读取和 accept 等待堆栈。
-pub const DEFAULT_JSTACK_STACK_SEGMENT_FILTERS: &str = concat!(
+pub(crate) const DEFAULT_JSTACK_STACK_SEGMENT_FILTERS: &str = concat!(
     "java.lang.Thread.State: RUNNABLE\n",
     "\tat java.net.SocketInputStream.socketRead0(Native Method)\n",
     "\tat java.net.SocketInputStream.socketRead(SocketInputStream.java:116)\n",
@@ -61,7 +61,7 @@ pub const DEFAULT_JSTACK_STACK_SEGMENT_FILTERS: &str = concat!(
 
 /// 应用配置根对象，字段结构与 `~/.argus/settings.toml` 保持一致。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AppConfig {
+pub(crate) struct AppConfig {
     /// 外观配置，控制主题文件选择和日志阅读区域字号。
     #[serde(default)]
     pub appearance: AppearanceConfig,
@@ -80,9 +80,6 @@ pub struct AppConfig {
     /// 编码配置，后续日志读取模块会据此选择默认解码策略。
     #[serde(default)]
     pub encoding: EncodingConfig,
-    /// 缓存配置，后续索引和读取模块会据此控制临时缓存策略。
-    #[serde(default)]
-    pub cache: CacheConfig,
     /// 升级配置，控制是否从用户配置的服务器检查并安装新版本。
     #[serde(default)]
     pub upgrade: UpgradeConfig,
@@ -92,7 +89,7 @@ impl AppConfig {
     /// 返回经过边界修正的配置副本。
     ///
     /// 返回值：所有数值型配置均被限制在当前 UI 可展示范围内，避免坏配置破坏界面状态。
-    pub fn normalized(mut self) -> Self {
+    pub(crate) fn normalized(mut self) -> Self {
         self.appearance.theme_mode = match self.appearance.theme_mode.trim() {
             "" => "dark.toml".to_string(),
             value
@@ -118,7 +115,6 @@ impl AppConfig {
         self.log_display.jstack_stack_segment_filters =
             normalized_stack_segment_filter_text(self.log_display.jstack_stack_segment_filters);
         self.connections = self.connections.normalized();
-        self.cache.limit_mb = self.cache.limit_mb.clamp(128, 2048);
         if self.encoding.selected.trim().is_empty() {
             self.encoding.selected = EncodingConfig::default().selected;
         }
@@ -140,7 +136,6 @@ impl Default for AppConfig {
             log_display: LogDisplayConfig::default(),
             connections: ConnectionConfig::default(),
             encoding: EncodingConfig::default(),
-            cache: CacheConfig::default(),
             upgrade: UpgradeConfig::default(),
         }
     }
@@ -148,7 +143,7 @@ impl Default for AppConfig {
 
 /// 外观配置，持久化设置页中的主题文件和日志内容字号。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AppearanceConfig {
+pub(crate) struct AppearanceConfig {
     /// 主题文件标识，内置主题为 `dark.toml`，用户主题为 `~/.argus/themes` 下的 TOML 文件名。
     pub theme_mode: String,
     /// 日志内容区字号，仅影响主阅读区域和未读取提示。
@@ -167,7 +162,7 @@ impl Default for AppearanceConfig {
 
 /// 日志来源加载配置，用于限制高成本文件系统和压缩包操作。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LoaderConfig {
+pub(crate) struct LoaderConfig {
     /// 允许展开的嵌套压缩包最大层级，默认 2 层。
     pub max_archive_depth: usize,
     /// 当前目录层单文件压缩包探测并发数，默认 4，避免大量压缩包串行探测过慢。
@@ -194,11 +189,11 @@ fn default_archive_probe_concurrency() -> usize {
 }
 
 /// 搜索关键字历史最多保留条数；超出时丢弃最旧项。
-pub const SEARCH_RECENT_KEYWORDS_MAX: usize = 20;
+pub(crate) const SEARCH_RECENT_KEYWORDS_MAX: usize = 20;
 
 /// 日志搜索配置，保存快搜关键字与最近搜索历史。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct LogSearchConfig {
+pub(crate) struct LogSearchConfig {
     /// 快搜关键字原始输入，使用英文逗号分隔；解析和去重在搜索启动时执行。
     pub quick_keywords: String,
     /// 最近搜索关键字历史，最新在前；保存最近 20 条，搜索窗口关键字输入框下拉展示。
@@ -208,7 +203,7 @@ pub struct LogSearchConfig {
 
 /// 日志显示配置，保存阅读区和线程日志分析的展示偏好。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LogDisplayConfig {
+pub(crate) struct LogDisplayConfig {
     /// Jstack 线程名过滤关键字，多个关键字可用逗号、分号或竖线分隔。
     #[serde(default = "default_jstack_thread_name_filters")]
     pub jstack_thread_name_filters: String,
@@ -239,7 +234,7 @@ fn default_jstack_stack_segment_filters() -> String {
 
 /// 编码配置，当前先持久化用户选择，日志正文读取接入后再参与解码。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct EncodingConfig {
+pub(crate) struct EncodingConfig {
     /// 用户选择的默认编码名称。
     pub selected: String,
 }
@@ -253,28 +248,9 @@ impl Default for EncodingConfig {
     }
 }
 
-/// 缓存配置，当前先持久化设置页状态，后续缓存模块接入时复用。
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CacheConfig {
-    /// 是否启用临时缓存。
-    pub enabled: bool,
-    /// 缓存上限，单位 MB。
-    pub limit_mb: usize,
-}
-
-impl Default for CacheConfig {
-    /// 构造默认缓存配置。
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            limit_mb: 512,
-        }
-    }
-}
-
 /// 自动升级配置，保存升级服务器和用户跳过版本等跨会话偏好。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct UpgradeConfig {
+pub(crate) struct UpgradeConfig {
     /// 是否启用启动时自动检查升级。
     pub enabled: bool,
     /// 升级服务器基础地址；为空时不会发起网络请求。
@@ -358,10 +334,6 @@ mod tests {
             encoding: EncodingConfig {
                 selected: String::new(),
             },
-            cache: CacheConfig {
-                enabled: true,
-                limit_mb: 1,
-            },
             upgrade: UpgradeConfig {
                 enabled: true,
                 server_url: " https://updates.example.com/argus ".to_string(),
@@ -386,7 +358,6 @@ mod tests {
             "java.net.SocketInputStream\n\nread"
         );
         assert_eq!(config.encoding.selected, "UTF-8");
-        assert_eq!(config.cache.limit_mb, 128);
         assert_eq!(
             config.upgrade.server_url,
             "https://updates.example.com/argus"

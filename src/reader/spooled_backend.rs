@@ -5,7 +5,7 @@
 //! 主要功能：将不可随机访问的压缩流物化到 `~/.argus/cache/log_pages`，供分页 reader 复用本地文件读取能力。
 
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +21,7 @@ const LOG_PAGE_CACHE_DIR_NAME: &str = "log_pages";
 
 /// 临时分页文件清理器；最后一个 reader 句柄释放时自动删除缓存文件。
 #[derive(Debug)]
-pub struct SpoolCleanup {
+pub(crate) struct SpoolCleanup {
     /// 需要清理的临时文件路径。
     path: PathBuf,
 }
@@ -33,13 +33,8 @@ impl SpoolCleanup {
     /// - `path`：已写入完成的临时分页文件路径。
     ///
     /// 返回值：可被 reader 句柄共享的清理器。
-    pub fn new(path: PathBuf) -> Arc<Self> {
+    pub(crate) fn new(path: PathBuf) -> Arc<Self> {
         Arc::new(Self { path })
-    }
-
-    /// 返回临时分页文件路径。
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
@@ -61,7 +56,7 @@ impl Drop for SpoolCleanup {
 /// - `label`：日志展示名称，用于生成便于排查的文件名片段。
 ///
 /// 返回值：打开的文件句柄和对应路径；调用方负责写入和 flush。
-pub fn create_spool_file(label: &str) -> Result<(File, PathBuf)> {
+pub(crate) fn create_spool_file(label: &str) -> Result<(File, PathBuf)> {
     let dir = log_page_cache_dir();
     fs::create_dir_all(&dir)
         .with_context(|| format!("无法创建日志分页缓存目录：{}", dir.display()))?;

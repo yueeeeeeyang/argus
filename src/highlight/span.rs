@@ -7,11 +7,11 @@
 use std::ops::Range;
 
 /// 单行高亮最大扫描字节数，避免极端超长行拖慢滚动渲染。
-pub const MAX_HIGHLIGHT_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 16 * 1024;
 
 /// 语法高亮 token 类型。
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum HighlightTokenKind {
+pub(crate) enum HighlightTokenKind {
     /// TRACE 日志级别。
     Trace,
     /// DEBUG 日志级别。
@@ -62,7 +62,7 @@ pub enum HighlightTokenKind {
 
 /// 单个高亮范围，range 使用展示文本的 UTF-8 字节下标。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HighlightSpan {
+pub(crate) struct HighlightSpan {
     /// 高亮范围。
     pub range: Range<usize>,
     /// 高亮 token 类型。

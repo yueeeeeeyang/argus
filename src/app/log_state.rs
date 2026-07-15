@@ -14,7 +14,7 @@ use crate::loader::SourceId;
 
 /// 日志正文中的文本位置，使用行号和字符列表达。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LogTextPosition {
+pub(crate) struct LogTextPosition {
     /// 0 基日志行号。
     pub line_index: usize,
     /// 行内字符列，按 Unicode 标量值计数，避免中文被字节下标截断。
@@ -23,7 +23,7 @@ pub struct LogTextPosition {
 
 /// 日志正文选区，支持跨行复制。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogTextSelection {
+pub(crate) struct LogTextSelection {
     /// 鼠标按下时的选区锚点。
     pub anchor: LogTextPosition,
     /// 当前拖拽或键盘扩展到的焦点位置。
@@ -32,12 +32,12 @@ pub struct LogTextSelection {
 
 impl LogTextSelection {
     /// 返回选区是否为空。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.anchor == self.focus
     }
 
     /// 返回按文档顺序排列后的起止位置。
-    pub fn normalized(&self) -> (LogTextPosition, LogTextPosition) {
+    pub(crate) fn normalized(&self) -> (LogTextPosition, LogTextPosition) {
         if log_text_position_le(self.anchor, self.focus) {
             (self.anchor, self.focus)
         } else {
@@ -48,7 +48,7 @@ impl LogTextSelection {
 
 /// 日志正文拖拽选择状态，记录起始选区和当前拖拽粒度。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogTextSelectionDrag {
+pub(crate) struct LogTextSelectionDrag {
     /// 鼠标按下时形成的基础选区；双击为词，三击为整行。
     pub anchor_range: LogTextSelection,
     /// 当前拖拽粒度，决定后续移动时如何扩展选区。
@@ -57,7 +57,7 @@ pub struct LogTextSelectionDrag {
 
 /// 日志正文中当前被搜索结果激活的命中位置。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ActiveSearchMatch {
+pub(crate) struct ActiveSearchMatch {
     /// 命中所在来源节点。
     pub source_id: SourceId,
     /// 0 基行号。
@@ -70,7 +70,7 @@ pub struct ActiveSearchMatch {
 
 /// 分页日志滚动状态，使用 f64 避免超大行数下的像素精度丢失。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PagedLogScrollState {
+pub(crate) struct PagedLogScrollState {
     /// 纵向滚动像素。
     pub top_px: f64,
     /// 横向滚动像素。
@@ -79,7 +79,7 @@ pub struct PagedLogScrollState {
 
 /// 分页日志后台预取请求标记，避免 UI 重绘期间重复启动同一范围读取。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PagedLogPrefetchRequest {
+pub(crate) struct PagedLogPrefetchRequest {
     /// 预取所属的来源节点 ID。
     pub source_id: SourceId,
     /// 起始 0 基行号。
@@ -90,7 +90,7 @@ pub struct PagedLogPrefetchRequest {
 
 /// 分页日志可见行高亮后台预取请求标记。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LogHighlightPrefetchRequest {
+pub(crate) struct LogHighlightPrefetchRequest {
     /// 预取所属的来源节点 ID。
     pub source_id: SourceId,
     /// 高亮语言。
@@ -103,7 +103,7 @@ pub struct LogHighlightPrefetchRequest {
 
 /// 单个日志 tab 的阅读区 UI 状态。
 #[derive(Clone, Debug)]
-pub struct LogTabViewState {
+pub(crate) struct LogTabViewState {
     /// 小日志 uniform_list 滚动句柄。
     pub scroll_handle: UniformListScrollHandle,
     /// 大日志分页视口测量句柄。
@@ -132,7 +132,7 @@ pub struct LogTabViewState {
 
 /// 日志正文滚动条方向。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LogScrollbarAxis {
+pub(crate) enum LogScrollbarAxis {
     /// 纵向滚动条。
     Vertical,
     /// 横向滚动条。
@@ -141,7 +141,7 @@ pub enum LogScrollbarAxis {
 
 /// 日志正文滚动条拖拽状态。
 #[derive(Clone, Copy, Debug)]
-pub struct LogScrollbarDrag {
+pub(crate) struct LogScrollbarDrag {
     /// 被拖动的标签页 ID。
     pub tab_id: usize,
     /// 当前拖动方向。

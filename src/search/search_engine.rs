@@ -25,7 +25,7 @@ const SEARCH_LINE_CHUNK_SIZE: usize = 4096;
 
 /// 搜索范围，决定 UI 展示的进度类型和目标收集方式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchScope {
+pub(crate) enum SearchScope {
     /// 当前激活日志文件。
     CurrentFile,
     /// 来源树中的一个目录或压缩包目录。
@@ -36,7 +36,7 @@ pub enum SearchScope {
 
 impl SearchScope {
     /// 返回搜索范围中文名称，用于窗口分段控件和结果面板展示。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::CurrentFile => "当前文件",
             Self::Directory => "目录",
@@ -47,7 +47,7 @@ impl SearchScope {
 
 /// 一次搜索的关键字和基础选项。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SearchQuery {
+pub(crate) struct SearchQuery {
     /// 原始关键字；空关键字由应用层拦截，不进入搜索引擎。
     pub keyword: String,
     /// 是否大小写敏感；当前 UI 默认 false。
@@ -58,7 +58,8 @@ pub struct SearchQuery {
 
 impl SearchQuery {
     /// 构造默认大小写不敏感的关键字查询。
-    pub fn new(keyword: String) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(keyword: String) -> Self {
         Self {
             keyword,
             case_sensitive: false,
@@ -69,7 +70,7 @@ impl SearchQuery {
 
 /// 单个可搜索日志目标。
 #[derive(Clone, Debug)]
-pub struct SearchTarget {
+pub(crate) struct SearchTarget {
     /// 来源树节点 ID，用于结果点击后打开对应日志 tab。
     pub source_id: SourceId,
     /// UI 展示名称。
@@ -82,11 +83,7 @@ pub struct SearchTarget {
 
 /// 搜索任务请求。
 #[derive(Clone, Debug)]
-pub struct SearchRequest {
-    /// 搜索 generation，用于 UI 丢弃过期任务事件。
-    pub generation: usize,
-    /// 搜索范围。
-    pub scope: SearchScope,
+pub(crate) struct SearchRequest {
     /// 搜索关键字集合；普通搜索只有一个查询，快搜会包含多个查询。
     pub queries: Vec<SearchQuery>,
     /// 本次搜索目标。
@@ -99,27 +96,22 @@ pub struct SearchRequest {
 
 impl SearchRequest {
     /// 构造普通单关键字搜索请求。
-    pub fn new(
-        generation: usize,
-        scope: SearchScope,
+    #[cfg(test)]
+    pub(crate) fn new(
         query: SearchQuery,
         targets: Vec<SearchTarget>,
         default_encoding: String,
     ) -> Self {
-        Self::with_queries(generation, scope, vec![query], targets, default_encoding)
+        Self::with_queries(vec![query], targets, default_encoding)
     }
 
     /// 构造多关键字搜索请求，调用方需保证查询集合非空。
-    pub fn with_queries(
-        generation: usize,
-        scope: SearchScope,
+    pub(crate) fn with_queries(
         queries: Vec<SearchQuery>,
         targets: Vec<SearchTarget>,
         default_encoding: String,
     ) -> Self {
         Self {
-            generation,
-            scope,
             queries,
             targets,
             default_encoding,
@@ -128,7 +120,10 @@ impl SearchRequest {
     }
 
     /// 为搜索请求附加当前会话的压缩包密码快照。
-    pub fn with_archive_passwords(mut self, archive_passwords: ArchivePasswordStore) -> Self {
+    pub(crate) fn with_archive_passwords(
+        mut self,
+        archive_passwords: ArchivePasswordStore,
+    ) -> Self {
         self.archive_passwords = archive_passwords;
         self
     }
@@ -136,7 +131,7 @@ impl SearchRequest {
 
 /// 搜索进度；当前文件搜索看行进度，目录和选中文件搜索看文件进度。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SearchProgress {
+pub(crate) struct SearchProgress {
     /// 已扫描文件数量。
     pub scanned_files: usize,
     /// 总文件数量。
@@ -151,7 +146,7 @@ pub struct SearchProgress {
 
 /// 单条搜索结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SearchResult {
+pub(crate) struct SearchResult {
     /// 匹配所在来源节点。
     pub source_id: SourceId,
     /// 匹配文件展示名。
@@ -170,7 +165,7 @@ pub struct SearchResult {
 
 /// 搜索结束摘要。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SearchTaskSummary {
+pub(crate) struct SearchTaskSummary {
     /// 是否因为用户取消而结束。
     pub was_cancelled: bool,
     /// 已扫描文件数量。
@@ -185,7 +180,8 @@ pub struct SearchTaskSummary {
 
 /// 当前日志快速查找扫描结果。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CurrentLogMatchScan {
+#[cfg(test)]
+pub(crate) struct CurrentLogMatchScan {
     /// 按行保存的命中结果；单行内可能包含多个命中范围。
     pub matches: Vec<SearchResult>,
     /// 关键字在当前日志中出现的总次数。
@@ -196,7 +192,7 @@ pub struct CurrentLogMatchScan {
 
 /// 当前日志快速计数结果；只保存出现次数，不缓存所有命中行。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CurrentLogMatchCount {
+pub(crate) struct CurrentLogMatchCount {
     /// 关键字在当前日志中出现的总次数。
     pub match_count: usize,
     /// 已扫描行数。
@@ -205,7 +201,7 @@ pub struct CurrentLogMatchCount {
 
 /// 当前日志快速定位方向；用于“上一个/下一个”只查找最近命中，避免整文件计数。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CurrentLogMatchDirection {
+pub(crate) enum CurrentLogMatchDirection {
     /// 从当前位置向后查找。
     Next,
     /// 从当前位置向前查找。
@@ -214,7 +210,7 @@ pub enum CurrentLogMatchDirection {
 
 /// 当前日志快速定位的起始位置。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CurrentLogMatchPosition {
+pub(crate) struct CurrentLogMatchPosition {
     /// 0 基行号。
     pub line_number: usize,
     /// 当前行内已激活的命中序号；为空时表示从该行正常开始查找。
@@ -223,7 +219,7 @@ pub struct CurrentLogMatchPosition {
 
 /// 当前日志快速定位结果。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CurrentLogMatchNavigation {
+pub(crate) struct CurrentLogMatchNavigation {
     /// 找到的命中行；没有匹配时为空。
     pub result: Option<SearchResult>,
     /// 当前要强调的单个命中范围。
@@ -236,11 +232,11 @@ pub struct CurrentLogMatchNavigation {
 
 /// 真实搜索引擎；保持无状态，便于单元测试和后台任务复用。
 #[derive(Debug, Default)]
-pub struct SearchEngine;
+pub(crate) struct SearchEngine;
 
 impl SearchEngine {
     /// 校验搜索查询；正则模式会提前编译表达式并返回用户可读错误。
-    pub fn validate_query(query: &SearchQuery) -> Result<(), String> {
+    pub(crate) fn validate_query(query: &SearchQuery) -> Result<(), String> {
         SearchMatcher::new(query).map(|_| ())
     }
 
@@ -253,7 +249,8 @@ impl SearchEngine {
     /// - `cancel_token`：外部取消标记，旧任务会在行块边界尽快退出。
     ///
     /// 返回值：当前日志所有命中行与出现总次数；不会读取目录或其它日志文件。
-    pub fn scan_current_log_matches(
+    #[cfg(test)]
+    pub(crate) fn scan_current_log_matches(
         target: SearchTarget,
         handle: LogReaderHandle,
         query: SearchQuery,
@@ -309,7 +306,7 @@ impl SearchEngine {
     /// - `cancel_token`：外部取消标记，旧任务会在行边界尽快退出。
     ///
     /// 返回值：出现次数和扫描行数；该接口专供“计数”按钮使用，避免高频关键字占用大量内存。
-    pub fn count_current_log_matches(
+    pub(crate) fn count_current_log_matches(
         handle: LogReaderHandle,
         query: SearchQuery,
         cancel_token: Arc<AtomicBool>,
@@ -359,7 +356,7 @@ impl SearchEngine {
     /// - `cancel_token`：外部取消标记。
     ///
     /// 返回值：最近的单个命中；没有匹配时返回空结果。该接口不会构建完整计数缓存。
-    pub fn find_current_log_match(
+    pub(crate) fn find_current_log_match(
         target: SearchTarget,
         handle: LogReaderHandle,
         query: SearchQuery,
@@ -425,7 +422,7 @@ impl SearchEngine {
     /// - `cancel_token`：外部取消标记，搜索循环会在文件和行块边界检查。
     ///
     /// 返回值：搜索结束摘要；单文件失败会写入 errors，不中断其他文件。
-    pub fn search(
+    pub(crate) fn search(
         request: SearchRequest,
         mut progress_callback: impl FnMut(SearchProgress),
         mut result_batch_callback: impl FnMut(Vec<SearchResult>),
@@ -459,7 +456,6 @@ impl SearchEngine {
             progress_callback(progress.clone());
 
             let handle = match LogFileReader::open(OpenLogRequest {
-                source_id: target.source_id,
                 location: target.location.clone(),
                 label: target.label.clone(),
                 default_encoding: request.default_encoding.clone(),
@@ -1280,7 +1276,7 @@ fn last_match_before_index(
         .iter()
         .enumerate()
         .take(clamped_max)
-        .last()
+        .next_back()
         .map(|(index, range)| (index, range.clone()))
 }
 
@@ -1312,7 +1308,7 @@ fn write_navigation_result(
 
 /// 单行多关键字匹配结果；同一行只生成一条搜索结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SearchLineMatches {
+pub(crate) struct SearchLineMatches {
     /// 合并后的命中范围，范围基于原始行文本的 UTF-8 byte range。
     pub match_ranges: Vec<Range<usize>>,
     /// 本行命中的关键字，按配置顺序去重保留。
@@ -1320,14 +1316,14 @@ pub struct SearchLineMatches {
 }
 
 /// 多关键字搜索匹配器集合，保证每个关键字只在任务启动时编译一次。
-pub struct SearchMatcherSet {
+pub(crate) struct SearchMatcherSet {
     /// 已编译匹配器及其展示关键字。
     matchers: Vec<(String, SearchMatcher)>,
 }
 
 impl SearchMatcherSet {
     /// 构造匹配器集合，并在快搜模式下指出具体失败关键字。
-    pub fn new(queries: &[SearchQuery]) -> Result<Self, String> {
+    pub(crate) fn new(queries: &[SearchQuery]) -> Result<Self, String> {
         if queries.is_empty() {
             return Err("请输入搜索关键字".to_string());
         }
@@ -1348,7 +1344,7 @@ impl SearchMatcherSet {
     }
 
     /// 查找单行内所有关键字命中；多个关键字命中同一行时合并为一条结果。
-    pub fn find_line_matches(&self, line: &str) -> Option<SearchLineMatches> {
+    pub(crate) fn find_line_matches(&self, line: &str) -> Option<SearchLineMatches> {
         let mut all_ranges = Vec::new();
         let mut matched_keywords = Vec::new();
 
@@ -1372,7 +1368,7 @@ impl SearchMatcherSet {
 }
 
 /// 编译后的搜索匹配器，保证正则表达式只在任务启动时构造一次。
-pub enum SearchMatcher {
+pub(crate) enum SearchMatcher {
     /// 普通关键字搜索。
     Literal(SearchQuery),
     /// 正则表达式搜索。
@@ -1381,7 +1377,7 @@ pub enum SearchMatcher {
 
 impl SearchMatcher {
     /// 根据查询构造匹配器，并把底层正则错误映射为中文提示。
-    pub fn new(query: &SearchQuery) -> Result<Self, String> {
+    pub(crate) fn new(query: &SearchQuery) -> Result<Self, String> {
         if query.regex_enabled {
             compile_search_regex(query).map(Self::Regex)
         } else {
@@ -1390,7 +1386,7 @@ impl SearchMatcher {
     }
 
     /// 在单行文本中查找所有命中范围。
-    pub fn find_match_ranges(&self, line: &str) -> Option<Vec<Range<usize>>> {
+    pub(crate) fn find_match_ranges(&self, line: &str) -> Option<Vec<Range<usize>>> {
         match self {
             Self::Literal(query) => find_literal_match_ranges(line, query),
             Self::Regex(regex) => find_regex_match_ranges(line, regex),
@@ -1403,7 +1399,7 @@ impl SearchMatcher {
     /// - `line`：已经解码并展开 tab 的展示行文本。
     ///
     /// 返回值：该行中的非重叠命中次数；正则零宽命中会被跳过，避免无意义计数。
-    pub fn count_in_line(&self, line: &str) -> usize {
+    pub(crate) fn count_in_line(&self, line: &str) -> usize {
         match self {
             Self::Literal(query) => count_literal_matches(line, query),
             Self::Regex(regex) => regex
@@ -1414,7 +1410,7 @@ impl SearchMatcher {
     }
 
     /// 返回匹配器对应的展示关键字。
-    pub fn keyword_label(&self) -> String {
+    pub(crate) fn keyword_label(&self) -> String {
         match self {
             Self::Literal(query) => query.keyword.clone(),
             Self::Regex(regex) => regex.as_str().to_string(),
@@ -1634,7 +1630,7 @@ mod tests {
 
     use super::{
         CurrentLogMatchDirection, CurrentLogMatchPosition, SearchEngine, SearchQuery,
-        SearchRequest, SearchScope, SearchTarget, find_match_ranges,
+        SearchRequest, SearchTarget, find_match_ranges,
     };
     use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
@@ -1708,8 +1704,6 @@ mod tests {
     #[test]
     fn invalid_regex_query_is_reported_without_scanning_files() {
         let request = SearchRequest::new(
-            1,
-            SearchScope::CurrentFile,
             SearchQuery {
                 keyword: "(".to_string(),
                 case_sensitive: false,
@@ -1743,7 +1737,6 @@ mod tests {
         fs::write(&path, "ERROR ERROR\ninfo\nerror\n").unwrap();
         let source_id = SourceId(7);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "count.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1779,9 +1772,7 @@ mod tests {
             6
         ));
         fs::write(&path, "ERROR ERROR\ninfo\nerror\n").unwrap();
-        let source_id = SourceId(11);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "count-only.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1816,7 +1807,6 @@ mod tests {
         fs::write(&path, text).unwrap();
         let source_id = SourceId(8);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "next.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1867,7 +1857,6 @@ mod tests {
         fs::write(&path, "ERROR one ERROR two\n").unwrap();
         let source_id = SourceId(9);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "inline.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1916,7 +1905,6 @@ mod tests {
         fs::write(&path, "ERROR first\nINFO middle\nerror last\n").unwrap();
         let source_id = SourceId(10);
         let handle = LogFileReader::open(OpenLogRequest {
-            source_id,
             location: SourceLocation::LocalPath(path.clone()),
             label: "prev.log".to_string(),
             default_encoding: "UTF-8".to_string(),
@@ -1958,8 +1946,6 @@ mod tests {
         ));
         fs::write(&path, "INFO start\nERROR failed\nwarn\nerror again\n").unwrap();
         let request = SearchRequest::new(
-            1,
-            SearchScope::CurrentFile,
             SearchQuery::new("error".to_string()),
             vec![SearchTarget {
                 source_id: SourceId(1),
@@ -2000,8 +1986,6 @@ mod tests {
         ));
         fs::write(&path, "ERROR timeout\nWARN only\nINFO ok\n").unwrap();
         let request = SearchRequest::with_queries(
-            1,
-            SearchScope::CurrentFile,
             vec![
                 SearchQuery::new("ERROR".to_string()),
                 SearchQuery::new("timeout".to_string()),

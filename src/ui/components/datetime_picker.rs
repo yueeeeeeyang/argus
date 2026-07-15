@@ -24,7 +24,7 @@ const DATETIME_WEEKDAY_LABELS: [&str; 7] = ["一", "二", "三", "四", "五", "
 
 /// 日期时间选择器当前展示值。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DateTimePickerValue {
+pub(crate) struct DateTimePickerValue {
     /// 年。
     pub year: i32,
     /// 月。
@@ -53,7 +53,7 @@ struct DateTimePickerDay {
 }
 
 /// 渲染 Runtime 使用的日期时间选择器浮层。
-pub fn render_datetime_picker(
+pub(crate) fn render_datetime_picker(
     analysis_id: usize,
     input_kind: RuntimeFilterInputKind,
     title: &'static str,

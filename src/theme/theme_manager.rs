@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -17,13 +17,13 @@ use crate::theme::{AppTheme, SyntaxTheme};
 /// 内置深色主题 TOML 内容，使用 include_str 保证打包后仍可读取。
 const BUILTIN_DARK_THEME_TOML: &str = include_str!("../../themes/dark.toml");
 /// 内置主题在设置下拉框和持久化配置中使用的稳定 ID。
-pub const BUILTIN_DARK_THEME_ID: &str = "dark.toml";
+pub(crate) const BUILTIN_DARK_THEME_ID: &str = "dark.toml";
 /// 深色主题模式标识。
 const DARK_MODE: &str = "dark";
 
 /// 主题加载错误，区分 TOML 解析和颜色令牌校验失败。
 #[derive(Debug, Error)]
-pub enum ThemeError {
+pub(crate) enum ThemeError {
     /// 主题文件 TOML 结构不合法。
     #[error("主题 TOML 解析失败：{0}")]
     Toml(#[from] toml::de::Error),
@@ -47,7 +47,7 @@ pub enum ThemeError {
 
 /// 主题管理器，负责持有内置主题和用户主题加载警告。
 #[derive(Clone, Debug)]
-pub struct ThemeManager {
+pub(crate) struct ThemeManager {
     /// 按主题 ID 索引的内置主题；当前内置主题仅保留暗色。
     builtin_themes: HashMap<String, AppTheme>,
     /// 用户主题集合，从 `~/.argus/themes/*.toml` 扫描得到。
@@ -58,22 +58,16 @@ pub struct ThemeManager {
 
 /// 已加载的用户主题元信息。
 #[derive(Clone, Debug)]
-pub struct LoadedUserTheme {
+pub(crate) struct LoadedUserTheme {
     /// 主题下拉框使用的稳定 ID，当前固定为 TOML 文件名。
     pub id: String,
-    /// 主题名称。
-    pub name: String,
-    /// 主题模式。
-    pub mode: String,
-    /// 主题文件路径。
-    pub path: PathBuf,
     /// 解析后的主题令牌。
     pub theme: AppTheme,
 }
 
 /// 设置页主题下拉框展示选项。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ThemeOption {
+pub(crate) struct ThemeOption {
     /// 选项 ID；内置主题和用户主题都使用文件名。
     pub id: String,
     /// 展示文案；只显示主题文件主名，不显示 `.toml` 扩展名。
@@ -148,12 +142,12 @@ impl ThemeManager {
     /// 加载默认主题目录下的内置主题和用户主题。
     ///
     /// 返回值：始终返回可用管理器；内置主题解析失败时使用紧急 fallback，用户主题失败则记录 warning。
-    pub fn load_default() -> Self {
+    pub(crate) fn load_default() -> Self {
         Self::load_with_user_theme_dir(&argus_theme_dir())
     }
 
     /// 使用指定用户主题目录加载主题，便于单元测试隔离真实用户目录。
-    pub fn load_with_user_theme_dir(user_theme_dir: &Path) -> Self {
+    pub(crate) fn load_with_user_theme_dir(user_theme_dir: &Path) -> Self {
         let mut manager = Self {
             builtin_themes: Self::load_builtin_themes(),
             user_themes: Vec::new(),
@@ -164,7 +158,7 @@ impl ThemeManager {
     }
 
     /// 返回指定主题 ID 对应的主题，未知值回退内置暗色主题。
-    pub fn theme_for_id(&self, theme_id: &str) -> AppTheme {
+    pub(crate) fn theme_for_id(&self, theme_id: &str) -> AppTheme {
         let resolved_id = self.resolve_theme_id(theme_id);
         self.builtin_themes
             .get(&resolved_id)
@@ -179,13 +173,8 @@ impl ThemeManager {
             .unwrap_or_else(AppTheme::dark)
     }
 
-    /// 兼容旧调用方的模式入口，`system/light/dark` 都归并到当前暗色主题选择。
-    pub fn theme_for_mode(&self, mode: &str) -> AppTheme {
-        self.theme_for_id(mode)
-    }
-
     /// 返回可在设置下拉框中展示的主题列表。
-    pub fn theme_options(&self) -> Vec<ThemeOption> {
+    pub(crate) fn theme_options(&self) -> Vec<ThemeOption> {
         let mut options = vec![ThemeOption {
             id: BUILTIN_DARK_THEME_ID.to_string(),
             label: theme_label_from_id(BUILTIN_DARK_THEME_ID),
@@ -198,7 +187,7 @@ impl ThemeManager {
     }
 
     /// 将配置文件或旧版本设置值规范化为当前可用主题 ID。
-    pub fn resolve_theme_id(&self, value: &str) -> String {
+    pub(crate) fn resolve_theme_id(&self, value: &str) -> String {
         let trimmed = value.trim();
         if trimmed.is_empty()
             || matches!(
@@ -219,7 +208,7 @@ impl ThemeManager {
     }
 
     /// 返回主题 ID 对应的下拉展示文案。
-    pub fn label_for_theme_id(&self, theme_id: &str) -> String {
+    pub(crate) fn label_for_theme_id(&self, theme_id: &str) -> String {
         self.theme_options()
             .into_iter()
             .find(|option| option.id == theme_id)
@@ -228,17 +217,19 @@ impl ThemeManager {
     }
 
     /// 返回用户主题加载警告。
-    pub fn warnings(&self) -> &[String] {
+    #[cfg(test)]
+    pub(crate) fn warnings(&self) -> &[String] {
         &self.warnings
     }
 
     /// 返回已经通过校验的用户主题列表。
-    pub fn user_themes(&self) -> &[LoadedUserTheme] {
+    #[cfg(test)]
+    pub(crate) fn user_themes(&self) -> &[LoadedUserTheme] {
         &self.user_themes
     }
 
     /// 从内置深色 TOML 构造主题，供旧 builtin 模块保持兼容。
-    pub fn builtin_dark_theme() -> AppTheme {
+    pub(crate) fn builtin_dark_theme() -> AppTheme {
         parse_theme_toml(BUILTIN_DARK_THEME_TOML)
             .map(|(_, theme)| theme)
             .unwrap_or_else(|_| AppTheme::dark())
@@ -287,7 +278,7 @@ impl ThemeManager {
                 .map_err(|error| error.to_string())
                 .and_then(|text| parse_theme_toml(&text).map_err(|error| error.to_string()))
             {
-                Ok((file, theme)) => {
+                Ok((_, theme)) => {
                     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                         self.warnings
                             .push(format!("跳过用户主题 {}：文件名无法读取", path.display()));
@@ -304,9 +295,6 @@ impl ThemeManager {
                     }
                     self.user_themes.push(LoadedUserTheme {
                         id: file_name.to_string(),
-                        name: file.name,
-                        mode: file.mode,
-                        path,
                         theme,
                     });
                 }
@@ -315,8 +303,7 @@ impl ThemeManager {
                     .push(format!("跳过用户主题 {}：{error}", path.display())),
             }
         }
-        self.user_themes
-            .sort_by(|left, right| left.id.to_lowercase().cmp(&right.id.to_lowercase()));
+        self.user_themes.sort_by_key(|left| left.id.to_lowercase());
     }
 }
 

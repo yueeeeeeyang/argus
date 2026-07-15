@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：解析运行期请求耗时日志，按请求地址合并统计并保留请求 SQL 明细。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -16,13 +16,13 @@ use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::{ArchiveFormat, ArchivePasswordKey, ArchivePasswordStore};
-use crate::loader::{
-    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceLocation, SourceTreeNode,
-};
+use crate::loader::{SourceId, SourceLocation, SourceTreeNode};
 use crate::reader::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
 use crate::reader::stream_backend::ArchiveStreamBackend;
 use crate::utils::path::normalize_archive_entry_path;
 use zip::ZipArchive;
+
+use super::source_input::{collect_analysis_files, resolve_analysis_location};
 
 /// Runtime 请求日志慢 SQL 判断比例；SQL 累积耗时超过请求总耗时 90% 即认为该请求慢。
 const SLOW_SQL_REQUEST_PERCENT: u64 = 90;
@@ -33,7 +33,7 @@ const MIN_PARALLEL_ZIP_TARGETS: usize = 64;
 
 /// 分析任务输入目标类型。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RuntimeAnalysisTargetKind {
+pub(crate) enum RuntimeAnalysisTargetKind {
     /// 单个日志文件，可能来自本地或压缩包条目。
     File,
     /// 本地目录；后台会递归收集其中的 `.log` 文件。
@@ -42,7 +42,7 @@ pub enum RuntimeAnalysisTargetKind {
 
 /// Runtime 分析任务输入目标。
 #[derive(Clone, Debug)]
-pub struct RuntimeAnalysisTarget {
+pub(crate) struct RuntimeAnalysisTarget {
     /// 来源树节点 ID；目录递归生成的子文件沿用目录 ID 作为任务上下文。
     pub source_id: SourceId,
     /// 来源位置，目录仅支持本地路径。
@@ -61,7 +61,7 @@ pub struct RuntimeAnalysisTarget {
 
 /// 单条 SQL 明细记录。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlRecord {
+pub(crate) struct RuntimeSqlRecord {
     /// SQL 执行总耗时，单位毫秒。
     pub execute_ms: u64,
     /// 获取数据库连接耗时，单位毫秒。
@@ -80,7 +80,7 @@ pub struct RuntimeSqlRecord {
 
 /// SQL 频率分析行。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeSqlFrequencyAnalysisRow {
+pub(crate) struct RuntimeSqlFrequencyAnalysisRow {
     /// 归一化后的 SQL 结构文本。
     pub normalized_sql: String,
     /// 当前结构下所有 SQL 的执行总耗时。
@@ -91,7 +91,7 @@ pub struct RuntimeSqlFrequencyAnalysisRow {
 
 impl RuntimeSqlFrequencyAnalysisRow {
     /// 返回当前 SQL 结构的平均执行耗时。
-    pub fn average_execute_ms(&self) -> f64 {
+    pub(crate) fn average_execute_ms(&self) -> f64 {
         if self.execute_count == 0 {
             0.0
         } else {
@@ -102,7 +102,7 @@ impl RuntimeSqlFrequencyAnalysisRow {
 
 /// 慢 SQL 归一化聚合行。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeSlowSqlSummaryRow {
+pub(crate) struct RuntimeSlowSqlSummaryRow {
     /// 归一化后的 SQL 结构文本。
     pub normalized_sql: String,
     /// 当前结构下所有 SQL 的执行总耗时。
@@ -113,7 +113,7 @@ pub struct RuntimeSlowSqlSummaryRow {
 
 impl RuntimeSlowSqlSummaryRow {
     /// 返回当前 SQL 结构的平均执行耗时。
-    pub fn average_execute_ms(&self) -> f64 {
+    pub(crate) fn average_execute_ms(&self) -> f64 {
         if self.execute_count == 0 {
             0.0
         } else {
@@ -124,7 +124,7 @@ impl RuntimeSlowSqlSummaryRow {
 
 /// SQL 频率详情行，表示某个 SQL 结构的一次具体执行。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlFrequencyDetailRow {
+pub(crate) struct RuntimeSqlFrequencyDetailRow {
     /// 请求记录在结果集中的稳定索引。
     pub request_index: usize,
     /// SQL 记录在当前请求中的稳定索引。
@@ -135,7 +135,7 @@ pub struct RuntimeSqlFrequencyDetailRow {
 
 /// 单个请求日志文件解析后的记录。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeRequestRecord {
+pub(crate) struct RuntimeRequestRecord {
     /// 记录在 `RuntimeAnalysisResult.requests` 中的稳定索引。
     pub index: usize,
     /// 来源树节点 ID。
@@ -170,7 +170,7 @@ pub struct RuntimeRequestRecord {
 
 /// 按请求地址合并后的总览行。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeRequestSummary {
+pub(crate) struct RuntimeRequestSummary {
     /// 请求地址。
     pub request_path: String,
     /// 请求日志数量。
@@ -187,7 +187,7 @@ pub struct RuntimeRequestSummary {
 
 /// 被跳过或读取失败的 Runtime 日志。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSkippedFile {
+pub(crate) struct RuntimeSkippedFile {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 文件展示名称。
@@ -198,7 +198,7 @@ pub struct RuntimeSkippedFile {
 
 /// Runtime 分析结果，供 UI 三层表格直接读取。
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeAnalysisResult {
+pub(crate) struct RuntimeAnalysisResult {
     /// 所有成功解析的请求记录。
     pub requests: Vec<RuntimeRequestRecord>,
     /// 按请求地址合并后的总览行。
@@ -213,7 +213,7 @@ pub struct RuntimeAnalysisResult {
 
 /// Runtime 分析过滤输入快照，保存用户在过滤栏中输入的原始文本。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RuntimeAnalysisFilterSnapshot {
+pub(crate) struct RuntimeAnalysisFilterSnapshot {
     /// 任意关键字过滤输入原文。
     pub keyword: String,
     /// 用户名过滤输入原文。
@@ -226,7 +226,7 @@ pub struct RuntimeAnalysisFilterSnapshot {
 
 /// Runtime 分析过滤条件，解析一次后供后台缓存和 UI 回退路径复用。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RuntimeAnalysisFilterCriteria {
+pub(crate) struct RuntimeAnalysisFilterCriteria {
     /// 关键字小写文本，空字符串表示不启用。
     pub keyword: String,
     /// 用户名过滤关键字列表，空列表表示不启用。
@@ -239,27 +239,22 @@ pub struct RuntimeAnalysisFilterCriteria {
 
 impl RuntimeAnalysisFilterCriteria {
     /// 返回是否配置了任意有效过滤条件。
-    pub fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         !self.keyword.is_empty()
             || !self.usernames.is_empty()
             || self.start_timestamp_ms.is_some()
             || self.end_timestamp_ms.is_some()
     }
 
-    /// 判断关键字是否为空或命中已经小写化的文本。
-    pub fn keyword_matches_lowercase(&self, lowercase_text: &str) -> bool {
-        self.keyword.is_empty() || lowercase_text.contains(&self.keyword)
-    }
-
     /// 判断关键字是否为空或命中普通文本；只用于少量汇总字段的回退匹配。
-    pub fn keyword_matches_text(&self, text: &str) -> bool {
+    pub(crate) fn keyword_matches_text(&self, text: &str) -> bool {
         self.keyword.is_empty() || text.to_lowercase().contains(&self.keyword)
     }
 }
 
 /// Runtime 过滤后的统一行缓存，供统计、SQL 频率和慢 SQL 三种结果类型共享。
 #[derive(Clone, Debug)]
-pub struct RuntimeAnalysisFilterRows {
+pub(crate) struct RuntimeAnalysisFilterRows {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeAnalysisFilterSnapshot,
     /// 当前过滤条件下的统计总览行。
@@ -270,17 +265,17 @@ pub struct RuntimeAnalysisFilterRows {
 
 impl RuntimeAnalysisResult {
     /// 返回成功解析的请求日志数量。
-    pub fn request_count(&self) -> usize {
+    pub(crate) fn request_count(&self) -> usize {
         self.requests.len()
     }
 
     /// 返回合并后的请求地址数量。
-    pub fn summary_count(&self) -> usize {
+    pub(crate) fn summary_count(&self) -> usize {
         self.summaries.len()
     }
 
     /// 返回跳过文件数量。
-    pub fn skipped_count(&self) -> usize {
+    pub(crate) fn skipped_count(&self) -> usize {
         self.skipped_files.len()
     }
 }
@@ -293,7 +288,7 @@ impl RuntimeAnalysisResult {
 /// - `loader_config`：日志加载配置，目录递归会尊重符号链接策略。
 ///
 /// 返回值：可直接供 Runtime 分析页渲染的聚合结果。
-pub fn analyze_runtime_targets(
+pub(crate) fn analyze_runtime_targets(
     targets: Vec<RuntimeAnalysisTarget>,
     default_encoding: String,
     loader_config: LoaderConfig,
@@ -338,7 +333,8 @@ pub fn analyze_runtime_targets(
 /// - `text`：文件内容。
 ///
 /// 返回值：单个请求日志记录，索引由上层聚合时写入。
-pub fn parse_runtime_request_text(
+#[cfg(test)]
+pub(crate) fn parse_runtime_request_text(
     source_id: SourceId,
     label: impl Into<String>,
     path: impl Into<String>,
@@ -359,7 +355,7 @@ pub fn parse_runtime_request_text(
 }
 
 /// 由请求记录构建总览聚合结果。
-pub fn build_runtime_analysis_result(
+pub(crate) fn build_runtime_analysis_result(
     requests: Vec<RuntimeRequestRecord>,
     skipped_files: Vec<RuntimeSkippedFile>,
     total_files: usize,
@@ -430,7 +426,7 @@ pub fn build_runtime_analysis_result(
 }
 
 /// 构建无过滤条件下的 SQL 频率分析结果。
-pub fn build_runtime_sql_frequency_rows(
+pub(crate) fn build_runtime_sql_frequency_rows(
     requests: &[RuntimeRequestRecord],
 ) -> Vec<RuntimeSqlFrequencyAnalysisRow> {
     let mut grouped = BTreeMap::<String, RuntimeSqlFrequencyAnalysisRow>::new();
@@ -454,7 +450,7 @@ pub fn build_runtime_sql_frequency_rows(
 }
 
 /// 构建无过滤条件下的慢 SQL 分析结果。
-pub fn build_runtime_slow_sql_rows(
+pub(crate) fn build_runtime_slow_sql_rows(
     requests: &[RuntimeRequestRecord],
 ) -> Vec<RuntimeSlowSqlSummaryRow> {
     let mut grouped = BTreeMap::<String, RuntimeSlowSqlSummaryRow>::new();
@@ -477,7 +473,7 @@ pub fn build_runtime_slow_sql_rows(
 }
 
 /// 按过滤条件构建 SQL 频率分析结果；用于进入 SQL 频率页时后台懒计算。
-pub fn build_runtime_sql_frequency_rows_for_filter(
+pub(crate) fn build_runtime_sql_frequency_rows_for_filter(
     result: &RuntimeAnalysisResult,
     filter: &RuntimeAnalysisFilterSnapshot,
 ) -> Vec<RuntimeSqlFrequencyAnalysisRow> {
@@ -515,7 +511,7 @@ pub fn build_runtime_sql_frequency_rows_for_filter(
 }
 
 /// 按过滤条件构建慢 SQL 分析结果；用于进入慢 SQL 页时后台懒计算。
-pub fn build_runtime_slow_sql_rows_for_filter(
+pub(crate) fn build_runtime_slow_sql_rows_for_filter(
     result: &RuntimeAnalysisResult,
     filter: &RuntimeAnalysisFilterSnapshot,
 ) -> Vec<RuntimeSlowSqlSummaryRow> {
@@ -552,7 +548,7 @@ pub fn build_runtime_slow_sql_rows_for_filter(
 }
 
 /// 根据原始过滤输入构造可执行的 Runtime 过滤条件。
-pub fn parse_runtime_analysis_filter_criteria(
+pub(crate) fn parse_runtime_analysis_filter_criteria(
     filter: &RuntimeAnalysisFilterSnapshot,
 ) -> RuntimeAnalysisFilterCriteria {
     RuntimeAnalysisFilterCriteria {
@@ -564,7 +560,7 @@ pub fn parse_runtime_analysis_filter_criteria(
 }
 
 /// 解析用户名过滤输入，支持英文逗号和中文逗号分隔多个模糊匹配关键字。
-pub fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
+pub(crate) fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
     raw.split([',', '，'])
         .map(|part| part.trim().to_lowercase())
         .filter(|part| !part.is_empty())
@@ -572,7 +568,7 @@ pub fn parse_runtime_username_filters(raw: &str) -> Vec<String> {
 }
 
 /// 解析 Runtime 时间过滤输入；支持毫秒时间戳和常见本地时间格式。
-pub fn parse_runtime_filter_time_value(raw: &str, is_end: bool) -> Option<i64> {
+pub(crate) fn parse_runtime_filter_time_value(raw: &str, is_end: bool) -> Option<i64> {
     let value = raw.trim();
     if value.is_empty() {
         return None;
@@ -609,7 +605,7 @@ pub fn parse_runtime_filter_time_value(raw: &str, is_end: bool) -> Option<i64> {
 }
 
 /// 在后台构建 Runtime 三类结果共享的过滤行缓存。
-pub fn build_runtime_analysis_filter_rows(
+pub(crate) fn build_runtime_analysis_filter_rows(
     result: &RuntimeAnalysisResult,
     filter: RuntimeAnalysisFilterSnapshot,
 ) -> RuntimeAnalysisFilterRows {
@@ -652,7 +648,7 @@ pub fn build_runtime_analysis_filter_rows(
 }
 
 /// 按执行次数、平均耗时和 SQL 文本稳定排序 SQL 频率分析结果。
-pub fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRow]) {
+pub(crate) fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRow]) {
     rows.sort_by(|left, right| {
         right
             .execute_count
@@ -668,7 +664,7 @@ pub fn sort_runtime_sql_frequency_rows(rows: &mut [RuntimeSqlFrequencyAnalysisRo
 }
 
 /// 按平均执行耗时、执行次数和 SQL 文本稳定排序慢 SQL 聚合结果。
-pub fn sort_runtime_slow_sql_summary_rows(rows: &mut [RuntimeSlowSqlSummaryRow]) {
+pub(crate) fn sort_runtime_slow_sql_summary_rows(rows: &mut [RuntimeSlowSqlSummaryRow]) {
     rows.sort_by(|left, right| {
         right
             .average_execute_ms()
@@ -680,7 +676,7 @@ pub fn sort_runtime_slow_sql_summary_rows(rows: &mut [RuntimeSlowSqlSummaryRow])
 }
 
 /// 按执行耗时和原始位置稳定排序 SQL 频率详情结果。
-pub fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDetailRow]) {
+pub(crate) fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDetailRow]) {
     rows.sort_by(|left, right| {
         right
             .execute_ms
@@ -691,7 +687,7 @@ pub fn sort_runtime_sql_frequency_detail_rows(rows: &mut [RuntimeSqlFrequencyDet
 }
 
 /// 判断请求是否命中用户名和时间区间过滤。
-pub fn runtime_request_matches_cross_filters(
+pub(crate) fn runtime_request_matches_cross_filters(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeAnalysisFilterCriteria,
 ) -> bool {
@@ -717,7 +713,7 @@ pub fn runtime_request_matches_cross_filters(
 }
 
 /// 判断请求明细行是否命中关键字；SQL 命中时所属请求也视为命中。
-pub fn runtime_request_matches_keyword(
+pub(crate) fn runtime_request_matches_keyword(
     request: &RuntimeRequestRecord,
     criteria: &RuntimeAnalysisFilterCriteria,
 ) -> bool {
@@ -733,7 +729,7 @@ pub fn runtime_request_matches_keyword(
 }
 
 /// 判断 SQL 明细行是否命中关键字；同时纳入所属请求元信息，便于跨层检索。
-pub fn runtime_sql_matches_keyword(
+pub(crate) fn runtime_sql_matches_keyword(
     request: &RuntimeRequestRecord,
     sql: &RuntimeSqlRecord,
     criteria: &RuntimeAnalysisFilterCriteria,
@@ -784,7 +780,7 @@ fn runtime_sql_fields_match_keyword(
 }
 
 /// 从原始 summary 的请求索引中应用过滤并重新计算聚合统计。
-pub fn filtered_runtime_summary_from_indices(
+pub(crate) fn filtered_runtime_summary_from_indices(
     result: &RuntimeAnalysisResult,
     summary: &RuntimeRequestSummary,
     criteria: &RuntimeAnalysisFilterCriteria,
@@ -892,7 +888,7 @@ fn format_ratio_for_search(ratio: f64) -> String {
 /// - `sql`：Runtime 日志中记录的 SQL 原文。
 ///
 /// 返回值：大小写和空白稳定、常见字面量替换为 `?` 的 SQL 结构文本。
-pub fn normalize_runtime_sql_structure(sql: &str) -> String {
+pub(crate) fn normalize_runtime_sql_structure(sql: &str) -> String {
     let mut tokens = Vec::new();
     let mut chars = sql.chars().peekable();
     while let Some(ch) = chars.peek().copied() {
@@ -1113,80 +1109,23 @@ fn collect_runtime_log_files(
     root: &Path,
     loader_config: &LoaderConfig,
 ) -> Result<Vec<RuntimeAnalysisTarget>> {
-    if !root.is_dir() {
-        bail!("{} 不是本地目录", root.display());
-    }
-
-    let mut paths = Vec::new();
-    let mut visited_dirs = BTreeSet::new();
-    collect_runtime_log_file_paths(
-        root,
-        loader_config.follow_symlinks,
-        &mut visited_dirs,
-        &mut paths,
-    )?;
-    paths.sort();
-
-    Ok(paths
-        .into_iter()
-        .filter_map(|path| {
-            let label = path.file_name()?.to_string_lossy().to_string();
-            Some(RuntimeAnalysisTarget {
-                source_id,
-                location: SourceLocation::LocalPath(path.clone()),
-                archive_probe_node: None,
-                label,
-                path: path.display().to_string(),
-                kind: RuntimeAnalysisTargetKind::File,
-                archive_passwords: ArchivePasswordStore::default(),
+    Ok(
+        collect_analysis_files(root, loader_config.follow_symlinks, has_log_extension)?
+            .into_iter()
+            .filter_map(|path| {
+                let label = path.file_name()?.to_string_lossy().to_string();
+                Some(RuntimeAnalysisTarget {
+                    source_id,
+                    location: SourceLocation::LocalPath(path.clone()),
+                    archive_probe_node: None,
+                    label,
+                    path: path.display().to_string(),
+                    kind: RuntimeAnalysisTargetKind::File,
+                    archive_passwords: ArchivePasswordStore::default(),
+                })
             })
-        })
-        .collect())
-}
-
-/// 深度优先收集 `.log` 文件；符号链接策略与来源加载配置保持一致。
-fn collect_runtime_log_file_paths(
-    dir: &Path,
-    follow_symlinks: bool,
-    visited_dirs: &mut BTreeSet<PathBuf>,
-    paths: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let canonical_dir = fs::canonicalize(dir)
-        .with_context(|| format!("无法解析目录真实路径：{}", dir.display()))?;
-    if !visited_dirs.insert(canonical_dir) {
-        return Ok(());
-    }
-
-    let mut entries = fs::read_dir(dir)
-        .with_context(|| format!("无法读取目录：{}", dir.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .with_context(|| format!("无法遍历目录：{}", dir.display()))?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let link_metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("无法读取文件元数据：{}", path.display()))?;
-        let is_symlink = link_metadata.file_type().is_symlink();
-        if is_symlink && !follow_symlinks {
-            continue;
-        }
-
-        let metadata = if is_symlink && follow_symlinks {
-            fs::metadata(&path)
-        } else {
-            Ok(link_metadata)
-        }
-        .with_context(|| format!("无法读取文件元数据：{}", path.display()))?;
-
-        if metadata.is_dir() {
-            collect_runtime_log_file_paths(&path, follow_symlinks, visited_dirs, paths)?;
-        } else if metadata.is_file() && has_log_extension(&path) {
-            paths.push(path);
-        }
-    }
-
-    Ok(())
+            .collect(),
+    )
 }
 
 /// 判断路径是否是 `.log` 文件，大小写不敏感。
@@ -1273,7 +1212,7 @@ fn read_runtime_requests_parallel(
         outcomes[order] = Some(outcome);
     }
 
-    outcomes.into_iter().filter_map(|outcome| outcome).collect()
+    outcomes.into_iter().flatten().collect()
 }
 
 /// 解析 Runtime 目标的文件名和真实读取位置；失败时生成可展示跳过记录。
@@ -1743,22 +1682,13 @@ fn resolve_runtime_target_location(
     target: &RuntimeAnalysisTarget,
     loader_config: &LoaderConfig,
 ) -> Result<SourceLocation> {
-    let Some(node) = target.archive_probe_node.clone() else {
-        return Ok(target.location.clone());
-    };
-
-    let probe_result = LogSourceLoader::new(loader_config.clone())
-        .with_archive_passwords(target.archive_passwords.clone())
-        .probe_archive_nodes(vec![SourceArchiveProbeRequest {
-            source_id: target.source_id,
-            node,
-        }])
-        .into_iter()
-        .next()
-        .and_then(|result| result.patch)
-        .ok_or_else(|| anyhow!("压缩包根层不是单文件日志，请展开后选择具体日志条目"))?;
-
-    Ok(probe_result.location)
+    resolve_analysis_location(
+        target.source_id,
+        &target.location,
+        target.archive_probe_node.as_ref(),
+        &target.archive_passwords,
+        loader_config,
+    )
 }
 
 /// 从文件名中解析请求元信息。
@@ -2306,8 +2236,10 @@ mod tests {
         )
         .expect("应能写入 Runtime 日志");
         std::os::unix::fs::symlink(&dir, dir.join("loop")).expect("应能创建目录符号链接回环");
-        let mut config = LoaderConfig::default();
-        config.follow_symlinks = true;
+        let config = LoaderConfig {
+            follow_symlinks: true,
+            ..LoaderConfig::default()
+        };
 
         let targets = collect_runtime_log_files(SourceId(8), &dir, &config)
             .expect("应能在符号链接回环中完成收集");

@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn render_in_memory_scrollbars(
+pub(crate) fn render_in_memory_scrollbars(
     tab_id: usize,
     state: &crate::app::LogTabViewState,
     line_number_width: f32,
@@ -58,7 +58,7 @@ pub fn render_in_memory_scrollbars(
 }
 
 /// 渲染分页日志的横纵滚动条。
-pub fn render_paged_scrollbars(
+pub(crate) fn render_paged_scrollbars(
     app: &ArgusApp,
     tab_id: usize,
     source_id: crate::loader::SourceId,
@@ -120,7 +120,7 @@ pub fn render_paged_scrollbars(
 }
 
 /// 计算滚动条滑块位置。
-pub fn scrollbar_metrics(
+pub(crate) fn scrollbar_metrics(
     viewport_len: gpui::Pixels,
     content_len: gpui::Pixels,
     scroll_offset: gpui::Pixels,
@@ -154,7 +154,7 @@ pub fn scrollbar_metrics(
 }
 
 /// 渲染单个滚动条滑块，并在拖动时写回对应滚动状态。
-pub fn render_scrollbar_thumb(
+pub(crate) fn render_scrollbar_thumb(
     tab_id: usize,
     axis: LogScrollbarAxis,
     metrics: LogScrollbarMetrics,

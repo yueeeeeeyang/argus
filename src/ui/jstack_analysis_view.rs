@@ -23,6 +23,7 @@ use crate::infra::text_selection::{
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::loading_spinner::render_loading_spinner;
+use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, IntoElement, KeyDownEvent,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -61,9 +62,7 @@ const HOVER_STACK_PREVIEW_LINE_LIMIT: usize = 10;
 
 /// Jstack 方块悬浮预览数据。
 #[derive(Clone)]
-pub struct JstackCellPreviewData {
-    /// 当前主题令牌。
-    pub theme: AppTheme,
+pub(crate) struct JstackCellPreviewData {
     /// 快照文件名称。
     pub snapshot_label: String,
     /// 线程名称。
@@ -78,7 +77,7 @@ pub struct JstackCellPreviewData {
 
 /// Jstack 方块内部悬浮气泡状态，位置以矩阵容器为坐标系。
 #[derive(Clone)]
-pub struct JstackCellHoverPreview {
+pub(crate) struct JstackCellHoverPreview {
     /// 当前气泡对应的稳定方块 key。
     pub key: String,
     /// 分析页 ID，避免跨页签显示旧气泡。
@@ -115,7 +114,11 @@ impl Render for ThreadNameSelectionTooltip {
 }
 
 /// 渲染 Jstack 分析页签主体。
-pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    analysis_id: usize,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let Some(state) = app.jstack_analysis_state(analysis_id) else {
         return render_missing_state(app, &theme);
@@ -163,9 +166,6 @@ pub fn render(app: &ArgusApp, analysis_id: usize, cx: &mut Context<ArgusApp>) ->
                 cx,
             )
             .into_any_element(),
-            JstackAnalysisTaskState::Failed { message } => {
-                render_error_state(message, &theme).into_any_element()
-            }
         })
         .into_any_element()
 }
@@ -206,9 +206,7 @@ fn render_header(
                 result.skipped_count(),
                 state.filtered_row_count,
             ),
-            JstackAnalysisTaskState::Loading { .. } | JstackAnalysisTaskState::Failed { .. } => {
-                (0, 0, 0, 0, 0)
-            }
+            JstackAnalysisTaskState::Loading { .. } => (0, 0, 0, 0, 0),
         };
     let filter_summary = if filtered_count > 0 {
         format!("，过滤 {filtered_count} 个线程")
@@ -414,18 +412,6 @@ fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + u
             theme.foreground_muted,
             18.0,
         ))
-        .child(message.to_string())
-}
-
-/// 渲染失败态。
-fn render_error_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(13.0))
-        .text_color(rgb(theme.error))
         .child(message.to_string())
 }
 
@@ -889,7 +875,6 @@ fn render_frequency_cell(
     let is_selected_cell = selected_cell_key == Some(cell_key.as_str());
     let preview_key = format!("{analysis_id}:{cell_key}");
     let preview_data = JstackCellPreviewData {
-        theme: theme.clone(),
         snapshot_label,
         thread_name: thread_name.clone(),
         count: cell.count,
@@ -1115,39 +1100,18 @@ fn preview_highlight_style_for_span(
         (
             range,
             HighlightStyle {
-                color: Some(rgb(color_for_preview_highlight_token(kind, theme)).into()),
+                color: Some(
+                    rgb(color_for_highlight_token(
+                        kind,
+                        theme,
+                        HighlightColorContext::Jstack,
+                    ))
+                    .into(),
+                ),
                 ..Default::default()
             },
         )
     })
-}
-
-/// 返回悬浮预览的语法高亮颜色。
-fn color_for_preview_highlight_token(kind: HighlightTokenKind, theme: &AppTheme) -> u32 {
-    match kind {
-        HighlightTokenKind::Trace => theme.foreground_muted,
-        HighlightTokenKind::Debug => theme.debug,
-        HighlightTokenKind::Info => theme.info,
-        HighlightTokenKind::Warning => theme.warning,
-        HighlightTokenKind::Error | HighlightTokenKind::Fatal => theme.error,
-        HighlightTokenKind::Timestamp => theme.syntax.timestamp,
-        HighlightTokenKind::Comment => theme.syntax.comment,
-        HighlightTokenKind::Key => theme.syntax.key,
-        HighlightTokenKind::Value => theme.syntax.string,
-        HighlightTokenKind::String => theme.syntax.string,
-        HighlightTokenKind::Number => theme.syntax.number,
-        HighlightTokenKind::Boolean => theme.syntax.boolean,
-        HighlightTokenKind::Punctuation => theme.syntax.punctuation,
-        HighlightTokenKind::Tag => theme.syntax.tag,
-        HighlightTokenKind::Attribute => theme.syntax.attribute,
-        HighlightTokenKind::ThreadName => theme.info,
-        HighlightTokenKind::ThreadState => theme.success,
-        HighlightTokenKind::StackClass => theme.syntax.class,
-        HighlightTokenKind::StackMethod => theme.info,
-        HighlightTokenKind::StackLocation => theme.syntax.string,
-        HighlightTokenKind::Lock => theme.syntax.lock,
-        HighlightTokenKind::Exception => theme.syntax.exception,
-    }
 }
 
 /// 根据矩阵滚动状态绘制可见滚动条。

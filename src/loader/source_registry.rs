@@ -12,7 +12,7 @@ use crate::loader::log_source::{
 
 /// 来源树单行渲染元数据，随树结构变化统一重建，避免滚动时重复计算。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SourceRowMeta {
+pub(crate) struct SourceRowMeta {
     /// 当前节点直接子级数量。
     pub child_count: usize,
     /// 当前节点后方是否还有同级节点。
@@ -23,7 +23,7 @@ pub struct SourceRowMeta {
 
 /// 来源注册表，使用扁平存储和父子索引支撑大目录树。
 #[derive(Clone, Debug)]
-pub struct SourceRegistry {
+pub(crate) struct SourceRegistry {
     /// 下一个可分配来源 ID。
     next_id: usize,
     /// 根节点顺序。
@@ -66,29 +66,24 @@ impl Default for SourceRegistry {
 
 impl SourceRegistry {
     /// 创建空来源注册表。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// 返回是否不包含任何来源节点。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
-    /// 返回节点总数。
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
-
     /// 分配新的来源 ID。
-    pub fn allocate_id(&mut self) -> SourceId {
+    pub(crate) fn allocate_id(&mut self) -> SourceId {
         let id = SourceId(self.next_id);
         self.next_id += 1;
         id
     }
 
     /// 注册一个节点，并维护根节点或父子关系顺序。
-    pub fn insert_node(&mut self, node: SourceTreeNode) {
+    pub(crate) fn insert_node(&mut self, node: SourceTreeNode) {
         let id = node.id;
         self.search_keys.insert(id, search_key_for_node(&node));
         if let Some(parent_id) = node.parent_id {
@@ -100,17 +95,17 @@ impl SourceRegistry {
     }
 
     /// 按 ID 读取节点。
-    pub fn node(&self, id: SourceId) -> Option<&SourceTreeNode> {
+    pub(crate) fn node(&self, id: SourceId) -> Option<&SourceTreeNode> {
         self.nodes.get(&id)
     }
 
     /// 按 ID 可变读取节点。
-    pub fn node_mut(&mut self, id: SourceId) -> Option<&mut SourceTreeNode> {
+    pub(crate) fn node_mut(&mut self, id: SourceId) -> Option<&mut SourceTreeNode> {
         self.nodes.get_mut(&id)
     }
 
     /// 返回父节点的直接子节点 ID。
-    pub fn child_ids(&self, parent_id: SourceId) -> &[SourceId] {
+    pub(crate) fn child_ids(&self, parent_id: SourceId) -> &[SourceId] {
         self.children
             .get(&parent_id)
             .map(Vec::as_slice)
@@ -118,7 +113,8 @@ impl SourceRegistry {
     }
 
     /// 返回指定节点后方是否还有同级节点，用于目录树连线避免绘制多余竖线。
-    pub fn has_next_sibling(&self, id: SourceId) -> bool {
+    #[cfg(test)]
+    pub(crate) fn has_next_sibling(&self, id: SourceId) -> bool {
         self.row_meta
             .get(&id)
             .map(|meta| meta.has_next_sibling)
@@ -126,7 +122,8 @@ impl SourceRegistry {
     }
 
     /// 返回需要延续竖向连线的祖先层级，供虚拟列表行按需绘制树形上下文。
-    pub fn ancestor_continuation_levels(&self, id: SourceId) -> &[usize] {
+    #[cfg(test)]
+    pub(crate) fn ancestor_continuation_levels(&self, id: SourceId) -> &[usize] {
         self.row_meta
             .get(&id)
             .map(|meta| meta.ancestor_continuation_levels.as_slice())
@@ -134,37 +131,37 @@ impl SourceRegistry {
     }
 
     /// 返回指定节点的行渲染元数据。
-    pub fn row_meta(&self, id: SourceId) -> SourceRowMeta {
+    pub(crate) fn row_meta(&self, id: SourceId) -> SourceRowMeta {
         self.row_meta.get(&id).cloned().unwrap_or_default()
     }
 
     /// 返回当前可见节点 ID 列表。
-    pub fn visible_source_ids(&self) -> &[SourceId] {
+    pub(crate) fn visible_source_ids(&self) -> &[SourceId] {
         &self.visible_source_ids
     }
 
     /// 返回节点在当前可见列表中的位置。
-    pub fn visible_index_of(&self, id: SourceId) -> Option<usize> {
+    pub(crate) fn visible_index_of(&self, id: SourceId) -> Option<usize> {
         self.visible_source_positions.get(&id).copied()
     }
 
     /// 返回当前被来源树强选中的节点 ID。
-    pub fn selected_id(&self) -> Option<SourceId> {
+    pub(crate) fn selected_id(&self) -> Option<SourceId> {
         self.selected_id
     }
 
     /// 返回所有已加载节点的树形顺序 ID 列表，不受展开状态影响。
-    pub fn tree_order_source_ids(&self) -> &[SourceId] {
+    pub(crate) fn tree_order_source_ids(&self) -> &[SourceId] {
         &self.tree_order_source_ids
     }
 
     /// 返回指定节点的预计算搜索关键字。
-    pub fn search_key(&self, id: SourceId) -> Option<&str> {
+    pub(crate) fn search_key(&self, id: SourceId) -> Option<&str> {
         self.search_keys.get(&id).map(String::as_str)
     }
 
     /// 返回指定节点从根到父级的祖先链路，供过滤视图保留目录上下文。
-    pub fn ancestor_ids(&self, id: SourceId) -> Vec<SourceId> {
+    pub(crate) fn ancestor_ids(&self, id: SourceId) -> Vec<SourceId> {
         let mut ancestors = Vec::new();
         let mut current_parent_id = self.node(id).and_then(|node| node.parent_id);
 
@@ -183,7 +180,7 @@ impl SourceRegistry {
     /// 选择指定节点，并取消之前节点选中态。
     ///
     /// 说明：来源树可能包含几万甚至几十万个节点，不能在 tab 切换时遍历所有节点。
-    pub fn select(&mut self, selected_id: SourceId) -> Option<SourceTreeNode> {
+    pub(crate) fn select(&mut self, selected_id: SourceId) -> Option<SourceTreeNode> {
         if !self.nodes.contains_key(&selected_id) {
             return None;
         }
@@ -202,7 +199,7 @@ impl SourceRegistry {
     }
 
     /// 展开指定节点的所有祖先节点，确保外部激活日志标签后来源树能显示对应路径。
-    pub fn expand_ancestors(&mut self, id: SourceId) -> bool {
+    pub(crate) fn expand_ancestors(&mut self, id: SourceId) -> bool {
         let ancestor_ids = self.ancestor_ids(id);
         let mut has_changed = false;
 
@@ -224,7 +221,7 @@ impl SourceRegistry {
     }
 
     /// 切换节点展开状态，返回切换后的状态。
-    pub fn toggle_expanded(&mut self, id: SourceId) -> Option<bool> {
+    pub(crate) fn toggle_expanded(&mut self, id: SourceId) -> Option<bool> {
         let node = self.nodes.get_mut(&id)?;
         if !node.kind.can_expand() {
             return None;
@@ -236,7 +233,7 @@ impl SourceRegistry {
     }
 
     /// 收起全部可展开节点并重建可见索引。
-    pub fn collapse_all(&mut self) -> usize {
+    pub(crate) fn collapse_all(&mut self) -> usize {
         let mut collapsed_count = 0;
         for node in self.nodes.values_mut() {
             if node.kind.can_expand() && node.expanded {
@@ -249,7 +246,7 @@ impl SourceRegistry {
     }
 
     /// 标记节点加载状态。
-    pub fn set_loading(&mut self, id: SourceId, is_loading: bool) {
+    pub(crate) fn set_loading(&mut self, id: SourceId, is_loading: bool) {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.metadata.is_loading = is_loading;
         }
@@ -259,7 +256,7 @@ impl SourceRegistry {
     ///
     /// 说明：后台单文件压缩包探测完成后会把可展开压缩包修正为可直接打开的叶子节点。
     /// 调用方应在批量替换后统一调用 `rebuild_all_indices`，避免大量节点逐个重建。
-    pub fn replace_node_payload(
+    pub(crate) fn replace_node_payload(
         &mut self,
         id: SourceId,
         kind: SourceKind,
@@ -286,7 +283,7 @@ impl SourceRegistry {
     }
 
     /// 将子级注册表追加到指定父节点下，并重映射子节点 ID。
-    pub fn append_children_registry(
+    pub(crate) fn append_children_registry(
         &mut self,
         parent_id: SourceId,
         other: SourceRegistry,
@@ -318,7 +315,7 @@ impl SourceRegistry {
     }
 
     /// 标记子级加载失败，保留未加载状态以便用户下次点击重试。
-    pub fn mark_children_load_failed(&mut self, parent_id: SourceId, message: String) {
+    pub(crate) fn mark_children_load_failed(&mut self, parent_id: SourceId, message: String) {
         if let Some(parent) = self.nodes.get_mut(&parent_id) {
             parent.metadata.children_loaded = false;
             parent.metadata.is_loading = false;
@@ -328,28 +325,14 @@ impl SourceRegistry {
         self.rebuild_visible_index();
     }
 
-    /// 清空注册表并重建可见索引。
-    pub fn clear(&mut self) {
-        self.root_ids.clear();
-        self.nodes.clear();
-        self.children.clear();
-        self.visible_source_ids.clear();
-        self.visible_source_positions.clear();
-        self.tree_order_source_ids.clear();
-        self.search_keys.clear();
-        self.row_meta.clear();
-        self.selected_id = None;
-        self.next_id = 1;
-    }
-
     /// 同时重建树序、行元数据和可见索引，供结构变化后调用。
-    pub fn rebuild_all_indices(&mut self) {
+    pub(crate) fn rebuild_all_indices(&mut self) {
         self.rebuild_tree_metadata();
         self.rebuild_visible_index();
     }
 
     /// 重建当前展开状态下的可见节点 ID 列表。
-    pub fn rebuild_visible_index(&mut self) {
+    pub(crate) fn rebuild_visible_index(&mut self) {
         let mut visible = Vec::new();
         for root_id in self.root_ids.iter().copied() {
             self.collect_visible(root_id, &mut visible);

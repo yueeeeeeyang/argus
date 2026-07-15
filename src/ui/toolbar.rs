@@ -14,7 +14,7 @@ use crate::ui::components::input::{
 use crate::ui::input_native::app_native_input;
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, IntoElement, KeyDownEvent, div,
-    prelude::*, px, rgb,
+    prelude::*,
 };
 use std::ops::Range;
 use std::time::Duration;
@@ -26,7 +26,7 @@ use std::time::Duration;
 /// - `cx`：应用上下文，用于更新占位提示。
 ///
 /// 返回值：GPUI 元素树；加载按钮会打开自定义来源选择器，其余按钮只更新本地状态。
-pub fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
+pub(crate) fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
     let theme = app.theme.clone();
 
     if app.is_source_tree_search_open {
@@ -68,7 +68,7 @@ pub fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyE
 /// - `cx`：应用上下文，用于打开表单、过滤框或执行收起操作。
 ///
 /// 返回值：GPUI 元素树；按钮顺序固定为新增链接、新增目录、过滤、收起全部。
-pub fn render_connection_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
+pub(crate) fn render_connection_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
     let theme = app.theme.clone();
 
     if app.is_connection_tree_search_open {
@@ -110,67 +110,6 @@ pub fn render_connection_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> 
         .into_any_element()
 }
 
-/// 渲染日志内容区顶部的导航和上下文工具。
-pub fn render_content_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
-    let theme = app.theme.clone();
-
-    div()
-        .h(px(42.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_3()
-        .border_b_1()
-        .border_color(rgb(theme.border))
-        .bg(rgb(theme.content))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(toolbar_icon_button(
-                    "content-back",
-                    ArgusIcon::ArrowLeft,
-                    "后退",
-                    &theme,
-                    cx,
-                ))
-                .child(toolbar_icon_button(
-                    "content-forward",
-                    ArgusIcon::ArrowRight,
-                    "前进",
-                    &theme,
-                    cx,
-                ))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(theme.foreground_muted))
-                        .child(app.content_path_label()),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(toolbar_icon_button(
-                    "content-wrap",
-                    ArgusIcon::Wrap,
-                    "自动换行",
-                    &theme,
-                    cx,
-                ))
-                .child(toolbar_icon_button(
-                    "content-more",
-                    ArgusIcon::More,
-                    "更多操作",
-                    &theme,
-                    cx,
-                )),
-        )
-}
-
 /// 渲染来源侧栏工具按钮，尺寸与标题栏图标按钮保持一致。
 fn source_icon_button(
     id: &'static str,
@@ -201,7 +140,7 @@ fn source_icon_button(
                     window.on_next_frame(move |window, cx| {
                         search_focus_handle.focus(window);
                         // 根节点点击会在同一轮事件里清理输入焦点，这里下一帧恢复刚打开的过滤框。
-                        let _ = app_entity.update(cx, |app, cx| {
+                        app_entity.update(cx, |app, cx| {
                             app.set_source_tree_search_focused(true);
                             cx.notify();
                         });
@@ -245,7 +184,7 @@ fn connection_icon_button(
                     let app_entity = app_entity.clone();
                     window.on_next_frame(move |window, cx| {
                         search_focus_handle.focus(window);
-                        let _ = app_entity.update(cx, |app, cx| {
+                        app_entity.update(cx, |app, cx| {
                             app.focus_connection_text_input_target(
                                 AppTextInputTarget::ConnectionTreeSearch,
                             );
@@ -282,13 +221,13 @@ fn render_source_search_toolbar(
             Input {
                 id: "source-tree-search-input",
                 placeholder: "过滤已加载日志",
-                value: app.source_tree_search_query.clone(),
+                value: app.source_tree_search_input.value.clone(),
                 is_disabled: false,
-                is_focused: app.is_source_tree_search_focused,
-                cursor_index: app.source_tree_search_cursor,
+                is_focused: app.source_tree_search_input.is_focused,
+                cursor_index: app.source_tree_search_input.cursor,
                 selection_range: app.source_tree_search_selection_range(),
-                marked_range: app.source_tree_search_marked_range.clone(),
-                is_pointer_selecting: app.source_tree_search_selection_drag.is_some(),
+                marked_range: app.source_tree_search_input.marked_range.clone(),
+                is_pointer_selecting: app.source_tree_search_input.selection_drag.is_some(),
                 is_secret: false,
                 size: InputSize::Compact,
                 leading_accessory: Some(InputAccessory {
@@ -429,32 +368,6 @@ fn render_connection_search_toolbar(
 }
 
 /// 返回输入框规范化后的非空选区。
-fn input_selection_range(input: &crate::app::SettingsTextInputState) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
-}
-
-/// 渲染内容区常规小型工具按钮，统一更新应用状态提示。
-fn toolbar_icon_button(
-    id: &'static str,
-    icon: ArgusIcon,
-    action_name: &'static str,
-    theme: &AppTheme,
-    cx: &mut Context<ArgusApp>,
-) -> impl IntoElement {
-    render_icon_button(
-        id,
-        icon,
-        action_name,
-        false,
-        IconButtonSize::Small,
-        theme,
-        cx.listener(move |app, _, _, cx| {
-            app.mark_placeholder_action(action_name);
-            cx.notify();
-        }),
-    )
+fn input_selection_range(input: &crate::app::TextInputState) -> Option<Range<usize>> {
+    input.selection_range()
 }

@@ -18,7 +18,7 @@ use crate::remote::terminal::{
 
 impl ArgusApp {
     /// 为指定 SSH 链接打开新的终端标签；同一链接允许同时打开多个独立会话。
-    pub fn open_or_focus_ssh_terminal(
+    pub(crate) fn open_or_focus_ssh_terminal(
         &mut self,
         link_id: ConnectionNodeId,
         cx: &mut Context<Self>,
@@ -27,7 +27,7 @@ impl ArgusApp {
     }
 
     /// 处理终端面板按键，将可发送的按键转换为远程 shell 字节。
-    pub fn handle_terminal_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    pub(crate) fn handle_terminal_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let TabKind::SshTerminal { session_id } = self.active_tab_kind() else {
             return;
         };
@@ -59,7 +59,7 @@ impl ArgusApp {
     }
 
     /// 向指定终端会话发送输入字节。
-    pub fn send_terminal_input(&mut self, session_id: usize, bytes: Vec<u8>) {
+    pub(crate) fn send_terminal_input(&mut self, session_id: usize, bytes: Vec<u8>) {
         let Some(session) = self.terminal_sessions.get_mut(&session_id) else {
             self.placeholder_notice = "终端会话不存在".to_string();
             return;
@@ -76,7 +76,7 @@ impl ArgusApp {
     }
 
     /// 从指定行列开始终端文本选择。
-    pub fn begin_terminal_selection(
+    pub(crate) fn begin_terminal_selection(
         &mut self,
         session_id: usize,
         position: TerminalGridPosition,
@@ -88,7 +88,7 @@ impl ArgusApp {
     }
 
     /// 拖拽更新终端文本选区。
-    pub fn update_terminal_selection(
+    pub(crate) fn update_terminal_selection(
         &mut self,
         session_id: usize,
         position: TerminalGridPosition,
@@ -99,28 +99,28 @@ impl ArgusApp {
     }
 
     /// 结束终端文本选择。
-    pub fn finish_terminal_selection(&mut self, session_id: usize) -> bool {
+    pub(crate) fn finish_terminal_selection(&mut self, session_id: usize) -> bool {
         self.terminal_sessions
             .get_mut(&session_id)
             .is_some_and(TerminalSessionState::finish_selection)
     }
 
     /// 返回指定终端是否正在拖拽文本选区。
-    pub fn is_terminal_selection_drag_active(&self, session_id: usize) -> bool {
+    pub(crate) fn is_terminal_selection_drag_active(&self, session_id: usize) -> bool {
         self.terminal_sessions
             .get(&session_id)
             .is_some_and(TerminalSessionState::is_selection_drag_active)
     }
 
     /// 清除指定终端文本选区。
-    pub fn clear_terminal_selection(&mut self, session_id: usize) -> bool {
+    pub(crate) fn clear_terminal_selection(&mut self, session_id: usize) -> bool {
         self.terminal_sessions
             .get_mut(&session_id)
             .is_some_and(TerminalSessionState::clear_selection)
     }
 
     /// 平台复制快捷键：把当前终端选区写入剪贴板。
-    pub fn copy_terminal_selection(&mut self, session_id: usize, cx: &mut Context<Self>) {
+    pub(crate) fn copy_terminal_selection(&mut self, session_id: usize, cx: &mut Context<Self>) {
         let Some(selected_text) = self
             .terminal_sessions
             .get(&session_id)
@@ -130,13 +130,13 @@ impl ArgusApp {
             return;
         };
 
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
         self.placeholder_notice = "已复制终端选区".to_string();
     }
 
     /// 平台全选快捷键：选择当前可见终端屏幕。
-    pub fn select_all_terminal(&mut self, session_id: usize) {
+    pub(crate) fn select_all_terminal(&mut self, session_id: usize) {
         if let Some(session) = self.terminal_sessions.get_mut(&session_id)
             && session.select_visible_screen()
         {
@@ -145,7 +145,11 @@ impl ArgusApp {
     }
 
     /// 处理终端正文滚轮，正数查看历史输出，负数回到实时输出。
-    pub fn scroll_terminal_scrollback(&mut self, session_id: usize, line_delta: f32) -> bool {
+    pub(crate) fn scroll_terminal_scrollback(
+        &mut self,
+        session_id: usize,
+        line_delta: f32,
+    ) -> bool {
         let Some(session) = self.terminal_sessions.get_mut(&session_id) else {
             return false;
         };
@@ -153,14 +157,14 @@ impl ArgusApp {
     }
 
     /// 开始拖动终端滚动条。
-    pub fn begin_terminal_scrollbar_drag(&mut self, session_id: usize, cursor_offset: f32) {
+    pub(crate) fn begin_terminal_scrollbar_drag(&mut self, session_id: usize, cursor_offset: f32) {
         if let Some(session) = self.terminal_sessions.get_mut(&session_id) {
             session.begin_scrollbar_drag(cursor_offset);
         }
     }
 
     /// 按鼠标位置更新终端滚动条拖拽状态，并同步 scrollback 偏移。
-    pub fn drag_terminal_scrollbar(
+    pub(crate) fn drag_terminal_scrollbar(
         &mut self,
         session_id: usize,
         pointer_y: f32,
@@ -186,7 +190,7 @@ impl ArgusApp {
     }
 
     /// 结束终端滚动条拖拽。
-    pub fn finish_terminal_scrollbar_drag(&mut self, session_id: usize) -> bool {
+    pub(crate) fn finish_terminal_scrollbar_drag(&mut self, session_id: usize) -> bool {
         let Some(session) = self.terminal_sessions.get_mut(&session_id) else {
             return false;
         };
@@ -194,7 +198,7 @@ impl ArgusApp {
     }
 
     /// 根据终端面板实际可用尺寸同步本地 vt100 屏幕和远程 PTY 行列。
-    pub fn resize_terminal_session(&mut self, session_id: usize, rows: u16, cols: u16) {
+    pub(crate) fn resize_terminal_session(&mut self, session_id: usize, rows: u16, cols: u16) {
         let Some(session) = self.terminal_sessions.get_mut(&session_id) else {
             return;
         };
@@ -202,7 +206,7 @@ impl ArgusApp {
     }
 
     /// 用户确认当前 SSH 主机指纹可信，并继续后台 worker。
-    pub fn confirm_terminal_host_key(&mut self, session_id: usize) {
+    pub(crate) fn confirm_terminal_host_key(&mut self, session_id: usize) {
         let Some((pending, sender)) = self.terminal_sessions.get(&session_id).and_then(|session| {
             session
                 .pending_host_key
@@ -230,7 +234,7 @@ impl ArgusApp {
     }
 
     /// 用户拒绝当前 SSH 主机指纹。
-    pub fn reject_terminal_host_key(&mut self, session_id: usize) {
+    pub(crate) fn reject_terminal_host_key(&mut self, session_id: usize) {
         let Some(session) = self.terminal_sessions.get_mut(&session_id) else {
             return;
         };
@@ -245,7 +249,7 @@ impl ArgusApp {
     }
 
     /// 断开并移除指定终端会话。
-    pub fn disconnect_terminal_session(&mut self, session_id: usize) {
+    pub(crate) fn disconnect_terminal_session(&mut self, session_id: usize) {
         if let Some(session) = self.terminal_sessions.remove(&session_id)
             && let Some(sender) = session.command_sender
         {
@@ -254,7 +258,7 @@ impl ArgusApp {
     }
 
     /// 断开所有 SSH 终端会话。
-    pub fn disconnect_all_terminal_sessions(&mut self) {
+    pub(crate) fn disconnect_all_terminal_sessions(&mut self) {
         let session_ids = self.terminal_sessions.keys().copied().collect::<Vec<_>>();
         for session_id in session_ids {
             self.disconnect_terminal_session(session_id);
@@ -280,7 +284,6 @@ impl ArgusApp {
             .map(ToString::to_string);
         let request = TerminalWorkerRequest {
             session_id,
-            link_id,
             ssh,
             trusted_fingerprint,
             rows: DEFAULT_TERMINAL_ROWS,

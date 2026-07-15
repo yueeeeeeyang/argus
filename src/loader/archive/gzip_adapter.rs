@@ -20,7 +20,7 @@ use crate::utils::path::normalize_archive_entry_path;
 
 /// GZIP 单文件压缩包适配器；不同于 tar.gz，它只有一个虚拟文件条目。
 #[derive(Debug, Default)]
-pub struct GzipArchiveAdapter;
+pub(crate) struct GzipArchiveAdapter;
 
 impl ArchiveAdapter for GzipArchiveAdapter {
     /// 声明普通 GZIP 的识别规则和可用能力。
@@ -33,7 +33,6 @@ impl ArchiveAdapter for GzipArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: false,
         }
     }
 
@@ -145,8 +144,7 @@ impl ArchiveAdapter for GzipArchiveAdapter {
 fn single_gzip_entry(source_label: &str) -> Vec<ArchiveEntryInfo> {
     let label = gzip_payload_label(source_label);
     vec![ArchiveEntryInfo {
-        path: label.clone(),
-        label,
+        path: label,
         is_dir: false,
         size: None,
     }]

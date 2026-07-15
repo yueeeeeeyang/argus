@@ -42,7 +42,7 @@ const MENU_WINDOW_MARGIN: f32 = 8.0;
 
 /// 当前打开的菜单类型。
 #[derive(Clone, Debug)]
-pub enum ActiveMenuKind {
+pub(crate) enum ActiveMenuKind {
     /// 标签页右键菜单，动作作用于指定标签。
     TabContext {
         /// 被右键点击的标签 ID。
@@ -78,7 +78,7 @@ pub enum ActiveMenuKind {
 
 /// 当前打开的菜单状态。
 #[derive(Clone, Debug)]
-pub struct ActiveMenu {
+pub(crate) struct ActiveMenu {
     /// 菜单类型，用于决定菜单项集合。
     pub kind: ActiveMenuKind,
     /// 菜单锚点，使用窗口坐标以便跨布局区域定位。
@@ -87,7 +87,7 @@ pub struct ActiveMenu {
 
 /// 菜单项点击后要执行的应用动作。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MenuAction {
+pub(crate) enum MenuAction {
     /// 激活指定标签页。
     ActivateTab {
         /// 目标标签 ID。
@@ -203,7 +203,7 @@ impl MenuAction {
 
 /// 菜单渲染条目。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MenuEntry {
+pub(crate) struct MenuEntry {
     /// 展示文案。
     pub label: String,
     /// 点击动作。
@@ -216,7 +216,7 @@ pub struct MenuEntry {
 
 impl MenuEntry {
     /// 创建普通菜单项。
-    pub fn new(label: impl Into<String>, action: MenuAction) -> Self {
+    pub(crate) fn new(label: impl Into<String>, action: MenuAction) -> Self {
         Self {
             label: label.into(),
             action,
@@ -226,13 +226,13 @@ impl MenuEntry {
     }
 
     /// 标记菜单项为当前选中项。
-    pub fn selected(mut self, is_selected: bool) -> Self {
+    pub(crate) fn selected(mut self, is_selected: bool) -> Self {
         self.is_selected = is_selected;
         self
     }
 
     /// 标记菜单项为破坏性操作。
-    pub fn danger(mut self) -> Self {
+    pub(crate) fn danger(mut self) -> Self {
         self.is_danger = true;
         self
     }
@@ -245,7 +245,7 @@ impl MenuEntry {
 /// - `cx`：应用上下文，用于绑定菜单关闭与动作回调。
 ///
 /// 返回值：覆盖全窗口的透明命中层与定位菜单；没有菜单时返回空容器。
-pub fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let Some(active_menu) = app.active_menu.clone() else {
         return div().into_any_element();
     };
@@ -261,9 +261,8 @@ pub fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl In
         ActiveMenuKind::TerminalContext { .. } => TERMINAL_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::SftpEntry { .. } => SFTP_ENTRY_CONTEXT_MENU_WIDTH,
     };
-    let menu_height = (entry_count as f32 * MENU_ROW_HEIGHT)
-        .min(MENU_MAX_HEIGHT)
-        .max(MENU_ROW_HEIGHT);
+    let menu_height =
+        (entry_count as f32 * MENU_ROW_HEIGHT).clamp(MENU_ROW_HEIGHT, MENU_MAX_HEIGHT);
     let scroll_handle = app.tab_menu_scroll.clone();
     let theme = app.theme.clone();
 

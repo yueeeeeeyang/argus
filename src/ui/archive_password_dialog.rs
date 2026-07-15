@@ -20,7 +20,7 @@ use gpui::{
 };
 
 /// 渲染当前压缩包密码输入弹窗。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     render_modal_dialog(
         ModalDialog {

@@ -11,7 +11,7 @@ use crate::loader::archive::detector::ArchiveFormat;
 
 /// 来源节点稳定 ID，UI 通过该 ID 选择、展开和滚动定位节点。
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SourceId(pub usize);
+pub(crate) struct SourceId(pub usize);
 
 impl fmt::Display for SourceId {
     /// 将来源 ID 输出为稳定数字文本，便于 GPUI 元素 ID 拼接。
@@ -22,7 +22,7 @@ impl fmt::Display for SourceId {
 
 /// 来源节点类型，决定图标、可展开能力和状态文案。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SourceKind {
+pub(crate) enum SourceKind {
     /// 本地目录。
     Directory,
     /// 普通日志候选文件。
@@ -37,27 +37,11 @@ pub enum SourceKind {
     ArchiveFile,
     /// 当前识别但暂不支持的来源。
     Unsupported(String),
-    /// 加载失败时展示的错误节点。
-    Error,
 }
 
 impl SourceKind {
-    /// 返回来源类型的短文案。
-    pub fn label(&self) -> String {
-        match self {
-            Self::Directory => "目录".to_string(),
-            Self::LogFile => "日志".to_string(),
-            Self::Archive(format) => format.label().to_string(),
-            Self::SingleFileArchive(format) => format.label().to_string(),
-            Self::ArchiveDirectory => "目录".to_string(),
-            Self::ArchiveFile => "条目".to_string(),
-            Self::Unsupported(reason) => reason.clone(),
-            Self::Error => "错误".to_string(),
-        }
-    }
-
     /// 返回节点是否拥有可展开子级。
-    pub fn can_expand(&self) -> bool {
+    pub(crate) fn can_expand(&self) -> bool {
         matches!(
             self,
             Self::Directory | Self::Archive(_) | Self::ArchiveDirectory
@@ -65,7 +49,7 @@ impl SourceKind {
     }
 
     /// 返回节点是否表示用户可选择的日志候选。
-    pub fn is_log_candidate(&self) -> bool {
+    pub(crate) fn is_log_candidate(&self) -> bool {
         matches!(
             self,
             Self::LogFile | Self::ArchiveFile | Self::SingleFileArchive(_)
@@ -75,7 +59,7 @@ impl SourceKind {
 
 /// 来源位置，区分真实本地路径和压缩包内部虚拟路径。
 #[derive(Clone, Debug)]
-pub enum SourceLocation {
+pub(crate) enum SourceLocation {
     /// 本地文件或目录路径。
     LocalPath(PathBuf),
     /// 压缩包内部条目路径。
@@ -97,7 +81,7 @@ pub enum SourceLocation {
 
 impl SourceLocation {
     /// 返回面向状态栏展示的位置文本。
-    pub fn display_path(&self) -> String {
+    pub(crate) fn display_path(&self) -> String {
         match self {
             Self::LocalPath(path) => path.display().to_string(),
             Self::ArchiveEntry {
@@ -116,7 +100,7 @@ impl SourceLocation {
 
 /// 来源节点元信息，不包含文件句柄或日志正文。
 #[derive(Clone, Debug, Default)]
-pub struct SourceMetadata {
+pub(crate) struct SourceMetadata {
     /// 文件或条目大小。
     pub size: Option<u64>,
     /// 是否已完成子级加载。
@@ -129,7 +113,7 @@ pub struct SourceMetadata {
 
 /// 来源树节点；树关系由注册表集中维护，节点自身只保存父级 ID。
 #[derive(Clone, Debug)]
-pub struct SourceTreeNode {
+pub(crate) struct SourceTreeNode {
     /// 节点稳定 ID。
     pub id: SourceId,
     /// 父节点 ID；根节点为 `None`。
@@ -148,11 +132,4 @@ pub struct SourceTreeNode {
     pub selected: bool,
     /// 是否展开。
     pub expanded: bool,
-}
-
-impl SourceTreeNode {
-    /// 返回节点类型短文案。
-    pub fn kind_label(&self) -> String {
-        self.kind.label()
-    }
 }

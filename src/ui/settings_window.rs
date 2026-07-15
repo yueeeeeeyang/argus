@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::analysis::jstack::split_stack_segment_filter_blocks;
 use crate::app::{
-    AppInputFocusHandles, AppTextInputTarget, ArgusApp, SettingsSection, SettingsTextInputState,
+    AppInputFocusHandles, AppTextInputTarget, ArgusApp, SettingsSection, TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::platform::open_with_registration::RegistrationStatus;
@@ -121,17 +121,17 @@ struct SettingsModalSnapshot {
     /// 是否跟随符号链接。
     follow_symlinks: bool,
     /// 快搜关键字输入框状态。
-    quick_keywords_input: SettingsTextInputState,
+    quick_keywords_input: TextInputState,
     /// Jstack 线程名过滤输入框状态。
-    jstack_thread_name_filter_input: SettingsTextInputState,
+    jstack_thread_name_filter_input: TextInputState,
     /// Jstack 完整线程段过滤输入框状态。
-    jstack_stack_segment_filter_input: SettingsTextInputState,
+    jstack_stack_segment_filter_input: TextInputState,
     /// 是否启用启动时自动检查升级。
     upgrade_enabled: bool,
     /// 升级服务器输入框状态。
-    upgrade_server_input: SettingsTextInputState,
+    upgrade_server_input: TextInputState,
     /// 升级验签公钥输入框状态。
-    upgrade_public_key_input: SettingsTextInputState,
+    upgrade_public_key_input: TextInputState,
     /// 当前平台 manifest 标识。
     upgrade_platform_label: String,
     /// 是否正在检查升级。
@@ -179,7 +179,7 @@ impl SettingsModalSnapshot {
 }
 
 /// Jstack 线程段过滤大编辑器窗口；使用独立窗口承载长 textarea，避免设置页行内编辑困难。
-pub struct JstackStackSegmentFilterEditorWindow {
+pub(crate) struct JstackStackSegmentFilterEditorWindow {
     /// 主应用实体，编辑内容直接写回 `ArgusApp` 的设置输入状态。
     app: Entity<ArgusApp>,
     /// 当前编辑器渲染快照。
@@ -213,7 +213,7 @@ impl JstackStackSegmentFilterEditorWindow {
     /// - `cx`：编辑器窗口上下文，用于订阅主应用状态。
     ///
     /// 返回值：可渲染的编辑器窗口视图。
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
         mut snapshot: JstackStackSegmentFilterEditorSnapshot,
@@ -245,7 +245,7 @@ impl JstackStackSegmentFilterEditorWindow {
     }
 
     /// 从主应用状态提取编辑器渲染快照。
-    pub fn snapshot_from_app(app: &ArgusApp) -> JstackStackSegmentFilterEditorSnapshot {
+    pub(crate) fn snapshot_from_app(app: &ArgusApp) -> JstackStackSegmentFilterEditorSnapshot {
         JstackStackSegmentFilterEditorSnapshot {
             theme: app.theme.clone(),
             input: app.settings_jstack_stack_segment_filter_input.clone(),
@@ -268,11 +268,11 @@ impl Render for JstackStackSegmentFilterEditorWindow {
 
 /// Jstack 线程段过滤编辑器快照。
 #[derive(Clone, Debug, PartialEq)]
-pub struct JstackStackSegmentFilterEditorSnapshot {
+pub(crate) struct JstackStackSegmentFilterEditorSnapshot {
     /// 当前主题令牌。
     pub theme: AppTheme,
     /// 当前线程段过滤输入状态。
-    pub input: SettingsTextInputState,
+    pub input: TextInputState,
 }
 
 /// 渲染覆盖主窗口的设置模态框。
@@ -283,7 +283,7 @@ pub struct JstackStackSegmentFilterEditorSnapshot {
 /// - `cx`：主应用上下文，用于更新设置状态并阻断遮罩层事件。
 ///
 /// 返回值：包含遮罩、居中容器、分类导航和设置内容的 GPUI 元素树。
-pub fn render_settings_modal(
+pub(crate) fn render_settings_modal(
     app: &ArgusApp,
     app_focus_handles: &AppInputFocusHandles,
     cx: &mut Context<ArgusApp>,
@@ -1456,14 +1456,8 @@ fn upgrade_public_key_input_control(
 }
 
 /// 返回设置输入框的规范化非空选区。
-fn settings_input_selection_range(
-    input: &SettingsTextInputState,
-) -> Option<std::ops::Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
+fn settings_input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize>> {
+    input.selection_range()
 }
 
 /// 渲染设置组背景容器。
@@ -1925,7 +1919,7 @@ fn update_settings_app(
     cx: &mut App,
     update: impl FnOnce(&mut ArgusApp, &mut Context<ArgusApp>),
 ) {
-    let _ = app_handle.update(cx, |app, app_cx| {
+    app_handle.update(cx, |app, app_cx| {
         update(app, app_cx);
         app_cx.notify();
     });

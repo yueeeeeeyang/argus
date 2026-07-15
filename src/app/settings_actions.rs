@@ -11,10 +11,10 @@ use gpui::{
     AppContext, Bounds, ClipboardItem, Context, Keystroke, WindowBounds, WindowOptions, px, size,
 };
 
-use crate::app::{ArgusApp, InputTextSelectionDrag, SettingsSection, SettingsTextInputState};
+use crate::app::{AppTextInputTarget, ArgusApp, SettingsSection, TextInputState};
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
-    remove_character_range, slice_character_range, word_range_at,
+    remove_character_range, slice_character_range,
 };
 use crate::platform::open_with_registration::{
     register_open_with, registration_status, unregister_open_with,
@@ -31,11 +31,56 @@ const JSTACK_STACK_SEGMENT_EDITOR_MIN_WIDTH: f32 = 680.0;
 const JSTACK_STACK_SEGMENT_EDITOR_MIN_HEIGHT: f32 = 520.0;
 
 impl ArgusApp {
+    /// 将指定设置文本输入统一写回配置并持久化。
+    ///
+    /// 键盘编辑、原生输入法提交以及显式清空均通过此入口提交，确保规范化规则、缓存刷新和提示一致。
+    pub(crate) fn commit_settings_text_input(&mut self, target: AppTextInputTarget) {
+        match target {
+            AppTextInputTarget::SettingsQuickKeywords => {
+                self.config.log_search.quick_keywords =
+                    self.settings_quick_keywords_input.value.clone();
+                self.placeholder_notice = "快搜关键字已保存".to_string();
+            }
+            AppTextInputTarget::SettingsJstackThreadNameFilter => {
+                self.config.log_display.jstack_thread_name_filters = self
+                    .settings_jstack_thread_name_filter_input
+                    .value
+                    .trim()
+                    .to_string();
+                self.rebuild_all_jstack_visible_row_caches();
+                self.placeholder_notice = "Jstack 线程名过滤已保存".to_string();
+            }
+            AppTextInputTarget::SettingsJstackStackSegmentFilter => {
+                self.config.log_display.jstack_stack_segment_filters =
+                    normalized_stack_segment_filter_value(
+                        &self.settings_jstack_stack_segment_filter_input.value,
+                    );
+                self.rebuild_all_jstack_visible_row_caches();
+                self.placeholder_notice = "Jstack 线程段过滤已保存".to_string();
+            }
+            AppTextInputTarget::SettingsUpgradeServer => {
+                self.config.upgrade.server_url =
+                    self.settings_upgrade_server_input.value.trim().to_string();
+                self.placeholder_notice = "升级服务器已保存".to_string();
+            }
+            AppTextInputTarget::SettingsUpgradePublicKey => {
+                self.config.upgrade.public_key_base64 = self
+                    .settings_upgrade_public_key_input
+                    .value
+                    .trim()
+                    .to_string();
+                self.placeholder_notice = "升级验签公钥已保存".to_string();
+            }
+            _ => return,
+        }
+        self.persist_config_or_report();
+    }
+
     /// 打开主窗口内的设置模态框，并刷新依赖系统能力的设置状态。
     ///
     /// 参数说明：
     /// - `cx`：主应用上下文，用于刷新系统右键菜单注册状态。
-    pub fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
         self.refresh_open_with_registration_status(cx);
         self.is_settings_modal_open = true;
         self.is_theme_dropdown_open = false;
@@ -44,7 +89,7 @@ impl ArgusApp {
     }
 
     /// 关闭设置模态框，并清理下拉菜单和输入框临时焦点状态。
-    pub fn close_settings_modal(&mut self) {
+    pub(crate) fn close_settings_modal(&mut self) {
         self.is_settings_modal_open = false;
         self.is_theme_dropdown_open = false;
         self.clear_all_text_input_focus();
@@ -55,7 +100,7 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `section`：用户从左侧导航选择的目标分类。
-    pub fn select_settings_section(&mut self, section: SettingsSection) {
+    pub(crate) fn select_settings_section(&mut self, section: SettingsSection) {
         if self.selected_settings_section == section {
             return;
         }
@@ -70,9 +115,9 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `cx`：主应用上下文，用于创建或激活独立编辑窗口。
-    pub fn open_jstack_stack_segment_filter_editor(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_jstack_stack_segment_filter_editor(&mut self, cx: &mut Context<Self>) {
         if self.is_jstack_stack_segment_filter_editor_open {
-            if let Some(window_handle) = self.jstack_stack_segment_filter_editor_handle.clone()
+            if let Some(window_handle) = self.jstack_stack_segment_filter_editor_handle
                 && window_handle
                     .update(cx, |_, window, _| window.activate_window())
                     .is_ok()
@@ -133,7 +178,7 @@ impl ArgusApp {
     }
 
     /// 清理 Jstack 线程段过滤编辑器打开状态；关闭按钮和窗口销毁都走该入口。
-    pub fn close_jstack_stack_segment_filter_editor(&mut self) {
+    pub(crate) fn close_jstack_stack_segment_filter_editor(&mut self) {
         self.is_jstack_stack_segment_filter_editor_open = false;
         self.jstack_stack_segment_filter_editor_handle = None;
         self.settings_jstack_stack_segment_filter_input.is_focused = false;
@@ -147,7 +192,7 @@ impl ArgusApp {
     ///
     /// 说明：状态查询应保持轻量，打开设置模态框和注册/卸载完成后都会调用；忙碌时跳过，
     /// 避免执行中状态被同步查询覆盖。
-    pub fn refresh_open_with_registration_status(&mut self, _cx: &mut Context<Self>) {
+    pub(crate) fn refresh_open_with_registration_status(&mut self, _cx: &mut Context<Self>) {
         if self.is_open_with_registration_busy {
             return;
         }
@@ -156,7 +201,7 @@ impl ArgusApp {
     }
 
     /// 注册系统右键菜单；执行期间禁用注册/卸载按钮，避免重复写入系统状态。
-    pub fn register_open_with_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn register_open_with_menu(&mut self, cx: &mut Context<Self>) {
         if self.is_open_with_registration_busy {
             self.open_with_registration_message = Some("系统右键菜单操作正在执行".to_string());
             return;
@@ -194,7 +239,7 @@ impl ArgusApp {
     }
 
     /// 卸载系统右键菜单；完成后重新查询系统状态并更新设置模态框提示。
-    pub fn unregister_open_with_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn unregister_open_with_menu(&mut self, cx: &mut Context<Self>) {
         if self.is_open_with_registration_busy {
             self.open_with_registration_message = Some("系统右键菜单操作正在执行".to_string());
             return;
@@ -232,7 +277,7 @@ impl ArgusApp {
     }
 
     /// 聚焦设置模态框快搜关键字输入框，并关闭设置页的其它浮层。
-    pub fn focus_settings_quick_keywords_input(&mut self) {
+    pub(crate) fn focus_settings_quick_keywords_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_jstack_thread_name_filter_input.is_focused = false;
         self.settings_jstack_thread_name_filter_input.marked_range = None;
@@ -249,12 +294,12 @@ impl ArgusApp {
     /// 返回设置模态框快搜关键字输入框当前选区范围。
     ///
     /// 返回值：存在非空选区时返回字符范围；无选区或空选区返回 `None`。
-    pub fn settings_quick_keywords_selection_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn settings_quick_keywords_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_quick_keywords_input)
     }
 
     /// 清空设置模态框快搜关键字输入框，并立即持久化配置。
-    pub fn clear_settings_quick_keywords_input(&mut self) {
+    pub(crate) fn clear_settings_quick_keywords_input(&mut self) {
         self.settings_quick_keywords_input.value.clear();
         self.settings_quick_keywords_input.cursor = 0;
         self.settings_quick_keywords_input.selection_anchor = None;
@@ -264,8 +309,9 @@ impl ArgusApp {
     }
 
     /// 直接更新快搜关键字配置；测试和未来批量设置入口可复用。
-    pub fn update_settings_quick_keywords(&mut self, value: String) {
-        self.settings_quick_keywords_input = SettingsTextInputState::from_value(value);
+    #[cfg(test)]
+    pub(super) fn update_settings_quick_keywords(&mut self, value: String) {
+        self.settings_quick_keywords_input = TextInputState::from_value(value);
         self.commit_settings_quick_keywords_input();
     }
 
@@ -274,7 +320,7 @@ impl ArgusApp {
     /// 参数说明：
     /// - `keystroke`：GPUI 归一化按键事件。
     /// - `cx`：主应用上下文，用于访问系统剪贴板。
-    pub fn handle_settings_quick_keywords_key(
+    pub(crate) fn handle_settings_quick_keywords_key(
         &mut self,
         keystroke: &Keystroke,
         cx: &mut Context<Self>,
@@ -309,7 +355,10 @@ impl ArgusApp {
                 let text_length = character_count(&self.settings_quick_keywords_input.value);
                 self.move_settings_quick_keywords_cursor_to(text_length, modifiers.shift);
             }
-            "escape" => self.settings_quick_keywords_input.is_focused = false,
+            "enter" | "escape" => {
+                self.commit_settings_text_input(AppTextInputTarget::SettingsQuickKeywords);
+                self.settings_quick_keywords_input.clear_focus();
+            }
             _ if key.chars().count() == 1 && !modifiers.control && !modifiers.platform => {
                 self.insert_settings_quick_keywords_text(key);
             }
@@ -318,53 +367,34 @@ impl ArgusApp {
     }
 
     /// 开始设置模态框快搜关键字输入框鼠标选择。
-    pub fn begin_settings_quick_keywords_pointer_selection(
+    pub(crate) fn begin_settings_quick_keywords_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
     ) {
         self.focus_settings_quick_keywords_input();
-        let range = settings_input_range_for_granularity(
-            &self.settings_quick_keywords_input,
-            character_index,
-            granularity,
-        );
-        self.settings_quick_keywords_input.cursor = range.end;
-        self.settings_quick_keywords_input.selection_anchor = Some(range.start);
-        self.settings_quick_keywords_input.marked_range = None;
-        self.settings_quick_keywords_input.selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
+        self.settings_quick_keywords_input
+            .begin_pointer_selection(character_index, granularity);
     }
 
     /// 更新设置模态框快搜关键字输入框鼠标拖拽选择。
-    pub fn update_settings_quick_keywords_pointer_selection(&mut self, character_index: usize) {
-        let Some(drag) = self.settings_quick_keywords_input.selection_drag.clone() else {
-            return;
-        };
-        let focus_range = settings_input_range_for_granularity(
-            &self.settings_quick_keywords_input,
-            character_index,
-            drag.granularity,
-        );
-        let start = drag.anchor_range.start.min(focus_range.start);
-        let end = drag.anchor_range.end.max(focus_range.end);
-        self.settings_quick_keywords_input.selection_anchor = Some(start);
-        self.settings_quick_keywords_input.marked_range = None;
-        self.settings_quick_keywords_input.cursor = end;
+    pub(crate) fn update_settings_quick_keywords_pointer_selection(
+        &mut self,
+        character_index: usize,
+    ) {
+        self.settings_quick_keywords_input
+            .update_pointer_selection(character_index);
     }
 
     /// 结束设置模态框快搜关键字输入框鼠标选择。
-    pub fn finish_settings_quick_keywords_pointer_selection(&mut self) {
-        self.settings_quick_keywords_input.selection_drag = None;
+    pub(crate) fn finish_settings_quick_keywords_pointer_selection(&mut self) {
+        self.settings_quick_keywords_input
+            .finish_pointer_selection();
     }
 
     /// 将设置输入框内容写回配置并保存。
     fn commit_settings_quick_keywords_input(&mut self) {
-        self.config.log_search.quick_keywords = self.settings_quick_keywords_input.value.clone();
-        self.placeholder_notice = "快搜关键字已保存".to_string();
-        self.persist_config_or_report();
+        self.commit_settings_text_input(AppTextInputTarget::SettingsQuickKeywords);
     }
 
     /// 向设置快搜输入框插入文本。
@@ -469,7 +499,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_quick_keywords_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -481,7 +511,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到设置快搜输入框。
     fn paste_settings_quick_keywords_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -500,7 +530,7 @@ impl ArgusApp {
     }
 
     /// 聚焦设置模态框 Jstack 线程名过滤输入框。
-    pub fn focus_settings_jstack_thread_name_filter_input(&mut self) {
+    pub(crate) fn focus_settings_jstack_thread_name_filter_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
         self.settings_quick_keywords_input.marked_range = None;
@@ -515,12 +545,14 @@ impl ArgusApp {
     }
 
     /// 返回设置模态框 Jstack 线程名过滤输入框当前选区范围。
-    pub fn settings_jstack_thread_name_filter_selection_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn settings_jstack_thread_name_filter_selection_range(
+        &self,
+    ) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_jstack_thread_name_filter_input)
     }
 
     /// 清空 Jstack 线程名过滤输入框，并立即持久化配置。
-    pub fn clear_settings_jstack_thread_name_filter_input(&mut self) {
+    pub(crate) fn clear_settings_jstack_thread_name_filter_input(&mut self) {
         self.settings_jstack_thread_name_filter_input.value.clear();
         self.settings_jstack_thread_name_filter_input.cursor = 0;
         self.settings_jstack_thread_name_filter_input
@@ -531,13 +563,14 @@ impl ArgusApp {
     }
 
     /// 直接更新 Jstack 线程名过滤配置，便于测试和未来批量导入复用。
-    pub fn update_settings_jstack_thread_name_filter(&mut self, value: String) {
-        self.settings_jstack_thread_name_filter_input = SettingsTextInputState::from_value(value);
+    #[cfg(test)]
+    pub(super) fn update_settings_jstack_thread_name_filter(&mut self, value: String) {
+        self.settings_jstack_thread_name_filter_input = TextInputState::from_value(value);
         self.commit_settings_jstack_thread_name_filter_input();
     }
 
     /// 处理设置模态框 Jstack 线程名过滤输入框键盘事件。
-    pub fn handle_settings_jstack_thread_name_filter_key(
+    pub(crate) fn handle_settings_jstack_thread_name_filter_key(
         &mut self,
         keystroke: &Keystroke,
         cx: &mut Context<Self>,
@@ -576,7 +609,10 @@ impl ArgusApp {
                     modifiers.shift,
                 );
             }
-            "escape" => self.settings_jstack_thread_name_filter_input.is_focused = false,
+            "enter" | "escape" => {
+                self.commit_settings_text_input(AppTextInputTarget::SettingsJstackThreadNameFilter);
+                self.settings_jstack_thread_name_filter_input.clear_focus();
+            }
             _ if key.chars().count() == 1 && !modifiers.control && !modifiers.platform => {
                 self.insert_settings_jstack_thread_name_filter_text(key);
             }
@@ -585,68 +621,34 @@ impl ArgusApp {
     }
 
     /// 开始设置模态框 Jstack 线程名过滤输入框鼠标选择。
-    pub fn begin_settings_jstack_thread_name_filter_pointer_selection(
+    pub(crate) fn begin_settings_jstack_thread_name_filter_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
     ) {
         self.focus_settings_jstack_thread_name_filter_input();
-        let range = settings_input_range_for_granularity(
-            &self.settings_jstack_thread_name_filter_input,
-            character_index,
-            granularity,
-        );
-        self.settings_jstack_thread_name_filter_input.cursor = range.end;
         self.settings_jstack_thread_name_filter_input
-            .selection_anchor = Some(range.start);
-        self.settings_jstack_thread_name_filter_input.marked_range = None;
-        self.settings_jstack_thread_name_filter_input.selection_drag =
-            Some(InputTextSelectionDrag {
-                anchor_range: range,
-                granularity,
-            });
+            .begin_pointer_selection(character_index, granularity);
     }
 
     /// 更新设置模态框 Jstack 线程名过滤输入框鼠标拖拽选择。
-    pub fn update_settings_jstack_thread_name_filter_pointer_selection(
+    pub(crate) fn update_settings_jstack_thread_name_filter_pointer_selection(
         &mut self,
         character_index: usize,
     ) {
-        let Some(drag) = self
-            .settings_jstack_thread_name_filter_input
-            .selection_drag
-            .clone()
-        else {
-            return;
-        };
-        let focus_range = settings_input_range_for_granularity(
-            &self.settings_jstack_thread_name_filter_input,
-            character_index,
-            drag.granularity,
-        );
-        let start = drag.anchor_range.start.min(focus_range.start);
-        let end = drag.anchor_range.end.max(focus_range.end);
         self.settings_jstack_thread_name_filter_input
-            .selection_anchor = Some(start);
-        self.settings_jstack_thread_name_filter_input.marked_range = None;
-        self.settings_jstack_thread_name_filter_input.cursor = end;
+            .update_pointer_selection(character_index);
     }
 
     /// 结束设置模态框 Jstack 线程名过滤输入框鼠标选择。
-    pub fn finish_settings_jstack_thread_name_filter_pointer_selection(&mut self) {
-        self.settings_jstack_thread_name_filter_input.selection_drag = None;
+    pub(crate) fn finish_settings_jstack_thread_name_filter_pointer_selection(&mut self) {
+        self.settings_jstack_thread_name_filter_input
+            .finish_pointer_selection();
     }
 
     /// 将 Jstack 线程名过滤输入框内容写回配置并保存。
     fn commit_settings_jstack_thread_name_filter_input(&mut self) {
-        self.config.log_display.jstack_thread_name_filters = self
-            .settings_jstack_thread_name_filter_input
-            .value
-            .trim()
-            .to_string();
-        self.rebuild_all_jstack_visible_row_caches();
-        self.placeholder_notice = "Jstack 线程名过滤已保存".to_string();
-        self.persist_config_or_report();
+        self.commit_settings_text_input(AppTextInputTarget::SettingsJstackThreadNameFilter);
     }
 
     /// 向 Jstack 线程名过滤输入框插入文本。
@@ -759,7 +761,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_jstack_thread_name_filter_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -771,7 +773,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到 Jstack 线程名过滤输入框。
     fn paste_settings_jstack_thread_name_filter_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -790,7 +792,7 @@ impl ArgusApp {
     }
 
     /// 聚焦设置模态框 Jstack 完整线程段过滤输入框。
-    pub fn focus_settings_jstack_stack_segment_filter_input(&mut self) {
+    pub(crate) fn focus_settings_jstack_stack_segment_filter_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
         self.settings_quick_keywords_input.marked_range = None;
@@ -805,12 +807,14 @@ impl ArgusApp {
     }
 
     /// 返回设置模态框 Jstack 完整线程段过滤输入框当前选区范围。
-    pub fn settings_jstack_stack_segment_filter_selection_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn settings_jstack_stack_segment_filter_selection_range(
+        &self,
+    ) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_jstack_stack_segment_filter_input)
     }
 
     /// 清空 Jstack 完整线程段过滤输入框，并立即持久化配置。
-    pub fn clear_settings_jstack_stack_segment_filter_input(&mut self) {
+    pub(crate) fn clear_settings_jstack_stack_segment_filter_input(&mut self) {
         self.settings_jstack_stack_segment_filter_input
             .value
             .clear();
@@ -824,13 +828,14 @@ impl ArgusApp {
     }
 
     /// 直接更新 Jstack 完整线程段过滤配置，便于测试和未来批量导入复用。
-    pub fn update_settings_jstack_stack_segment_filter(&mut self, value: String) {
-        self.settings_jstack_stack_segment_filter_input = SettingsTextInputState::from_value(value);
+    #[cfg(test)]
+    pub(super) fn update_settings_jstack_stack_segment_filter(&mut self, value: String) {
+        self.settings_jstack_stack_segment_filter_input = TextInputState::from_value(value);
         self.commit_settings_jstack_stack_segment_filter_input();
     }
 
     /// 处理设置模态框 Jstack 完整线程段过滤输入框键盘事件。
-    pub fn handle_settings_jstack_stack_segment_filter_key(
+    pub(crate) fn handle_settings_jstack_stack_segment_filter_key(
         &mut self,
         keystroke: &Keystroke,
         cx: &mut Context<Self>,
@@ -883,10 +888,11 @@ impl ArgusApp {
                 self.move_settings_jstack_stack_segment_filter_cursor_to(cursor, modifiers.shift);
             }
             "escape" => {
-                self.settings_jstack_stack_segment_filter_input.is_focused = false;
-                self.settings_jstack_stack_segment_filter_input.marked_range = None;
+                self.commit_settings_text_input(
+                    AppTextInputTarget::SettingsJstackStackSegmentFilter,
+                );
                 self.settings_jstack_stack_segment_filter_input
-                    .selection_drag = None;
+                    .clear_focus();
             }
             _ if key.chars().count() == 1
                 && !modifiers.control
@@ -900,68 +906,34 @@ impl ArgusApp {
     }
 
     /// 开始设置模态框 Jstack 完整线程段过滤输入框鼠标选择。
-    pub fn begin_settings_jstack_stack_segment_filter_pointer_selection(
+    pub(crate) fn begin_settings_jstack_stack_segment_filter_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
     ) {
         self.focus_settings_jstack_stack_segment_filter_input();
-        let range = settings_textarea_range_for_granularity(
-            &self.settings_jstack_stack_segment_filter_input,
-            character_index,
-            granularity,
-        );
-        self.settings_jstack_stack_segment_filter_input.cursor = range.end;
         self.settings_jstack_stack_segment_filter_input
-            .selection_anchor = Some(range.start);
-        self.settings_jstack_stack_segment_filter_input.marked_range = None;
-        self.settings_jstack_stack_segment_filter_input
-            .selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
+            .begin_pointer_selection(character_index, granularity);
     }
 
     /// 更新设置模态框 Jstack 完整线程段过滤输入框鼠标拖拽选择。
-    pub fn update_settings_jstack_stack_segment_filter_pointer_selection(
+    pub(crate) fn update_settings_jstack_stack_segment_filter_pointer_selection(
         &mut self,
         character_index: usize,
     ) {
-        let Some(drag) = self
-            .settings_jstack_stack_segment_filter_input
-            .selection_drag
-            .clone()
-        else {
-            return;
-        };
-        let focus_range = settings_textarea_range_for_granularity(
-            &self.settings_jstack_stack_segment_filter_input,
-            character_index,
-            drag.granularity,
-        );
-        let start = drag.anchor_range.start.min(focus_range.start);
-        let end = drag.anchor_range.end.max(focus_range.end);
         self.settings_jstack_stack_segment_filter_input
-            .selection_anchor = Some(start);
-        self.settings_jstack_stack_segment_filter_input.marked_range = None;
-        self.settings_jstack_stack_segment_filter_input.cursor = end;
+            .update_pointer_selection(character_index);
     }
 
     /// 结束设置模态框 Jstack 完整线程段过滤输入框鼠标选择。
-    pub fn finish_settings_jstack_stack_segment_filter_pointer_selection(&mut self) {
+    pub(crate) fn finish_settings_jstack_stack_segment_filter_pointer_selection(&mut self) {
         self.settings_jstack_stack_segment_filter_input
-            .selection_drag = None;
+            .finish_pointer_selection();
     }
 
     /// 将 Jstack 完整线程段过滤输入框内容写回配置并保存。
     fn commit_settings_jstack_stack_segment_filter_input(&mut self) {
-        self.config.log_display.jstack_stack_segment_filters =
-            normalized_stack_segment_filter_value(
-                &self.settings_jstack_stack_segment_filter_input.value,
-            );
-        self.rebuild_all_jstack_visible_row_caches();
-        self.placeholder_notice = "Jstack 线程段过滤已保存".to_string();
-        self.persist_config_or_report();
+        self.commit_settings_text_input(AppTextInputTarget::SettingsJstackStackSegmentFilter);
     }
 
     /// 向 Jstack 完整线程段过滤输入框插入文本。
@@ -1088,7 +1060,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_jstack_stack_segment_filter_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -1100,7 +1072,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到 Jstack 完整线程段过滤输入框；保留真实换行以匹配完整线程段。
     fn paste_settings_jstack_stack_segment_filter_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -1119,7 +1091,7 @@ impl ArgusApp {
     }
 
     /// 聚焦设置模态框升级服务器输入框，并关闭设置页的其它浮层。
-    pub fn focus_settings_upgrade_server_input(&mut self) {
+    pub(crate) fn focus_settings_upgrade_server_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
         self.settings_quick_keywords_input.marked_range = None;
@@ -1134,12 +1106,12 @@ impl ArgusApp {
     }
 
     /// 返回设置模态框升级服务器输入框当前选区范围。
-    pub fn settings_upgrade_server_selection_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn settings_upgrade_server_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_upgrade_server_input)
     }
 
     /// 清空升级服务器输入框，并立即持久化配置。
-    pub fn clear_settings_upgrade_server_input(&mut self) {
+    pub(crate) fn clear_settings_upgrade_server_input(&mut self) {
         self.settings_upgrade_server_input.value.clear();
         self.settings_upgrade_server_input.cursor = 0;
         self.settings_upgrade_server_input.selection_anchor = None;
@@ -1148,14 +1120,8 @@ impl ArgusApp {
         self.commit_settings_upgrade_server_input();
     }
 
-    /// 直接更新升级服务器地址；测试和未来导入配置入口可复用。
-    pub fn update_settings_upgrade_server_url(&mut self, value: String) {
-        self.settings_upgrade_server_input = SettingsTextInputState::from_value(value);
-        self.commit_settings_upgrade_server_input();
-    }
-
     /// 处理设置模态框升级服务器输入框键盘事件。
-    pub fn handle_settings_upgrade_server_key(
+    pub(crate) fn handle_settings_upgrade_server_key(
         &mut self,
         keystroke: &Keystroke,
         cx: &mut Context<Self>,
@@ -1190,7 +1156,10 @@ impl ArgusApp {
                 let text_length = character_count(&self.settings_upgrade_server_input.value);
                 self.move_settings_upgrade_server_cursor_to(text_length, modifiers.shift);
             }
-            "escape" => self.settings_upgrade_server_input.is_focused = false,
+            "enter" | "escape" => {
+                self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradeServer);
+                self.settings_upgrade_server_input.clear_focus();
+            }
             _ if key.chars().count() == 1 && !modifiers.control && !modifiers.platform => {
                 self.insert_settings_upgrade_server_text(key);
             }
@@ -1199,54 +1168,34 @@ impl ArgusApp {
     }
 
     /// 开始设置模态框升级服务器输入框鼠标选择。
-    pub fn begin_settings_upgrade_server_pointer_selection(
+    pub(crate) fn begin_settings_upgrade_server_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
     ) {
         self.focus_settings_upgrade_server_input();
-        let range = settings_input_range_for_granularity(
-            &self.settings_upgrade_server_input,
-            character_index,
-            granularity,
-        );
-        self.settings_upgrade_server_input.cursor = range.end;
-        self.settings_upgrade_server_input.selection_anchor = Some(range.start);
-        self.settings_upgrade_server_input.marked_range = None;
-        self.settings_upgrade_server_input.selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
+        self.settings_upgrade_server_input
+            .begin_pointer_selection(character_index, granularity);
     }
 
     /// 更新设置模态框升级服务器输入框鼠标拖拽选择。
-    pub fn update_settings_upgrade_server_pointer_selection(&mut self, character_index: usize) {
-        let Some(drag) = self.settings_upgrade_server_input.selection_drag.clone() else {
-            return;
-        };
-        let focus_range = settings_input_range_for_granularity(
-            &self.settings_upgrade_server_input,
-            character_index,
-            drag.granularity,
-        );
-        let start = drag.anchor_range.start.min(focus_range.start);
-        let end = drag.anchor_range.end.max(focus_range.end);
-        self.settings_upgrade_server_input.selection_anchor = Some(start);
-        self.settings_upgrade_server_input.marked_range = None;
-        self.settings_upgrade_server_input.cursor = end;
+    pub(crate) fn update_settings_upgrade_server_pointer_selection(
+        &mut self,
+        character_index: usize,
+    ) {
+        self.settings_upgrade_server_input
+            .update_pointer_selection(character_index);
     }
 
     /// 结束设置模态框升级服务器输入框鼠标选择。
-    pub fn finish_settings_upgrade_server_pointer_selection(&mut self) {
-        self.settings_upgrade_server_input.selection_drag = None;
+    pub(crate) fn finish_settings_upgrade_server_pointer_selection(&mut self) {
+        self.settings_upgrade_server_input
+            .finish_pointer_selection();
     }
 
     /// 将升级服务器输入框内容写回配置并保存。
     fn commit_settings_upgrade_server_input(&mut self) {
-        self.config.upgrade.server_url =
-            self.settings_upgrade_server_input.value.trim().to_string();
-        self.placeholder_notice = "升级服务器已保存".to_string();
-        self.persist_config_or_report();
+        self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradeServer);
     }
 
     /// 向升级服务器输入框插入文本。
@@ -1351,7 +1300,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_upgrade_server_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -1363,7 +1312,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到升级服务器输入框。
     fn paste_settings_upgrade_server_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -1382,7 +1331,7 @@ impl ArgusApp {
     }
 
     /// 聚焦设置模态框升级验签公钥输入框，并关闭设置页的其它浮层。
-    pub fn focus_settings_upgrade_public_key_input(&mut self) {
+    pub(crate) fn focus_settings_upgrade_public_key_input(&mut self) {
         self.is_theme_dropdown_open = false;
         self.settings_quick_keywords_input.is_focused = false;
         self.settings_quick_keywords_input.marked_range = None;
@@ -1397,12 +1346,12 @@ impl ArgusApp {
     }
 
     /// 返回设置模态框升级验签公钥输入框当前选区范围。
-    pub fn settings_upgrade_public_key_selection_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn settings_upgrade_public_key_selection_range(&self) -> Option<Range<usize>> {
         normalized_input_selection_range(&self.settings_upgrade_public_key_input)
     }
 
     /// 清空升级验签公钥输入框，并立即持久化配置。
-    pub fn clear_settings_upgrade_public_key_input(&mut self) {
+    pub(crate) fn clear_settings_upgrade_public_key_input(&mut self) {
         self.settings_upgrade_public_key_input.value.clear();
         self.settings_upgrade_public_key_input.cursor = 0;
         self.settings_upgrade_public_key_input.selection_anchor = None;
@@ -1411,18 +1360,12 @@ impl ArgusApp {
         self.commit_settings_upgrade_public_key_input();
     }
 
-    /// 直接更新升级验签公钥；测试和未来导入配置入口可复用。
-    pub fn update_settings_upgrade_public_key(&mut self, value: String) {
-        self.settings_upgrade_public_key_input = SettingsTextInputState::from_value(value);
-        self.commit_settings_upgrade_public_key_input();
-    }
-
     /// 处理设置模态框升级验签公钥输入框键盘事件。
     ///
     /// 参数说明：
     /// - `keystroke`：GPUI 归一化按键事件。
     /// - `cx`：主应用上下文，用于访问系统剪贴板。
-    pub fn handle_settings_upgrade_public_key_key(
+    pub(crate) fn handle_settings_upgrade_public_key_key(
         &mut self,
         keystroke: &Keystroke,
         cx: &mut Context<Self>,
@@ -1457,7 +1400,10 @@ impl ArgusApp {
                 let text_length = character_count(&self.settings_upgrade_public_key_input.value);
                 self.move_settings_upgrade_public_key_cursor_to(text_length, modifiers.shift);
             }
-            "escape" => self.settings_upgrade_public_key_input.is_focused = false,
+            "enter" | "escape" => {
+                self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradePublicKey);
+                self.settings_upgrade_public_key_input.clear_focus();
+            }
             _ if key.chars().count() == 1 && !modifiers.control && !modifiers.platform => {
                 self.insert_settings_upgrade_public_key_text(key);
             }
@@ -1466,61 +1412,34 @@ impl ArgusApp {
     }
 
     /// 开始设置模态框升级验签公钥输入框鼠标选择。
-    pub fn begin_settings_upgrade_public_key_pointer_selection(
+    pub(crate) fn begin_settings_upgrade_public_key_pointer_selection(
         &mut self,
         character_index: usize,
         granularity: TextSelectionGranularity,
     ) {
         self.focus_settings_upgrade_public_key_input();
-        let range = settings_input_range_for_granularity(
-            &self.settings_upgrade_public_key_input,
-            character_index,
-            granularity,
-        );
-        self.settings_upgrade_public_key_input.cursor = range.end;
-        self.settings_upgrade_public_key_input.selection_anchor = Some(range.start);
-        self.settings_upgrade_public_key_input.marked_range = None;
-        self.settings_upgrade_public_key_input.selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
+        self.settings_upgrade_public_key_input
+            .begin_pointer_selection(character_index, granularity);
     }
 
     /// 更新设置模态框升级验签公钥输入框鼠标拖拽选择。
-    pub fn update_settings_upgrade_public_key_pointer_selection(&mut self, character_index: usize) {
-        let Some(drag) = self
-            .settings_upgrade_public_key_input
-            .selection_drag
-            .clone()
-        else {
-            return;
-        };
-        let focus_range = settings_input_range_for_granularity(
-            &self.settings_upgrade_public_key_input,
-            character_index,
-            drag.granularity,
-        );
-        let start = drag.anchor_range.start.min(focus_range.start);
-        let end = drag.anchor_range.end.max(focus_range.end);
-        self.settings_upgrade_public_key_input.selection_anchor = Some(start);
-        self.settings_upgrade_public_key_input.marked_range = None;
-        self.settings_upgrade_public_key_input.cursor = end;
+    pub(crate) fn update_settings_upgrade_public_key_pointer_selection(
+        &mut self,
+        character_index: usize,
+    ) {
+        self.settings_upgrade_public_key_input
+            .update_pointer_selection(character_index);
     }
 
     /// 结束设置模态框升级验签公钥输入框鼠标选择。
-    pub fn finish_settings_upgrade_public_key_pointer_selection(&mut self) {
-        self.settings_upgrade_public_key_input.selection_drag = None;
+    pub(crate) fn finish_settings_upgrade_public_key_pointer_selection(&mut self) {
+        self.settings_upgrade_public_key_input
+            .finish_pointer_selection();
     }
 
     /// 将升级验签公钥输入框内容写回配置并保存。
     fn commit_settings_upgrade_public_key_input(&mut self) {
-        self.config.upgrade.public_key_base64 = self
-            .settings_upgrade_public_key_input
-            .value
-            .trim()
-            .to_string();
-        self.placeholder_notice = "升级验签公钥已保存".to_string();
-        self.persist_config_or_report();
+        self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradePublicKey);
     }
 
     /// 向升级验签公钥输入框插入文本。
@@ -1632,7 +1551,7 @@ impl ArgusApp {
         let Some(text) = self.selected_settings_upgrade_public_key_text() else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -1644,7 +1563,7 @@ impl ArgusApp {
 
     /// 粘贴剪贴板文本到升级验签公钥输入框；去掉换行以兼容脚本输出和折行 Base64。
     fn paste_settings_upgrade_public_key_clipboard(&mut self, cx: &mut Context<Self>) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };
@@ -1664,46 +1583,8 @@ impl ArgusApp {
 }
 
 /// 返回输入状态中的规范化非空选区。
-fn normalized_input_selection_range(input: &SettingsTextInputState) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
-}
-
-/// 根据鼠标选择粒度返回设置输入框目标字符范围。
-fn settings_input_range_for_granularity(
-    input: &SettingsTextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    let text_length = character_count(&input.value);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
-}
-
-/// 根据鼠标选择粒度返回多行设置输入框目标字符范围。
-fn settings_textarea_range_for_granularity(
-    input: &SettingsTextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    let text_length = character_count(&input.value);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => current_line_range(&input.value, cursor),
-    }
+fn normalized_input_selection_range(input: &TextInputState) -> Option<Range<usize>> {
+    input.selection_range()
 }
 
 /// 归一化 textarea 文本，统一系统换行符但保留真实多行结构。
@@ -1765,10 +1646,9 @@ mod tests {
     /// 验证 textarea 行范围只覆盖当前行，不会像单行输入框那样全选。
     #[test]
     fn textarea_line_granularity_selects_current_line() {
-        let input = SettingsTextInputState::from_value("first\nsecond\nthird".to_string());
+        let input = TextInputState::from_value("first\nsecond\nthird".to_string());
 
-        let range =
-            settings_textarea_range_for_granularity(&input, 8, TextSelectionGranularity::Line);
+        let range = input.range_for_granularity(8, TextSelectionGranularity::Line);
 
         assert_eq!(slice_character_range(&input.value, range), "second");
     }

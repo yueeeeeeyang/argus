@@ -6,7 +6,7 @@
 
 /// 搜索任务 UI 状态；真实搜索结果和进度由应用状态分别保存。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SearchTaskState {
+pub(crate) enum SearchTaskState {
     /// 尚未启动搜索。
     Idle,
     /// 搜索正在后台执行。
@@ -28,7 +28,7 @@ impl Default for SearchTaskState {
 
 impl SearchTaskState {
     /// 返回任务是否仍在运行，用于按钮禁用和取消逻辑判断。
-    pub fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         matches!(self, Self::Running)
     }
 }

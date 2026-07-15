@@ -16,7 +16,7 @@ use url::Url;
 ///
 /// 返回值：存在于本机路径格式中的候选来源。该函数只解析路径，不做文件系统访问，
 /// 由后续加载器负责校验路径是否可读。
-pub fn paths_from_startup_args<I>(args: I) -> Vec<PathBuf>
+pub(crate) fn paths_from_startup_args<I>(args: I) -> Vec<PathBuf>
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -34,7 +34,7 @@ where
 /// - `urls`：GPUI 传入的 URL 字符串；Finder/Open With 通常会传入 `file://` URL。
 ///
 /// 返回值：所有可解析为本地文件系统路径的条目。
-pub fn paths_from_open_urls(urls: Vec<String>) -> Vec<PathBuf> {
+pub(crate) fn paths_from_open_urls(urls: Vec<String>) -> Vec<PathBuf> {
     urls.into_iter()
         .filter_map(|url| path_from_open_string(&url))
         .collect()
@@ -44,7 +44,7 @@ pub fn paths_from_open_urls(urls: Vec<String>) -> Vec<PathBuf> {
 ///
 /// 说明：macOS `open-url` 常用 `file://`，Windows 右键命令通常是普通路径；
 /// 因此这里同时兼容 URL 和原始路径两种形式。
-pub fn path_from_open_string(value: &str) -> Option<PathBuf> {
+pub(crate) fn path_from_open_string(value: &str) -> Option<PathBuf> {
     if value.trim().is_empty() {
         return None;
     }

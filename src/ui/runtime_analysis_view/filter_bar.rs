@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn render_filter_bar(
+pub(crate) fn render_filter_bar(
     app: &ArgusApp,
     analysis_id: usize,
     state: &RuntimeAnalysisState,
@@ -82,11 +82,11 @@ pub fn render_filter_bar(
 }
 
 /// 渲染 Runtime 时间过滤输入框和对应的日期时间选择器浮层。
-pub fn render_runtime_time_filter_picker(
+pub(crate) fn render_runtime_time_filter_picker(
     app: &ArgusApp,
     analysis_id: usize,
     input_kind: RuntimeFilterInputKind,
-    input_state: &SettingsTextInputState,
+    input_state: &TextInputState,
     title: &'static str,
     placeholder: &'static str,
     theme: &AppTheme,
@@ -110,7 +110,7 @@ pub fn render_runtime_time_filter_picker(
 }
 
 /// 渲染 Runtime 页面级日期时间选择器，避免被下方表格内容覆盖。
-pub fn render_runtime_time_picker_overlay(
+pub(crate) fn render_runtime_time_picker_overlay(
     analysis_id: usize,
     input_kind: RuntimeFilterInputKind,
     state: &RuntimeAnalysisState,
@@ -139,7 +139,7 @@ pub fn render_runtime_time_picker_overlay(
 }
 
 /// 返回 Runtime 时间选择器浮层左侧位置，与过滤栏输入框布局保持一致。
-pub fn runtime_time_picker_left(input_kind: RuntimeFilterInputKind) -> f32 {
+pub(crate) fn runtime_time_picker_left(input_kind: RuntimeFilterInputKind) -> f32 {
     let start_left = RUNTIME_VIEW_PADDING
         + RUNTIME_FILTER_KEYWORD_WIDTH
         + RUNTIME_FILTER_GAP
@@ -155,11 +155,11 @@ pub fn runtime_time_picker_left(input_kind: RuntimeFilterInputKind) -> f32 {
 }
 
 /// 渲染 Runtime 过滤栏中的单个输入框。
-pub fn render_runtime_filter_input(
+pub(crate) fn render_runtime_filter_input(
     app: &ArgusApp,
     analysis_id: usize,
     input_kind: RuntimeFilterInputKind,
-    input_state: &SettingsTextInputState,
+    input_state: &TextInputState,
     id_suffix: &'static str,
     placeholder: &'static str,
     icon: ArgusIcon,

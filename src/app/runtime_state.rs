@@ -12,18 +12,18 @@ use gpui::{Pixels, ScrollHandle, UniformListScrollHandle};
 
 use crate::analysis::runtime::{
     RuntimeAnalysisFilterRows, RuntimeAnalysisFilterSnapshot as RuntimeSqlAnalysisFilterSnapshot,
-    RuntimeAnalysisResult, RuntimeAnalysisTarget, RuntimeRequestSummary, RuntimeSlowSqlSummaryRow,
+    RuntimeAnalysisResult, RuntimeRequestSummary, RuntimeSlowSqlSummaryRow,
     RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
 };
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, slice_character_range, word_range_at,
 };
 
-use super::types::{RuntimeDateTimePart, RuntimeFilterInputKind, SettingsTextInputState};
+use super::types::{RuntimeDateTimePart, RuntimeFilterInputKind, TextInputState};
 
 /// Runtime 分析任务状态，供内容区页签展示加载、结果或失败。
 #[derive(Clone, Debug)]
-pub enum RuntimeAnalysisTaskState {
+pub(crate) enum RuntimeAnalysisTaskState {
     /// 后台任务正在读取和聚合 Runtime 日志。
     Loading {
         /// 当前加载提示。
@@ -31,16 +31,11 @@ pub enum RuntimeAnalysisTaskState {
     },
     /// 分析完成，可渲染三层统计表格。
     Ready(Arc<RuntimeAnalysisResult>),
-    /// 分析任务启动或后台执行失败。
-    Failed {
-        /// 用户可读失败原因。
-        message: String,
-    },
 }
 
 /// Runtime 分析页当前显示层级。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RuntimeAnalysisView {
+pub(crate) enum RuntimeAnalysisView {
     /// 总解析结果总览。
     Summary,
     /// 指定请求地址的请求明细表。
@@ -59,7 +54,7 @@ pub enum RuntimeAnalysisView {
 
 /// Runtime 分析结果类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeAnalysisResultType {
+pub(crate) enum RuntimeAnalysisResultType {
     /// 当前请求统计总览和下钻表格。
     Statistics,
     /// 按 SQL 结构聚合后的执行频率分析。
@@ -70,7 +65,7 @@ pub enum RuntimeAnalysisResultType {
 
 /// Runtime SQL 频率分析缓存。
 #[derive(Clone, Debug)]
-pub struct RuntimeSqlFrequencyRowsCache {
+pub(crate) struct RuntimeSqlFrequencyRowsCache {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
     /// 已过滤和排序的 SQL 频率行。
@@ -79,7 +74,7 @@ pub struct RuntimeSqlFrequencyRowsCache {
 
 /// Runtime SQL 频率详情缓存。
 #[derive(Clone, Debug)]
-pub struct RuntimeSqlFrequencyDetailRowsCache {
+pub(crate) struct RuntimeSqlFrequencyDetailRowsCache {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
     /// 当前详情页对应的 SQL 结构文本。
@@ -90,7 +85,7 @@ pub struct RuntimeSqlFrequencyDetailRowsCache {
 
 /// Runtime 慢 SQL 分析缓存。
 #[derive(Clone, Debug)]
-pub struct RuntimeSlowSqlRowsCache {
+pub(crate) struct RuntimeSlowSqlRowsCache {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
     /// 已过滤和排序的慢 SQL 聚合行。
@@ -99,7 +94,7 @@ pub struct RuntimeSlowSqlRowsCache {
 
 /// Runtime 总览表排序结果缓存。
 #[derive(Clone, Debug)]
-pub struct RuntimeSummaryRowsCache {
+pub(crate) struct RuntimeSummaryRowsCache {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
     /// 总览表排序字段。
@@ -112,7 +107,7 @@ pub struct RuntimeSummaryRowsCache {
 
 /// Runtime 请求明细表排序索引缓存。
 #[derive(Clone, Debug)]
-pub struct RuntimeRequestIndicesCache {
+pub(crate) struct RuntimeRequestIndicesCache {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
     /// 当前请求地址。
@@ -127,7 +122,7 @@ pub struct RuntimeRequestIndicesCache {
 
 /// Runtime SQL 明细表排序索引缓存。
 #[derive(Clone, Debug)]
-pub struct RuntimeSqlIndicesCache {
+pub(crate) struct RuntimeSqlIndicesCache {
     /// 生成缓存时使用的过滤输入快照。
     pub filter: RuntimeSqlAnalysisFilterSnapshot,
     /// 当前请求在结果集中的稳定索引。
@@ -142,7 +137,7 @@ pub struct RuntimeSqlIndicesCache {
 
 /// Runtime 表格排序方向。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSortDirection {
+pub(crate) enum RuntimeSortDirection {
     /// 升序。
     Ascending,
     /// 降序。
@@ -151,7 +146,7 @@ pub enum RuntimeSortDirection {
 
 /// Runtime 表格滚动条所属表格。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeScrollbarTable {
+pub(crate) enum RuntimeScrollbarTable {
     /// 总览表。
     Summary,
     /// 请求详情表。
@@ -170,7 +165,7 @@ pub enum RuntimeScrollbarTable {
 
 /// Runtime 表格滚动条拖拽状态。
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RuntimeScrollbarDrag {
+pub(crate) struct RuntimeScrollbarDrag {
     /// 当前被拖拽的表格。
     pub table: RuntimeScrollbarTable,
     /// 鼠标按下位置相对滑块顶部的偏移。
@@ -179,7 +174,7 @@ pub struct RuntimeScrollbarDrag {
 
 impl RuntimeSortDirection {
     /// 返回切换后的排序方向。
-    pub fn toggled(self) -> Self {
+    pub(crate) fn toggled(self) -> Self {
         match self {
             Self::Ascending => Self::Descending,
             Self::Descending => Self::Ascending,
@@ -187,7 +182,7 @@ impl RuntimeSortDirection {
     }
 
     /// 返回表头展示箭头。
-    pub fn indicator(self) -> &'static str {
+    pub(crate) fn indicator(self) -> &'static str {
         match self {
             Self::Ascending => " ↑",
             Self::Descending => " ↓",
@@ -197,7 +192,7 @@ impl RuntimeSortDirection {
 
 /// Runtime 总览表排序字段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSummarySortKey {
+pub(crate) enum RuntimeSummarySortKey {
     /// 请求次数。
     RequestCount,
     /// 请求地址。
@@ -210,7 +205,7 @@ pub enum RuntimeSummarySortKey {
 
 /// Runtime 请求明细表排序字段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeRequestSortKey {
+pub(crate) enum RuntimeRequestSortKey {
     /// 请求时间。
     RequestTime,
     /// 用户名。
@@ -223,7 +218,7 @@ pub enum RuntimeRequestSortKey {
 
 /// Runtime SQL 明细表排序字段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSqlSortKey {
+pub(crate) enum RuntimeSqlSortKey {
     /// SQL 执行总耗时。
     ExecuteDuration,
     /// 获取连接耗时。
@@ -240,13 +235,7 @@ pub enum RuntimeSqlSortKey {
 
 /// 单个 Runtime 分析页签的持久状态。
 #[derive(Clone, Debug)]
-pub struct RuntimeAnalysisState {
-    /// 分析 ID，与 `TabKind::RuntimeAnalysis` 对应。
-    pub id: usize,
-    /// 页签标题。
-    pub title: String,
-    /// 本次分析的来源目标快照，保持创建页签时的来源树顺序。
-    pub targets: Vec<RuntimeAnalysisTarget>,
+pub(crate) struct RuntimeAnalysisState {
     /// 后台任务 generation，避免旧任务覆盖新结果。
     pub generation: usize,
     /// 当前三层 drill-down 视图。
@@ -266,13 +255,13 @@ pub struct RuntimeAnalysisState {
     /// SQL 明细表排序方向。
     pub sql_sort_direction: RuntimeSortDirection,
     /// 任意关键字过滤输入框状态。
-    pub filter_keyword_input: SettingsTextInputState,
+    pub filter_keyword_input: TextInputState,
     /// 用户名过滤输入框状态。
-    pub filter_username_input: SettingsTextInputState,
+    pub filter_username_input: TextInputState,
     /// 请求开始时间过滤输入框状态。
-    pub filter_start_time_input: SettingsTextInputState,
+    pub filter_start_time_input: TextInputState,
     /// 请求结束时间过滤输入框状态。
-    pub filter_end_time_input: SettingsTextInputState,
+    pub filter_end_time_input: TextInputState,
     /// 已应用到结果缓存的关键字过滤值，输入防抖完成前仍保持旧值。
     pub applied_filter_keyword: String,
     /// 已应用到结果缓存的用户名过滤值。
@@ -354,7 +343,7 @@ pub struct RuntimeAnalysisState {
 /// 统计分析、频率/慢 SQL 详情中的具体 SQL 记录使用 `Record`；
 /// 频率/慢 SQL 分析中的聚合行使用 `Summary`。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSqlCellKey {
+pub(crate) enum RuntimeSqlCellKey {
     /// 具体请求中的某条 SQL 记录。
     Record {
         /// 请求记录在分析结果中的稳定索引。
@@ -371,7 +360,7 @@ pub enum RuntimeSqlCellKey {
 
 /// Runtime SQL 完整文本弹窗状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextDialog {
+pub(crate) struct RuntimeSqlTextDialog {
     /// 请求地址。
     pub request_path: String,
     /// 请求时间展示文本。
@@ -388,7 +377,7 @@ pub struct RuntimeSqlTextDialog {
 
 /// Runtime SQL 弹窗正文中的文本位置，使用行号和字符列表达。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextPosition {
+pub(crate) struct RuntimeSqlTextPosition {
     /// 0 基 SQL 行号。
     pub line_index: usize,
     /// 行内字符列，按 Unicode 标量值计数。
@@ -397,7 +386,7 @@ pub struct RuntimeSqlTextPosition {
 
 /// Runtime SQL 弹窗正文选区，支持跨行复制。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextSelection {
+pub(crate) struct RuntimeSqlTextSelection {
     /// 鼠标按下时的选区锚点。
     pub anchor: RuntimeSqlTextPosition,
     /// 当前拖拽到的焦点位置。
@@ -406,12 +395,12 @@ pub struct RuntimeSqlTextSelection {
 
 impl RuntimeSqlTextSelection {
     /// 返回选区是否为空。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.anchor == self.focus
     }
 
     /// 返回按文档顺序排列后的起止位置。
-    pub fn normalized(&self) -> (RuntimeSqlTextPosition, RuntimeSqlTextPosition) {
+    pub(crate) fn normalized(&self) -> (RuntimeSqlTextPosition, RuntimeSqlTextPosition) {
         if runtime_sql_text_position_le(self.anchor, self.focus) {
             (self.anchor, self.focus)
         } else {
@@ -422,7 +411,7 @@ impl RuntimeSqlTextSelection {
 
 /// Runtime SQL 弹窗正文拖拽选择状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSqlTextSelectionDrag {
+pub(crate) struct RuntimeSqlTextSelectionDrag {
     /// 鼠标按下时形成的基础选区。
     pub anchor_range: RuntimeSqlTextSelection,
     /// 当前拖拽粒度，决定后续移动时按字符、词或整行扩展。
@@ -431,7 +420,7 @@ pub struct RuntimeSqlTextSelectionDrag {
 
 /// Runtime 表格单元格的单行文本选区。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeTableCellSelection {
+pub(crate) struct RuntimeTableCellSelection {
     /// 单元格稳定 key，包含当前分析页内的层级、行和列身份。
     pub cell_key: String,
     /// 当前单元格完整文本；复制时从该文本中截取选区。
@@ -444,7 +433,7 @@ pub struct RuntimeTableCellSelection {
 
 impl RuntimeTableCellSelection {
     /// 返回按字符顺序归一化后的非空选区。
-    pub fn normalized_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn normalized_range(&self) -> Option<Range<usize>> {
         let text_length = character_count(&self.text);
         let start = self.anchor.min(self.focus).min(text_length);
         let end = self.anchor.max(self.focus).min(text_length);
@@ -454,7 +443,7 @@ impl RuntimeTableCellSelection {
 
 /// Runtime 表格单元格拖拽选择状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeTableCellSelectionDrag {
+pub(crate) struct RuntimeTableCellSelectionDrag {
     /// 本次拖拽起始的单元格 key。
     pub cell_key: String,
     /// 本次拖拽起始的单元格完整文本。
@@ -548,11 +537,15 @@ pub(super) fn selected_runtime_sql_text_from_lines(
 
     let end_line = end.line_index.min(lines.len().saturating_sub(1));
     let mut selected = String::new();
-    for line_index in start.line_index..=end_line {
+    for (line_index, line) in lines
+        .iter()
+        .enumerate()
+        .take(end_line + 1)
+        .skip(start.line_index)
+    {
         if line_index > start.line_index {
             selected.push('\n');
         }
-        let line = &lines[line_index];
         let line_character_count = character_count(line);
         let start_column = if line_index == start.line_index {
             start.column.min(line_character_count)
@@ -650,39 +643,15 @@ pub(super) fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysis
 }
 
 /// 清理单个 Runtime 过滤输入框焦点态，保留文本和光标位置。
-pub(super) fn clear_runtime_filter_input_focus(input: &mut SettingsTextInputState) {
-    input.is_focused = false;
-    input.selection_anchor = None;
-    input.marked_range = None;
-    input.selection_drag = None;
+pub(super) fn clear_runtime_filter_input_focus(input: &mut TextInputState) {
+    input.clear_focus();
 }
 
 /// 返回 Runtime 过滤输入框规范化后的非空选区。
 pub(super) fn normalized_runtime_filter_input_selection_range(
-    input: &SettingsTextInputState,
+    input: &TextInputState,
 ) -> Option<Range<usize>> {
-    let anchor = input.selection_anchor?;
-    if anchor == input.cursor {
-        return None;
-    }
-    Some(anchor.min(input.cursor)..anchor.max(input.cursor))
-}
-
-/// 根据鼠标选择粒度返回 Runtime 过滤输入框目标字符范围。
-pub(super) fn runtime_filter_input_range_for_granularity(
-    input: &SettingsTextInputState,
-    character_index: usize,
-    granularity: TextSelectionGranularity,
-) -> Range<usize> {
-    let text_length = character_count(&input.value);
-    let cursor = character_index.min(text_length);
-    match granularity {
-        TextSelectionGranularity::Character => cursor..cursor,
-        TextSelectionGranularity::Word => {
-            word_range_at(&input.value, cursor).unwrap_or(cursor..cursor)
-        }
-        TextSelectionGranularity::Line => 0..text_length,
-    }
+    input.selection_range()
 }
 
 /// 解析 Runtime 时间过滤输入，支持毫秒时间戳和常见本地日期时间格式。
@@ -744,25 +713,15 @@ pub(super) fn runtime_days_in_month(year: i32, month: u32) -> u32 {
 }
 
 /// 按年月调整 Runtime 时间，保留当前时分秒并处理月末越界。
-pub(super) fn adjust_runtime_datetime_year_month(
+pub(super) fn adjust_runtime_datetime_month(
     datetime: chrono::DateTime<Local>,
-    part: RuntimeDateTimePart,
     delta: i32,
 ) -> chrono::DateTime<Local> {
     let mut year = datetime.year();
     let mut month = datetime.month() as i32;
-    match part {
-        RuntimeDateTimePart::Year => year += delta,
-        RuntimeDateTimePart::Month => {
-            let month_index = year * 12 + (month - 1) + delta;
-            year = month_index.div_euclid(12);
-            month = month_index.rem_euclid(12) + 1;
-        }
-        RuntimeDateTimePart::Day
-        | RuntimeDateTimePart::Hour
-        | RuntimeDateTimePart::Minute
-        | RuntimeDateTimePart::Second => return datetime,
-    }
+    let month_index = year * 12 + (month - 1) + delta;
+    year = month_index.div_euclid(12);
+    month = month_index.rem_euclid(12) + 1;
 
     let month = month.clamp(1, 12) as u32;
     let day = datetime.day().min(runtime_days_in_month(year, month));
@@ -786,10 +745,7 @@ pub(super) fn adjust_runtime_datetime_part(
     delta: i32,
 ) -> chrono::DateTime<Local> {
     match part {
-        RuntimeDateTimePart::Year | RuntimeDateTimePart::Month => {
-            adjust_runtime_datetime_year_month(datetime, part, delta)
-        }
-        RuntimeDateTimePart::Day => datetime + chrono::Duration::days(delta as i64),
+        RuntimeDateTimePart::Month => adjust_runtime_datetime_month(datetime, delta),
         RuntimeDateTimePart::Hour => datetime + chrono::Duration::hours(delta as i64),
         RuntimeDateTimePart::Minute => datetime + chrono::Duration::minutes(delta as i64),
         RuntimeDateTimePart::Second => datetime + chrono::Duration::seconds(delta as i64),

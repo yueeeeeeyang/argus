@@ -21,8 +21,8 @@ pub(crate) fn highlight_java_thread_dump(line: &str, builder: &mut SpanBuilder) 
         return;
     }
 
-    if trimmed.starts_with('"') {
-        if let Some(end_quote) = trimmed[1..].find('"') {
+    if let Some(thread_text) = trimmed.strip_prefix('"') {
+        if let Some(end_quote) = thread_text.find('"') {
             builder.push(
                 trimmed_start,
                 trimmed_start + end_quote + 2,

@@ -8,10 +8,12 @@ use anyhow::Result;
 
 /// 系统右键菜单注册状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RegistrationStatus {
+pub(crate) enum RegistrationStatus {
     /// 当前系统已经存在 Argus 右键入口。
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     Registered,
     /// 当前系统没有发现 Argus 右键入口。
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     NotRegistered,
     /// 当前运行环境不支持注册，并携带用户可读原因。
     Unsupported(String),
@@ -20,23 +22,18 @@ pub enum RegistrationStatus {
 }
 
 impl RegistrationStatus {
-    /// 返回是否明确处于已注册状态。
-    pub fn is_registered(&self) -> bool {
-        matches!(self, Self::Registered)
-    }
-
     /// 返回当前状态是否允许尝试注册。
-    pub fn can_register(&self) -> bool {
+    pub(crate) fn can_register(&self) -> bool {
         !matches!(self, Self::Registered | Self::Unsupported(_))
     }
 
     /// 返回当前状态是否允许尝试卸载。
-    pub fn can_unregister(&self) -> bool {
+    pub(crate) fn can_unregister(&self) -> bool {
         !matches!(self, Self::NotRegistered | Self::Unsupported(_))
     }
 
     /// 返回状态徽标文案。
-    pub fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::Registered => "已注册".to_string(),
             Self::NotRegistered => "未注册".to_string(),
@@ -47,17 +44,17 @@ impl RegistrationStatus {
 }
 
 /// 查询当前平台的系统右键菜单注册状态。
-pub fn registration_status() -> RegistrationStatus {
+pub(crate) fn registration_status() -> RegistrationStatus {
     platform_impl::registration_status()
 }
 
 /// 注册系统“用 Argus 打开”入口。
-pub fn register_open_with() -> Result<()> {
+pub(crate) fn register_open_with() -> Result<()> {
     platform_impl::register_open_with()
 }
 
 /// 卸载系统“用 Argus 打开”入口。
-pub fn unregister_open_with() -> Result<()> {
+pub(crate) fn unregister_open_with() -> Result<()> {
     platform_impl::unregister_open_with()
 }
 
@@ -298,7 +295,7 @@ mod platform_impl {
     const LSREGISTER_PATH: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
     /// 查询 macOS 运行环境是否具备注册条件。
-    pub fn registration_status() -> RegistrationStatus {
+    pub(super) fn registration_status() -> RegistrationStatus {
         match current_app_bundle() {
             Some(app_bundle) => {
                 match ensure_bundle_declares_open_with_document_types(&app_bundle) {
@@ -315,7 +312,7 @@ mod platform_impl {
     }
 
     /// 调用 LaunchServices 注册当前 `.app` bundle。
-    pub fn register_open_with() -> Result<()> {
+    pub(super) fn register_open_with() -> Result<()> {
         let app_bundle = current_app_bundle()
             .ok_or_else(|| anyhow!("请使用打包后的 Argus.app 运行，cargo run 环境无法注册"))?;
         ensure_bundle_declares_open_with_document_types(&app_bundle)
@@ -324,7 +321,7 @@ mod platform_impl {
     }
 
     /// 调用 LaunchServices 反注册当前 `.app` bundle。
-    pub fn unregister_open_with() -> Result<()> {
+    pub(super) fn unregister_open_with() -> Result<()> {
         let app_bundle = current_app_bundle()
             .ok_or_else(|| anyhow!("请使用打包后的 Argus.app 运行，cargo run 环境无法卸载"))?;
         run_lsregister("-u", &app_bundle).context(
@@ -390,10 +387,7 @@ mod platform_impl {
             return Ok(());
         }
 
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
-        )
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim())
     }
 }
 

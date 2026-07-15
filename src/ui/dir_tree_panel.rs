@@ -74,7 +74,7 @@ impl Render for SourceNameTooltip {
 /// - `cx`：应用上下文，用于虚拟列表范围处理和节点事件回调。
 ///
 /// 返回值：GPUI 元素树；只渲染当前视口范围内的来源节点。
-pub fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
     let visible_count = app.visible_source_ids().len();
     let empty_message = if app.is_source_loading {
@@ -351,8 +351,7 @@ fn source_meta_text(source: &SourceTreeNode, child_count: usize) -> String {
         | SourceKind::Archive(_)
         | SourceKind::SingleFileArchive(_)
         | SourceKind::ArchiveFile
-        | SourceKind::Unsupported(_)
-        | SourceKind::Error => source.metadata.size.map(format_bytes).unwrap_or_default(),
+        | SourceKind::Unsupported(_) => source.metadata.size.map(format_bytes).unwrap_or_default(),
     }
 }
 /// 根据节点层级和兄弟关系渲染目录树连线，避免最后一个子节点下方残留无连接竖线。
@@ -508,6 +507,6 @@ fn icon_for_source(source: &SourceTreeNode) -> ArgusIcon {
         SourceKind::ArchiveDirectory if source.expanded => ArgusIcon::FolderOpen,
         SourceKind::ArchiveDirectory => ArgusIcon::Folder,
         SourceKind::ArchiveFile | SourceKind::LogFile => ArgusIcon::FileText,
-        SourceKind::Unsupported(_) | SourceKind::Error => ArgusIcon::File,
+        SourceKind::Unsupported(_) => ArgusIcon::File,
     }
 }

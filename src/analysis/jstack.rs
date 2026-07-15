@@ -9,22 +9,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::{ArchivePasswordStore, detect_archive_format};
-use crate::loader::{
-    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceKind, SourceLocation,
-    SourceMetadata, SourceTreeNode,
-};
+use crate::loader::{SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
 use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
+
+use super::source_input::{collect_analysis_files, resolve_analysis_location};
 
 /// Jstack 本地目录递归时识别的普通文本日志扩展名。
 const JSTACK_TEXT_EXTENSIONS: &[&str] = &["log", "txt", "out", "dump"];
 
 /// Jstack 线程状态，聚合 UI 会按该枚举映射颜色。
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum JstackThreadState {
+pub(crate) enum JstackThreadState {
     /// Java 线程正在运行或可运行。
     Runnable,
     /// Java 线程阻塞在监视器或锁上。
@@ -39,7 +38,7 @@ pub enum JstackThreadState {
 
 impl JstackThreadState {
     /// 返回 UI 展示用状态标签。
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Runnable => "RUNNABLE",
             Self::Blocked => "BLOCKED",
@@ -79,7 +78,7 @@ impl JstackThreadState {
 
 /// 单个快照中的线程样本。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadSample {
+pub(crate) struct JstackThreadSample {
     /// 线程名称，取自 jstack 线程头第一段双引号内容。
     pub thread_name: String,
     /// 线程 ID 摘要，优先包含 `#id`、`tid=` 和 `nid=`，用于区分同名线程。
@@ -92,7 +91,7 @@ pub struct JstackThreadSample {
 
 /// 线程在某个快照中的一次具体出现记录。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadStackOccurrence {
+pub(crate) struct JstackThreadStackOccurrence {
     /// 快照序号，和 `JstackAnalysisResult.snapshots` 对齐。
     pub snapshot_index: usize,
     /// 快照展示名称。
@@ -115,7 +114,7 @@ pub struct JstackThreadStackOccurrence {
 
 /// 线程详情窗口所需的数据快照。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackThreadDetail {
+pub(crate) struct JstackThreadDetail {
     /// 被查看的线程名称。
     pub thread_name: String,
     /// 被查看线程的 ID 摘要。
@@ -126,7 +125,7 @@ pub struct JstackThreadDetail {
 
 /// 一个被分析文件对应的 Jstack 快照。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackSnapshot {
+pub(crate) struct JstackSnapshot {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 来源展示名称。
@@ -139,7 +138,7 @@ pub struct JstackSnapshot {
 
 /// 分析任务输入目标。
 #[derive(Clone, Debug)]
-pub struct JstackAnalysisTarget {
+pub(crate) struct JstackAnalysisTarget {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 来源位置，可能是本地文件或压缩包内条目。
@@ -156,7 +155,7 @@ pub struct JstackAnalysisTarget {
 
 /// 频率矩阵中单个线程在单个快照中的聚合格子。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackFrequencyCell {
+pub(crate) struct JstackFrequencyCell {
     /// 快照序号，和 `JstackAnalysisResult.snapshots` 对齐。
     pub snapshot_index: usize,
     /// 出现次数；为 0 时表示该线程没有出现在当前快照。
@@ -169,7 +168,7 @@ pub struct JstackFrequencyCell {
 
 /// 频率矩阵中的线程行。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackFrequencyRow {
+pub(crate) struct JstackFrequencyRow {
     /// 线程名称。
     pub thread_name: String,
     /// 线程 ID 摘要，避免同名不同线程被聚合到同一行。
@@ -182,28 +181,21 @@ pub struct JstackFrequencyRow {
 
 impl JstackThreadDetail {
     /// 返回适合 UI 展示和复制的线程身份文本。
-    pub fn display_label(&self) -> String {
-        thread_display_label(&self.thread_name, &self.thread_id)
-    }
-}
-
-impl JstackThreadStackOccurrence {
-    /// 返回当前堆栈出现记录的线程身份文本。
-    pub fn display_label(&self) -> String {
+    pub(crate) fn display_label(&self) -> String {
         thread_display_label(&self.thread_name, &self.thread_id)
     }
 }
 
 impl JstackFrequencyRow {
     /// 返回矩阵行使用的线程身份文本。
-    pub fn display_label(&self) -> String {
+    pub(crate) fn display_label(&self) -> String {
         thread_display_label(&self.thread_name, &self.thread_id)
     }
 }
 
 /// 被跳过或读取失败的快照。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackSkippedSnapshot {
+pub(crate) struct JstackSkippedSnapshot {
     /// 来源树节点 ID。
     pub source_id: SourceId,
     /// 来源展示名称。
@@ -214,7 +206,7 @@ pub struct JstackSkippedSnapshot {
 
 /// Jstack 分析结果，包含快照列、线程行和诊断统计。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JstackAnalysisResult {
+pub(crate) struct JstackAnalysisResult {
     /// 成功解析的快照列。
     pub snapshots: Vec<JstackSnapshot>,
     /// 按总频率排序后的线程行。
@@ -229,7 +221,7 @@ pub struct JstackAnalysisResult {
 
 /// Jstack 线程过滤器，按线程名关键字和完整线程段片段隐藏分析结果。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct JstackThreadFilter {
+pub(crate) struct JstackThreadFilter {
     /// 线程名匹配规则，已转为小写。
     thread_name_patterns: Vec<JstackThreadNamePattern>,
     /// 完整线程段匹配片段，已转为小写并处理转义换行。
@@ -253,7 +245,7 @@ impl JstackThreadFilter {
     /// - `stack_segment_filters`：完整线程段片段，使用空行分隔多个片段；兼容旧版 `||` 分隔。
     ///
     /// 返回值：归一化后的过滤器；空白配置会被忽略。
-    pub fn from_raw(thread_name_filters: &str, stack_segment_filters: &str) -> Self {
+    pub(crate) fn from_raw(thread_name_filters: &str, stack_segment_filters: &str) -> Self {
         Self {
             thread_name_patterns: parse_thread_name_filter_patterns(thread_name_filters),
             stack_segment_patterns: parse_stack_segment_filter_patterns(stack_segment_filters),
@@ -261,12 +253,12 @@ impl JstackThreadFilter {
     }
 
     /// 返回过滤器是否没有任何有效规则。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.thread_name_patterns.is_empty() && self.stack_segment_patterns.is_empty()
     }
 
     /// 判断一个频率行是否命中配置过滤规则。
-    pub fn matches_row(&self, row: &JstackFrequencyRow) -> bool {
+    pub(crate) fn matches_row(&self, row: &JstackFrequencyRow) -> bool {
         if self.is_empty() {
             return false;
         }
@@ -346,17 +338,17 @@ struct JstackSnapshotThreadAggregate {
 
 impl JstackAnalysisResult {
     /// 返回成功快照数量。
-    pub fn snapshot_count(&self) -> usize {
+    pub(crate) fn snapshot_count(&self) -> usize {
         self.snapshots.len()
     }
 
     /// 返回不同线程数量。
-    pub fn thread_count(&self) -> usize {
+    pub(crate) fn thread_count(&self) -> usize {
         self.rows.len()
     }
 
     /// 返回跳过文件数量。
-    pub fn skipped_count(&self) -> usize {
+    pub(crate) fn skipped_count(&self) -> usize {
         self.skipped_snapshots.len()
     }
 }
@@ -368,7 +360,7 @@ impl JstackAnalysisResult {
 /// - `default_encoding`：日志读取兜底编码。
 ///
 /// 返回值：可直接供 UI 渲染的频率矩阵结果。
-pub fn analyze_jstack_targets(
+pub(crate) fn analyze_jstack_targets(
     targets: Vec<JstackAnalysisTarget>,
     default_encoding: String,
     loader_config: LoaderConfig,
@@ -437,69 +429,14 @@ fn collect_jstack_log_files(
     root: &Path,
     loader_config: &LoaderConfig,
 ) -> Result<Vec<JstackAnalysisTarget>> {
-    if !root.is_dir() {
-        return Err(anyhow!("{} 不是本地目录", root.display()));
-    }
-
-    let mut paths = Vec::new();
-    let mut visited_dirs = BTreeSet::new();
-    collect_jstack_log_file_paths(
+    Ok(collect_analysis_files(
         root,
         loader_config.follow_symlinks,
-        &mut visited_dirs,
-        &mut paths,
-    )?;
-    paths.sort();
-
-    Ok(paths
-        .into_iter()
-        .filter_map(|path| jstack_target_for_local_file(source_id, path))
-        .collect())
-}
-
-/// 深度优先收集候选文件；符号链接策略与来源加载配置保持一致。
-fn collect_jstack_log_file_paths(
-    dir: &Path,
-    follow_symlinks: bool,
-    visited_dirs: &mut BTreeSet<PathBuf>,
-    paths: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let canonical_dir = fs::canonicalize(dir)
-        .map_err(|error| anyhow!("无法解析目录真实路径 {}：{error}", dir.display()))?;
-    if !visited_dirs.insert(canonical_dir) {
-        return Ok(());
-    }
-
-    let mut entries = fs::read_dir(dir)
-        .map_err(|error| anyhow!("无法读取目录 {}：{error}", dir.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| anyhow!("无法遍历目录 {}：{error}", dir.display()))?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let link_metadata = fs::symlink_metadata(&path)
-            .map_err(|error| anyhow!("无法读取文件元数据 {}：{error}", path.display()))?;
-        let is_symlink = link_metadata.file_type().is_symlink();
-        if is_symlink && !follow_symlinks {
-            continue;
-        }
-
-        let metadata = if is_symlink && follow_symlinks {
-            fs::metadata(&path)
-        } else {
-            Ok(link_metadata)
-        }
-        .map_err(|error| anyhow!("无法读取文件元数据 {}：{error}", path.display()))?;
-
-        if metadata.is_dir() {
-            collect_jstack_log_file_paths(&path, follow_symlinks, visited_dirs, paths)?;
-        } else if metadata.is_file() && is_jstack_candidate_file(&path) {
-            paths.push(path);
-        }
-    }
-
-    Ok(())
+        is_jstack_candidate_file,
+    )?
+    .into_iter()
+    .filter_map(|path| jstack_target_for_local_file(source_id, path))
+    .collect())
 }
 
 /// 判断本地文件是否值得作为 Jstack 快照尝试解析。
@@ -559,7 +496,8 @@ fn jstack_target_for_local_file(
 /// - `text`：完整日志文本。
 ///
 /// 返回值：一个快照的线程样本列表。
-pub fn parse_jstack_snapshot(
+#[cfg(test)]
+pub(crate) fn parse_jstack_snapshot(
     source_id: SourceId,
     label: impl Into<String>,
     path: impl Into<String>,
@@ -579,7 +517,7 @@ pub fn parse_jstack_snapshot(
 }
 
 /// 由已解析快照构建频率矩阵。
-pub fn build_analysis_result(
+pub(crate) fn build_analysis_result(
     snapshots: Vec<JstackSnapshot>,
     skipped_snapshots: Vec<JstackSkippedSnapshot>,
     total_files: usize,
@@ -676,7 +614,6 @@ fn read_jstack_snapshot(
 ) -> Result<JstackSnapshot> {
     let location = resolve_jstack_target_location(&target, loader_config)?;
     let handle = LogFileReader::open(OpenLogRequest {
-        source_id: target.source_id,
         location,
         label: target.label.clone(),
         default_encoding: default_encoding.to_string(),
@@ -696,22 +633,13 @@ fn resolve_jstack_target_location(
     target: &JstackAnalysisTarget,
     loader_config: &LoaderConfig,
 ) -> Result<SourceLocation> {
-    let Some(node) = target.archive_probe_node.clone() else {
-        return Ok(target.location.clone());
-    };
-
-    let probe_result = LogSourceLoader::new(loader_config.clone())
-        .with_archive_passwords(target.archive_passwords.clone())
-        .probe_archive_nodes(vec![SourceArchiveProbeRequest {
-            source_id: target.source_id,
-            node,
-        }])
-        .into_iter()
-        .next()
-        .and_then(|result| result.patch)
-        .ok_or_else(|| anyhow!("压缩包根层不是单文件日志，请展开后选择具体日志条目"))?;
-
-    Ok(probe_result.location)
+    resolve_analysis_location(
+        target.source_id,
+        &target.location,
+        target.archive_probe_node.as_ref(),
+        &target.archive_passwords,
+        loader_config,
+    )
 }
 
 /// 按批次读取日志文档并增量解析 Jstack，避免把完整日志拼成一个大字符串。
@@ -865,7 +793,7 @@ fn dominant_state(state_counts: &BTreeMap<JstackThreadState, usize>) -> Option<J
 
 /// 解析线程名过滤关键字；过滤适合短词，因此支持常见行内分隔符。
 fn parse_thread_name_filter_patterns(raw: &str) -> Vec<JstackThreadNamePattern> {
-    raw.split(|character: char| matches!(character, ',' | ';' | '|' | '\n' | '\r' | '，' | '；'))
+    raw.split([',', ';', '|', '\n', '\r', '，', '；'])
         .filter_map(|pattern| {
             let pattern = normalized_filter_pattern(pattern)?;
             if pattern.contains('*') || pattern.contains('?') {
@@ -1450,8 +1378,10 @@ mod tests {
         fs::create_dir_all(&dir).expect("应能创建 Jstack 符号链接测试路径");
         fs::write(dir.join("thread-a.log"), sample_jstack_text()).expect("应能写入 Jstack 日志");
         std::os::unix::fs::symlink(&dir, dir.join("loop")).expect("应能创建目录符号链接回环");
-        let mut config = LoaderConfig::default();
-        config.follow_symlinks = true;
+        let config = LoaderConfig {
+            follow_symlinks: true,
+            ..LoaderConfig::default()
+        };
 
         let result = analyze_jstack_targets(
             vec![JstackAnalysisTarget {

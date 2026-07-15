@@ -12,7 +12,7 @@ use memmap2::MmapOptions;
 
 /// 本地普通文件 mmap 后端；当前返回完整字节供统一解码器生成文本。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct MmapBackend;
+pub(crate) struct MmapBackend;
 
 impl MmapBackend {
     /// 读取本地日志文件的原始字节。
@@ -21,7 +21,7 @@ impl MmapBackend {
     /// - `path`：本地普通日志文件路径。
     ///
     /// 返回值：日志文件字节；空文件返回空 Vec。
-    pub fn read_to_bytes(path: &Path) -> Result<Vec<u8>> {
+    pub(crate) fn read_to_bytes(path: &Path) -> Result<Vec<u8>> {
         if !path.is_file() {
             bail!("日志来源不是普通文件：{}", path.display());
         }

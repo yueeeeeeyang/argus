@@ -14,7 +14,7 @@ use crate::app::{
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
-    HighlightCache, HighlightLanguage, HighlightSpan, HighlightTokenKind, detect_highlight_language,
+    HighlightCache, HighlightLanguage, HighlightSpan, detect_highlight_language,
 };
 use crate::infra::perf::PerfSpan;
 use crate::infra::text_selection::{
@@ -29,7 +29,6 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::jstack_analysis_view;
 use crate::ui::runtime_analysis_view;
-use crate::ui::settings_page;
 use crate::ui::sftp_file_manager_view;
 use crate::ui::terminal_view;
 use gpui::{
@@ -78,14 +77,14 @@ mod scrollbars;
 mod search_results;
 mod text_helpers;
 
-pub use log_lines::*;
-pub use scrollbars::*;
-pub use search_results::*;
-pub use text_helpers::*;
+pub(crate) use log_lines::*;
+pub(crate) use scrollbars::*;
+pub(crate) use search_results::*;
+pub(crate) use text_helpers::*;
 
 /// 滚动条渲染和拖拽所需的度量数据。
 #[derive(Clone, Copy, Debug)]
-pub struct LogScrollbarMetrics {
+pub(crate) struct LogScrollbarMetrics {
     /// 滑块起点。
     thumb_start: gpui::Pixels,
     /// 滑块长度。
@@ -100,7 +99,7 @@ pub struct LogScrollbarMetrics {
 
 /// 分页日志单行实际交给 GPUI 渲染的可见文本切片。
 #[derive(Clone, Debug)]
-pub struct LogVisibleText {
+pub(crate) struct LogVisibleText {
     /// 当前切片文本。
     text: String,
     /// 当前切片在完整展示文本中的字符范围。
@@ -114,7 +113,7 @@ pub struct LogVisibleText {
 /// - `cx`：应用上下文，用于内容区工具按钮和日志选择事件。
 ///
 /// 返回值：GPUI 元素树；真实来源会按读取状态展示加载、失败或逐行日志。
-pub fn render(
+pub(crate) fn render(
     app: &mut ArgusApp,
     window: &mut Window,
     cx: &mut Context<ArgusApp>,
@@ -252,9 +251,7 @@ fn visible_row_capacity(viewport_height: gpui::Pixels) -> usize {
         return DEFAULT_VISIBLE_ROWS;
     }
 
-    ((f32::from(viewport_height) / LOG_VIEWER_ROW_HEIGHT).ceil() as usize + 2)
-        .max(1)
-        .min(400)
+    ((f32::from(viewport_height) / LOG_VIEWER_ROW_HEIGHT).ceil() as usize + 2).clamp(1, 400)
 }
 
 /// 计算分页日志最大纵向滚动像素。
@@ -267,6 +264,7 @@ fn paged_vertical_max_scroll(line_count: usize, viewport_height: gpui::Pixels) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::highlight::HighlightTokenKind;
 
     /// 验证选区覆盖语法高亮中段时，只覆盖被选中的范围，两侧语法颜色仍会保留。
     #[test]

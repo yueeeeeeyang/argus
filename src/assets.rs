@@ -15,11 +15,11 @@ const TAB_CONNECTOR_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg"
 
 /// Argus 内存资产源，当前只负责提供 Lucide SVG 图标。
 #[derive(Debug, Default)]
-pub struct ArgusAssetSource;
+pub(crate) struct ArgusAssetSource;
 
 impl ArgusAssetSource {
     /// 创建资产源实例，当前不读取文件系统。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

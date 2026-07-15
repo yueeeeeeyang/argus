@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn render_search_results_panel(
+pub(crate) fn render_search_results_panel(
     app: &ArgusApp,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
@@ -156,7 +156,7 @@ pub fn render_search_results_panel(
 }
 
 /// 渲染搜索结果面板顶部拖拽条，用于调整底部面板高度。
-pub fn render_search_results_resize_handle(
+pub(crate) fn render_search_results_resize_handle(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -235,7 +235,7 @@ pub fn render_search_results_resize_handle(
 }
 
 /// 根据虚拟列表行类型分派渲染搜索分组或命中结果。
-pub fn render_search_result_item(
+pub(crate) fn render_search_result_item(
     app: &ArgusApp,
     item: SearchResultListItem,
     theme: &AppTheme,
@@ -255,7 +255,7 @@ pub fn render_search_result_item(
 }
 
 /// 渲染搜索结果文件分组行。
-pub fn render_search_result_group_row(
+pub(crate) fn render_search_result_group_row(
     app: &ArgusApp,
     group_index: usize,
     theme: &AppTheme,
@@ -340,7 +340,7 @@ pub fn render_search_result_group_row(
 }
 
 /// 渲染搜索结果中的一行。
-pub fn render_search_result_row(
+pub(crate) fn render_search_result_row(
     app: &ArgusApp,
     index: usize,
     result: &crate::search::search_engine::SearchResult,
@@ -427,7 +427,7 @@ pub fn render_search_result_row(
 }
 
 /// 返回搜索结果行实际渲染宽度：至少撑满当前视口，内容更宽时交给横向滚动条。
-pub fn search_result_row_width(app: &ArgusApp, intrinsic_width: f32) -> f32 {
+pub(crate) fn search_result_row_width(app: &ArgusApp, intrinsic_width: f32) -> f32 {
     let viewport_width = search_result_viewport_width(app);
     app.log_search
         .result_list_content_width
@@ -437,13 +437,13 @@ pub fn search_result_row_width(app: &ArgusApp, intrinsic_width: f32) -> f32 {
 }
 
 /// 读取搜索结果列表当前可视宽度；首帧尚未测量时返回 0，由最小宽度兜底。
-pub fn search_result_viewport_width(app: &ArgusApp) -> f32 {
+pub(crate) fn search_result_viewport_width(app: &ArgusApp) -> f32 {
     let scroll_state = app.log_search.result_scroll.0.borrow();
     f32::from(scroll_state.base_handle.bounds().size.width)
 }
 
 /// 估算搜索结果单行文本宽度，中文和其它非 ASCII 字符按更宽字形处理，避免提前换行。
-pub fn estimated_search_result_text_width(text: &str) -> f32 {
+pub(crate) fn estimated_search_result_text_width(text: &str) -> f32 {
     text.chars()
         .map(|character| {
             if character.is_ascii() {
@@ -456,7 +456,7 @@ pub fn estimated_search_result_text_width(text: &str) -> f32 {
 }
 
 /// 渲染搜索结果面板自定义横纵滚动条。
-pub fn render_search_results_scrollbars(
+pub(crate) fn render_search_results_scrollbars(
     app: &ArgusApp,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
@@ -511,7 +511,7 @@ pub fn render_search_results_scrollbars(
 }
 
 /// 渲染搜索结果面板单个滚动条。
-pub fn render_search_result_scrollbar_thumb(
+pub(crate) fn render_search_result_scrollbar_thumb(
     axis: SearchResultScrollbarAxis,
     metrics: LogScrollbarMetrics,
     viewport_bounds: gpui::Bounds<gpui::Pixels>,

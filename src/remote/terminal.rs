@@ -5,44 +5,39 @@
 //! 主要功能：使用内嵌 ssh2 通道建立远程 shell，并把后台输出安全回传给 GPUI 状态。
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::ops::Range;
-use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use async_channel::{Receiver, Sender};
-use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use gpui::ScrollHandle;
-use ssh2::{HashType, Session};
 
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, word_range_at,
 };
 use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId, SshLinkConfig};
+use crate::remote::ssh::{authenticate_ssh_session, connect_ssh_session};
 
 /// 终端默认行数。
-pub const DEFAULT_TERMINAL_ROWS: u16 = 30;
+pub(crate) const DEFAULT_TERMINAL_ROWS: u16 = 30;
 /// 终端默认列数。
-pub const DEFAULT_TERMINAL_COLS: u16 = 100;
+pub(crate) const DEFAULT_TERMINAL_COLS: u16 = 100;
 /// 终端滚屏缓存行数，避免短时间输出过多时丢失最近上下文。
 const TERMINAL_SCROLLBACK_LINES: usize = 2000;
 /// SSH 后台循环空闲等待间隔，平衡响应速度和 CPU 占用。
 const SSH_WORKER_IDLE_SLEEP: Duration = Duration::from_millis(12);
 
 /// SSH 终端运行期状态，存放在 `ArgusApp` 中并由 UI 渲染。
-pub struct TerminalSessionState {
+pub(crate) struct TerminalSessionState {
     /// 终端会话 ID，与标签页中的 `session_id` 对应。
     pub id: usize,
     /// 关联的链接节点 ID。
     pub link_id: ConnectionNodeId,
     /// 终端标签标题。
     pub title: String,
-    /// 远程地址展示文案。
-    pub address: String,
     /// 当前终端状态。
     pub status: TerminalStatus,
     /// 终端输出解析器，负责把 ANSI 控制序列还原成屏幕文本。
@@ -73,7 +68,7 @@ pub struct TerminalSessionState {
 
 impl TerminalSessionState {
     /// 创建一个处于“连接中”的终端会话状态。
-    pub fn connecting(
+    pub(crate) fn connecting(
         id: usize,
         link: &ConnectionLinkConfig,
         command_sender: mpsc::Sender<TerminalCommand>,
@@ -82,7 +77,6 @@ impl TerminalSessionState {
             id,
             link_id: link.id,
             title: link.name.clone(),
-            address: link.address_label(),
             status: TerminalStatus::Connecting,
             parser: vt100::Parser::new(
                 DEFAULT_TERMINAL_ROWS,
@@ -104,21 +98,13 @@ impl TerminalSessionState {
     }
 
     /// 将后台输出写入 vt100 解析器。
-    pub fn process_output(&mut self, bytes: &[u8]) {
+    pub(crate) fn process_output(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         self.refresh_max_scrollback_offset();
     }
 
-    /// 返回终端屏幕当前可见行。
-    pub fn visible_lines(&self) -> Vec<String> {
-        self.screen_lines()
-            .into_iter()
-            .map(|line| line.text.trim_end().to_string())
-            .collect()
-    }
-
     /// 生成当前终端屏幕快照，供 UI 按终端单元格绘制颜色、背景和光标。
-    pub fn screen_snapshot(&self) -> TerminalScreenSnapshot {
+    pub(crate) fn screen_snapshot(&self) -> TerminalScreenSnapshot {
         let screen = self.parser.screen();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let scrollback_offset = screen.scrollback();
@@ -182,7 +168,7 @@ impl TerminalSessionState {
     }
 
     /// 根据滚轮行数调整 scrollback 偏移；正数查看更早输出，负数回到更新输出。
-    pub fn scroll_scrollback_by(&mut self, line_delta: f32) -> bool {
+    pub(crate) fn scroll_scrollback_by(&mut self, line_delta: f32) -> bool {
         if line_delta == 0.0 || !line_delta.is_finite() {
             return false;
         }
@@ -206,13 +192,13 @@ impl TerminalSessionState {
     }
 
     /// 回到实时终端屏幕，通常在用户开始输入时调用。
-    pub fn reset_scrollback(&mut self) -> bool {
+    pub(crate) fn reset_scrollback(&mut self) -> bool {
         self.scrollback_line_remainder = 0.0;
         self.set_scrollback_offset(0)
     }
 
     /// 将 scrollback 偏移设置到指定行，超出范围时由 vt100 自动夹紧。
-    pub fn set_scrollback_offset(&mut self, offset: usize) -> bool {
+    pub(crate) fn set_scrollback_offset(&mut self, offset: usize) -> bool {
         let screen = self.parser.screen_mut();
         let current = screen.scrollback();
         screen.set_scrollback(offset);
@@ -222,29 +208,30 @@ impl TerminalSessionState {
     }
 
     /// 开始拖动终端滚动条，保存鼠标在滑块内的偏移。
-    pub fn begin_scrollbar_drag(&mut self, cursor_offset: f32) {
+    pub(crate) fn begin_scrollbar_drag(&mut self, cursor_offset: f32) {
         self.scrollbar_drag_cursor_offset = Some(cursor_offset.max(0.0));
     }
 
     /// 返回当前滚动条拖拽偏移；没有拖拽时为空。
-    pub fn scrollbar_drag_cursor_offset(&self) -> Option<f32> {
+    pub(crate) fn scrollbar_drag_cursor_offset(&self) -> Option<f32> {
         self.scrollbar_drag_cursor_offset
     }
 
     /// 结束滚动条拖拽。
-    pub fn finish_scrollbar_drag(&mut self) -> bool {
+    pub(crate) fn finish_scrollbar_drag(&mut self) -> bool {
         let was_dragging = self.scrollbar_drag_cursor_offset.is_some();
         self.scrollbar_drag_cursor_offset = None;
         was_dragging
     }
 
     /// 从指定终端行列开始文本选择。
-    pub fn begin_selection(&mut self, position: TerminalGridPosition) {
+    #[cfg(test)]
+    pub(crate) fn begin_selection(&mut self, position: TerminalGridPosition) {
         self.begin_selection_with_granularity(position, TextSelectionGranularity::Character);
     }
 
     /// 根据点击次数从指定终端行列开始文本选择。
-    pub fn begin_selection_with_click_count(
+    pub(crate) fn begin_selection_with_click_count(
         &mut self,
         position: TerminalGridPosition,
         click_count: usize,
@@ -256,7 +243,7 @@ impl TerminalSessionState {
     }
 
     /// 从指定终端行列和选择粒度开始文本选择。
-    pub fn begin_selection_with_granularity(
+    pub(crate) fn begin_selection_with_granularity(
         &mut self,
         position: TerminalGridPosition,
         granularity: TextSelectionGranularity,
@@ -271,7 +258,7 @@ impl TerminalSessionState {
     }
 
     /// 拖拽过程中更新终端文本选择范围。
-    pub fn update_selection(&mut self, position: TerminalGridPosition) -> bool {
+    pub(crate) fn update_selection(&mut self, position: TerminalGridPosition) -> bool {
         let Some(drag) = self.selection_drag.clone() else {
             return false;
         };
@@ -286,7 +273,7 @@ impl TerminalSessionState {
     }
 
     /// 结束终端文本选择；空选区会被清除。
-    pub fn finish_selection(&mut self) -> bool {
+    pub(crate) fn finish_selection(&mut self) -> bool {
         let was_dragging = self.selection_drag.is_some();
         self.selection_drag = None;
         if self.selection.is_some_and(|selection| selection.is_empty()) {
@@ -296,12 +283,12 @@ impl TerminalSessionState {
     }
 
     /// 返回当前是否正在拖拽终端文本选区。
-    pub fn is_selection_drag_active(&self) -> bool {
+    pub(crate) fn is_selection_drag_active(&self) -> bool {
         self.selection_drag.is_some()
     }
 
     /// 清除终端文本选区。
-    pub fn clear_selection(&mut self) -> bool {
+    pub(crate) fn clear_selection(&mut self) -> bool {
         let changed = self.selection.is_some() || self.selection_drag.is_some();
         self.selection = None;
         self.selection_drag = None;
@@ -309,7 +296,7 @@ impl TerminalSessionState {
     }
 
     /// 选择当前可见终端屏幕，供平台全选快捷键使用。
-    pub fn select_visible_screen(&mut self) -> bool {
+    pub(crate) fn select_visible_screen(&mut self) -> bool {
         if self.rows == 0 || self.cols == 0 {
             return false;
         }
@@ -325,7 +312,7 @@ impl TerminalSessionState {
     }
 
     /// 返回当前终端选区文本；空选区或无选区时返回空。
-    pub fn selected_text(&self) -> Option<String> {
+    pub(crate) fn selected_text(&self) -> Option<String> {
         let selection = self.selection.filter(|selection| !selection.is_empty())?;
         let (start, end) = selection.normalized();
         let screen = self.parser.screen();
@@ -334,7 +321,7 @@ impl TerminalSessionState {
     }
 
     /// 更新终端尺寸，并同步本地解析器尺寸。
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    pub(crate) fn resize(&mut self, rows: u16, cols: u16) {
         if self.rows == rows && self.cols == cols {
             return;
         }
@@ -427,7 +414,7 @@ impl TerminalSessionState {
 
 /// 终端屏幕中的一个行列坐标，列允许等于 `cols` 以表示行尾边界。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct TerminalGridPosition {
+pub(crate) struct TerminalGridPosition {
     /// 0 基终端行号。
     pub row: u16,
     /// 0 基终端列号；作为选区终点时可等于终端列数。
@@ -436,7 +423,7 @@ pub struct TerminalGridPosition {
 
 /// 终端文本选区，由锚点和当前焦点行列组成。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TerminalTextSelection {
+pub(crate) struct TerminalTextSelection {
     /// 选区开始拖拽时的锚点。
     pub anchor: TerminalGridPosition,
     /// 选区当前焦点。
@@ -454,7 +441,7 @@ struct TerminalSelectionDrag {
 
 impl TerminalTextSelection {
     /// 返回从小到大排列后的选区端点。
-    pub fn normalized(&self) -> (TerminalGridPosition, TerminalGridPosition) {
+    pub(crate) fn normalized(&self) -> (TerminalGridPosition, TerminalGridPosition) {
         if self.anchor <= self.focus {
             (self.anchor, self.focus)
         } else {
@@ -463,7 +450,7 @@ impl TerminalTextSelection {
     }
 
     /// 判断选区是否没有覆盖任何终端单元格。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.anchor == self.focus
     }
 }
@@ -492,7 +479,7 @@ fn merge_terminal_text_selections(
 
 /// 终端屏幕单行文本及列边界到 UTF-8 字节偏移的映射。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerminalScreenLine {
+pub(crate) struct TerminalScreenLine {
     /// 按终端单元格补齐到当前列数的显示文本。
     pub text: String,
     /// 终端列边界到 `text` 字节下标的映射，长度为 `cols + 1`。
@@ -501,7 +488,7 @@ pub struct TerminalScreenLine {
 
 impl TerminalScreenLine {
     /// 返回终端列范围在当前行文本中的 UTF-8 字节范围。
-    pub fn byte_range_for_columns(&self, range: Range<u16>) -> Range<usize> {
+    pub(crate) fn byte_range_for_columns(&self, range: Range<u16>) -> Range<usize> {
         let last_index = self.column_byte_indices.len().saturating_sub(1);
         let start_col = usize::from(range.start).min(last_index);
         let end_col = usize::from(range.end).min(last_index).max(start_col);
@@ -522,7 +509,7 @@ impl TerminalScreenLine {
     }
 
     /// 返回指定 UTF-8 字节边界对应的终端列；宽字符会映射到占用列的末端边界。
-    pub fn column_for_byte_boundary(&self, byte_index: usize) -> u16 {
+    pub(crate) fn column_for_byte_boundary(&self, byte_index: usize) -> u16 {
         let byte_index = byte_index.min(self.text.len());
         self.column_byte_indices
             .iter()
@@ -533,7 +520,7 @@ impl TerminalScreenLine {
 
 /// 终端屏幕快照，避免 UI 直接持有 vt100 屏幕借用。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerminalScreenSnapshot {
+pub(crate) struct TerminalScreenSnapshot {
     /// 当前终端可见行数。
     pub rows: u16,
     /// 当前终端可见列数。
@@ -558,7 +545,7 @@ pub struct TerminalScreenSnapshot {
 
 /// 终端颜色值，覆盖默认色、索引色和 truecolor。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TerminalColor {
+pub(crate) enum TerminalColor {
     /// 使用主题默认前景或背景色。
     Default,
     /// ANSI/256 色索引。
@@ -580,7 +567,7 @@ impl From<vt100::Color> for TerminalColor {
 
 /// 终端单元格样式，包含文本色、背景色和常用 SGR 属性。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TerminalCellStyle {
+pub(crate) struct TerminalCellStyle {
     /// 单元格前景色。
     pub fg: TerminalColor,
     /// 单元格背景色。
@@ -611,7 +598,7 @@ impl TerminalCellStyle {
 
 /// 同一行、同一样式的连续终端单元格片段。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerminalCellRun {
+pub(crate) struct TerminalCellRun {
     /// 片段所在行。
     pub row: u16,
     /// 片段起始列。
@@ -706,7 +693,7 @@ fn terminal_screen_line(screen: &vt100::Screen, row: u16, cols: u16) -> Terminal
 
 /// 终端会话状态，用于右侧面板展示不同文案和操作。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TerminalStatus {
+pub(crate) enum TerminalStatus {
     /// 正在连接服务器。
     Connecting,
     /// 已拿到未知主机指纹，等待用户确认。
@@ -721,7 +708,7 @@ pub enum TerminalStatus {
 
 /// 等待用户确认的主机指纹信息。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingHostKey {
+pub(crate) struct PendingHostKey {
     /// 远程主机。
     pub host: String,
     /// 远程端口。
@@ -732,11 +719,9 @@ pub struct PendingHostKey {
 
 /// 启动 SSH worker 时需要的不可变请求数据。
 #[derive(Clone, Debug)]
-pub struct TerminalWorkerRequest {
+pub(crate) struct TerminalWorkerRequest {
     /// 终端会话 ID。
     pub session_id: usize,
-    /// 关联链接 ID。
-    pub link_id: ConnectionNodeId,
     /// SSH 配置快照。
     pub ssh: SshLinkConfig,
     /// 已保存的可信指纹；为空表示首次连接需要用户确认。
@@ -768,7 +753,7 @@ impl TerminalPtySize {
 
 /// UI 发送给 SSH worker 的命令。
 #[derive(Clone, Debug)]
-pub enum TerminalCommand {
+pub(crate) enum TerminalCommand {
     /// 用户确认当前未知主机指纹可信。
     TrustHostKey,
     /// 用户拒绝当前未知主机指纹。
@@ -788,7 +773,7 @@ pub enum TerminalCommand {
 
 /// SSH worker 回传给 UI 的事件。
 #[derive(Clone, Debug)]
-pub enum TerminalEvent {
+pub(crate) enum TerminalEvent {
     /// 发现未知主机指纹，需要 UI 弹窗确认。
     HostKeyVerification {
         /// 会话 ID。
@@ -829,7 +814,7 @@ pub enum TerminalEvent {
 }
 
 /// 启动 SSH 后台线程，并返回命令发送端与事件接收端。
-pub fn spawn_ssh_worker(
+pub(crate) fn spawn_ssh_worker(
     request: TerminalWorkerRequest,
 ) -> (mpsc::Sender<TerminalCommand>, Receiver<TerminalEvent>) {
     let (command_sender, command_receiver) = mpsc::channel();
@@ -850,7 +835,7 @@ pub fn spawn_ssh_worker(
 }
 
 /// 根据 GPUI 按键字段生成写入终端的字节序列。
-pub fn terminal_input_bytes(
+pub(crate) fn terminal_input_bytes(
     key: &str,
     key_char: Option<&str>,
     is_control: bool,
@@ -888,17 +873,9 @@ fn run_ssh_worker(
     command_receiver: mpsc::Receiver<TerminalCommand>,
     event_sender: Sender<TerminalEvent>,
 ) -> Result<()> {
-    let tcp = TcpStream::connect((request.ssh.host.as_str(), request.ssh.port))
-        .with_context(|| format!("无法连接到 {}:{}", request.ssh.host, request.ssh.port))?;
-    tcp.set_nodelay(true).ok();
-
-    let mut session = Session::new().context("无法创建 SSH 会话")?;
-    session.set_tcp_stream(tcp);
-    session.handshake().context("SSH 握手失败")?;
-
-    let fingerprint = sha256_fingerprint(&session).context("无法获取 SSH 主机指纹")?;
+    let (session, fingerprint) = connect_ssh_session(&request.ssh)?;
     let pty_size = verify_host_key(&request, &command_receiver, &event_sender, &fingerprint)?;
-    authenticate(&session, &request.ssh)?;
+    authenticate_ssh_session(&session, &request.ssh)?;
 
     let mut channel = session
         .channel_session()
@@ -972,14 +949,6 @@ fn run_ssh_worker(
     Ok(())
 }
 
-/// 生成 libssh2 握手后返回的 SHA256 主机指纹文本。
-fn sha256_fingerprint(session: &Session) -> Result<String> {
-    let hash = session
-        .host_key_hash(HashType::Sha256)
-        .ok_or_else(|| anyhow!("服务器未返回 SHA256 主机指纹"))?;
-    Ok(format!("SHA256:{}", STANDARD_NO_PAD.encode(hash)))
-}
-
 /// 校验主机指纹；未知主机需要等待 UI 发送确认或拒绝命令。
 fn verify_host_key(
     request: &TerminalWorkerRequest,
@@ -1024,35 +993,6 @@ fn verify_host_key(
     }
 }
 
-/// 按“私钥优先、密码兜底”的顺序执行 SSH 鉴权。
-fn authenticate(session: &Session, ssh: &SshLinkConfig) -> Result<()> {
-    let mut auth_errors = Vec::new();
-    if let Some(private_key_path) = ssh.private_key_path.as_deref() {
-        let passphrase = ssh.private_key_passphrase.as_deref();
-        if let Err(error) = session.userauth_pubkey_file(
-            &ssh.username,
-            None,
-            Path::new(private_key_path),
-            passphrase,
-        ) {
-            auth_errors.push(format!("私钥鉴权失败：{error}"));
-        }
-    }
-    if !session.authenticated()
-        && !ssh.password.is_empty()
-        && let Err(error) = session.userauth_password(&ssh.username, &ssh.password)
-    {
-        auth_errors.push(format!("密码鉴权失败：{error}"));
-    }
-    if session.authenticated() {
-        Ok(())
-    } else if auth_errors.is_empty() {
-        bail!("SSH 鉴权失败：未配置可用凭据")
-    } else {
-        bail!("SSH 鉴权失败：{}", auth_errors.join("；"))
-    }
-}
-
 /// 向远程通道写入字节，非阻塞模式下遇到 WouldBlock 时保留简洁失败提示。
 fn write_channel_bytes(channel: &mut ssh2::Channel, bytes: &[u8]) -> Result<()> {
     channel
@@ -1076,7 +1016,6 @@ mod tests {
             id: 1,
             link_id: 1,
             title: "测试终端".to_string(),
-            address: "root@example:22".to_string(),
             status: TerminalStatus::Connected,
             parser: vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_LINES),
             command_sender: Some(sender),
@@ -1282,7 +1221,6 @@ mod tests {
     fn verify_host_key_preserves_resize_before_trust() {
         let request = TerminalWorkerRequest {
             session_id: 7,
-            link_id: 3,
             ssh: SshLinkConfig {
                 host: "10.0.0.1".to_string(),
                 port: 22,

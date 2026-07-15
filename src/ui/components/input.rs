@@ -36,9 +36,12 @@ const TEXTAREA_SCROLLBAR_MIN_THUMB: f32 = 18.0;
 /// 多行文本域滚动条滑块厚度。
 const TEXTAREA_SCROLLBAR_THUMB_SIZE: f32 = 4.0;
 
+/// 原生文本编辑写回回调；单行输入框和文本域共享同一签名。
+type NativeEditCallback = Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>;
+
 /// 输入框尺寸规格，便于不同工具栏复用同一组件。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InputSize {
+pub(crate) enum InputSize {
     /// 紧凑输入框，用于来源侧栏等窄区域。
     Compact,
     /// 常规输入框，用于内容区搜索面板。
@@ -47,7 +50,7 @@ pub enum InputSize {
 
 /// 输入框前置或后置附件配置，当前主要承载 Lucide 图标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InputAccessory {
+pub(crate) struct InputAccessory {
     /// 附件元素稳定 ID，用于后置按钮测试定位；前置静态图标可忽略该值。
     pub id: &'static str,
     /// 附件展示图标。
@@ -58,16 +61,16 @@ pub struct InputAccessory {
 
 /// 系统文本输入桥接配置，用于接收中文输入法等 IME 提交文本。
 #[derive(Clone)]
-pub struct NativeInput {
+pub(crate) struct NativeInput {
     /// 当前输入框对应的真实 GPUI 焦点句柄。
     pub focus_handle: FocusHandle,
     /// 系统输入提交后的业务写回回调。
-    pub on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+    pub on_edit: NativeEditCallback,
 }
 
 /// 文本域内部滚动状态，保存滚动条拖拽态等纯 UI 交互数据。
 #[derive(Clone, Default)]
-pub struct TextareaScrollState {
+pub(crate) struct TextareaScrollState {
     /// 当前滚动条拖拽状态；使用内部可变性避免把临时拖拽态写入业务配置。
     scrollbar_drag: Rc<RefCell<Option<TextareaScrollbarDrag>>>,
     /// 最近一次自动跟随光标的内容签名，避免用户手动滚动后被每帧强制拉回光标。
@@ -76,7 +79,7 @@ pub struct TextareaScrollState {
 
 impl TextareaScrollState {
     /// 创建空文本域滚动状态。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -98,7 +101,7 @@ impl NativeInput {
     /// - `on_edit`：输入法提交或 marked text 变化时的业务写回回调。
     ///
     /// 返回值：可传给 `Input` 的原生输入桥接配置。
-    pub fn new(
+    pub(crate) fn new(
         focus_handle: FocusHandle,
         on_edit: impl Fn(NativeTextEdit, &mut Window, &mut App) + 'static,
     ) -> Self {
@@ -111,7 +114,7 @@ impl NativeInput {
 
 /// 输入框渲染配置；业务输入状态由调用方维护。
 #[derive(Clone)]
-pub struct Input {
+pub(crate) struct Input {
     /// 输入框稳定元素 ID。
     pub id: &'static str,
     /// 输入框占位提示。
@@ -144,7 +147,7 @@ pub struct Input {
 
 /// 多行文本域渲染配置；业务输入状态由调用方维护。
 #[derive(Clone)]
-pub struct Textarea {
+pub(crate) struct Textarea {
     /// 文本域稳定元素 ID。
     pub id: &'static str,
     /// 文本域占位提示。
@@ -179,7 +182,7 @@ pub struct Textarea {
 
 /// 输入框鼠标选择阶段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InputPointerAction {
+pub(crate) enum InputPointerAction {
     /// 鼠标按下，开始一次选择。
     Begin,
     /// 鼠标拖拽，扩展当前选择。
@@ -190,7 +193,7 @@ pub enum InputPointerAction {
 
 /// 输入框鼠标选择事件；字符索引由组件根据文本布局计算。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InputPointerEvent {
+pub(crate) struct InputPointerEvent {
     /// 当前选择阶段。
     pub action: InputPointerAction,
     /// 鼠标命中的字符索引。
@@ -208,7 +211,7 @@ pub struct InputPointerEvent {
 /// - `on_trailing_click`：后置附件点击回调，未配置后置附件时不会触发。
 ///
 /// 返回值：GPUI 元素树；组件自身不保存业务状态。
-pub fn render_input(
+pub(crate) fn render_input(
     input: Input,
     theme: &AppTheme,
     on_key_down: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
@@ -376,7 +379,7 @@ pub fn render_input(
 /// - `on_trailing_click`：后置附件点击回调，未配置后置附件时不会触发。
 ///
 /// 返回值：GPUI 元素树；组件自身不保存业务状态。
-pub fn render_textarea(
+pub(crate) fn render_textarea(
     textarea: Textarea,
     theme: &AppTheme,
     on_key_down: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
@@ -602,7 +605,7 @@ fn effective_input_focus(
     runtime_focus_handle: Option<&FocusHandle>,
     window: &Window,
 ) -> bool {
-    is_focused && runtime_focus_handle.map_or(true, |focus_handle| focus_handle.is_focused(window))
+    is_focused && runtime_focus_handle.is_none_or(|focus_handle| focus_handle.is_focused(window))
 }
 
 /// 渲染输入框文本、选区和光标；光标通过循环动画实现静止闪烁。
@@ -1785,7 +1788,7 @@ struct NativeInputHandler {
     /// 输入框文本区域绘制边界。
     bounds: Bounds<Pixels>,
     /// 编辑写回回调。
-    on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+    on_edit: NativeEditCallback,
 }
 
 impl NativeInputHandler {
@@ -2038,7 +2041,7 @@ struct NativeTextareaInputHandler {
     /// 当前滚动内容相对可见视口的偏移，GPUI 向右/下滚动时为负值。
     scroll_offset: gpui::Point<Pixels>,
     /// 编辑写回回调。
-    on_edit: Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>,
+    on_edit: NativeEditCallback,
 }
 
 impl NativeTextareaInputHandler {

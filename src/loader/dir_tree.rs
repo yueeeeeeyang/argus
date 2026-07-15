@@ -34,7 +34,7 @@ use crate::utils::path::{display_name, normalize_archive_entry_path};
 
 /// 日志来源加载器，当前只加载来源结构，不读取日志正文。
 #[derive(Clone, Debug)]
-pub struct LogSourceLoader {
+pub(crate) struct LogSourceLoader {
     /// 加载模块配置，限制目录和压缩包展开策略。
     config: LoaderConfig,
     /// 是否延迟执行单文件压缩包探测；目录展开的快速路径只读缓存，不新增耗时探测。
@@ -45,7 +45,7 @@ pub struct LogSourceLoader {
 
 /// 加载报告，记录本次新增节点、跳过项和错误说明。
 #[derive(Debug)]
-pub struct LoadReport {
+pub(crate) struct LoadReport {
     /// 本次加载生成的临时注册表。
     pub registry: SourceRegistry,
     /// 新增节点数量。
@@ -60,7 +60,7 @@ pub struct LoadReport {
 
 /// 来源树压缩包节点探测请求，由 UI 后台队列按优先级提交。
 #[derive(Clone, Debug)]
-pub struct SourceArchiveProbeRequest {
+pub(crate) struct SourceArchiveProbeRequest {
     /// 需要被回填的真实来源节点 ID。
     pub source_id: SourceId,
     /// 节点快照；后台探测不能直接读取 UI 注册表。
@@ -69,7 +69,7 @@ pub struct SourceArchiveProbeRequest {
 
 /// 来源树压缩包节点探测结果；`patch == None` 表示不是单文件压缩包。
 #[derive(Clone, Debug)]
-pub struct SourceArchiveProbeResult {
+pub(crate) struct SourceArchiveProbeResult {
     /// 结果对应的真实来源节点 ID。
     pub source_id: SourceId,
     /// 可回填的节点补丁；无补丁时保持原可展开压缩包行为。
@@ -78,7 +78,7 @@ pub struct SourceArchiveProbeResult {
 
 /// 单文件压缩包探测成功后需要替换到来源节点上的数据。
 #[derive(Clone, Debug)]
-pub struct SourceArchiveProbePatch {
+pub(crate) struct SourceArchiveProbePatch {
     /// 折叠后的节点类型。
     pub kind: SourceKind,
     /// 折叠后的真实打开位置。
@@ -89,7 +89,7 @@ pub struct SourceArchiveProbePatch {
 
 /// 日志来源加载错误。
 #[derive(Debug, Error)]
-pub enum LoadError {
+pub(crate) enum LoadError {
     /// 来源路径不可读或不存在。
     #[error("无法读取来源路径：{0}")]
     UnreadablePath(String),
@@ -206,7 +206,7 @@ const ARCHIVE_SINGLE_FILE_PROBE_CACHE_LIMIT: usize = 16_384;
 
 impl LogSourceLoader {
     /// 使用指定配置创建日志来源加载器。
-    pub fn new(config: LoaderConfig) -> Self {
+    pub(crate) fn new(config: LoaderConfig) -> Self {
         Self {
             config,
             defer_archive_probe: false,
@@ -215,7 +215,10 @@ impl LogSourceLoader {
     }
 
     /// 为加载器附加当前会话已输入的压缩包密码快照。
-    pub fn with_archive_passwords(mut self, archive_passwords: ArchivePasswordStore) -> Self {
+    pub(crate) fn with_archive_passwords(
+        mut self,
+        archive_passwords: ArchivePasswordStore,
+    ) -> Self {
         self.archive_passwords = archive_passwords;
         self
     }
@@ -223,13 +226,13 @@ impl LogSourceLoader {
     /// 创建只使用缓存、不新增同步探测的加载器。
     ///
     /// 说明：UI 展开目录时使用该模式，保证目录列表先快速返回；后台探测队列再渐进修正节点。
-    pub fn with_deferred_archive_probe(mut self) -> Self {
+    pub(crate) fn with_deferred_archive_probe(mut self) -> Self {
         self.defer_archive_probe = true;
         self
     }
 
     /// 批量探测来源树中的压缩包节点，调用方负责按批次和优先级提交请求。
-    pub fn probe_archive_nodes(
+    pub(crate) fn probe_archive_nodes(
         &self,
         requests: Vec<SourceArchiveProbeRequest>,
     ) -> Vec<SourceArchiveProbeResult> {
@@ -267,7 +270,7 @@ impl LogSourceLoader {
     /// - `paths`：来自自定义来源选择器的文件、目录或压缩包路径。
     ///
     /// 返回值：包含临时来源注册表的加载报告。
-    pub fn load_paths(&self, paths: Vec<PathBuf>) -> LoadReport {
+    pub(crate) fn load_paths(&self, paths: Vec<PathBuf>) -> LoadReport {
         let mut registry = SourceRegistry::new();
         let mut report = LoadReport::empty();
 
@@ -293,7 +296,7 @@ impl LogSourceLoader {
     /// - `parent`：当前 UI 中被展开的来源节点快照。
     ///
     /// 返回值：只包含父节点子级的临时注册表；调用方负责挂回真实父节点。
-    pub fn load_children(&self, parent: &SourceTreeNode) -> LoadReport {
+    pub(crate) fn load_children(&self, parent: &SourceTreeNode) -> LoadReport {
         let mut registry = SourceRegistry::new();
         let mut report = LoadReport::empty();
 
@@ -1421,12 +1424,8 @@ fn probe_source_archive_node(
                 .ok()
                 .map(|metadata| metadata.len())
                 .or(node.metadata.size);
-            let key = local_archive_probe_cache_key(
-                path,
-                format,
-                entry_size,
-                !passwords.is_empty(),
-            );
+            let key =
+                local_archive_probe_cache_key(path, format, entry_size, !passwords.is_empty());
             let target = cached_archive_probe_target(key, || {
                 probe_local_single_file_target(path, format, passwords)
             })?;
@@ -1548,7 +1547,7 @@ fn single_file_target_from_probe(probe: ArchiveRootProbe) -> Option<SingleFileAr
 
 impl LoadReport {
     /// 构造空加载报告。
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             registry: SourceRegistry::new(),
             added_count: 0,
@@ -1575,7 +1574,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::config::LoaderConfig;
-    use crate::loader::archive::ArchiveEntryInfo;
+    use crate::loader::archive::adapter::ArchiveEntryInfo;
     use crate::loader::archive::detector::ArchiveFormat;
     use crate::loader::dir_tree::{LogSourceLoader, SourceArchiveProbeRequest};
     use crate::loader::log_source::SourceKind;
@@ -1756,7 +1755,6 @@ mod tests {
             0,
             vec![ArchiveEntryInfo {
                 path: "inner.zip".to_string(),
-                label: "inner.zip".to_string(),
                 is_dir: false,
                 size: Some(128),
             }],

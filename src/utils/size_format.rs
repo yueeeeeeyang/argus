@@ -5,7 +5,7 @@
 //! 主要功能：将字节数转换为适合状态栏和来源树提示展示的短文本。
 
 /// 将字节数格式化为 B、KB、MB、GB 或 TB。
-pub fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit_index = 0usize;

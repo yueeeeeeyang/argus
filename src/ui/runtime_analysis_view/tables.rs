@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn render_summary_table(
+pub(crate) fn render_summary_table(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     result: &RuntimeAnalysisResult,
@@ -72,7 +72,7 @@ pub fn render_summary_table(
 }
 
 /// 渲染请求详情表格。
-pub fn render_request_details_table(
+pub(crate) fn render_request_details_table(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     result: &RuntimeAnalysisResult,
@@ -164,7 +164,7 @@ pub fn render_request_details_table(
 }
 
 /// 渲染 SQL 明细表格。
-pub fn render_sql_table(
+pub(crate) fn render_sql_table(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     request_path: &str,
@@ -266,7 +266,7 @@ pub fn render_sql_table(
 }
 
 /// 渲染 SQL 频率分析表格。
-pub fn render_sql_frequency_table(
+pub(crate) fn render_sql_frequency_table(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     result: &RuntimeAnalysisResult,
@@ -344,7 +344,7 @@ pub fn render_sql_frequency_table(
 }
 
 /// 渲染 SQL 频率详情表格。
-pub fn render_sql_frequency_detail_table(
+pub(crate) fn render_sql_frequency_detail_table(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     result: &RuntimeAnalysisResult,
@@ -438,7 +438,7 @@ pub fn render_sql_frequency_detail_table(
 }
 
 /// 渲染慢 SQL 分析表格。
-pub fn render_slow_sql_table(
+pub(crate) fn render_slow_sql_table(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     result: &RuntimeAnalysisResult,
@@ -516,7 +516,7 @@ pub fn render_slow_sql_table(
 }
 
 /// 渲染慢 SQL 详情表格。
-pub fn render_slow_sql_detail_table(
+pub(crate) fn render_slow_sql_detail_table(
     analysis_id: usize,
     state: &RuntimeAnalysisState,
     result: &RuntimeAnalysisResult,
@@ -610,7 +610,7 @@ pub fn render_slow_sql_detail_table(
 }
 
 /// 渲染 SQL 频率分析表头。
-pub fn render_sql_frequency_header(theme: &AppTheme) -> impl IntoElement + use<> {
+pub(crate) fn render_sql_frequency_header(theme: &AppTheme) -> impl IntoElement + use<> {
     render_table_header(theme)
         .child(render_static_flex_header_cell("SQL文本", theme))
         .child(render_sql_analysis_column_gap())
@@ -632,7 +632,7 @@ pub fn render_sql_frequency_header(theme: &AppTheme) -> impl IntoElement + use<>
 }
 
 /// 渲染单条 SQL 频率分析行。
-pub fn render_sql_frequency_row(
+pub(crate) fn render_sql_frequency_row(
     analysis_id: usize,
     row_index: usize,
     row: &RuntimeSqlFrequencyAnalysisRow,
@@ -710,7 +710,7 @@ pub fn render_sql_frequency_row(
 }
 
 /// 渲染 SQL 频率详情顶部信息。
-pub fn render_sql_frequency_detail_topbar(
+pub(crate) fn render_sql_frequency_detail_topbar(
     analysis_id: usize,
     normalized_sql: &str,
     row_count: usize,
@@ -764,7 +764,7 @@ pub fn render_sql_frequency_detail_topbar(
 }
 
 /// 渲染 SQL 频率详情表头。
-pub fn render_sql_frequency_detail_header(theme: &AppTheme) -> impl IntoElement + use<> {
+pub(crate) fn render_sql_frequency_detail_header(theme: &AppTheme) -> impl IntoElement + use<> {
     render_table_header(theme)
         .child(render_static_flex_header_cell("SQL文本", theme))
         .child(render_sql_analysis_column_gap())
@@ -786,7 +786,7 @@ pub fn render_sql_frequency_detail_header(theme: &AppTheme) -> impl IntoElement 
 }
 
 /// 渲染单条 SQL 频率详情行。
-pub fn render_sql_frequency_detail_row(
+pub(crate) fn render_sql_frequency_detail_row(
     analysis_id: usize,
     result: &RuntimeAnalysisResult,
     row: &RuntimeSqlFrequencyDetailRow,
@@ -882,7 +882,7 @@ pub fn render_sql_frequency_detail_row(
 }
 
 /// 渲染慢 SQL 分析表头。
-pub fn render_slow_sql_header(theme: &AppTheme) -> impl IntoElement + use<> {
+pub(crate) fn render_slow_sql_header(theme: &AppTheme) -> impl IntoElement + use<> {
     render_table_header(theme)
         .child(render_static_flex_header_cell("SQL文本", theme))
         .child(render_sql_analysis_column_gap())
@@ -904,7 +904,7 @@ pub fn render_slow_sql_header(theme: &AppTheme) -> impl IntoElement + use<> {
 }
 
 /// 渲染单条慢 SQL 聚合行。
-pub fn render_slow_sql_row(
+pub(crate) fn render_slow_sql_row(
     analysis_id: usize,
     row_index: usize,
     row: &RuntimeSlowSqlSummaryRow,
@@ -979,7 +979,7 @@ pub fn render_slow_sql_row(
 }
 
 /// 渲染慢 SQL 详情顶部信息。
-pub fn render_slow_sql_detail_topbar(
+pub(crate) fn render_slow_sql_detail_topbar(
     analysis_id: usize,
     normalized_sql: &str,
     row_count: usize,
@@ -1031,7 +1031,7 @@ pub fn render_slow_sql_detail_topbar(
 }
 
 /// 渲染慢 SQL 详情表头。
-pub fn render_slow_sql_detail_header(theme: &AppTheme) -> impl IntoElement + use<> {
+pub(crate) fn render_slow_sql_detail_header(theme: &AppTheme) -> impl IntoElement + use<> {
     render_table_header(theme)
         .child(render_static_flex_header_cell("SQL文本", theme))
         .child(render_sql_analysis_column_gap())
@@ -1053,7 +1053,7 @@ pub fn render_slow_sql_detail_header(theme: &AppTheme) -> impl IntoElement + use
 }
 
 /// 渲染慢 SQL 详情中的单次执行行。
-pub fn render_slow_sql_detail_row(
+pub(crate) fn render_slow_sql_detail_row(
     analysis_id: usize,
     result: &RuntimeAnalysisResult,
     row: &RuntimeSqlFrequencyDetailRow,

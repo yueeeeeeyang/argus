@@ -18,7 +18,7 @@ use crate::ui::components::input::NativeInput;
 /// - `focus_handle`：该输入框的真实 GPUI 焦点句柄。
 ///
 /// 返回值：可放入通用 `Input` 组件的原生输入配置。
-pub fn app_native_input(
+pub(crate) fn app_native_input(
     app_handle: Entity<ArgusApp>,
     target: AppTextInputTarget,
     focus_handle: FocusHandle,

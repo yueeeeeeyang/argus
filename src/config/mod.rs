@@ -4,12 +4,9 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供应用配置模型、日志搜索配置、日志显示配置、升级配置和配置管理入口。
 
-pub mod app_config;
-pub mod config_manager;
-pub mod paths;
+pub(crate) mod app_config;
+pub(crate) mod config_manager;
+pub(crate) mod paths;
 
-pub use app_config::{
-    AppConfig, AppearanceConfig, CacheConfig, EncodingConfig, LoaderConfig, LogDisplayConfig,
-    LogSearchConfig, SEARCH_RECENT_KEYWORDS_MAX, UpgradeConfig,
-};
-pub use config_manager::{ConfigError, ConfigManager};
+pub(crate) use app_config::{AppConfig, LoaderConfig, SEARCH_RECENT_KEYWORDS_MAX, UpgradeConfig};
+pub(crate) use config_manager::ConfigManager;

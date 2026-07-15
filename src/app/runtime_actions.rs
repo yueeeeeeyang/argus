@@ -3,7 +3,11 @@
 use super::*;
 
 impl ArgusApp {
-    pub fn open_runtime_analysis_tab(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+    pub(crate) fn open_runtime_analysis_tab(
+        &mut self,
+        source_id: SourceId,
+        cx: &mut Context<Self>,
+    ) {
         if !self.ensure_source_directory_ready_for_analysis(
             source_id,
             PendingSourceAnalysisAction::Runtime { source_id },
@@ -45,12 +49,15 @@ impl ArgusApp {
     }
 
     /// 返回指定 Runtime 分析状态。
-    pub fn runtime_analysis_state(&self, analysis_id: usize) -> Option<&RuntimeAnalysisState> {
+    pub(crate) fn runtime_analysis_state(
+        &self,
+        analysis_id: usize,
+    ) -> Option<&RuntimeAnalysisState> {
         self.runtime_analyses.get(&analysis_id)
     }
 
     /// 返回指定 Runtime 分析状态的可变引用。
-    pub fn runtime_analysis_state_mut(
+    pub(crate) fn runtime_analysis_state_mut(
         &mut self,
         analysis_id: usize,
     ) -> Option<&mut RuntimeAnalysisState> {
@@ -97,9 +104,6 @@ impl ArgusApp {
         self.runtime_analyses.insert(
             analysis_id,
             RuntimeAnalysisState {
-                id: analysis_id,
-                title: title.clone(),
-                targets,
                 generation,
                 view: RuntimeAnalysisView::Summary,
                 result_type: RuntimeAnalysisResultType::Statistics,
@@ -109,10 +113,10 @@ impl ArgusApp {
                 request_sort_direction: RuntimeSortDirection::Descending,
                 sql_sort_key: RuntimeSqlSortKey::ExecuteDuration,
                 sql_sort_direction: RuntimeSortDirection::Descending,
-                filter_keyword_input: SettingsTextInputState::default(),
-                filter_username_input: SettingsTextInputState::default(),
-                filter_start_time_input: SettingsTextInputState::default(),
-                filter_end_time_input: SettingsTextInputState::default(),
+                filter_keyword_input: TextInputState::default(),
+                filter_username_input: TextInputState::default(),
+                filter_start_time_input: TextInputState::default(),
+                filter_end_time_input: TextInputState::default(),
                 applied_filter_keyword: String::new(),
                 applied_filter_username: String::new(),
                 applied_filter_start_time: String::new(),
@@ -614,7 +618,7 @@ impl ArgusApp {
     }
 
     /// 切换 Runtime 分析结果类型，并清理旧表格残留的交互状态。
-    pub fn set_runtime_result_type(
+    pub(crate) fn set_runtime_result_type(
         &mut self,
         analysis_id: usize,
         result_type: RuntimeAnalysisResultType,
@@ -672,7 +676,7 @@ impl ArgusApp {
     }
 
     /// 打开 SQL 频率分析中指定 SQL 结构的执行详情页。
-    pub fn open_runtime_sql_frequency_detail(
+    pub(crate) fn open_runtime_sql_frequency_detail(
         &mut self,
         analysis_id: usize,
         normalized_sql: String,
@@ -694,7 +698,7 @@ impl ArgusApp {
     }
 
     /// 从 SQL 频率详情页返回 SQL 频率列表。
-    pub fn show_runtime_sql_frequency_summary(&mut self, analysis_id: usize) {
+    pub(crate) fn show_runtime_sql_frequency_summary(&mut self, analysis_id: usize) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
@@ -710,7 +714,11 @@ impl ArgusApp {
     }
 
     /// 打开慢 SQL 分析中指定 SQL 结构的执行详情页。
-    pub fn open_runtime_slow_sql_detail(&mut self, analysis_id: usize, normalized_sql: String) {
+    pub(crate) fn open_runtime_slow_sql_detail(
+        &mut self,
+        analysis_id: usize,
+        normalized_sql: String,
+    ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
@@ -728,7 +736,7 @@ impl ArgusApp {
     }
 
     /// 从慢 SQL 详情页返回慢 SQL 聚合列表。
-    pub fn show_runtime_slow_sql_summary(&mut self, analysis_id: usize) {
+    pub(crate) fn show_runtime_slow_sql_summary(&mut self, analysis_id: usize) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
@@ -744,7 +752,7 @@ impl ArgusApp {
     }
 
     /// 切换 Runtime 分析总览表排序字段。
-    pub fn set_runtime_summary_sort(
+    pub(crate) fn set_runtime_summary_sort(
         &mut self,
         analysis_id: usize,
         sort_key: RuntimeSummarySortKey,
@@ -767,7 +775,7 @@ impl ArgusApp {
     }
 
     /// 切换 Runtime 请求明细表排序字段。
-    pub fn set_runtime_request_sort(
+    pub(crate) fn set_runtime_request_sort(
         &mut self,
         analysis_id: usize,
         sort_key: RuntimeRequestSortKey,
@@ -790,7 +798,7 @@ impl ArgusApp {
     }
 
     /// 切换 Runtime SQL 明细表排序字段。
-    pub fn set_runtime_sql_sort(&mut self, analysis_id: usize, sort_key: RuntimeSqlSortKey) {
+    pub(crate) fn set_runtime_sql_sort(&mut self, analysis_id: usize, sort_key: RuntimeSqlSortKey) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
@@ -808,7 +816,11 @@ impl ArgusApp {
     }
 
     /// 从 Runtime 总览进入指定请求地址的详情页。
-    pub fn open_runtime_request_details(&mut self, analysis_id: usize, request_path: String) {
+    pub(crate) fn open_runtime_request_details(
+        &mut self,
+        analysis_id: usize,
+        request_path: String,
+    ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
@@ -826,7 +838,7 @@ impl ArgusApp {
     }
 
     /// 从 Runtime 请求详情进入指定请求日志的 SQL 列表。
-    pub fn open_runtime_sql_list(
+    pub(crate) fn open_runtime_sql_list(
         &mut self,
         analysis_id: usize,
         request_path: String,
@@ -850,7 +862,7 @@ impl ArgusApp {
     }
 
     /// 返回 Runtime 总览页。
-    pub fn show_runtime_summary(&mut self, analysis_id: usize) {
+    pub(crate) fn show_runtime_summary(&mut self, analysis_id: usize) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
@@ -865,7 +877,11 @@ impl ArgusApp {
     }
 
     /// 从 Runtime SQL 列表返回请求详情页。
-    pub fn show_runtime_request_details(&mut self, analysis_id: usize, request_path: String) {
+    pub(crate) fn show_runtime_request_details(
+        &mut self,
+        analysis_id: usize,
+        request_path: String,
+    ) {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Runtime 分析结果".to_string();
             return;
@@ -882,7 +898,7 @@ impl ArgusApp {
     /// 更新 Runtime SQL 文本单元格悬浮状态。
     ///
     /// `cell_key` 标识当前悬浮的具体 SQL 记录或聚合行；返回值表示状态是否变化，需要触发界面刷新。
-    pub fn set_runtime_sql_cell_hovered(
+    pub(crate) fn set_runtime_sql_cell_hovered(
         &mut self,
         analysis_id: usize,
         cell_key: RuntimeSqlCellKey,
@@ -906,7 +922,7 @@ impl ArgusApp {
     }
 
     /// 打开 Runtime SQL 完整文本弹窗，弹窗内容保留 SQL 原始换行和缩进。
-    pub fn open_runtime_sql_text_dialog(
+    pub(crate) fn open_runtime_sql_text_dialog(
         &mut self,
         analysis_id: usize,
         mut dialog: RuntimeSqlTextDialog,
@@ -928,7 +944,7 @@ impl ArgusApp {
     }
 
     /// 关闭 Runtime SQL 完整文本弹窗。
-    pub fn close_runtime_sql_text_dialog(&mut self, analysis_id: usize) -> bool {
+    pub(crate) fn close_runtime_sql_text_dialog(&mut self, analysis_id: usize) -> bool {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return false;
         };
@@ -943,7 +959,7 @@ impl ArgusApp {
     }
 
     /// 清理 Runtime SQL 完整文本弹窗中的正文选区。
-    pub fn clear_runtime_sql_text_selection(&mut self, analysis_id: usize) -> bool {
+    pub(crate) fn clear_runtime_sql_text_selection(&mut self, analysis_id: usize) -> bool {
         let Some(dialog) = self
             .runtime_analyses
             .get_mut(&analysis_id)
@@ -957,7 +973,7 @@ impl ArgusApp {
     }
 
     /// 开始在 Runtime SQL 完整文本弹窗中选择文本。
-    pub fn begin_runtime_sql_text_selection(
+    pub(crate) fn begin_runtime_sql_text_selection(
         &mut self,
         analysis_id: usize,
         line_index: usize,
@@ -983,7 +999,7 @@ impl ArgusApp {
     }
 
     /// 拖拽更新 Runtime SQL 完整文本弹窗中的文本选区。
-    pub fn update_runtime_sql_text_selection(
+    pub(crate) fn update_runtime_sql_text_selection(
         &mut self,
         analysis_id: usize,
         line_index: usize,
@@ -1027,7 +1043,7 @@ impl ArgusApp {
     }
 
     /// 结束 Runtime SQL 完整文本弹窗文本选择；空选区会被清理。
-    pub fn finish_runtime_sql_text_selection(&mut self, analysis_id: usize) -> bool {
+    pub(crate) fn finish_runtime_sql_text_selection(&mut self, analysis_id: usize) -> bool {
         let Some(dialog) = self
             .runtime_analyses
             .get_mut(&analysis_id)
@@ -1039,7 +1055,7 @@ impl ArgusApp {
         if dialog
             .selection
             .as_ref()
-            .map_or(true, RuntimeSqlTextSelection::is_empty)
+            .is_none_or(RuntimeSqlTextSelection::is_empty)
         {
             dialog.selection = None;
         }
@@ -1049,7 +1065,7 @@ impl ArgusApp {
     /// 复制 Runtime SQL 完整文本弹窗中的当前选区。
     ///
     /// 返回值：是否存在可复制的 SQL 弹窗选区。
-    pub fn copy_runtime_sql_text_selection(
+    pub(crate) fn copy_runtime_sql_text_selection(
         &mut self,
         analysis_id: usize,
         cx: &mut Context<Self>,
@@ -1067,7 +1083,7 @@ impl ArgusApp {
             return false;
         };
 
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
         self.placeholder_notice = format!("已复制 SQL 文本：{selected_text}");
         true
@@ -1081,7 +1097,7 @@ impl ArgusApp {
     /// - `text`：单元格完整文本。
     /// - `character_index`：鼠标按下位置命中的字符列。
     /// - `granularity`：按点击次数决定的选择粒度。
-    pub fn begin_runtime_cell_selection(
+    pub(crate) fn begin_runtime_cell_selection(
         &mut self,
         analysis_id: usize,
         cell_key: String,
@@ -1112,7 +1128,7 @@ impl ArgusApp {
     /// 拖拽更新 Runtime 表格单元格中的文本选区。
     ///
     /// 返回值：本次拖拽是否命中当前分析页和当前单元格。
-    pub fn update_runtime_cell_selection(
+    pub(crate) fn update_runtime_cell_selection(
         &mut self,
         analysis_id: usize,
         cell_key: &str,
@@ -1142,7 +1158,7 @@ impl ArgusApp {
     /// 结束 Runtime 单元格文本选择；如果没有选中字符则清理空选区。
     ///
     /// 返回值：当前分析页是否存在需要结束的拖拽状态。
-    pub fn finish_runtime_cell_selection(&mut self, analysis_id: usize) -> bool {
+    pub(crate) fn finish_runtime_cell_selection(&mut self, analysis_id: usize) -> bool {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return false;
         };
@@ -1159,7 +1175,11 @@ impl ArgusApp {
     }
 
     /// 复制当前 Runtime 分析页表格单元格中拖选的文本。
-    pub fn copy_selected_runtime_cell(&mut self, analysis_id: usize, cx: &mut Context<Self>) {
+    pub(crate) fn copy_selected_runtime_cell(
+        &mut self,
+        analysis_id: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some((cell_text, range)) = self
             .runtime_analyses
             .get(&analysis_id)
@@ -1175,7 +1195,7 @@ impl ArgusApp {
         };
 
         let selected_text = slice_character_range(&cell_text, range);
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text.clone()));
         self.placeholder_notice = format!("已复制 Runtime 单元格内容：{selected_text}");
     }
@@ -1183,7 +1203,7 @@ impl ArgusApp {
     /// 清理全部 Runtime 分析页的表格单元格文本选区。
     ///
     /// 返回值：是否确实清理了已有选区或拖拽状态。
-    pub fn clear_runtime_cell_selection(&mut self) -> bool {
+    pub(crate) fn clear_runtime_cell_selection(&mut self) -> bool {
         let mut changed = false;
         for state in self.runtime_analyses.values_mut() {
             if state.cell_selection.take().is_some() {
@@ -1197,7 +1217,7 @@ impl ArgusApp {
     }
 
     /// 打开 Runtime 时间选择器，并关闭其它 Runtime 页签中已展开的时间面板。
-    pub fn open_runtime_time_picker(
+    pub(crate) fn open_runtime_time_picker(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1219,7 +1239,7 @@ impl ArgusApp {
     /// 关闭指定 Runtime 分析页的时间选择器。
     ///
     /// 返回值：是否关闭了一个已打开的面板。
-    pub fn close_runtime_time_picker(&mut self, analysis_id: usize) -> bool {
+    pub(crate) fn close_runtime_time_picker(&mut self, analysis_id: usize) -> bool {
         self.runtime_analyses
             .get_mut(&analysis_id)
             .and_then(|state| state.open_time_picker.take())
@@ -1227,7 +1247,7 @@ impl ArgusApp {
     }
 
     /// 使用快捷动作设置 Runtime 时间过滤输入框。
-    pub fn apply_runtime_time_picker_quick_action(
+    pub(crate) fn apply_runtime_time_picker_quick_action(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1259,7 +1279,7 @@ impl ArgusApp {
     }
 
     /// 按日期时间组件的步进按钮调整 Runtime 时间过滤输入框。
-    pub fn adjust_runtime_filter_time(
+    pub(crate) fn adjust_runtime_filter_time(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1285,7 +1305,7 @@ impl ArgusApp {
     ///
     /// 说明：常见 Web 日期时间选择器在点选日期后仍保留时间选择能力；
     /// 因此这里只更新日期，不关闭浮层，方便用户继续微调时分秒。
-    pub fn set_runtime_filter_date(
+    pub(crate) fn set_runtime_filter_date(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1348,7 +1368,7 @@ impl ArgusApp {
     }
 
     /// 聚焦 Runtime 过滤输入框，并清理其它 Runtime 过滤输入框的临时输入法状态。
-    pub fn focus_runtime_filter_input(
+    pub(crate) fn focus_runtime_filter_input(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1363,7 +1383,7 @@ impl ArgusApp {
     }
 
     /// 清空 Runtime 过滤输入框，并立即刷新当前分析页过滤结果。
-    pub fn clear_runtime_filter_input(
+    pub(crate) fn clear_runtime_filter_input(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1382,7 +1402,7 @@ impl ArgusApp {
     }
 
     /// 处理 Runtime 过滤输入框键盘事件。
-    pub fn handle_runtime_filter_input_key(
+    pub(crate) fn handle_runtime_filter_input_key(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1472,7 +1492,7 @@ impl ArgusApp {
     }
 
     /// 开始 Runtime 过滤输入框鼠标选择。
-    pub fn begin_runtime_filter_input_pointer_selection(
+    pub(crate) fn begin_runtime_filter_input_pointer_selection(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1483,18 +1503,11 @@ impl ArgusApp {
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
             return;
         };
-        let range = runtime_filter_input_range_for_granularity(input, character_index, granularity);
-        input.cursor = range.end;
-        input.selection_anchor = Some(range.start);
-        input.marked_range = None;
-        input.selection_drag = Some(InputTextSelectionDrag {
-            anchor_range: range,
-            granularity,
-        });
+        input.begin_pointer_selection(character_index, granularity);
     }
 
     /// 更新 Runtime 过滤输入框鼠标拖拽选区。
-    pub fn update_runtime_filter_input_pointer_selection(
+    pub(crate) fn update_runtime_filter_input_pointer_selection(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
@@ -1503,33 +1516,26 @@ impl ArgusApp {
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
             return;
         };
-        let Some(drag) = input.selection_drag.clone() else {
-            return;
-        };
-        let focus_range =
-            runtime_filter_input_range_for_granularity(input, character_index, drag.granularity);
-        input.selection_anchor = Some(drag.anchor_range.start.min(focus_range.start));
-        input.marked_range = None;
-        input.cursor = drag.anchor_range.end.max(focus_range.end);
+        input.update_pointer_selection(character_index);
     }
 
     /// 结束 Runtime 过滤输入框鼠标选择。
-    pub fn finish_runtime_filter_input_pointer_selection(
+    pub(crate) fn finish_runtime_filter_input_pointer_selection(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
     ) {
         if let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) {
-            input.selection_drag = None;
+            input.finish_pointer_selection();
         }
     }
 
     /// 返回指定 Runtime 过滤输入框的只读状态。
-    pub fn runtime_filter_input(
+    pub(crate) fn runtime_filter_input(
         &self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
-    ) -> Option<&SettingsTextInputState> {
+    ) -> Option<&TextInputState> {
         let state = self.runtime_analyses.get(&analysis_id)?;
         Some(match input_kind {
             RuntimeFilterInputKind::Keyword => &state.filter_keyword_input,
@@ -1540,11 +1546,11 @@ impl ArgusApp {
     }
 
     /// 返回指定 Runtime 过滤输入框的可变状态。
-    pub fn runtime_filter_input_mut(
+    pub(crate) fn runtime_filter_input_mut(
         &mut self,
         analysis_id: usize,
         input_kind: RuntimeFilterInputKind,
-    ) -> Option<&mut SettingsTextInputState> {
+    ) -> Option<&mut TextInputState> {
         let state = self.runtime_analyses.get_mut(&analysis_id)?;
         Some(match input_kind {
             RuntimeFilterInputKind::Keyword => &mut state.filter_keyword_input,
@@ -1555,10 +1561,8 @@ impl ArgusApp {
     }
 
     /// Runtime 过滤条件变化后标记待应用，真正过滤由防抖后台任务完成。
-    pub fn after_runtime_filter_changed(&mut self, analysis_id: usize) -> Option<usize> {
-        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
-            return None;
-        };
+    pub(crate) fn after_runtime_filter_changed(&mut self, analysis_id: usize) -> Option<usize> {
+        let state = self.runtime_analyses.get_mut(&analysis_id)?;
         state.filter_input_generation = state.filter_input_generation.saturating_add(1);
         state.is_filter_pending = true;
         state.cell_selection = None;
@@ -1596,7 +1600,7 @@ impl ArgusApp {
         else {
             return;
         };
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
     }
 
@@ -1620,7 +1624,7 @@ impl ArgusApp {
         input_kind: RuntimeFilterInputKind,
         cx: &mut Context<Self>,
     ) {
-        let app_context: &gpui::App = (&*cx).borrow();
+        let app_context: &gpui::App = (*cx).borrow();
         let Some(item) = app_context.read_from_clipboard() else {
             return;
         };

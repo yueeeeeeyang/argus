@@ -88,7 +88,11 @@ pub(crate) struct TabBarLayout {
 /// - `cx`：应用上下文，用于绑定切换、关闭、右键菜单和溢出菜单。
 ///
 /// 返回值：GPUI 元素树；不包含新增标签页和拖拽排序入口。
-pub fn render(app: &ArgusApp, window: &mut Window, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+pub(crate) fn render(
+    app: &ArgusApp,
+    window: &mut Window,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
     let theme = app.theme.clone();
     let tabs = app.tabs.clone();
     let active_tab_id = app.active_tab_id;
@@ -247,10 +251,7 @@ fn is_tab_loading(app: &ArgusApp, kind: &TabKind) -> bool {
             .is_some_and(|state| {
                 matches!(state.task_state, RuntimeAnalysisTaskState::Loading { .. })
             }),
-        TabKind::Empty
-        | TabKind::Settings
-        | TabKind::SshTerminal { .. }
-        | TabKind::SftpFileManager { .. } => false,
+        TabKind::Empty | TabKind::SshTerminal { .. } | TabKind::SftpFileManager { .. } => false,
     }
 }
 
@@ -515,7 +516,6 @@ mod tests {
     use crate::app::{ArgusTab, TabKind};
     use crate::config::ConfigManager;
     use crate::loader::SourceId;
-    use crate::reader::read_mode::ReadMode;
     use gpui::{Modifiers, MouseDownEvent, MouseUpEvent, TestAppContext, point, px};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -666,7 +666,6 @@ mod tests {
         app.log_read_states.insert(
             source_id,
             LogOpenState::Loading {
-                mode: ReadMode::MmapPaged,
                 message: "正在读取".to_string(),
             },
         );

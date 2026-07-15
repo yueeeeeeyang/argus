@@ -13,7 +13,7 @@ use crate::loader::archive::{
 
 /// 压缩包条目顺序流后端；当前将流式输出汇聚为解码缓冲。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ArchiveStreamBackend;
+pub(crate) struct ArchiveStreamBackend;
 
 impl ArchiveStreamBackend {
     /// 流式读取压缩包内部日志条目的原始字节。
@@ -22,7 +22,7 @@ impl ArchiveStreamBackend {
     /// - `location`：必须是 `SourceLocation::ArchiveEntry`。
     ///
     /// 返回值：目标条目解压后字节；读取过程中不创建临时文件。
-    pub fn read_to_bytes(
+    pub(crate) fn read_to_bytes(
         location: &SourceLocation,
         archive_passwords: &ArchivePasswordStore,
     ) -> Result<Vec<u8>> {
@@ -60,7 +60,7 @@ impl ArchiveStreamBackend {
     /// - `consumer`：接收解压后字节分片的回调。
     ///
     /// 返回值：读取成功返回 `Ok(())`；调用方可在回调内决定继续保存在内存或物化到分页文件。
-    pub fn stream_to_consumer(
+    pub(crate) fn stream_to_consumer(
         location: &SourceLocation,
         archive_passwords: &ArchivePasswordStore,
         consumer: &mut ArchiveEntryConsumer<'_>,

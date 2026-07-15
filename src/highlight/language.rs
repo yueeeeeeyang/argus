@@ -6,7 +6,7 @@
 
 /// 当前行应该使用的高亮语言。
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum HighlightLanguage {
+pub(crate) enum HighlightLanguage {
     /// 普通日志。
     Log,
     /// Java 线程栈或 jstack 输出。
@@ -30,7 +30,7 @@ pub enum HighlightLanguage {
 /// - `path`：真实来源路径或压缩包内虚拟路径。
 ///
 /// 返回值：当前来源最合适的高亮语言；未知后缀默认按普通日志处理。
-pub fn detect_highlight_language(label: &str, path: &str) -> HighlightLanguage {
+pub(crate) fn detect_highlight_language(label: &str, path: &str) -> HighlightLanguage {
     let name = if path.is_empty() { label } else { path };
     let lower = name.to_ascii_lowercase();
 

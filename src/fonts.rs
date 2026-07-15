@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use gpui::App;
 
 /// Argus 主界面和来源树使用的字体族名称。
-pub const ARGUS_UI_FONT_FAMILY: &str = "Microsoft YaHei Mono";
+pub(crate) const ARGUS_UI_FONT_FAMILY: &str = "Microsoft YaHei Mono";
 /// Argus 日志正文使用的等宽字体族名称。
-pub const ARGUS_LOG_FONT_FAMILY: &str = "JetBrains Mono";
+pub(crate) const ARGUS_LOG_FONT_FAMILY: &str = "JetBrains Mono";
 
 /// 仓库内置界面字体文件路径；字体文件需由具备授权的贡献者放入该位置。
 const MICROSOFT_YAHEI_MONO_FONT_PATH: &str = "assets/fonts/MicrosoftYaHeiMono.ttf";
@@ -30,7 +30,7 @@ const JETBRAINS_MONO_REGULAR_FONT_PATH: &str = "assets/fonts/JetBrainsMono-Regul
 /// 说明：
 /// - 界面字体缺失时仍设置字体族名称，系统若已安装同名字体会直接使用，否则由平台字体回退兜底。
 /// - 日志字体优先读取 `assets/fonts/JetBrainsMono-Regular.ttf`，确保日志阅读区使用稳定的等宽字体。
-pub fn register_argus_fonts(cx: &mut App) -> anyhow::Result<()> {
+pub(crate) fn register_argus_fonts(cx: &mut App) -> anyhow::Result<()> {
     let mut fonts = Vec::new();
     for path in embedded_font_paths() {
         if let Some(font_bytes) = load_font_bytes(&path)? {
@@ -50,7 +50,7 @@ fn load_font_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
         return Ok(None);
     }
 
-    fs::read(&path)
+    fs::read(path)
         .map(Some)
         .map_err(|error| anyhow::anyhow!("无法读取内置字体文件 {}：{}", path.display(), error))
 }

@@ -19,7 +19,7 @@ use crate::utils::path::normalize_archive_entry_path;
 
 /// 普通 TAR 适配器，当前只做条目枚举。
 #[derive(Debug, Default)]
-pub struct TarArchiveAdapter;
+pub(crate) struct TarArchiveAdapter;
 
 impl ArchiveAdapter for TarArchiveAdapter {
     /// 声明 TAR 格式的识别规则和可用能力。
@@ -32,7 +32,6 @@ impl ArchiveAdapter for TarArchiveAdapter {
             supports_listing: true,
             supports_entry_reading: true,
             supports_nested_archives: true,
-            supports_passwords: false,
         }
     }
 
@@ -133,7 +132,10 @@ impl ArchiveAdapter for TarArchiveAdapter {
 }
 
 /// 从任意 TAR 读取器短路探测根层单文件。
-pub fn probe_tar_single_file_root<R>(reader: R, source_label: &str) -> Result<ArchiveRootProbe>
+pub(crate) fn probe_tar_single_file_root<R>(
+    reader: R,
+    source_label: &str,
+) -> Result<ArchiveRootProbe>
 where
     R: std::io::Read,
 {
@@ -150,14 +152,8 @@ where
             continue;
         }
 
-        let label = entry_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry_path.as_str())
-            .to_string();
         let entry_info = ArchiveEntryInfo {
             path: entry_path,
-            label,
             is_dir: entry.header().entry_type().is_dir(),
             size: Some(entry.size()),
         };
@@ -170,7 +166,7 @@ where
 }
 
 /// 从任意读取器中枚举 TAR 条目，供普通 TAR 和压缩 TAR 复用。
-pub fn list_tar_entries<R>(reader: R, source_label: &str) -> Result<Vec<ArchiveEntryInfo>>
+pub(crate) fn list_tar_entries<R>(reader: R, source_label: &str) -> Result<Vec<ArchiveEntryInfo>>
 where
     R: std::io::Read,
 {
@@ -187,14 +183,8 @@ where
             continue;
         }
 
-        let label = entry_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry_path.as_str())
-            .to_string();
         entries.push(ArchiveEntryInfo {
             path: entry_path,
-            label,
             is_dir: entry.header().entry_type().is_dir(),
             size: Some(entry.size()),
         });
@@ -211,7 +201,11 @@ where
 /// - `source_label`：错误提示中的来源名称。
 ///
 /// 返回值：目标条目的原始字节；目录条目不会返回内容。
-pub fn read_tar_entry_bytes<R>(reader: R, entry_path: &str, source_label: &str) -> Result<Vec<u8>>
+pub(crate) fn read_tar_entry_bytes<R>(
+    reader: R,
+    entry_path: &str,
+    source_label: &str,
+) -> Result<Vec<u8>>
 where
     R: std::io::Read,
 {
@@ -230,7 +224,7 @@ where
 /// - `entry_path`：目标条目路径，统一使用 `/` 分隔。
 /// - `source_label`：错误提示中的来源名称。
 /// - `consumer`：接收解压后字节分片的回调。
-pub fn stream_tar_entry<R>(
+pub(crate) fn stream_tar_entry<R>(
     reader: R,
     entry_path: &str,
     source_label: &str,
