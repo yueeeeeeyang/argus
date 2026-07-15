@@ -1,8 +1,8 @@
 //! 文件职责：提供语法高亮统一入口。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：根据语言类型分发到具体规则模块，并统一执行超长行扫描上限控制。
+//! 主要功能：根据日志、配置或代码语言分发具体规则，并统一执行超长行扫描上限控制。
 
 use crate::highlight::language::HighlightLanguage;
 use crate::highlight::rules;
@@ -39,6 +39,14 @@ impl SyntaxHighlighter {
             HighlightLanguage::Xml => rules::xml::highlight_xml(line, &mut builder),
             HighlightLanguage::Json => rules::json::highlight_json(line, &mut builder),
             HighlightLanguage::Yaml => rules::yaml::highlight_yaml(line, &mut builder),
+            HighlightLanguage::Java => rules::java::highlight_java(line, &mut builder),
+            HighlightLanguage::JavaScript => {
+                rules::javascript::highlight_javascript(line, &mut builder)
+            }
+            HighlightLanguage::Css => rules::css::highlight_css(line, &mut builder),
+            HighlightLanguage::Jsp => rules::jsp::highlight_jsp(line, &mut builder),
+            HighlightLanguage::Sql => rules::sql::highlight_sql(line, &mut builder),
+            HighlightLanguage::Shell => rules::shell::highlight_shell(line, &mut builder),
             HighlightLanguage::Plain => {}
         }
         builder.finish()

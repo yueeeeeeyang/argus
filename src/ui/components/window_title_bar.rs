@@ -1,8 +1,8 @@
 //! 文件职责：提供独立窗口统一标题栏组件。
 //! 创建日期：2026-07-03
-//! 修改日期：2026-07-03
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：渲染带关闭按钮的窗口标题栏骨架，供独立窗口复用；标题左侧内容由调用者按各自结构提供。
+//! 主要功能：使用主窗口标题栏主题色渲染带关闭按钮的独立窗口标题栏骨架。
 
 use gpui::{App, ClickEvent, ElementId, IntoElement, Window, div, prelude::*, px, rgb};
 
@@ -39,6 +39,7 @@ pub(crate) fn render_window_title_bar(
         .flex()
         .items_center()
         .justify_between()
+        .bg(rgb(theme.title_bar))
         .occlude();
     if show_border {
         bar = bar.border_b_1().border_color(rgb(theme.border));

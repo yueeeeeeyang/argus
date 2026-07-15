@@ -4,7 +4,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：组织输入框、弹窗、下拉框、上下文菜单、滚动条和图标等通用组件。
 
-pub(crate) mod centered_message;
 pub(crate) mod context_menu;
 pub(crate) mod datetime_picker;
 pub(crate) mod dropdown;

@@ -1,8 +1,8 @@
 //! 文件职责：验证日志与配置文件高亮规则。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：覆盖语言识别、各格式核心 token、范围合法性和超长行扫描上限。
+//! 主要功能：覆盖日志、配置、代码语言识别、核心 token、范围合法性和超长行扫描上限。
 
 use super::*;
 use crate::highlight::span::MAX_HIGHLIGHT_BYTES;
@@ -240,4 +240,193 @@ fn detects_language_from_label_or_path() {
         detect_highlight_language("config.yaml", ""),
         HighlightLanguage::Yaml
     );
+    assert_eq!(
+        detect_highlight_language("Main.java", ""),
+        HighlightLanguage::Java
+    );
+    assert_eq!(
+        detect_highlight_language("bundle.min.js", ""),
+        HighlightLanguage::JavaScript
+    );
+    assert_eq!(
+        detect_highlight_language("theme.css", ""),
+        HighlightLanguage::Css
+    );
+    assert_eq!(
+        detect_highlight_language("page.txt", "/views/index.jsp"),
+        HighlightLanguage::Jsp
+    );
+    assert_eq!(
+        detect_highlight_language("query.sql", ""),
+        HighlightLanguage::Sql
+    );
+    assert_eq!(
+        detect_highlight_language("deploy.zsh", ""),
+        HighlightLanguage::Shell
+    );
+}
+
+/// 验证 Java 注解、关键字、类型、方法、数字和注释均能识别。
+#[test]
+fn highlights_java_source_tokens() {
+    let spans = SyntaxHighlighter::highlight(
+        r#"@Override public String greet() { return "hi" + 42; } // note"#,
+        HighlightLanguage::Java,
+    );
+
+    assert_has_kinds(
+        &spans,
+        &[
+            HighlightTokenKind::Annotation,
+            HighlightTokenKind::Keyword,
+            HighlightTokenKind::Type,
+            HighlightTokenKind::Function,
+            HighlightTokenKind::String,
+            HighlightTokenKind::Number,
+            HighlightTokenKind::Comment,
+        ],
+    );
+}
+
+/// 验证 JavaScript 关键字、函数、模板字符串和箭头运算符均能识别。
+#[test]
+fn highlights_javascript_source_tokens() {
+    let spans = SyntaxHighlighter::highlight(
+        "const load = async () => fetch(`/api/items`);",
+        HighlightLanguage::JavaScript,
+    );
+
+    assert_has_kinds(
+        &spans,
+        &[
+            HighlightTokenKind::Keyword,
+            HighlightTokenKind::Function,
+            HighlightTokenKind::String,
+            HighlightTokenKind::Operator,
+        ],
+    );
+}
+
+/// 验证 CSS 选择器、属性、颜色、函数和数值均能识别。
+#[test]
+fn highlights_css_source_tokens() {
+    let spans = SyntaxHighlighter::highlight(
+        ".card { color: #fff; width: calc(100% - 2px); }",
+        HighlightLanguage::Css,
+    );
+
+    assert_has_kinds(
+        &spans,
+        &[
+            HighlightTokenKind::Selector,
+            HighlightTokenKind::Attribute,
+            HighlightTokenKind::Function,
+            HighlightTokenKind::Number,
+        ],
+    );
+}
+
+/// 验证 JSP 指令、属性、HTML 标签和 EL 变量可以在同一行组合高亮。
+#[test]
+fn highlights_jsp_mixed_language_tokens() {
+    let spans = SyntaxHighlighter::highlight(
+        r#"<%@ page import="java.util.List" %><span>${user.name}</span>"#,
+        HighlightLanguage::Jsp,
+    );
+
+    assert_has_kinds(
+        &spans,
+        &[
+            HighlightTokenKind::Keyword,
+            HighlightTokenKind::Attribute,
+            HighlightTokenKind::String,
+            HighlightTokenKind::Tag,
+            HighlightTokenKind::Variable,
+        ],
+    );
+}
+
+/// 验证 JSP 注释优先于内部 EL 表达式，避免注释内容呈现为可执行模板。
+#[test]
+fn highlights_jsp_comment_as_single_token() {
+    let line = "<%-- ${ignored.value} --%>";
+    let spans = SyntaxHighlighter::highlight(line, HighlightLanguage::Jsp);
+
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].kind, HighlightTokenKind::Comment);
+    assert_eq!(&line[spans[0].range.clone()], line);
+}
+
+/// 验证 SQL 大小写不敏感关键字、函数、参数、字面量和注释均能识别。
+#[test]
+fn highlights_sql_source_tokens() {
+    let spans = SyntaxHighlighter::highlight(
+        "SELECT count(*) FROM users WHERE id = :id AND active = true; -- note",
+        HighlightLanguage::Sql,
+    );
+
+    assert_has_kinds(
+        &spans,
+        &[
+            HighlightTokenKind::Keyword,
+            HighlightTokenKind::Function,
+            HighlightTokenKind::Variable,
+            HighlightTokenKind::Boolean,
+            HighlightTokenKind::Comment,
+        ],
+    );
+}
+
+/// 验证 Shell 关键字、变量、运算符和行尾注释均能识别。
+#[test]
+fn highlights_shell_source_tokens() {
+    let spans = SyntaxHighlighter::highlight(
+        "export PATH=$PATH:/opt/bin && true # note",
+        HighlightLanguage::Shell,
+    );
+
+    assert_has_kinds(
+        &spans,
+        &[
+            HighlightTokenKind::Keyword,
+            HighlightTokenKind::Variable,
+            HighlightTokenKind::Operator,
+            HighlightTokenKind::Boolean,
+            HighlightTokenKind::Comment,
+        ],
+    );
+}
+
+/// 验证新增代码语言在中英文混排时仍产生有序、合法且不重叠的 UTF-8 范围。
+#[test]
+fn code_highlight_ranges_are_non_overlapping_utf8_boundaries() {
+    let cases = [
+        (HighlightLanguage::Java, "String 名称 = \"Argus\";"),
+        (HighlightLanguage::JavaScript, "const 名称 = `Argus`;"),
+        (HighlightLanguage::Css, ".标题 { color: #fff; }"),
+        (HighlightLanguage::Jsp, "<span>${用户.name}</span>"),
+        (HighlightLanguage::Sql, "SELECT 名称 FROM 表名;"),
+        (HighlightLanguage::Shell, "export 名称=$PATH"),
+    ];
+
+    for (language, line) in cases {
+        let spans = SyntaxHighlighter::highlight(line, language);
+        for span in &spans {
+            assert!(line.is_char_boundary(span.range.start));
+            assert!(line.is_char_boundary(span.range.end));
+        }
+        for pair in spans.windows(2) {
+            assert!(pair[0].range.end <= pair[1].range.start);
+        }
+    }
+}
+
+/// 断言高亮结果至少包含所有期望 token 类型，避免测试绑定具体分词数量和范围。
+fn assert_has_kinds(spans: &[HighlightSpan], expected: &[HighlightTokenKind]) {
+    for kind in expected {
+        assert!(
+            spans.iter().any(|span| span.kind == *kind),
+            "缺少期望的高亮 token：{kind:?}，实际为 {spans:?}"
+        );
+    }
 }

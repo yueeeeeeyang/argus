@@ -1,8 +1,8 @@
 //! 文件职责：定义语法高亮的公共 token、span 和范围构造工具。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：为各类高亮规则提供统一的 UTF-8 字节范围模型与去重构造器。
+//! 主要功能：为日志、配置和代码高亮规则提供统一的 UTF-8 字节范围模型与去重构造器。
 
 use std::ops::Range;
 
@@ -58,6 +58,20 @@ pub(crate) enum HighlightTokenKind {
     Lock,
     /// 异常、错误和死锁提示。
     Exception,
+    /// 编程语言关键字或 SQL 保留字。
+    Keyword,
+    /// 类型名、类名或内置类型。
+    Type,
+    /// 函数、方法或 CSS 函数名。
+    Function,
+    /// 变量、参数或 Shell 环境变量。
+    Variable,
+    /// 运算符。
+    Operator,
+    /// Java 注解、CSS at-rule 等声明标记。
+    Annotation,
+    /// CSS 选择器。
+    Selector,
 }
 
 /// 单个高亮范围，range 使用展示文本的 UTF-8 字节下标。

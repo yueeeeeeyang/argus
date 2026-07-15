@@ -1,15 +1,15 @@
 //! 文件职责：定义 Argus 界面使用的主题令牌。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-12
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供运行期主题颜色、日志级别颜色和主题文件损坏时的紧急兜底令牌。
+//! 主要功能：提供运行期界面颜色、日志级别、代码语法颜色和主题文件损坏时的紧急兜底令牌。
 
-/// 语法高亮主题令牌，供日志、配置文件和 Java 线程栈高亮复用。
+/// 语法高亮主题令牌，供日志、配置文件、代码预览和 Java 线程栈高亮复用。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SyntaxTheme {
     /// 注释颜色。
     pub comment: u32,
-    /// 配置键或 JSON/YAML 属性名颜色。
+    /// 配置键、JSON/YAML 属性名或代码变量颜色。
     pub key: u32,
     /// 字符串颜色。
     pub string: u32,
@@ -19,19 +19,19 @@ pub(crate) struct SyntaxTheme {
     pub boolean: u32,
     /// 标点符号颜色。
     pub punctuation: u32,
-    /// XML 标签颜色。
+    /// XML 标签、编程语言关键字或 CSS 选择器颜色。
     pub tag: u32,
-    /// XML 属性名颜色。
+    /// XML/CSS 属性名颜色。
     pub attribute: u32,
     /// 日志时间戳颜色。
     pub timestamp: u32,
     /// Java 线程名颜色。
     pub thread: u32,
-    /// Java 类名颜色。
+    /// Java 类名或其他语言类型名颜色。
     pub class: u32,
-    /// Java 方法名颜色。
+    /// Java 方法名、普通函数或 CSS 函数颜色。
     pub method: u32,
-    /// Java 锁对象或等待目标颜色。
+    /// Java 锁对象、代码注解或 CSS at-rule 颜色。
     pub lock: u32,
     /// 异常、错误和死锁提示颜色。
     pub exception: u32,

@@ -1,8 +1,8 @@
-//! 文件职责：提供日志高亮结果的轻量 LRU 缓存。
+//! 文件职责：提供日志与文件预览语法高亮结果的轻量 LRU 缓存。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：按 tab 缓存最近可见行的高亮结果，降低滚动时的重复扫描成本。
+//! 主要功能：按阅读视图缓存最近可见行的高亮结果，降低日志或代码滚动时的重复扫描成本。
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -12,10 +12,10 @@ use crate::highlight::highlighter::SyntaxHighlighter;
 use crate::highlight::language::HighlightLanguage;
 use crate::highlight::span::HighlightSpan;
 
-/// 单个日志 tab 默认缓存的高亮行数。
+/// 单个日志标签或文件预览窗口默认缓存的高亮行数。
 const DEFAULT_HIGHLIGHT_CACHE_CAPACITY: usize = 2048;
 
-/// 单个 tab 的语法高亮缓存，滚动时避免重复扫描热点可见行。
+/// 单个阅读视图的语法高亮缓存，滚动时避免重复扫描热点可见行。
 #[derive(Clone, Debug)]
 pub(crate) struct HighlightCache {
     /// 内部可变缓存；GPUI 渲染路径通常只持有不可变 app 引用。
@@ -42,8 +42,8 @@ impl HighlightCache {
     /// 读取或生成指定行的高亮结果。
     ///
     /// 参数说明：
-    /// - `line_number`：0 基日志行号。
-    /// - `language`：当前 tab 的高亮语言。
+    /// - `line_number`：0 基内容行号。
+    /// - `language`：当前阅读视图的高亮语言。
     /// - `line`：当前展示行文本。
     ///
     /// 返回值：当前行的高亮范围；缓存锁异常时直接同步计算。

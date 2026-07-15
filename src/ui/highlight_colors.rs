@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：集中维护 Log/Jstack 共享映射，并通过展示上下文保留线程类令牌的产品差异。
+//! 主要功能：集中维护日志、代码预览和 Jstack 共享映射，并保留线程类令牌的产品差异。
 
 use crate::highlight::HighlightTokenKind;
 use crate::theme::AppTheme;
@@ -12,6 +12,8 @@ use crate::theme::AppTheme;
 pub(crate) enum HighlightColorContext {
     /// 常规日志正文，优先使用语法主题中的线程、方法和弱化位置颜色。
     Log,
+    /// 只读文件预览，代码与配置令牌沿用编辑器语义色。
+    FilePreview,
     /// Jstack 分析与详情，线程名/方法使用信息色，线程状态使用成功色。
     Jstack,
 }
@@ -38,24 +40,33 @@ pub(crate) fn color_for_highlight_token(
         HighlightTokenKind::Tag => theme.syntax.tag,
         HighlightTokenKind::Attribute => theme.syntax.attribute,
         HighlightTokenKind::ThreadName => match context {
-            HighlightColorContext::Log => theme.syntax.thread,
+            HighlightColorContext::Log | HighlightColorContext::FilePreview => theme.syntax.thread,
             HighlightColorContext::Jstack => theme.info,
         },
         HighlightTokenKind::ThreadState => match context {
-            HighlightColorContext::Log => theme.warning,
+            HighlightColorContext::Log | HighlightColorContext::FilePreview => theme.warning,
             HighlightColorContext::Jstack => theme.success,
         },
         HighlightTokenKind::StackClass => theme.syntax.class,
         HighlightTokenKind::StackMethod => match context {
-            HighlightColorContext::Log => theme.syntax.method,
+            HighlightColorContext::Log | HighlightColorContext::FilePreview => theme.syntax.method,
             HighlightColorContext::Jstack => theme.info,
         },
         HighlightTokenKind::StackLocation => match context {
-            HighlightColorContext::Log => theme.foreground_muted,
+            HighlightColorContext::Log | HighlightColorContext::FilePreview => {
+                theme.foreground_muted
+            }
             HighlightColorContext::Jstack => theme.syntax.string,
         },
         HighlightTokenKind::Lock => theme.syntax.lock,
         HighlightTokenKind::Exception => theme.syntax.exception,
+        HighlightTokenKind::Keyword => theme.syntax.tag,
+        HighlightTokenKind::Type => theme.syntax.class,
+        HighlightTokenKind::Function => theme.syntax.method,
+        HighlightTokenKind::Variable => theme.syntax.key,
+        HighlightTokenKind::Operator => theme.syntax.punctuation,
+        HighlightTokenKind::Annotation => theme.syntax.lock,
+        HighlightTokenKind::Selector => theme.syntax.tag,
     }
 }
 
