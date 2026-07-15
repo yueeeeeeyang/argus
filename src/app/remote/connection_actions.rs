@@ -438,10 +438,6 @@ impl ArgusApp {
     /// 提交当前链接工作区弹窗。
     pub(crate) fn submit_connection_dialog(&mut self) {
         match self.connection_dialog.clone() {
-            Some(ConnectionDialogState::NewDirectory(form)) => {
-                self.submit_connection_directory_form(form)
-            }
-            Some(ConnectionDialogState::NewSshLink(form)) => self.submit_ssh_link_form(form),
             Some(ConnectionDialogState::ConfirmHostKey(prompt)) => {
                 self.confirm_connection_host_key_prompt(prompt)
             }
@@ -467,27 +463,6 @@ impl ArgusApp {
     /// 清理链接树和链接表单输入框焦点态。
     pub(crate) fn clear_connection_text_input_focuses(&mut self) {
         clear_connection_input_focus(&mut self.connection_tree_search_input);
-        if let Some(dialog) = self.connection_dialog.as_mut() {
-            match dialog {
-                ConnectionDialogState::NewDirectory(form) => {
-                    clear_connection_input_focus(&mut form.name_input);
-                }
-                ConnectionDialogState::NewSshLink(form) => {
-                    clear_connection_input_focus(&mut form.name_input);
-                    clear_connection_input_focus(&mut form.host_input);
-                    clear_connection_input_focus(&mut form.port_input);
-                    clear_connection_input_focus(&mut form.username_input);
-                    clear_connection_input_focus(&mut form.password_input);
-                    clear_connection_input_focus(&mut form.share_input);
-                    clear_connection_input_focus(&mut form.initial_dir_input);
-                    clear_connection_input_focus(&mut form.domain_input);
-                    clear_connection_input_focus(&mut form.private_key_path_input);
-                    clear_connection_input_focus(&mut form.private_key_passphrase_input);
-                }
-                ConnectionDialogState::ConfirmHostKey(_)
-                | ConnectionDialogState::ConfirmDelete(_) => {}
-            }
-        }
     }
 
     /// 返回链接相关输入框的只读引用。
@@ -497,60 +472,6 @@ impl ArgusApp {
     ) -> Option<&SettingsTextInputState> {
         match target {
             AppTextInputTarget::ConnectionTreeSearch => Some(&self.connection_tree_search_input),
-            AppTextInputTarget::ConnectionDirectoryName => {
-                match self.connection_dialog.as_ref()? {
-                    ConnectionDialogState::NewDirectory(form) => Some(&form.name_input),
-                    _ => None,
-                }
-            }
-            AppTextInputTarget::ConnectionLinkName => match self.connection_dialog.as_ref()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&form.name_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkHost => match self.connection_dialog.as_ref()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&form.host_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkPort => match self.connection_dialog.as_ref()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&form.port_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkUsername => match self.connection_dialog.as_ref()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&form.username_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkPassword => match self.connection_dialog.as_ref()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&form.password_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkShare => match self.connection_dialog.as_ref()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&form.share_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkInitialDir => {
-                match self.connection_dialog.as_ref()? {
-                    ConnectionDialogState::NewSshLink(form) => Some(&form.initial_dir_input),
-                    _ => None,
-                }
-            }
-            AppTextInputTarget::ConnectionLinkDomain => match self.connection_dialog.as_ref()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&form.domain_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkPrivateKeyPath => {
-                match self.connection_dialog.as_ref()? {
-                    ConnectionDialogState::NewSshLink(form) => Some(&form.private_key_path_input),
-                    _ => None,
-                }
-            }
-            AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
-                match self.connection_dialog.as_ref()? {
-                    ConnectionDialogState::NewSshLink(form) => {
-                        Some(&form.private_key_passphrase_input)
-                    }
-                    _ => None,
-                }
-            }
             _ => None,
         }
     }
@@ -563,62 +484,6 @@ impl ArgusApp {
         match target {
             AppTextInputTarget::ConnectionTreeSearch => {
                 Some(&mut self.connection_tree_search_input)
-            }
-            AppTextInputTarget::ConnectionDirectoryName => {
-                match self.connection_dialog.as_mut()? {
-                    ConnectionDialogState::NewDirectory(form) => Some(&mut form.name_input),
-                    _ => None,
-                }
-            }
-            AppTextInputTarget::ConnectionLinkName => match self.connection_dialog.as_mut()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&mut form.name_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkHost => match self.connection_dialog.as_mut()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&mut form.host_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkPort => match self.connection_dialog.as_mut()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&mut form.port_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkUsername => match self.connection_dialog.as_mut()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&mut form.username_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkPassword => match self.connection_dialog.as_mut()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&mut form.password_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkShare => match self.connection_dialog.as_mut()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&mut form.share_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkInitialDir => {
-                match self.connection_dialog.as_mut()? {
-                    ConnectionDialogState::NewSshLink(form) => Some(&mut form.initial_dir_input),
-                    _ => None,
-                }
-            }
-            AppTextInputTarget::ConnectionLinkDomain => match self.connection_dialog.as_mut()? {
-                ConnectionDialogState::NewSshLink(form) => Some(&mut form.domain_input),
-                _ => None,
-            },
-            AppTextInputTarget::ConnectionLinkPrivateKeyPath => {
-                match self.connection_dialog.as_mut()? {
-                    ConnectionDialogState::NewSshLink(form) => {
-                        Some(&mut form.private_key_path_input)
-                    }
-                    _ => None,
-                }
-            }
-            AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
-                match self.connection_dialog.as_mut()? {
-                    ConnectionDialogState::NewSshLink(form) => {
-                        Some(&mut form.private_key_passphrase_input)
-                    }
-                    _ => None,
-                }
             }
             _ => None,
         }
@@ -751,23 +616,7 @@ impl ArgusApp {
         ));
     }
 
-    /// 提交新增目录表单。
-    fn submit_connection_directory_form(&mut self, form: ConnectionDirectoryFormState) {
-        match self.create_connection_directory_from_form(form) {
-            Ok(_) => self.connection_dialog = None,
-            Err(error) => self.update_directory_form_error(error.to_string()),
-        }
-    }
-
-    /// 提交新增 SSH 链接表单。
-    fn submit_ssh_link_form(&mut self, form: ConnectionLinkFormState) {
-        match self.create_connection_link_from_form(form) {
-            Ok(_) => self.connection_dialog = None,
-            Err(error) => self.update_link_form_error(error),
-        }
-    }
-
-    /// 校验并创建链接目录，供表单模态框和兼容弹窗共同复用。
+    /// 校验并创建链接目录，供目录模态框提交时调用。
     pub(crate) fn create_connection_directory_from_form(
         &mut self,
         form: ConnectionDirectoryFormState,
@@ -1050,22 +899,6 @@ impl ArgusApp {
         }
     }
 
-    /// 更新新增目录表单错误。
-    fn update_directory_form_error(&mut self, message: String) {
-        if let Some(ConnectionDialogState::NewDirectory(form)) = self.connection_dialog.as_mut() {
-            form.error_message = Some(message.clone());
-        }
-        self.placeholder_notice = message;
-    }
-
-    /// 更新新增 SSH 链接表单错误。
-    fn update_link_form_error(&mut self, message: String) {
-        if let Some(ConnectionDialogState::NewSshLink(form)) = self.connection_dialog.as_mut() {
-            form.error_message = Some(message.clone());
-        }
-        self.placeholder_notice = message;
-    }
-
     /// 删除链接输入框当前选区。
     fn delete_connection_input_selection(&mut self, target: AppTextInputTarget) -> bool {
         let Some(input) = self.connection_text_input_mut(target) else {
@@ -1283,15 +1116,12 @@ mod tests {
     #[test]
     fn submit_directory_form_creates_directory() {
         let mut app = test_app("submit-directory");
-        app.connection_dialog = Some(ConnectionDialogState::NewDirectory(
-            ConnectionDirectoryFormState {
-                parent_id: None,
-                name_input: SettingsTextInputState::from_value("生产环境".to_string()),
-                error_message: None,
-            },
-        ));
-
-        app.submit_connection_dialog();
+        app.create_connection_directory_from_form(ConnectionDirectoryFormState {
+            parent_id: None,
+            name_input: SettingsTextInputState::from_value("生产环境".to_string()),
+            error_message: None,
+        })
+        .expect("有效目录表单应创建成功");
 
         assert_eq!(app.config.connections.directories.len(), 1);
         assert_eq!(app.config.connections.directories[0].name, "生产环境");
@@ -1305,7 +1135,7 @@ mod tests {
     #[test]
     fn submit_link_form_rejects_invalid_port() {
         let mut app = test_app("submit-link-invalid-port");
-        app.connection_dialog = Some(ConnectionDialogState::NewSshLink(ConnectionLinkFormState {
+        let result = app.create_connection_link_from_form(ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Ssh,
             parent_id: None,
             name_input: SettingsTextInputState::from_value("app-01".to_string()),
@@ -1319,22 +1149,17 @@ mod tests {
             private_key_path_input: SettingsTextInputState::default(),
             private_key_passphrase_input: SettingsTextInputState::default(),
             error_message: None,
-        }));
+        });
 
-        app.submit_connection_dialog();
-
+        assert!(result.is_err());
         assert!(app.config.connections.links.is_empty());
-        assert!(matches!(
-            app.connection_dialog,
-            Some(ConnectionDialogState::NewSshLink(_))
-        ));
     }
 
     /// 验证新增 SMB 链接会写入共享配置并保留密码原文。
     #[test]
     fn submit_smb_link_form_creates_smb_link() {
         let mut app = test_app("submit-smb-link");
-        app.connection_dialog = Some(ConnectionDialogState::NewSshLink(ConnectionLinkFormState {
+        app.create_connection_link_from_form(ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Smb,
             parent_id: None,
             name_input: SettingsTextInputState::from_value("共享日志".to_string()),
@@ -1348,9 +1173,8 @@ mod tests {
             private_key_path_input: SettingsTextInputState::default(),
             private_key_passphrase_input: SettingsTextInputState::default(),
             error_message: None,
-        }));
-
-        app.submit_connection_dialog();
+        })
+        .expect("有效 SMB 表单应创建成功");
 
         let link = app
             .config

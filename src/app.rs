@@ -1,8 +1,8 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供工作区切换、真实来源树、Jstack 分析、升级状态、未读取内容提示和保留的日志样例数据。
+//! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime 分析及远程连接状态。
 
 mod log_search_actions;
 mod log_text;
@@ -99,7 +99,7 @@ use gpui::{ScrollHandle, ScrollStrategy, UniformListScrollHandle};
 #[cfg(test)]
 use log_text::{log_text_range_for_granularity, merge_log_text_ranges};
 #[cfg(test)]
-use placeholder_data::{placeholder_logs, placeholder_source_registry};
+use placeholder_data::placeholder_source_registry;
 pub(crate) use source_picker_actions::{
     ExternalSourceTrigger, SourcePickerSortDirection, SourcePickerSortKey, SourcePickerState,
 };
@@ -302,10 +302,6 @@ pub(crate) struct ArgusApp {
     pub source_picker: SourcePickerState,
     /// 日志来源选择器模态框子视图。
     pub source_picker_modal: Option<Entity<SourcePickerWindow>>,
-    /// 当前内容区状态。
-    pub content_state: ContentState,
-    /// 日志行占位数据。
-    pub logs: Vec<LogLine>,
     /// 日志读取状态，以来源 ID 为键复用已打开的 reader。
     pub log_read_states: HashMap<SourceId, LogOpenState>,
     /// 日志读取 generation，用于丢弃后台任务返回的过期结果。
@@ -372,22 +368,6 @@ pub(crate) struct ArgusApp {
     pub source_panel_animation_from_width: f32,
     /// 来源侧栏动画目标宽度。
     pub source_panel_animation_to_width: f32,
-    /// 搜索面板是否打开。
-    pub is_search_panel_open: bool,
-    /// 搜索框本地输入内容。
-    pub search_query: String,
-    /// 是否启用大小写敏感搜索。
-    pub is_case_sensitive: bool,
-    /// 是否启用正则搜索。
-    pub is_regex_enabled: bool,
-    /// 是否启用全词匹配。
-    pub is_whole_word_enabled: bool,
-    /// 当前选中日志行。
-    pub selected_log_line: Option<usize>,
-    /// 当前弹出的占位弹窗。
-    pub active_dialog: Option<PlaceholderDialog>,
-    /// 打开来源弹窗中选中的来源类型。
-    pub selected_placeholder_source: PlaceholderSourceKind,
     /// 当前选择的主题 ID；内置和用户主题都使用 TOML 文件名。
     pub selected_theme_id: String,
     /// 设置模态框主题下拉框是否展开。
@@ -421,10 +401,6 @@ pub(crate) struct ArgusApp {
     pub log_content_font_size: f32,
     /// 设置页编码选项。
     pub selected_encoding: String,
-    /// 是否启用临时缓存。
-    pub is_cache_enabled: bool,
-    /// 缓存上限，单位 MB。
-    pub cache_limit_mb: usize,
     /// 是否正在后台检查升级。
     pub is_upgrade_checking: bool,
     /// 是否正在下载、替换或重启升级版本。
@@ -454,8 +430,6 @@ impl ArgusApp {
             .log_content_font_size
             .clamp(LOG_CONTENT_FONT_SIZE_MIN, LOG_CONTENT_FONT_SIZE_MAX);
         let selected_encoding = config.encoding.selected.clone();
-        let is_cache_enabled = config.cache.enabled;
-        let cache_limit_mb = config.cache.limit_mb.clamp(128, 2048);
         let quick_keywords_input_value = config.log_search.quick_keywords.clone();
         let jstack_thread_name_filter_input_value =
             config.log_display.jstack_thread_name_filters.clone();
@@ -465,7 +439,6 @@ impl ArgusApp {
         let upgrade_public_key_input_value = config.upgrade.public_key_base64.clone();
         config.appearance.theme_mode = selected_theme_id.clone();
         config.appearance.log_content_font_size = log_content_font_size;
-        config.cache.limit_mb = cache_limit_mb;
         Self {
             config,
             config_manager,
@@ -507,8 +480,6 @@ impl ArgusApp {
             archive_password_prompt: None,
             source_picker: SourcePickerState::default(),
             source_picker_modal: None,
-            content_state: ContentState::SourceNotSelected,
-            logs: Vec::new(),
             log_read_states: HashMap::new(),
             log_reader_generations: HashMap::new(),
             log_tab_view_states: HashMap::new(),
@@ -546,14 +517,6 @@ impl ArgusApp {
             source_panel_animation_generation: 0,
             source_panel_animation_from_width: SOURCE_PANEL_DEFAULT_WIDTH,
             source_panel_animation_to_width: SOURCE_PANEL_DEFAULT_WIDTH,
-            is_search_panel_open: false,
-            search_query: String::new(),
-            is_case_sensitive: false,
-            is_regex_enabled: false,
-            is_whole_word_enabled: false,
-            selected_log_line: None,
-            active_dialog: None,
-            selected_placeholder_source: PlaceholderSourceKind::File,
             selected_theme_id,
             is_theme_dropdown_open: false,
             settings_quick_keywords_input: SettingsTextInputState::from_value(
@@ -580,8 +543,6 @@ impl ArgusApp {
             open_with_registration_message: None,
             log_content_font_size,
             selected_encoding,
-            is_cache_enabled,
-            cache_limit_mb,
             is_upgrade_checking: false,
             is_upgrade_installing: false,
             upgrade_message: None,
@@ -600,14 +561,6 @@ impl ArgusApp {
                 root: cx.focus_handle(),
                 source_tree_search: cx.focus_handle(),
                 connection_tree_search: cx.focus_handle(),
-                connection_directory_name: cx.focus_handle(),
-                connection_link_name: cx.focus_handle(),
-                connection_link_host: cx.focus_handle(),
-                connection_link_port: cx.focus_handle(),
-                connection_link_username: cx.focus_handle(),
-                connection_link_password: cx.focus_handle(),
-                connection_link_private_key_path: cx.focus_handle(),
-                connection_link_private_key_passphrase: cx.focus_handle(),
                 sftp_address: cx.focus_handle(),
                 sftp_rename_name: cx.focus_handle(),
                 archive_password: cx.focus_handle(),
@@ -631,12 +584,7 @@ impl ArgusApp {
     }
 
     /// 切换标题栏工作区入口，并更新状态提示。
-    pub(crate) fn switch_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
-        if workspace == Workspace::Settings {
-            self.open_settings_modal(cx);
-            return;
-        }
-
+    pub(crate) fn switch_workspace(&mut self, workspace: Workspace) {
         self.workspace = workspace;
         self.sync_source_panel_animation_to_current_width();
         if workspace == Workspace::Connections && self.is_source_panel_collapsed {
@@ -645,7 +593,6 @@ impl ArgusApp {
         self.placeholder_notice = match workspace {
             Workspace::LogAnalysis => "已切换到日志分析占位工作区".to_string(),
             Workspace::Connections => "已切换到链接工作区".to_string(),
-            Workspace::Settings => "已切换到设置占位工作区".to_string(),
         };
     }
 
@@ -669,37 +616,9 @@ impl ArgusApp {
             .unwrap_or("未命名日志")
     }
 
-    /// 打开或关闭搜索面板。
-    pub(crate) fn toggle_search_panel(&mut self) {
-        self.is_search_panel_open = !self.is_search_panel_open;
-        self.placeholder_notice = if self.is_search_panel_open {
-            "已打开本地搜索面板，占位搜索不会扫描真实文件".to_string()
-        } else {
-            "已关闭本地搜索面板".to_string()
-        };
-    }
-
-    /// 打开来源占位弹窗。
-    pub(crate) fn open_source_dialog(&mut self) {
-        self.active_dialog = Some(PlaceholderDialog::OpenSource);
-        self.placeholder_notice = "请使用来源工具栏的加载日志按钮打开自定义来源选择器".to_string();
-    }
-
     /// 打开自定义跨平台来源选择器，后续由选择器确认按钮触发真实加载。
     pub(crate) fn request_load_sources(&mut self, cx: &mut Context<Self>) {
         self.open_source_picker(cx);
-    }
-
-    /// 关闭当前占位弹窗。
-    pub(crate) fn close_dialog(&mut self) {
-        self.active_dialog = None;
-        self.placeholder_notice = "已关闭占位弹窗".to_string();
-    }
-
-    /// 选择打开来源弹窗中的来源类型。
-    pub(crate) fn select_placeholder_source(&mut self, source_kind: PlaceholderSourceKind) {
-        self.selected_placeholder_source = source_kind;
-        self.placeholder_notice = format!("已选择{}占位来源", source_kind.label());
     }
 
     /// 切换来源侧栏折叠状态。
@@ -728,7 +647,7 @@ impl ArgusApp {
     pub(crate) fn current_source_panel_width(&self) -> f32 {
         match self.workspace {
             Workspace::Connections => self.connection_source_panel_width,
-            Workspace::LogAnalysis | Workspace::Settings => self.source_panel_width,
+            Workspace::LogAnalysis => self.source_panel_width,
         }
     }
 
@@ -736,7 +655,7 @@ impl ArgusApp {
     fn set_current_source_panel_width(&mut self, width: f32) {
         match self.workspace {
             Workspace::Connections => self.connection_source_panel_width = width,
-            Workspace::LogAnalysis | Workspace::Settings => self.source_panel_width = width,
+            Workspace::LogAnalysis => self.source_panel_width = width,
         }
     }
 
@@ -800,11 +719,6 @@ impl ArgusApp {
             self.current_source_panel_width()
         );
         true
-    }
-
-    /// 兼容旧测试入口：设置页已迁移为模态框，标签页路径不再由 UI 触发。
-    pub(crate) fn open_or_focus_settings_tab(&mut self) {
-        self.placeholder_notice = "设置已迁移到模态框，请从标题栏设置按钮打开".to_string();
     }
 
     /// 打开或聚焦指定日志来源标签页；读取正文由 UI 入口随后触发后台任务。
@@ -1300,7 +1214,7 @@ impl ArgusApp {
             TabKind::SftpFileManager { session_id } => {
                 self.disconnect_sftp_session(*session_id);
             }
-            TabKind::Empty | TabKind::Settings => {}
+            TabKind::Empty => {}
         }
     }
 
@@ -1329,8 +1243,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::SshTerminal { .. }
             | TabKind::SftpFileManager { .. }
-            | TabKind::RuntimeAnalysis { .. }
-            | TabKind::Settings => {
+            | TabKind::RuntimeAnalysis { .. } => {
                 self.jstack_analyses.clear();
             }
         }
@@ -1347,8 +1260,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::SshTerminal { .. }
-            | TabKind::SftpFileManager { .. }
-            | TabKind::Settings => {
+            | TabKind::SftpFileManager { .. } => {
                 self.runtime_analyses.clear();
             }
         }
@@ -1362,8 +1274,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::SftpFileManager { .. }
-            | TabKind::RuntimeAnalysis { .. }
-            | TabKind::Settings => None,
+            | TabKind::RuntimeAnalysis { .. } => None,
         };
         let sessions_to_disconnect = self
             .terminal_sessions
@@ -1384,8 +1295,7 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::RuntimeAnalysis { .. }
-            | TabKind::SshTerminal { .. }
-            | TabKind::Settings => None,
+            | TabKind::SshTerminal { .. } => None,
         };
         let sessions_to_disconnect = self
             .sftp_sessions
@@ -1684,8 +1594,6 @@ impl ArgusApp {
                 tab.kind = TabKind::Empty;
             }
             self.active_tab_id = self.tabs[0].id;
-            self.content_state = ContentState::SourceNotSelected;
-            self.logs.clear();
             self.log_read_states.clear();
             self.log_reader_generations.clear();
             self.log_tab_view_states.clear();
@@ -1801,7 +1709,6 @@ impl ArgusApp {
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
         self.reset_log_search_runtime_state();
-        self.content_state = ContentState::SourceNotSelected;
         self.placeholder_notice = "已关闭全部标签".to_string();
     }
 
@@ -1846,7 +1753,6 @@ impl ArgusApp {
                 .get(&session_id)
                 .map(|state| format!("SFTP / {}:{}", state.address, state.current_dir))
                 .unwrap_or_else(|| "SFTP / 文件管理".to_string()),
-            TabKind::Settings => "Argus / 设置".to_string(),
             TabKind::Empty if self.has_loaded_real_sources => "请选择日志来源".to_string(),
             TabKind::Empty => "未选择来源".to_string(),
         }
@@ -1866,70 +1772,6 @@ impl ArgusApp {
             self.source_tree_scroll
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
-    }
-
-    /// 选择日志行，仅更新本地高亮状态。
-    pub(crate) fn select_log_line(&mut self, line_number: usize) {
-        self.selected_log_line = Some(line_number);
-        self.placeholder_notice = format!("已选择第 {line_number} 行日志");
-    }
-
-    /// 切换大小写、正则或全词匹配等搜索开关。
-    pub(crate) fn toggle_search_option(&mut self, option_name: &str) {
-        match option_name {
-            "case" => {
-                self.is_case_sensitive = !self.is_case_sensitive;
-                self.placeholder_notice = "已切换大小写匹配选项".to_string();
-            }
-            "regex" => {
-                self.is_regex_enabled = !self.is_regex_enabled;
-                self.placeholder_notice = "已切换正则搜索选项".to_string();
-            }
-            "whole" => {
-                self.is_whole_word_enabled = !self.is_whole_word_enabled;
-                self.placeholder_notice = "已切换全词匹配选项".to_string();
-            }
-            _ => self.mark_placeholder_action("搜索选项"),
-        }
-    }
-
-    /// 处理搜索框按键输入，当前只维护本地字符串。
-    pub(crate) fn handle_search_key(&mut self, keystroke: &Keystroke) {
-        match keystroke.key.as_str() {
-            "backspace" => {
-                self.search_query.pop();
-            }
-            "escape" => {
-                self.is_search_panel_open = false;
-                self.placeholder_notice = "已关闭本地搜索面板".to_string();
-                return;
-            }
-            "enter" => {
-                self.placeholder_notice =
-                    format!("搜索「{}」为占位操作，未扫描真实日志", self.search_query);
-                return;
-            }
-            _ => {
-                if let Some(key_char) = keystroke.key_char.as_ref()
-                    && !keystroke.modifiers.platform
-                    && !key_char.chars().any(char::is_control)
-                {
-                    self.search_query.push_str(key_char);
-                }
-            }
-        }
-
-        if self.search_query.is_empty() {
-            self.placeholder_notice = "搜索框为空，占位搜索未执行".to_string();
-        } else {
-            self.placeholder_notice = format!("已输入搜索关键字：{}", self.search_query);
-        }
-    }
-
-    /// 清空搜索关键字。
-    pub(crate) fn clear_search_query(&mut self) {
-        self.search_query.clear();
-        self.placeholder_notice = "已清空搜索关键字".to_string();
     }
 
     /// 在主窗口渲染前保留主题同步入口；当前仅支持暗色主题，因此不随系统外观切换。
@@ -1994,29 +1836,6 @@ impl ArgusApp {
         self.persist_config_or_report();
     }
 
-    /// 切换临时缓存开关。
-    pub(crate) fn toggle_cache_enabled(&mut self) {
-        self.is_cache_enabled = !self.is_cache_enabled;
-        self.config.cache.enabled = self.is_cache_enabled;
-        self.placeholder_notice = if self.is_cache_enabled {
-            "已启用临时缓存占位设置".to_string()
-        } else {
-            "已关闭临时缓存占位设置".to_string()
-        };
-        self.persist_config_or_report();
-    }
-
-    /// 调整缓存上限，始终限制在占位设置页可展示范围内。
-    pub(crate) fn adjust_cache_limit(&mut self, delta: isize) {
-        self.cache_limit_mb = self
-            .cache_limit_mb
-            .saturating_add_signed(delta)
-            .clamp(128, 2048);
-        self.config.cache.limit_mb = self.cache_limit_mb;
-        self.placeholder_notice = format!("缓存上限已调整为 {} MB", self.cache_limit_mb);
-        self.persist_config_or_report();
-    }
-
     pub(crate) fn adjust_max_archive_depth(&mut self, delta: isize) {
         self.config.loader.max_archive_depth = self
             .config
@@ -2066,8 +1885,7 @@ fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
         | TabKind::JstackAnalysis { .. }
         | TabKind::RuntimeAnalysis { .. }
         | TabKind::SshTerminal { .. }
-        | TabKind::SftpFileManager { .. }
-        | TabKind::Settings => None,
+        | TabKind::SftpFileManager { .. } => None,
     }
 }
 

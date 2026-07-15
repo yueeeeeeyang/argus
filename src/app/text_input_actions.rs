@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use crate::app::{
-    AppTextInputTarget, ArgusApp, ConnectionDialogState, InputTextSelectionDrag,
-    LogSearchInputKind, RuntimeFilterInputKind,
+    AppTextInputTarget, ArgusApp, InputTextSelectionDrag, LogSearchInputKind,
+    RuntimeFilterInputKind,
 };
 use crate::infra::text_selection::{NativeTextEdit, character_count, replace_character_range};
 
@@ -113,18 +113,7 @@ impl ArgusApp {
                     )
                 };
             }
-            AppTextInputTarget::ConnectionTreeSearch
-            | AppTextInputTarget::ConnectionDirectoryName
-            | AppTextInputTarget::ConnectionLinkName
-            | AppTextInputTarget::ConnectionLinkHost
-            | AppTextInputTarget::ConnectionLinkPort
-            | AppTextInputTarget::ConnectionLinkUsername
-            | AppTextInputTarget::ConnectionLinkPassword
-            | AppTextInputTarget::ConnectionLinkShare
-            | AppTextInputTarget::ConnectionLinkInitialDir
-            | AppTextInputTarget::ConnectionLinkDomain
-            | AppTextInputTarget::ConnectionLinkPrivateKeyPath
-            | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
+            AppTextInputTarget::ConnectionTreeSearch => {
                 apply_native_connection_edit(self, target, &edit);
             }
             AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
@@ -290,18 +279,7 @@ impl ArgusApp {
             AppTextInputTarget::SourceTreeSearch => {
                 self.is_source_tree_search_focused = true;
             }
-            AppTextInputTarget::ConnectionTreeSearch
-            | AppTextInputTarget::ConnectionDirectoryName
-            | AppTextInputTarget::ConnectionLinkName
-            | AppTextInputTarget::ConnectionLinkHost
-            | AppTextInputTarget::ConnectionLinkPort
-            | AppTextInputTarget::ConnectionLinkUsername
-            | AppTextInputTarget::ConnectionLinkPassword
-            | AppTextInputTarget::ConnectionLinkShare
-            | AppTextInputTarget::ConnectionLinkInitialDir
-            | AppTextInputTarget::ConnectionLinkDomain
-            | AppTextInputTarget::ConnectionLinkPrivateKeyPath
-            | AppTextInputTarget::ConnectionLinkPrivateKeyPassphrase => {
+            AppTextInputTarget::ConnectionTreeSearch => {
                 self.focus_connection_text_input_target(target);
             }
             AppTextInputTarget::SftpAddress { .. } | AppTextInputTarget::SftpRenameName => {
@@ -480,23 +458,15 @@ fn apply_native_connection_edit(
     }) else {
         return;
     };
-    if target == AppTextInputTarget::ConnectionTreeSearch {
-        app.placeholder_notice = if value.is_empty() {
-            "链接过滤为空，显示完整目录树".to_string()
-        } else {
-            format!(
-                "链接过滤「{}」命中 {} 个节点",
-                value,
-                app.visible_connection_rows().len()
-            )
-        };
-    } else if !matches!(
-        app.connection_dialog,
-        Some(ConnectionDialogState::ConfirmHostKey(_))
-            | Some(ConnectionDialogState::ConfirmDelete(_))
-    ) {
-        clear_connection_dialog_error(app);
-    }
+    app.placeholder_notice = if value.is_empty() {
+        "链接过滤为空，显示完整目录树".to_string()
+    } else {
+        format!(
+            "链接过滤「{}」命中 {} 个节点",
+            value,
+            app.visible_connection_rows().len()
+        )
+    };
 }
 
 /// 应用 Runtime 过滤输入框的原生编辑，并刷新当前分析页过滤结果。
@@ -521,17 +491,6 @@ fn apply_native_runtime_filter_edit(
     );
     if edit.marked_range.is_none() {
         app.after_runtime_filter_changed(analysis_id);
-    }
-}
-
-/// 清理连接表单错误，让用户修改字段后可以重新提交。
-fn clear_connection_dialog_error(app: &mut ArgusApp) {
-    if let Some(dialog) = app.connection_dialog.as_mut() {
-        match dialog {
-            ConnectionDialogState::NewDirectory(form) => form.error_message = None,
-            ConnectionDialogState::NewSshLink(form) => form.error_message = None,
-            ConnectionDialogState::ConfirmHostKey(_) | ConnectionDialogState::ConfirmDelete(_) => {}
-        }
     }
 }
 

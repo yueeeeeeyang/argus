@@ -7,9 +7,6 @@ pub(crate) fn render_content_body(
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
     match app.active_tab_kind() {
-        TabKind::Settings => {
-            render_empty_state("设置已迁移", "请从标题栏打开设置窗口。", app, theme)
-        }
         TabKind::JstackAnalysis { analysis_id } => {
             jstack_analysis_view::render(app, analysis_id, cx).into_any_element()
         }

@@ -255,8 +255,8 @@ fn title_action_button(
                 theme,
                 cx.listener(move |app, _, _, cx| {
                     match action_name {
-                        "日志分析" => app.switch_workspace(Workspace::LogAnalysis, cx),
-                        "链接" => app.switch_workspace(Workspace::Connections, cx),
+                        "日志分析" => app.switch_workspace(Workspace::LogAnalysis),
+                        "链接" => app.switch_workspace(Workspace::Connections),
                         "收起左侧菜单" | "展开左侧菜单" => app.toggle_source_panel(),
                         _ => app.mark_placeholder_action(action_name),
                     }

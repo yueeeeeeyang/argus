@@ -576,9 +576,6 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
             cx,
         )
         .into_any_element(),
-        ConnectionDialogState::NewDirectory(_) | ConnectionDialogState::NewSshLink(_) => {
-            div().into_any_element()
-        }
     }
 }
 

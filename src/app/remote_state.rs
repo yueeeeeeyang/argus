@@ -10,10 +10,6 @@ use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
 /// 链接工作区当前打开的弹窗。
 #[derive(Clone, Debug)]
 pub(crate) enum ConnectionDialogState {
-    /// 新增目录表单。
-    NewDirectory(ConnectionDirectoryFormState),
-    /// 新增远程链接表单。
-    NewSshLink(ConnectionLinkFormState),
     /// SSH 首次连接未知主机时的指纹确认弹窗。
     ConfirmHostKey(ConnectionHostKeyPromptState),
     /// 删除链接目录、SSH 链接或 SMB 链接前的二次确认弹窗。

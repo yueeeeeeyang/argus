@@ -1551,28 +1551,13 @@ fn new_app_starts_with_empty_source_tree() {
     assert!(app.visible_source_ids().is_empty());
 }
 
-/// 验证正式启动时内容区只展示提示信息，不渲染样例日志行。
+/// 验证正式启动时内容区只保留空标签，不注入样例日志标签。
 #[test]
-fn new_app_starts_without_placeholder_log_rows() {
+fn new_app_starts_with_empty_log_tab() {
     let app = test_app();
 
-    assert!(app.logs.is_empty());
-    assert!(app.selected_log_line.is_none());
     assert_eq!(app.active_tab_title(), "未选择日志");
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert!(matches!(app.content_state, ContentState::SourceNotSelected));
-}
-
-/// 验证旧设置标签入口不再创建设置标签页。
-#[test]
-fn legacy_settings_tab_entry_does_not_create_tab() {
-    let mut app = test_app();
-
-    app.open_or_focus_settings_tab();
-
-    assert_eq!(app.tabs.len(), 1);
-    assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert!(app.placeholder_notice.contains("模态框"));
 }
 
 /// 验证设置分类切换会更新右侧内容状态，并关闭上一分类的临时交互状态。
@@ -1600,26 +1585,6 @@ fn closing_settings_modal_clears_modal_state() {
 
     assert!(!app.is_settings_modal_open);
     assert!(!app.settings_jstack_thread_name_filter_input.is_focused);
-}
-
-/// 验证旧设置标签入口不会影响当前日志标签。
-#[test]
-fn legacy_settings_tab_entry_keeps_active_log_tab() {
-    let mut app = app_with_placeholder_sources();
-    let app_log_id = source_id_by_label(&app, "app.log");
-
-    app.select_source(app_log_id);
-    let app_tab_id = app.active_tab_id;
-    app.open_or_focus_settings_tab();
-
-    assert_eq!(app.active_tab_id, app_tab_id);
-    assert_eq!(
-        app.tabs
-            .iter()
-            .filter(|tab| matches!(tab.kind, TabKind::Settings))
-            .count(),
-        0
-    );
 }
 
 /// 验证同一日志来源重复点击时复用已有标签页。
@@ -1973,7 +1938,6 @@ fn settings_changes_are_persisted_to_config_file() {
 fn applying_new_load_report_replaces_old_log_workspace() {
     let mut app = app_with_placeholder_sources();
     app.has_loaded_real_sources = true;
-    app.logs = placeholder_logs();
     app.tabs.push(ArgusTab {
         id: 2,
         title: "old.log".to_string(),
@@ -2016,12 +1980,10 @@ fn applying_new_load_report_replaces_old_log_workspace() {
     });
 
     assert_eq!(visible_labels(&app), vec!["new.log"]);
-    assert!(app.logs.is_empty());
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.active_tab_title(), "未选择日志");
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     assert_eq!(app.next_tab_id, 2);
-    assert!(matches!(app.content_state, ContentState::SourceNotSelected));
     assert!(!app.is_source_tree_search_open);
     assert!(app.source_tree_search_query.is_empty());
     assert!(app.filtered_source_ids.is_empty());

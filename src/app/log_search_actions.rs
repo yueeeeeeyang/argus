@@ -3131,8 +3131,6 @@ mod tests {
 
         assert!(app.log_search.case_sensitive);
         assert!(app.log_search.regex_enabled);
-        assert!(!app.is_case_sensitive);
-        assert!(!app.is_regex_enabled);
     }
 
     /// 验证同一行多个命中时，快速定位可以高亮具体的单个命中范围。

@@ -18,8 +18,6 @@ pub(crate) enum Workspace {
     LogAnalysis,
     /// 链接工作区，用于展示 SSH/SMB 链接目录树、终端和远程文件管理标签页。
     Connections,
-    /// 设置工作区，用于展示主题、编码、缓存、快捷键等占位配置。
-    Settings,
 }
 
 /// 设置模态框左侧导航当前选中的分类。
@@ -49,35 +47,6 @@ impl SettingsSection {
             Self::LogLoading => "日志加载",
         }
     }
-}
-
-/// 打开来源占位弹窗中的来源类型。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PlaceholderSourceKind {
-    /// 本地日志文件。
-    File,
-    /// 本地目录。
-    Directory,
-    /// 压缩包来源。
-    Archive,
-}
-
-impl PlaceholderSourceKind {
-    /// 返回来源类型展示文案。
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::File => "日志文件",
-            Self::Directory => "目录",
-            Self::Archive => "压缩包",
-        }
-    }
-}
-
-/// 占位弹窗类型，当前仅用于打开来源。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PlaceholderDialog {
-    /// 打开来源弹窗。
-    OpenSource,
 }
 
 /// 顶部标签页类型，决定主内容区渲染哪个页面。
@@ -112,8 +81,6 @@ pub(crate) enum TabKind {
         /// 远程文件会话 ID，用于从应用状态表中读取远程文件列表和操作状态。
         session_id: usize,
     },
-    /// 设置标签页；全局唯一，可关闭后再次从标题栏打开。
-    Settings,
 }
 
 /// 顶部标签页状态。
@@ -210,28 +177,6 @@ pub(crate) enum AppTextInputTarget {
     SourceTreeSearch,
     /// 链接树过滤输入框。
     ConnectionTreeSearch,
-    /// 新增目录表单中的目录名称输入框。
-    ConnectionDirectoryName,
-    /// 新增连接链接表单中的链接名称输入框。
-    ConnectionLinkName,
-    /// 新增连接链接表单中的主机输入框。
-    ConnectionLinkHost,
-    /// 新增连接链接表单中的端口输入框。
-    ConnectionLinkPort,
-    /// 新增连接链接表单中的用户名输入框。
-    ConnectionLinkUsername,
-    /// 新增连接链接表单中的密码输入框。
-    ConnectionLinkPassword,
-    /// 新增 SMB 链接表单中的共享名称输入框。
-    ConnectionLinkShare,
-    /// 新增 SMB 链接表单中的初始目录输入框。
-    ConnectionLinkInitialDir,
-    /// 新增 SMB 链接表单中的域或工作组输入框。
-    ConnectionLinkDomain,
-    /// 新增 SSH 链接表单中的私钥路径输入框。
-    ConnectionLinkPrivateKeyPath,
-    /// 新增 SSH 链接表单中的私钥口令输入框。
-    ConnectionLinkPrivateKeyPassphrase,
     /// 远程文件管理地址栏输入框。
     SftpAddress {
         /// 远程文件管理会话 ID。
@@ -304,22 +249,6 @@ pub(crate) struct AppInputFocusHandles {
     pub source_tree_search: FocusHandle,
     /// 链接树过滤输入框焦点。
     pub connection_tree_search: FocusHandle,
-    /// 新增目录名称输入框焦点。
-    pub connection_directory_name: FocusHandle,
-    /// 新增连接链接名称输入框焦点。
-    pub connection_link_name: FocusHandle,
-    /// 新增连接链接主机输入框焦点。
-    pub connection_link_host: FocusHandle,
-    /// 新增连接链接端口输入框焦点。
-    pub connection_link_port: FocusHandle,
-    /// 新增连接链接用户名输入框焦点。
-    pub connection_link_username: FocusHandle,
-    /// 新增连接链接密码输入框焦点。
-    pub connection_link_password: FocusHandle,
-    /// 新增 SSH 链接私钥路径输入框焦点。
-    pub connection_link_private_key_path: FocusHandle,
-    /// 新增 SSH 链接私钥口令输入框焦点。
-    pub connection_link_private_key_passphrase: FocusHandle,
     /// 远程文件管理地址栏焦点。
     pub sftp_address: FocusHandle,
     /// 远程文件管理重命名弹窗输入框焦点。
@@ -348,50 +277,4 @@ pub(crate) struct AppInputFocusHandles {
     pub runtime_filter_start_time: FocusHandle,
     /// Runtime 结束时间过滤输入框焦点。
     pub runtime_filter_end_time: FocusHandle,
-}
-
-/// 来源树占位节点，用于模拟文件、目录和压缩包结构。
-#[derive(Clone, Debug)]
-pub(crate) struct SourceNode {
-    /// 节点唯一 ID，用于本地选择与展开折叠。
-    pub id: usize,
-    /// 节点缩进层级，模拟目录树深度。
-    pub depth: usize,
-    /// 节点名称。
-    pub label: String,
-    /// 节点类型文案。
-    pub kind: String,
-    /// 是否为当前选中节点。
-    pub selected: bool,
-    /// 是否为已展开节点；叶子节点忽略该字段。
-    pub expanded: bool,
-}
-
-/// 日志行占位数据，用于模拟 INFO/WARN/ERROR 等等级日志。
-#[derive(Clone, Debug)]
-pub(crate) struct LogLine {
-    /// 行号。
-    pub number: usize,
-    /// 日志等级。
-    pub level: String,
-    /// 日志文本。
-    pub message: String,
-}
-
-/// 内容区显示状态；本阶段真实来源只显示未读取提示，不读取日志正文。
-#[derive(Clone, Debug)]
-pub(crate) enum ContentState {
-    /// 初始样例预览，用于空项目首次启动时展示界面密度。
-    PlaceholderPreview,
-    /// 已接入真实来源树，但尚未选择日志候选节点。
-    SourceNotSelected,
-    /// 已选择真实来源节点，正文读取状态由 `log_read_states` 继续描述。
-    SourceNotRead {
-        /// 被选择的来源 ID。
-        source_id: SourceId,
-        /// 标签展示名称。
-        label: String,
-        /// 状态栏和内容区展示路径。
-        path: String,
-    },
 }

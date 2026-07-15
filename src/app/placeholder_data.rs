@@ -8,7 +8,6 @@
 
 use std::path::PathBuf;
 
-use super::LogLine;
 use crate::loader::archive::ArchiveFormat;
 use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode};
 
@@ -114,50 +113,4 @@ pub(super) fn placeholder_source_registry() -> SourceRegistry {
 
     registry.rebuild_all_indices();
     registry
-}
-
-/// 构造日志内容占位数据，覆盖常见日志等级视觉状态。
-pub(super) fn placeholder_logs() -> Vec<LogLine> {
-    vec![
-        LogLine {
-            number: 1,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:45 [INFO] Application started".into(),
-        },
-        LogLine {
-            number: 2,
-            level: "DEBUG".into(),
-            message: "2024-01-15 10:23:46 [DEBUG] Loading config...".into(),
-        },
-        LogLine {
-            number: 3,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:46 [INFO] Config loaded".into(),
-        },
-        LogLine {
-            number: 4,
-            level: "WARN".into(),
-            message: "2024-01-15 10:23:47 [WARN] Deprecated API usage".into(),
-        },
-        LogLine {
-            number: 5,
-            level: "ERROR".into(),
-            message: "2024-01-15 10:23:48 [ERROR] Failed to connect".into(),
-        },
-        LogLine {
-            number: 6,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:48 [INFO] Retrying connection...".into(),
-        },
-        LogLine {
-            number: 7,
-            level: "DEBUG".into(),
-            message: "2024-01-15 10:23:49 [DEBUG] Connection established".into(),
-        },
-        LogLine {
-            number: 8,
-            level: "INFO".into(),
-            message: "2024-01-15 10:23:50 [INFO] Request received".into(),
-        },
-    ]
 }

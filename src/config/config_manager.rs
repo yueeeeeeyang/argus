@@ -126,9 +126,8 @@ impl Default for ConfigManager {
 mod tests {
     use super::*;
     use crate::config::app_config::{
-        AppearanceConfig, CacheConfig, DEFAULT_JSTACK_STACK_SEGMENT_FILTERS,
-        DEFAULT_JSTACK_THREAD_NAME_FILTERS, EncodingConfig, LoaderConfig, LogDisplayConfig,
-        LogSearchConfig, UpgradeConfig,
+        AppearanceConfig, DEFAULT_JSTACK_STACK_SEGMENT_FILTERS, DEFAULT_JSTACK_THREAD_NAME_FILTERS,
+        EncodingConfig, LoaderConfig, LogDisplayConfig, LogSearchConfig, UpgradeConfig,
     };
     use crate::remote::connection::{
         ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SmbLinkConfig,
@@ -301,10 +300,6 @@ private_key_passphrase = " phrase "
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
             },
-            cache: CacheConfig {
-                enabled: false,
-                limit_mb: 1024,
-            },
             upgrade: UpgradeConfig {
                 enabled: true,
                 server_url: "https://updates.example.com/argus".to_string(),
@@ -343,8 +338,6 @@ private_key_passphrase = " phrase "
             "SHA256:test"
         );
         assert_eq!(loaded.encoding.selected, "GBK");
-        assert!(!loaded.cache.enabled);
-        assert_eq!(loaded.cache.limit_mb, 1024);
         assert!(loaded.upgrade.enabled);
         assert_eq!(
             loaded.upgrade.server_url,
@@ -352,6 +345,28 @@ private_key_passphrase = " phrase "
         );
         assert_eq!(loaded.upgrade.public_key_base64, "TEST_PUBLIC_KEY_BASE64");
         assert_eq!(loaded.upgrade.skipped_version.as_deref(), Some("0.2.0"));
+    }
+
+    /// 验证旧版无效缓存配置可以被忽略，并在下一次保存时从设置文件中清除。
+    #[test]
+    fn legacy_cache_section_is_ignored_and_removed_on_save() {
+        let path = test_settings_path("legacy-cache");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("旧配置迁移测试目录应可创建");
+        }
+        let mut config = AppConfig::default();
+        config.encoding.selected = "GBK".to_string();
+        let mut text = toml::to_string_pretty(&config).expect("默认配置应可序列化");
+        text.push_str("\n[cache]\nenabled = false\nlimit_mb = 1024\n");
+        fs::write(&path, text).expect("应能写入带旧缓存段的设置文件");
+
+        let loaded = ConfigManager::load_from_path(&path).expect("旧缓存段不应阻断配置加载");
+        assert_eq!(loaded.encoding.selected, "GBK");
+
+        ConfigManager::save_to_path(&path, &loaded).expect("迁移后的配置应可保存");
+        let saved = fs::read_to_string(&path).expect("应能读取迁移后的配置");
+        assert!(!saved.contains("[cache]"));
+        assert!(saved.contains("selected = \"GBK\""));
     }
 
     /// 验证坏 TOML 会暴露解析错误，让默认加载入口决定是否回退。

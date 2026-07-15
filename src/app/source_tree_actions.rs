@@ -86,9 +86,7 @@ impl ArgusApp {
             return;
         };
 
-        self.selected_log_line = None;
         if selected_node.kind.is_log_candidate() {
-            self.logs.clear();
             self.open_or_focus_log_tab(source_id);
         } else {
             self.placeholder_notice = format!("已选择来源节点 {}", selected_node.label);
@@ -212,8 +210,6 @@ impl ArgusApp {
 
     /// 清理旧日志工作区状态，确保新来源不会继承旧日志的标签、筛选和内容选择。
     pub(super) fn reset_log_workspace_after_source_replace(&mut self) {
-        self.content_state = ContentState::SourceNotSelected;
-        self.logs.clear();
         self.log_read_states.clear();
         self.log_reader_generations.clear();
         self.log_tab_view_states.clear();
@@ -224,9 +220,6 @@ impl ArgusApp {
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
         self.reset_log_search_runtime_state();
-        self.selected_log_line = None;
-        self.is_search_panel_open = false;
-        self.search_query.clear();
         self.hovered_tab_id = None;
         self.active_menu = None;
         self.log_scrollbar_drag = None;

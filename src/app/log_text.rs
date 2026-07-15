@@ -109,8 +109,7 @@ impl ArgusApp {
                 | TabKind::JstackAnalysis { .. }
                 | TabKind::RuntimeAnalysis { .. }
                 | TabKind::SshTerminal { .. }
-                | TabKind::SftpFileManager { .. }
-                | TabKind::Settings => None,
+                | TabKind::SftpFileManager { .. } => None,
             }
         })?;
         let LogOpenState::Ready(handle) = self.log_read_state(source_id)? else {

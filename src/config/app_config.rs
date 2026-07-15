@@ -1,8 +1,8 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-25
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供外观、日志加载、日志搜索、链接、编码、缓存和升级设置的默认值、校验和 TOML 序列化结构。
+//! 主要功能：提供外观、日志加载、日志搜索、链接、编码和升级设置的默认值、校验及 TOML 模型。
 
 use crate::remote::connection::ConnectionConfig;
 use serde::{Deserialize, Serialize};
@@ -80,9 +80,6 @@ pub(crate) struct AppConfig {
     /// 编码配置，后续日志读取模块会据此选择默认解码策略。
     #[serde(default)]
     pub encoding: EncodingConfig,
-    /// 缓存配置，后续索引和读取模块会据此控制临时缓存策略。
-    #[serde(default)]
-    pub cache: CacheConfig,
     /// 升级配置，控制是否从用户配置的服务器检查并安装新版本。
     #[serde(default)]
     pub upgrade: UpgradeConfig,
@@ -118,7 +115,6 @@ impl AppConfig {
         self.log_display.jstack_stack_segment_filters =
             normalized_stack_segment_filter_text(self.log_display.jstack_stack_segment_filters);
         self.connections = self.connections.normalized();
-        self.cache.limit_mb = self.cache.limit_mb.clamp(128, 2048);
         if self.encoding.selected.trim().is_empty() {
             self.encoding.selected = EncodingConfig::default().selected;
         }
@@ -140,7 +136,6 @@ impl Default for AppConfig {
             log_display: LogDisplayConfig::default(),
             connections: ConnectionConfig::default(),
             encoding: EncodingConfig::default(),
-            cache: CacheConfig::default(),
             upgrade: UpgradeConfig::default(),
         }
     }
@@ -253,25 +248,6 @@ impl Default for EncodingConfig {
     }
 }
 
-/// 缓存配置，当前先持久化设置页状态，后续缓存模块接入时复用。
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct CacheConfig {
-    /// 是否启用临时缓存。
-    pub enabled: bool,
-    /// 缓存上限，单位 MB。
-    pub limit_mb: usize,
-}
-
-impl Default for CacheConfig {
-    /// 构造默认缓存配置。
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            limit_mb: 512,
-        }
-    }
-}
-
 /// 自动升级配置，保存升级服务器和用户跳过版本等跨会话偏好。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct UpgradeConfig {
@@ -358,10 +334,6 @@ mod tests {
             encoding: EncodingConfig {
                 selected: String::new(),
             },
-            cache: CacheConfig {
-                enabled: true,
-                limit_mb: 1,
-            },
             upgrade: UpgradeConfig {
                 enabled: true,
                 server_url: " https://updates.example.com/argus ".to_string(),
@@ -386,7 +358,6 @@ mod tests {
             "java.net.SocketInputStream\n\nread"
         );
         assert_eq!(config.encoding.selected, "UTF-8");
-        assert_eq!(config.cache.limit_mb, 128);
         assert_eq!(
             config.upgrade.server_url,
             "https://updates.example.com/argus"
