@@ -1,6 +1,6 @@
 # 文件职责：定义 Argus 桌面客户端的 Cargo 包信息与依赖版本。
 # 创建日期：2026-06-09
-# 修改日期：2026-07-14
+# 修改日期：2026-07-15
 # 作者：Argus 开发团队
 # 主要功能：配置 Rust 版本、包元信息以及 GPUI 界面依赖。
 
@@ -54,7 +54,14 @@ zip = { version = "8.6.0", default-features = false, features = ["aes-crypto", "
 # libssh2 在 Windows 默认使用系统 WinCNG。避免启用 vendored-openssl，才能从非 Windows
 # 主机交叉编译 MSVC 目标，同时无需随应用分发额外的 OpenSSL 动态库。
 ssh2 = "0.9.5"
-windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry"] }
+raw-window-handle = "0.6.2"
+windows-sys = { version = "0.60.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(not(windows))'.dependencies]
 # macOS/Linux 延续原有的 vendored OpenSSL 策略，避免依赖开发机预装的 OpenSSL 版本。

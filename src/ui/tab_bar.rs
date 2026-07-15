@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义标题栏中的日志标签区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：展示可切换标签、右键菜单和多标签溢出下拉入口。
 
@@ -14,9 +14,11 @@ use crate::ui::components::context_menu::ActiveMenuKind;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
+#[cfg(not(target_os = "windows"))]
+use gpui::WindowControlArea;
 use gpui::{
     ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, SharedString,
-    Window, WindowControlArea, div, prelude::*, px, rgb, svg,
+    Window, div, prelude::*, px, rgb, svg,
 };
 
 /// 激活标签底部凹弧连接遮罩尺寸。
@@ -36,7 +38,7 @@ const TAB_MAX_WIDTH: f32 = 230.0;
 /// 下拉按钮占位宽度；按钮始终展示，便于从固定入口查看全部标签。
 const TAB_OVERFLOW_BUTTON_WIDTH: f32 = 32.0;
 /// 标签页和右侧下拉按钮之间的最小间距；更多空间优先让标签页使用。
-const TITLE_RIGHT_DRAG_MIN_WIDTH: f32 = 8.0;
+const TITLE_RIGHT_DRAG_MIN_WIDTH: f32 = 64.0;
 /// 标题栏中标签栏左侧外部留白，对应 `custom_title_bar` 中的间距。
 const TAB_EXTERNAL_LEFT_GAP: f32 = 16.0;
 /// 标题栏右侧固定按钮与窗口右边缘的间距，对应 `custom_title_bar` 中的间距。
@@ -434,29 +436,32 @@ fn render_tab_close_slot(
 
 /// 渲染标签区域右侧的标题栏拖拽空白，并支持双击最大化或还原。
 fn tab_drag_area(cx: &mut Context<ArgusApp>) -> impl IntoElement {
-    div()
+    let drag_area = div()
         .id("tab-bar-drag-area")
         .debug_selector(|| "tab-bar-drag-area".to_string())
         .h_full()
         .min_w(px(TITLE_RIGHT_DRAG_MIN_WIDTH))
-        .flex_1()
-        .window_control_area(WindowControlArea::Drag)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|app, event: &MouseDownEvent, window, cx| {
-                match event.click_count {
-                    1 => custom_titlebar::start_window_drag(window),
-                    2 => {
-                        window.zoom_window();
-                        app.placeholder_notice = "已切换窗口最大化状态".to_string();
-                        cx.notify();
-                    }
-                    _ => {}
+        .flex_1();
+    // Windows 需要普通客户区事件来调用显式 HWND 拖动；其余平台保留 GPUI 控制区语义。
+    #[cfg(not(target_os = "windows"))]
+    let drag_area = drag_area.window_control_area(WindowControlArea::Drag);
+
+    drag_area.on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|app, event: &MouseDownEvent, window, cx| {
+            match event.click_count {
+                1 => custom_titlebar::start_window_drag(window),
+                2 => {
+                    window.zoom_window();
+                    app.placeholder_notice = "已切换窗口最大化状态".to_string();
+                    cx.notify();
                 }
-                // 该 hitbox 只覆盖标签右侧空白，拖动或缩放后不再向其他标题栏元素传播。
-                cx.stop_propagation();
-            }),
-        )
+                _ => {}
+            }
+            // 该 hitbox 只覆盖标签右侧空白，拖动或缩放后不再向其他标题栏元素传播。
+            cx.stop_propagation();
+        }),
+    )
 }
 
 /// 渲染标签溢出下拉按钮。
@@ -572,6 +577,10 @@ mod tests {
         assert!(
             tab_bounds.right() <= drag_bounds.left(),
             "标签边界不应覆盖空白拖拽区：tab={tab_bounds:?}, drag={drag_bounds:?}"
+        );
+        assert!(
+            drag_bounds.size.width >= px(TITLE_RIGHT_DRAG_MIN_WIDTH),
+            "标题栏应保留稳定可命中的拖拽宽度：drag={drag_bounds:?}"
         );
 
         simulate_repeated_clicks(

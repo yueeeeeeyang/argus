@@ -98,6 +98,7 @@ impl ArgusApp {
             tab.kind = TabKind::RuntimeAnalysis { analysis_id };
         }
         self.active_tab_id = tab_id;
+        self.close_log_search_results_for_active_analysis_tab();
         self.log_tab_view_states.remove(&tab_id);
 
         let generation = 1;

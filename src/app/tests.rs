@@ -1,5 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -627,6 +628,7 @@ fn creating_jstack_analysis_tab_reuses_empty_tab() {
     let app_log_id = source_id_by_label(&app, "app.log");
     let error_log_id = source_id_by_label(&app, "error.log");
     let targets = app.jstack_targets_from_source_ids(&[app_log_id, error_log_id]);
+    app.log_search.message = Some("搜索结果面板仍在展示".to_string());
 
     let (analysis_id, generation) = app
         .create_jstack_analysis_tab_state(targets)
@@ -651,6 +653,7 @@ fn creating_jstack_analysis_tab_reuses_empty_tab() {
         JstackAnalysisTaskState::Loading { .. }
     ));
     assert_eq!(app.active_tab_title(), "Jstack分析(2)");
+    assert!(!app.should_show_log_search_results());
 }
 
 /// 验证 Jstack 配置过滤开关默认开启，并可在分析页内临时关闭。
@@ -739,6 +742,7 @@ fn creating_runtime_analysis_tab_reuses_empty_tab() {
     let app_log_id = source_id_by_label(&app, "app.log");
     let error_log_id = source_id_by_label(&app, "error.log");
     let targets = app.runtime_targets_from_source_ids(&[app_log_id, error_log_id]);
+    app.log_search.message = Some("搜索结果面板仍在展示".to_string());
 
     let (analysis_id, generation) = app
         .create_runtime_analysis_tab_state(targets)
@@ -764,6 +768,74 @@ fn creating_runtime_analysis_tab_reuses_empty_tab() {
         RuntimeAnalysisTaskState::Loading { .. }
     ));
     assert_eq!(app.active_tab_title(), "Runtime分析(2)");
+    assert!(!app.should_show_log_search_results());
+}
+
+/// 验证切换到已经存在的分析标签也会关闭日志搜索结果面板。
+#[test]
+fn activating_existing_analysis_tab_closes_search_results_panel() {
+    let mut app = app_with_placeholder_sources();
+    let app_log_id = source_id_by_label(&app, "app.log");
+    app.select_source(app_log_id);
+    let log_tab_id = app.active_tab_id;
+
+    let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+    app.create_jstack_analysis_tab_state(targets)
+        .expect("应能创建 Jstack 分析 tab");
+    let analysis_tab_id = app.active_tab_id;
+    app.activate_tab(log_tab_id);
+    app.log_search.message = Some("搜索结果面板仍在展示".to_string());
+
+    app.activate_tab(analysis_tab_id);
+
+    assert_eq!(app.active_tab_id, analysis_tab_id);
+    assert!(!app.should_show_log_search_results());
+    assert!(app.log_search.message.is_none());
+    assert_eq!(app.placeholder_notice, "已切换到 Jstack分析");
+}
+
+/// 验证关闭当前日志标签并自动落到分析标签时也会关闭日志搜索结果面板。
+#[test]
+fn closing_active_tab_into_analysis_closes_search_results_panel() {
+    let mut app = app_with_placeholder_sources();
+    let app_log_id = source_id_by_label(&app, "app.log");
+    app.select_source(app_log_id);
+    let log_tab_id = app.active_tab_id;
+
+    let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+    app.create_jstack_analysis_tab_state(targets)
+        .expect("应能创建 Jstack 分析 tab");
+    let analysis_tab_id = app.active_tab_id;
+    app.activate_tab(log_tab_id);
+    app.log_search.message = Some("搜索结果面板仍在展示".to_string());
+
+    app.close_tab(log_tab_id);
+
+    assert_eq!(app.active_tab_id, analysis_tab_id);
+    assert!(!app.should_show_log_search_results());
+    assert!(app.log_search.message.is_none());
+}
+
+/// 验证关闭其他标签并保留分析标签时会关闭日志搜索结果面板。
+#[test]
+fn keeping_analysis_tab_closes_search_results_panel() {
+    let mut app = app_with_placeholder_sources();
+    let app_log_id = source_id_by_label(&app, "app.log");
+    app.select_source(app_log_id);
+    let log_tab_id = app.active_tab_id;
+
+    let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+    app.create_runtime_analysis_tab_state(targets)
+        .expect("应能创建 Runtime 分析 tab");
+    let analysis_tab_id = app.active_tab_id;
+    app.activate_tab(log_tab_id);
+    app.log_search.message = Some("搜索结果面板仍在展示".to_string());
+
+    app.close_other_tabs(analysis_tab_id);
+
+    assert_eq!(app.active_tab_id, analysis_tab_id);
+    assert!(!app.should_show_log_search_results());
+    assert!(app.log_search.message.is_none());
 }
 
 /// 验证切换 Runtime 结果类型会清理旧表格交互态，统计下钻会回到统计分析。

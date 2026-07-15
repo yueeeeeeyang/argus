@@ -1,6 +1,6 @@
 //! 文件职责：定义 Argus 界面使用的 Lucide 图标清单与 SVG 渲染入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：将稳定的业务语义图标和快搜等操作图标映射到 icondata Lucide 图标常量。
 
@@ -38,6 +38,10 @@ pub(crate) enum ArgusIcon {
     Minus,
     /// 关闭标签或弹窗。
     Close,
+    /// Windows 主窗口最大化。
+    WindowMaximize,
+    /// Windows 主窗口从最大化状态还原。
+    WindowRestore,
     /// 布局切换。
     Layout,
     /// 更多操作。
@@ -118,6 +122,8 @@ impl ArgusIcon {
             Self::Plus,
             Self::Minus,
             Self::Close,
+            Self::WindowMaximize,
+            Self::WindowRestore,
             Self::Layout,
             Self::More,
             Self::ArrowLeft,
@@ -173,6 +179,8 @@ impl ArgusIcon {
             Self::Plus => "icons/plus.svg",
             Self::Minus => "icons/minus.svg",
             Self::Close => "icons/close.svg",
+            Self::WindowMaximize => "icons/window-maximize.svg",
+            Self::WindowRestore => "icons/window-restore.svg",
             Self::Layout => "icons/layout.svg",
             Self::More => "icons/more.svg",
             Self::ArrowLeft => "icons/arrow-left.svg",
@@ -245,6 +253,8 @@ impl ArgusIcon {
             Self::Plus => icondata::LuPlus,
             Self::Minus => icondata::LuMinus,
             Self::Close => icondata::LuX,
+            Self::WindowMaximize => icondata::LuSquare,
+            Self::WindowRestore => icondata::LuCopy,
             Self::Layout => icondata::LuPanelLeft,
             Self::More => icondata::LuEllipsis,
             Self::ArrowLeft => icondata::LuArrowLeft,

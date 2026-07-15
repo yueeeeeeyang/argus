@@ -1490,8 +1490,24 @@ impl ArgusApp {
         }
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = tab_id;
+            self.close_log_search_results_for_active_analysis_tab();
             self.sync_source_tree_selection_from_active_tab();
             self.placeholder_notice = format!("已切换到 {}", self.active_tab_title());
+        }
+    }
+
+    /// 进入 Jstack 或 Runtime 分析标签时关闭仍在展示的日志搜索结果面板。
+    ///
+    /// 说明：结果面板由结果、运行中任务或提示消息共同决定是否可见，并没有独立的打开
+    /// 标志；这里只在面板确实可见且当前标签属于分析页时复用完整关闭流程，以同步取消
+    /// 搜索任务、清理结果和正文命中高亮，同时保留搜索窗口中的查询条件。
+    fn close_log_search_results_for_active_analysis_tab(&mut self) {
+        let is_analysis_tab = matches!(
+            self.active_tab_kind(),
+            TabKind::JstackAnalysis { .. } | TabKind::RuntimeAnalysis { .. }
+        );
+        if is_analysis_tab && self.should_show_log_search_results() {
+            self.close_log_search_results_panel();
         }
     }
 
@@ -1598,6 +1614,7 @@ impl ArgusApp {
         if self.active_tab_id == tab_id {
             let next_index = closed_index.min(self.tabs.len().saturating_sub(1));
             self.active_tab_id = self.tabs[next_index].id;
+            self.close_log_search_results_for_active_analysis_tab();
             self.sync_source_tree_selection_from_active_tab();
         }
         self.placeholder_notice = "已关闭标签页".to_string();
@@ -1629,6 +1646,7 @@ impl ArgusApp {
         self.retain_terminal_session_for_tab_kind(&kept_kind);
         self.retain_sftp_session_for_tab_kind(&kept_kind);
         self.active_tab_id = tab_id;
+        self.close_log_search_results_for_active_analysis_tab();
         self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
         self.log_scrollbar_drag = None;
