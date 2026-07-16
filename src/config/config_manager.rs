@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-18
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -231,6 +231,7 @@ private_key_passphrase = " phrase "
     fn save_then_load_round_trips_settings() {
         let path = test_settings_path("round-trip");
         let config = AppConfig {
+            ai: Default::default(),
             appearance: AppearanceConfig {
                 theme_mode: "custom_dark.toml".to_string(),
                 log_content_font_size: 16.0,

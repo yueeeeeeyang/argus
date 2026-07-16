@@ -1,16 +1,16 @@
 //! 文件职责：组合 Argus 主窗口的整体布局。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：渲染自定义标题栏、来源侧栏、日志内容区、升级弹窗和设置模态框。
+//! 主要功能：渲染标题栏、来源侧栏、日志内容区、AI 分析弹窗、升级弹窗和设置模态框。
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::ui::{
-    archive_password_dialog, components::context_menu, connection_dialog, custom_title_bar,
-    log_content_view, remote_file_dialog, settings_window, source_panel, source_picker,
-    source_resizer, upgrade_dialog,
+    agent_dialog, ai_settings_editor, archive_password_dialog, components::context_menu,
+    connection_dialog, custom_title_bar, log_content_view, remote_file_dialog, settings_window,
+    source_panel, source_picker, source_resizer, upgrade_dialog,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
@@ -122,6 +122,9 @@ pub(crate) fn render(
         .when_some(app.source_picker_modal.clone(), |this, modal| {
             this.child(source_picker::render_source_picker_modal(modal, &theme, cx))
         })
+        .when_some(app.ai_agent_launch_modal.clone(), |this, modal| {
+            this.child(agent_dialog::render_agent_launch_modal(modal, &theme, cx))
+        })
         .when_some(app.connection_directory_modal.clone(), |this, modal| {
             this.child(connection_dialog::render_connection_directory_modal(
                 modal, &theme, cx,
@@ -137,6 +140,11 @@ pub(crate) fn render(
                 app,
                 &input_focus_handles,
                 cx,
+            ))
+        })
+        .when_some(app.ai_settings_editor_modal.clone(), |this, modal| {
+            this.child(ai_settings_editor::render_ai_settings_editor_modal(
+                modal, &theme, cx,
             ))
         })
 }

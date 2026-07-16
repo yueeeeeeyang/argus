@@ -1,8 +1,8 @@
 //! 文件职责：渲染 Argus 主窗口设置模态框和独立设置编辑器。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：以主窗口模态框展示分类设置，并提供 Jstack 线程段过滤大编辑器。
+//! 主要功能：以主窗口模态框展示分类设置，并提供智能分析和 Jstack 线程段过滤编辑入口。
 
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ use crate::analysis::jstack::split_stack_segment_filter_blocks;
 use crate::app::{
     AppInputFocusHandles, AppTextInputTarget, ArgusApp, SettingsSection, TextInputState,
 };
+use crate::config::{AiModelProfile, LogTypeProfile};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::theme::{AppTheme, ThemeOption};
@@ -23,7 +24,7 @@ use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, Textarea,
-    TextareaScrollState, render_input, render_textarea,
+    TextareaAccessoryPosition, TextareaScrollState, TextareaStyle, render_input, render_textarea,
 };
 use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 use crate::ui::input_native::app_native_input;
@@ -106,6 +107,12 @@ struct SettingsModalSnapshot {
     selected_section: SettingsSection,
     /// 当前选中的主题 ID。
     selected_theme_id: String,
+    /// 是否启用 AI 日志分析。
+    ai_enabled: bool,
+    /// 可供智能分析会话选择的模型配置列表。
+    ai_model_profiles: Vec<AiModelProfile>,
+    /// 自定义日志类型说明列表。
+    ai_log_profiles: Vec<LogTypeProfile>,
     /// 当前选中主题展示文案。
     selected_theme_label: String,
     /// 可选主题列表。
@@ -153,6 +160,9 @@ impl SettingsModalSnapshot {
             theme: app.theme.clone(),
             selected_section: app.selected_settings_section,
             selected_theme_id: app.selected_theme_id.clone(),
+            ai_enabled: app.config.ai.enabled,
+            ai_model_profiles: app.config.ai.model_profiles.clone(),
+            ai_log_profiles: app.config.ai.log_profiles.clone(),
             selected_theme_label: app.selected_theme_label(),
             theme_options: app.theme_options(),
             is_theme_dropdown_open: app.is_theme_dropdown_open,
@@ -461,6 +471,25 @@ fn render_settings_sidebar(
                 .child(
                     div()
                         .mt_3()
+                        .child(settings_navigation_group_label("智能分析", theme)),
+                )
+                .child(settings_navigation_item(
+                    SettingsSection::AiModel,
+                    ArgusIcon::Settings,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
+                .child(settings_navigation_item(
+                    SettingsSection::AiLogProfiles,
+                    ArgusIcon::FileText,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
+                .child(
+                    div()
+                        .mt_3()
                         .child(settings_navigation_group_label("日志", theme)),
                 )
                 .child(settings_navigation_item(
@@ -566,6 +595,8 @@ fn settings_section_id(section: SettingsSection) -> &'static str {
     match section {
         SettingsSection::About => "about",
         SettingsSection::Appearance => "appearance",
+        SettingsSection::AiModel => "ai-model",
+        SettingsSection::AiLogProfiles => "ai-log-profiles",
         SettingsSection::LogDisplay => "log-display",
         SettingsSection::LogSearch => "log-search",
         SettingsSection::LogLoading => "log-loading",
@@ -598,6 +629,12 @@ fn render_selected_settings_section(
         SettingsSection::Appearance => {
             render_appearance_section(snapshot, app_handle, theme).into_any_element()
         }
+        SettingsSection::AiModel => {
+            render_ai_model_section(snapshot, app_handle, theme).into_any_element()
+        }
+        SettingsSection::AiLogProfiles => {
+            render_ai_log_profiles_section(snapshot, app_handle, theme).into_any_element()
+        }
         SettingsSection::LogDisplay => {
             render_log_display_section(snapshot, app_handle, input_focus_handles, theme)
                 .into_any_element()
@@ -610,6 +647,267 @@ fn render_selected_settings_section(
             render_log_loading_section(snapshot, app_handle, theme).into_any_element()
         }
     }
+}
+
+/// 渲染智能分析分组下的模型配置页面。
+fn render_ai_model_section(
+    snapshot: &SettingsModalSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> AnyElement {
+    let add_model_app = app_handle.clone();
+    let list_theme = theme.clone();
+    settings_section(
+        "模型配置",
+        ArgusIcon::Settings,
+        setting_group(theme)
+            .child(setting_row(
+                "当前状态",
+                ai_settings_entry_control(
+                    format!(
+                        "{} · {} 个模型",
+                        if snapshot.ai_enabled {
+                            "已启用"
+                        } else {
+                            "未启用"
+                        },
+                        snapshot.ai_model_profiles.len()
+                    ),
+                    "新增模型",
+                    "settings-add-ai-model",
+                    ArgusIcon::Settings,
+                    theme,
+                    move |cx| {
+                        update_settings_app(&add_model_app, cx, |app, app_cx| {
+                            app.open_ai_model_editor(None, app_cx)
+                        });
+                    },
+                ),
+                theme,
+            ))
+            .when(snapshot.ai_model_profiles.is_empty(), |this| {
+                this.child(ai_settings_empty_row(
+                    "尚未配置模型，新增后才能使用智能分析。",
+                    &list_theme,
+                ))
+            })
+            .children(
+                snapshot
+                    .ai_model_profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(index, model)| {
+                        let edit_app = app_handle.clone();
+                        let row_theme = theme.clone();
+                        let summary = format!(
+                            "{} · {} · 上下文 {} · {}",
+                            if model.enabled { "启用" } else { "停用" },
+                            model.model,
+                            model.context_window_label(),
+                            model.base_url
+                        );
+                        div()
+                            .id(("settings-ai-model-row", index))
+                            .min_h(px(52.0))
+                            .px_3()
+                            .py_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .rounded_sm()
+                            .bg(rgb(theme.current_line))
+                            .cursor_pointer()
+                            .hover(move |this| this.bg(rgb(row_theme.selection)))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(model.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(theme.foreground_muted))
+                                            .child(summary),
+                                    ),
+                            )
+                            .child(render_icon(ArgusIcon::Expand, theme.foreground_muted, 14.0))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                update_settings_app(&edit_app, cx, |app, app_cx| {
+                                    app.open_ai_model_editor(Some(index), app_cx);
+                                });
+                            })
+                    }),
+            ),
+        theme,
+    )
+    .into_any_element()
+}
+
+/// 渲染智能分析分组下的日志类型说明页面。
+fn render_ai_log_profiles_section(
+    snapshot: &SettingsModalSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> AnyElement {
+    let add_profile_app = app_handle.clone();
+    let list_theme = theme.clone();
+    settings_section(
+        "日志类型说明",
+        ArgusIcon::FileText,
+        setting_group(theme)
+            .child(setting_row(
+                "当前配置",
+                ai_settings_entry_control(
+                    format!("{} 个日志类型", snapshot.ai_log_profiles.len()),
+                    "新增",
+                    "settings-add-ai-log-profile",
+                    ArgusIcon::FileText,
+                    theme,
+                    move |cx| {
+                        update_settings_app(&add_profile_app, cx, |app, app_cx| {
+                            app.open_ai_log_profile_editor(None, app_cx)
+                        });
+                    },
+                ),
+                theme,
+            ))
+            .when(snapshot.ai_log_profiles.is_empty(), |this| {
+                this.child(ai_settings_empty_row(
+                    "尚未配置日志类型说明，Agent 将仅依赖自动识别结果。",
+                    &list_theme,
+                ))
+            })
+            .children(
+                snapshot
+                    .ai_log_profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(index, profile)| {
+                        let edit_app = app_handle.clone();
+                        let row_theme = theme.clone();
+                        div()
+                            .id(("settings-ai-log-profile-row", index))
+                            .min_h(px(52.0))
+                            .px_3()
+                            .py_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .rounded_sm()
+                            .bg(rgb(theme.current_line))
+                            .cursor_pointer()
+                            .hover(move |this| this.bg(rgb(row_theme.selection)))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(profile.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(theme.foreground_muted))
+                                            .child(format!(
+                                                "{} · {} 条名称规则 · 优先级 {}",
+                                                if profile.enabled { "启用" } else { "停用" },
+                                                profile.matchers.len(),
+                                                profile.priority
+                                            )),
+                                    ),
+                            )
+                            .child(render_icon(ArgusIcon::Expand, theme.foreground_muted, 14.0))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                update_settings_app(&edit_app, cx, |app, app_cx| {
+                                    app.open_ai_log_profile_editor(Some(index), app_cx);
+                                });
+                            })
+                    }),
+            ),
+        theme,
+    )
+    .into_any_element()
+}
+
+/// 渲染模型或日志类型列表的空状态，和其它设置行保持相同高度、背景及文字层级。
+fn ai_settings_empty_row(message: &'static str, theme: &AppTheme) -> impl IntoElement {
+    div()
+        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+        .px_3()
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .bg(rgb(theme.current_line))
+        .text_size(px(12.0))
+        .text_color(rgb(theme.foreground_muted))
+        .child(message)
+}
+
+/// 渲染智能分析设置行右侧的摘要和配置按钮。
+fn ai_settings_entry_control(
+    summary: String,
+    button_label: &'static str,
+    button_id: &'static str,
+    icon: ArgusIcon,
+    theme: &AppTheme,
+    action: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let button_theme = theme.clone();
+    div()
+        .min_w(px(0.0))
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_3()
+        .child(
+            div()
+                .max_w(px(280.0))
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.foreground_muted))
+                .child(summary),
+        )
+        .child(
+            div()
+                .id(button_id)
+                .h(px(30.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .rounded_sm()
+                .bg(rgb(theme.current_line))
+                .text_size(px(12.0))
+                .text_color(rgb(theme.foreground))
+                .cursor_pointer()
+                .hover(move |this| this.bg(rgb(button_theme.selection)))
+                .child(render_icon(icon, theme.foreground_muted, 13.0))
+                .child(button_label)
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    action(cx);
+                }),
+        )
 }
 
 /// 渲染 Jstack 线程段过滤大编辑器窗口。
@@ -749,11 +1047,15 @@ fn render_jstack_stack_segment_editor_textarea(
             fill_height: true,
             scroll_handle: focus_handles.textarea_scroll.clone(),
             scroll_state: focus_handles.textarea_scroll_state.clone(),
+            style: TextareaStyle::Default,
             trailing_accessory: Some(InputAccessory {
                 id: "jstack-stack-segment-editor-clear",
                 icon: ArgusIcon::Close,
                 tooltip: "清空线程段过滤",
             }),
+            trailing_accessory_position: TextareaAccessoryPosition::TopRight,
+            trailing_accessory_always_visible: false,
+            trailing_accessory_selected: false,
             native_input: Some(native_input),
         },
         theme,

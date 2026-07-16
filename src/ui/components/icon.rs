@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：将稳定的业务语义图标和快搜等操作图标映射到 icondata Lucide 图标常量。
+//! 主要功能：将稳定的业务语义、快搜和智能分析图标映射到 icondata Lucide 图标常量。
 
 use gpui::{IntoElement, prelude::*, px, rgb, svg};
 use icondata::Icon;
@@ -24,6 +24,8 @@ pub(crate) enum ArgusIcon {
     Search,
     /// 一键快搜。
     QuickSearch,
+    /// AI 智能日志分析。
+    SmartAnalysis,
     /// 来源树过滤。
     Filter,
     /// 连接入口。
@@ -64,6 +66,8 @@ pub(crate) enum ArgusIcon {
     Upload,
     /// 下载文件。
     Download,
+    /// 保存设置或编辑结果。
+    Save,
     /// 重命名。
     Rename,
     /// 删除。
@@ -119,6 +123,7 @@ impl ArgusIcon {
             Self::FolderPlus,
             Self::Search,
             Self::QuickSearch,
+            Self::SmartAnalysis,
             Self::Filter,
             Self::Connection,
             Self::Link,
@@ -139,6 +144,7 @@ impl ArgusIcon {
             Self::Refresh,
             Self::Upload,
             Self::Download,
+            Self::Save,
             Self::Rename,
             Self::Trash,
             Self::Collapse,
@@ -178,6 +184,7 @@ impl ArgusIcon {
             Self::FolderPlus => "icons/folder-plus.svg",
             Self::Search => "icons/search.svg",
             Self::QuickSearch => "icons/quick-search.svg",
+            Self::SmartAnalysis => "icons/smart-analysis.svg",
             Self::Filter => "icons/filter.svg",
             Self::Connection => "icons/connection.svg",
             Self::Link => "icons/link.svg",
@@ -198,6 +205,7 @@ impl ArgusIcon {
             Self::Refresh => "icons/refresh.svg",
             Self::Upload => "icons/upload.svg",
             Self::Download => "icons/download.svg",
+            Self::Save => "icons/save.svg",
             Self::Rename => "icons/rename.svg",
             Self::Trash => "icons/trash.svg",
             Self::Collapse => "icons/collapse.svg",
@@ -254,6 +262,7 @@ impl ArgusIcon {
             Self::FolderPlus => icondata::LuFolderPlus,
             Self::Search => icondata::LuSearch,
             Self::QuickSearch => icondata::LuZap,
+            Self::SmartAnalysis => icondata::LuSparkles,
             Self::Filter => icondata::LuListFilter,
             Self::Connection => icondata::LuPlug,
             Self::Link => icondata::LuLink,
@@ -274,6 +283,7 @@ impl ArgusIcon {
             Self::Refresh => icondata::LuRefreshCw,
             Self::Upload => icondata::LuUpload,
             Self::Download => icondata::LuDownload,
+            Self::Save => icondata::LuSave,
             Self::Rename => icondata::LuPencil,
             Self::Trash => icondata::LuTrash2,
             Self::Collapse => icondata::LuChevronDown,

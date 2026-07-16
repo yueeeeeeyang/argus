@@ -1,13 +1,16 @@
 //! 文件职责：建立日志行号到原始字节范围的索引。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：按块扫描大日志文件，记录每行起始偏移和正文长度，供分页读取按需 seek。
 
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -95,22 +98,32 @@ pub(crate) fn build_line_index(path: &Path) -> Result<LineIndex> {
 /// - `encoding_label`：检测得到的编码名称，用于选择换行扫描策略。
 ///
 /// 返回值：完整行索引；空文件返回 0 行。
+#[cfg(test)]
 pub(crate) fn build_line_index_with_encoding(
     path: &Path,
     encoding_label: &str,
 ) -> Result<LineIndex> {
+    build_line_index_with_encoding_and_cancel(path, encoding_label, &AtomicBool::new(false))
+}
+
+/// 为可 seek 日志建立可取消行索引；每个 8 MiB 扫描块边界检查取消标记。
+pub(crate) fn build_line_index_with_encoding_and_cancel(
+    path: &Path,
+    encoding_label: &str,
+    cancel_flag: &AtomicBool,
+) -> Result<LineIndex> {
     if encoding_label.eq_ignore_ascii_case("UTF-16LE") {
-        return build_utf16_line_index(path, Utf16Endian::Little);
+        return build_utf16_line_index(path, Utf16Endian::Little, cancel_flag);
     }
     if encoding_label.eq_ignore_ascii_case("UTF-16BE") {
-        return build_utf16_line_index(path, Utf16Endian::Big);
+        return build_utf16_line_index(path, Utf16Endian::Big, cancel_flag);
     }
 
-    build_byte_line_index(path)
+    build_byte_line_index(path, cancel_flag)
 }
 
 /// 为单字节换行编码建立行索引。
-fn build_byte_line_index(path: &Path) -> Result<LineIndex> {
+fn build_byte_line_index(path: &Path, cancel_flag: &AtomicBool) -> Result<LineIndex> {
     let file = File::open(path).with_context(|| format!("无法打开日志文件：{}", path.display()))?;
     let total_bytes = file
         .metadata()
@@ -131,6 +144,9 @@ fn build_byte_line_index(path: &Path) -> Result<LineIndex> {
     let mut skip_lf_after_cr = false;
 
     loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            bail!("日志行索引扫描已取消");
+        }
         let read = reader
             .read(&mut buffer)
             .with_context(|| format!("无法扫描日志行索引：{}", path.display()))?;
@@ -205,7 +221,11 @@ enum Utf16Endian {
 }
 
 /// 为 UTF-16 文件建立行索引，避免按单字节扫描时把换行码元切坏。
-fn build_utf16_line_index(path: &Path, endian: Utf16Endian) -> Result<LineIndex> {
+fn build_utf16_line_index(
+    path: &Path,
+    endian: Utf16Endian,
+    cancel_flag: &AtomicBool,
+) -> Result<LineIndex> {
     let file = File::open(path).with_context(|| format!("无法打开日志文件：{}", path.display()))?;
     let total_bytes = file
         .metadata()
@@ -227,6 +247,9 @@ fn build_utf16_line_index(path: &Path, endian: Utf16Endian) -> Result<LineIndex>
     let mut pending_byte = None;
 
     loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            bail!("UTF-16 日志行索引扫描已取消");
+        }
         let read = reader
             .read(&mut buffer)
             .with_context(|| format!("无法扫描 UTF-16 日志行索引：{}", path.display()))?;
@@ -394,9 +417,13 @@ pub(crate) fn checked_line_span(start: LineIndexEntry, end: LineIndexEntry) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{build_line_index, build_line_index_with_encoding, checked_line_span};
+    use super::{
+        build_line_index, build_line_index_with_encoding,
+        build_line_index_with_encoding_and_cancel, checked_line_span,
+    };
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
 
     /// 构造隔离测试文件路径，避免依赖真实项目文件。
     fn temp_path(name: &str) -> PathBuf {
@@ -431,6 +458,20 @@ mod tests {
 
         assert!(index.is_empty());
 
+        let _ = fs::remove_file(path);
+    }
+
+    /// 验证 Agent 取消后不会继续为大日志建立行索引。
+    #[test]
+    fn line_index_honors_cancel_flag_before_scanning() {
+        let path = temp_path("cancelled.log");
+        fs::write(&path, b"first\nsecond\n").expect("应能写入测试日志");
+        let cancel_flag = AtomicBool::new(true);
+
+        let error = build_line_index_with_encoding_and_cancel(&path, "UTF-8", &cancel_flag)
+            .expect_err("取消后的索引任务必须停止");
+
+        assert!(error.to_string().contains("已取消"));
         let _ = fs::remove_file(path);
     }
 

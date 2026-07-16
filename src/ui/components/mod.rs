@@ -10,6 +10,7 @@ pub(crate) mod dropdown;
 pub(crate) mod icon;
 pub(crate) mod icon_button;
 pub(crate) mod input;
+pub(crate) mod input_behavior;
 pub(crate) mod loading_spinner;
 pub(crate) mod modal_dialog;
 pub(crate) mod scrollbar;

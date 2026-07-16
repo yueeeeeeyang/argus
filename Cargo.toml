@@ -24,16 +24,23 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 ed25519-dalek = "2.2.0"
 encoding_rs = "0.8.35"
 flate2 = "1.1.9"
+# 消费 Rig 的多轮流式响应，并把思考和正文增量分批转发到 GPUI。
+futures = "0.3.32"
 # GPUI 0.2.2 在 macOS 默认会调用完整 Xcode 的 metal 工具预编译 shader。
 # 当前开发环境只有 Command Line Tools，因此启用 runtime_shaders 让 cargo check 可在本机完成。
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 hex = "0.4.3"
 icondata = { version = "0.7.0", default-features = false, features = ["lucide"] }
+keyring = "4.1.5"
 memmap2 = "0.9.10"
 percent-encoding = "2.3.2"
 rars = "0.2.0"
 regex = "1.12.3"
+# Rig 使用 reqwest 发送 OpenAI 兼容请求；直接依赖用于设置每次模型请求的超时。
+reqwest = "0.13.4"
+rig-core = "=0.40.0"
 roxmltree = "0.20.0"
+schemars = "1.2.1"
 # SVN SSH 主机指纹预检直接复用与 svn crate 相同的纯 Rust russh 栈，不启动系统 ssh。
 russh = { version = "0.62.2", default-features = false, features = ["ring", "rsa"] }
 self-replace = "1.5.0"
@@ -41,6 +48,7 @@ semver = "1.0.28"
 sevenz-rust = "0.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+secrecy = "0.10.3"
 sha2 = "0.10.9"
 # 0.13 使用稳定版 aes 0.9，与 svn 的 russh 加密栈兼容；API 保持现有 SMB 行为不变。
 smb2 = "0.13.0"
@@ -51,9 +59,12 @@ tar = "0.4.46"
 thiserror = "2.0.18"
 toml = "0.8.23"
 tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "fs"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
+tempfile = "3.27.0"
 # SVN HTTPS 使用操作系统信任根，兼容由企业 CA 签发且已安装到系统证书库的内网仓库。
 ureq = { version = "2.12.1", features = ["native-certs"] }
 url = "2.5.8"
+uuid = { version = "1.23.0", features = ["v4", "serde"] }
 vt100 = "0.16.2"
 walkdir = "2.5.0"
 xz2 = "0.1.7"
@@ -94,7 +105,7 @@ embed-resource = "3.0.9"
 [dev-dependencies]
 # 标题栏和模态框等 GPUI 交互需要真实 hitbox/input 回归测试，测试构建开启官方测试上下文。
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
-tempfile = "3.27.0"
+wiremock = "0.6.5"
 
 [patch.crates-io]
 # GPUI 0.2.2 的 Windows release shader 构建仅能在 Windows 主机运行；本地补丁复用

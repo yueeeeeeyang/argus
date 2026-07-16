@@ -2488,6 +2488,7 @@ fn merge_search_summary(total: &mut SearchTaskSummary, batch: SearchTaskSummary)
     total.was_cancelled |= batch.was_cancelled;
     total.scanned_files += batch.scanned_files;
     total.scanned_lines += batch.scanned_lines;
+    total.scanned_bytes = total.scanned_bytes.saturating_add(batch.scanned_bytes);
     total.matched_results += batch.matched_results;
     total.errors.extend(batch.errors);
 }

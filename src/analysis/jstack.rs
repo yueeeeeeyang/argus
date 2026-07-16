@@ -1,15 +1,18 @@
 //! 文件职责：实现 Jstack 线程日志解析、聚合和读取入口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-25
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：把多个线程栈日志快照聚合为线程频率矩阵，供主内容区分析页签渲染。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::{ArchivePasswordStore, detect_archive_format};
@@ -217,6 +220,8 @@ pub(crate) struct JstackAnalysisResult {
     pub total_files: usize,
     /// 解析到的线程样本总数。
     pub total_samples: usize,
+    /// Agent 可取消入口实际读取或解压的日志字节数；常规 UI 入口不依赖该字段。
+    pub scanned_bytes: u64,
 }
 
 /// Jstack 线程过滤器，按线程名关键字和完整线程段片段隐藏分析结果。
@@ -365,11 +370,30 @@ pub(crate) fn analyze_jstack_targets(
     default_encoding: String,
     loader_config: LoaderConfig,
 ) -> JstackAnalysisResult {
+    analyze_jstack_targets_with_cancel(
+        targets,
+        default_encoding,
+        loader_config,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+/// 从多个来源读取 Jstack，并在来源、归档数据块和解析批次边界响应取消。
+pub(crate) fn analyze_jstack_targets_with_cancel(
+    targets: Vec<JstackAnalysisTarget>,
+    default_encoding: String,
+    loader_config: LoaderConfig,
+    cancel_flag: Arc<AtomicBool>,
+) -> JstackAnalysisResult {
     let mut snapshot_targets = Vec::new();
     let mut snapshots = Vec::new();
     let mut skipped_snapshots = Vec::new();
+    let mut scanned_bytes = 0_u64;
 
     for target in targets {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
         match expand_jstack_target(target, &loader_config) {
             Ok(mut expanded) => snapshot_targets.append(&mut expanded),
             Err((source_id, label, reason)) => skipped_snapshots.push(JstackSkippedSnapshot {
@@ -382,15 +406,27 @@ pub(crate) fn analyze_jstack_targets(
 
     let total_files = snapshot_targets.len();
     for target in snapshot_targets {
-        match read_jstack_snapshot(target.clone(), &default_encoding, &loader_config) {
-            Ok(snapshot) if snapshot.samples.is_empty() => {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        match read_jstack_snapshot(
+            target.clone(),
+            &default_encoding,
+            &loader_config,
+            cancel_flag.clone(),
+        ) {
+            Ok((snapshot, byte_len)) if snapshot.samples.is_empty() => {
+                scanned_bytes = scanned_bytes.saturating_add(byte_len);
                 skipped_snapshots.push(JstackSkippedSnapshot {
                     source_id: target.source_id,
                     label: target.label,
                     reason: "未解析到 Jstack 线程".to_string(),
                 });
             }
-            Ok(snapshot) => snapshots.push(snapshot),
+            Ok((snapshot, byte_len)) => {
+                scanned_bytes = scanned_bytes.saturating_add(byte_len);
+                snapshots.push(snapshot);
+            }
             Err(error) => skipped_snapshots.push(JstackSkippedSnapshot {
                 source_id: target.source_id,
                 label: target.label,
@@ -399,7 +435,9 @@ pub(crate) fn analyze_jstack_targets(
         }
     }
 
-    build_analysis_result(snapshots, skipped_snapshots, total_files)
+    let mut result = build_analysis_result(snapshots, skipped_snapshots, total_files);
+    result.scanned_bytes = scanned_bytes;
+    result
 }
 
 /// 展开 Jstack 分析目标；本地目录会递归转换为可读取的日志或单文件压缩包快照。
@@ -603,6 +641,7 @@ pub(crate) fn build_analysis_result(
         skipped_snapshots,
         total_files,
         total_samples,
+        scanned_bytes: 0,
     }
 }
 
@@ -611,21 +650,29 @@ fn read_jstack_snapshot(
     target: JstackAnalysisTarget,
     default_encoding: &str,
     loader_config: &LoaderConfig,
-) -> Result<JstackSnapshot> {
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<(JstackSnapshot, u64)> {
     let location = resolve_jstack_target_location(&target, loader_config)?;
-    let handle = LogFileReader::open(OpenLogRequest {
-        location,
-        label: target.label.clone(),
-        default_encoding: default_encoding.to_string(),
-        archive_passwords: target.archive_passwords.clone(),
-    })?;
-    let samples = parse_jstack_document(handle.document())?;
-    Ok(JstackSnapshot {
-        source_id: target.source_id,
-        label: target.label,
-        path: target.path,
-        samples,
-    })
+    let handle = LogFileReader::open_with_cancel_flag(
+        OpenLogRequest {
+            location,
+            label: target.label.clone(),
+            default_encoding: default_encoding.to_string(),
+            archive_passwords: target.archive_passwords.clone(),
+        },
+        cancel_flag.clone(),
+    )?;
+    let byte_len = handle.byte_len();
+    let samples = parse_jstack_document(handle.document(), &cancel_flag)?;
+    Ok((
+        JstackSnapshot {
+            source_id: target.source_id,
+            label: target.label,
+            path: target.path,
+            samples,
+        },
+        byte_len,
+    ))
 }
 
 /// 解析 Jstack 输入目标的真实读取位置；待探测压缩包会在后台独立判断是否为单文件日志。
@@ -643,13 +690,19 @@ fn resolve_jstack_target_location(
 }
 
 /// 按批次读取日志文档并增量解析 Jstack，避免把完整日志拼成一个大字符串。
-fn parse_jstack_document(document: &LogDocument) -> Result<Vec<JstackThreadSample>> {
+fn parse_jstack_document(
+    document: &LogDocument,
+    cancel_flag: &AtomicBool,
+) -> Result<Vec<JstackThreadSample>> {
     let mut parser = JstackSnapshotParser::default();
     let line_count = document.line_count();
     let mut start_line = 0_usize;
     const READ_BATCH_LINES: usize = 4096;
 
     while start_line < line_count {
+        if cancel_flag.load(Ordering::Relaxed) {
+            bail!("Jstack 分析已取消");
+        }
         let lines = document.lines(start_line, READ_BATCH_LINES)?;
         if lines.is_empty() {
             break;

@@ -4,6 +4,9 @@
 //! 作者：Argus 开发团队
 //! 主要功能：组织主窗口、来源侧栏、内容视图、分析页面、设置窗口、远程会话和可复用组件。
 
+pub(crate) mod agent_dialog;
+pub(crate) mod agent_window;
+pub(crate) mod ai_settings_editor;
 pub(crate) mod archive_password_dialog;
 pub(crate) mod components;
 pub(crate) mod connection_dialog;

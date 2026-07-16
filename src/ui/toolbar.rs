@@ -1,8 +1,8 @@
 //! 文件职责：渲染侧栏和内容区的紧凑上下文工具栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供加载日志、过滤、目录树折叠、导航和更多操作的占位按钮。
+//! 主要功能：提供加载日志、过滤、目录树折叠、智能分析、导航和更多上下文操作。
 
 use crate::app::{AppTextInputTarget, ArgusApp};
 use crate::theme::AppTheme;
@@ -41,6 +41,7 @@ pub(crate) fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) 
             "source-load-log",
             ArgusIcon::FolderPlus,
             "加载日志",
+            true,
             &theme,
             cx,
         ))
@@ -48,6 +49,7 @@ pub(crate) fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) 
             "source-filter",
             ArgusIcon::Filter,
             "过滤",
+            true,
             &theme,
             cx,
         ))
@@ -55,6 +57,16 @@ pub(crate) fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) 
             "source-collapse-all",
             ArgusIcon::ListCollapse,
             "全部收起",
+            true,
+            &theme,
+            cx,
+        ))
+        .child(source_icon_button(
+            "source-smart-analysis",
+            ArgusIcon::SmartAnalysis,
+            "智能分析",
+            // 智能分析会主动扫描未展开目录；入口始终可点击，不再依赖当前是否已有可见日志叶子。
+            true,
             &theme,
             cx,
         ))
@@ -115,43 +127,52 @@ fn source_icon_button(
     id: &'static str,
     icon: ArgusIcon,
     action_name: &'static str,
+    is_enabled: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
-) -> impl IntoElement {
+) -> AnyElement {
     let app_entity = cx.entity();
-
-    render_icon_button(
-        id,
-        icon,
-        action_name,
-        false,
-        IconButtonSize::Small,
-        theme,
-        cx.listener(move |app, _event: &ClickEvent, window, cx| {
-            match action_name {
-                "加载日志" => app.request_load_sources(cx),
-                "过滤" => {
-                    app.open_source_tree_search();
-                    let search_focus_handle = app
-                        .ensure_input_focus_handles(cx)
-                        .source_tree_search
-                        .clone();
-                    let app_entity = app_entity.clone();
-                    window.on_next_frame(move |window, cx| {
-                        search_focus_handle.focus(window);
-                        // 根节点点击会在同一轮事件里清理输入焦点，这里下一帧恢复刚打开的过滤框。
-                        app_entity.update(cx, |app, cx| {
-                            app.set_source_tree_search_focused(true);
-                            cx.notify();
-                        });
-                    });
+    div()
+        .opacity(if is_enabled { 1.0 } else { 0.4 })
+        .child(render_icon_button(
+            id,
+            icon,
+            action_name,
+            false,
+            IconButtonSize::Small,
+            theme,
+            cx.listener(move |app, _event: &ClickEvent, window, cx| {
+                if !is_enabled {
+                    app.placeholder_notice = "请先加载至少一个日志来源".to_string();
+                    cx.notify();
+                    return;
                 }
-                "全部收起" => app.collapse_all_sources(),
-                _ => app.mark_placeholder_action(action_name),
-            }
-            cx.notify();
-        }),
-    )
+                match action_name {
+                    "加载日志" => app.request_load_sources(cx),
+                    "过滤" => {
+                        app.open_source_tree_search();
+                        let search_focus_handle = app
+                            .ensure_input_focus_handles(cx)
+                            .source_tree_search
+                            .clone();
+                        let app_entity = app_entity.clone();
+                        window.on_next_frame(move |window, cx| {
+                            search_focus_handle.focus(window);
+                            // 根节点点击会在同一轮事件里清理输入焦点，这里下一帧恢复刚打开的过滤框。
+                            app_entity.update(cx, |app, cx| {
+                                app.set_source_tree_search_focused(true);
+                                cx.notify();
+                            });
+                        });
+                    }
+                    "全部收起" => app.collapse_all_sources(),
+                    "智能分析" => app.open_ai_agent_launch_dialog(cx),
+                    _ => app.mark_placeholder_action(action_name),
+                }
+                cx.notify();
+            }),
+        ))
+        .into_any_element()
 }
 
 /// 渲染链接侧栏工具按钮。

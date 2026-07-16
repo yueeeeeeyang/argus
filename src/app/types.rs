@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-08
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：定义工作区、标签页、文本输入目标和占位数据等跨功能域共享类型。
+//! 主要功能：定义工作区、设置分类、标签页、文本输入目标和占位数据等跨功能域共享类型。
 
 use gpui::FocusHandle;
 
@@ -28,6 +28,10 @@ pub(crate) enum SettingsSection {
     About,
     /// 外观设置，包含主题选择。
     Appearance,
+    /// 智能分析分组下的模型配置。
+    AiModel,
+    /// 智能分析分组下的日志类型说明。
+    AiLogProfiles,
     /// 日志显示设置，包含字号和 Jstack 过滤规则。
     LogDisplay,
     /// 日志搜索设置，包含快搜关键字。
@@ -42,6 +46,8 @@ impl SettingsSection {
         match self {
             Self::About => "关于",
             Self::Appearance => "外观",
+            Self::AiModel => "模型配置",
+            Self::AiLogProfiles => "日志类型说明",
             Self::LogDisplay => "日志显示",
             Self::LogSearch => "日志搜索",
             Self::LogLoading => "日志加载",

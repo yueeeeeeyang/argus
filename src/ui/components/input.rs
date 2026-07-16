@@ -1,6 +1,6 @@
 //! 文件职责：提供 Argus 界面可复用的紧凑输入框组件。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-25
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：统一输入框和多行文本域尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
 
@@ -174,10 +174,36 @@ pub(crate) struct Textarea {
     pub scroll_handle: ScrollHandle,
     /// 文本域滚动交互状态，负责支持自绘滚动条拖拽。
     pub scroll_state: TextareaScrollState,
+    /// 文本域视觉变体；对话输入使用更醒目的悬浮编辑器样式。
+    pub style: TextareaStyle,
     /// 后置可点击图标附件。
     pub trailing_accessory: Option<InputAccessory>,
+    /// 后置图标在文本域中的悬浮位置。
+    pub trailing_accessory_position: TextareaAccessoryPosition,
+    /// 是否在文本域失焦时仍显示后置图标。
+    pub trailing_accessory_always_visible: bool,
+    /// 后置图标是否使用选中态背景，用于主要发送操作。
+    pub trailing_accessory_selected: bool,
     /// 系统文本输入桥接配置；为空时退回按键事件输入。
     pub native_input: Option<NativeInput>,
+}
+
+/// 多行文本域视觉变体。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TextareaStyle {
+    /// 普通表单和设置编辑器使用的紧凑样式。
+    Default,
+    /// Agent 对话输入使用的圆角悬浮编辑器样式。
+    Composer,
+}
+
+/// 文本域后置图标的悬浮位置。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TextareaAccessoryPosition {
+    /// 位于右上角，适合清空等辅助操作。
+    TopRight,
+    /// 位于右下角，适合对话发送等主要操作。
+    BottomRight,
 }
 
 /// 输入框鼠标选择阶段。
@@ -288,7 +314,8 @@ pub(crate) fn render_input(
         .border_1()
         .border_color(rgb(border_color))
         .bg(rgb(background_color))
-        .occlude()
+        // 输入框需要阻止点击穿透，但必须保留后层滚动容器的命中，避免鼠标经过输入框时页面滚动中断。
+        .block_mouse_except_scroll()
         .text_size(px(font_size))
         .text_color(rgb(text_color))
         .when(!input.is_disabled, |this| {
@@ -394,21 +421,22 @@ pub(crate) fn render_textarea(
     let trailing_button_size = 24.0_f32;
     let visible_lines = textarea.visible_lines.max(3);
     let height = line_height * visible_lines as f32 + vertical_padding * 2.0;
-    // 失焦后隐藏右侧清除按钮，并同步收回右侧预留空间。
-    let visible_trailing_accessory = textarea
-        .trailing_accessory
-        .filter(|_| textarea.is_focused && !textarea.is_disabled);
+    // 普通清除按钮失焦后隐藏；对话发送按钮可由调用方声明始终可见。
+    let visible_trailing_accessory = textarea.trailing_accessory.filter(|_| {
+        !textarea.is_disabled && (textarea.trailing_accessory_always_visible || textarea.is_focused)
+    });
     let right_padding = if visible_trailing_accessory.is_some() {
         trailing_button_size + horizontal_padding
     } else {
         horizontal_padding
     };
-    let display_text = if textarea.value.is_empty() {
+    let has_user_content = !textarea.value.is_empty();
+    let display_text = if !has_user_content {
         textarea.placeholder.to_string()
     } else {
         textarea.value.clone()
     };
-    let text_color = if textarea.value.is_empty() {
+    let text_color = if !has_user_content {
         theme.foreground_muted
     } else {
         theme.foreground
@@ -433,23 +461,35 @@ pub(crate) fn render_textarea(
         .as_ref()
         .map(|native_input| native_input.focus_handle.clone());
     let runtime_focus_handle_for_scroll_sync = runtime_focus_handle_for_text.clone();
-    let content_lines = textarea_text_lines(if textarea.value.is_empty() {
+    let content_lines = textarea_text_lines(if !has_user_content {
         &display_text
     } else {
         &textarea.value
     });
     let content_line_count = content_lines.len().max(visible_lines);
     let content_height = content_line_count as f32 * line_height;
-    let content_width = content_lines
-        .iter()
-        // 这里使用偏保守的字符宽度估算，确保中文、英文标点和长线程段都有足够横向滚动空间。
-        .map(|line| character_count(&line.text) as f32 * font_size + 8.0)
-        .fold(0.0_f32, f32::max);
+    let content_width = if !has_user_content {
+        // 占位文案只用于提示，不属于用户内容，不能让空文本框出现横向滚动条。
+        0.0
+    } else {
+        content_lines
+            .iter()
+            // 这里使用偏保守的字符宽度估算，确保中文、英文标点和长线程段都有足够横向滚动空间。
+            .map(|line| character_count(&line.text) as f32 * font_size + 8.0)
+            .fold(0.0_f32, f32::max)
+    };
     let scroll_handle = textarea.scroll_handle.clone();
     let scroll_handle_for_viewport = scroll_handle.clone();
+    let scroll_handle_for_wheel = scroll_handle.clone();
     let scroll_handle_for_pointer = scroll_handle.clone();
     let scroll_handle_for_bars = scroll_handle.clone();
     let scroll_state = textarea.scroll_state.clone();
+    if !has_user_content {
+        // 清空内容后同步清除旧偏移和拖拽态，避免上一段长文本的滚动信息残留到占位状态。
+        scroll_handle.set_offset(point(px(0.0), px(0.0)));
+        scroll_state.scrollbar_drag.replace(None);
+        scroll_state.last_caret_sync.replace(None);
+    }
     let scroll_state_for_sync = scroll_state.clone();
     let scroll_state_for_bars = scroll_state.clone();
 
@@ -457,11 +497,22 @@ pub(crate) fn render_textarea(
         .id(textarea.id)
         .w_full()
         .relative()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(theme.border))
         .bg(rgb(theme.content))
-        .occlude()
+        .when(textarea.style == TextareaStyle::Default, |this| {
+            this.rounded_sm().border_1().border_color(rgb(theme.border))
+        })
+        .when(textarea.style == TextareaStyle::Composer, |this| {
+            this.rounded_lg()
+                .border_1()
+                .border_color(rgb(if textarea.is_focused {
+                    theme.info
+                } else {
+                    theme.border
+                }))
+                .shadow_lg()
+        })
+        // 文本域自身可滚动；允许外层滚动命中后，滚到边界时页面仍能继续响应同方向滚轮。
+        .block_mouse_except_scroll()
         .text_size(px(font_size))
         .text_color(rgb(text_color))
         .when(textarea.fill_height, |this| this.flex_1().min_h(px(0.0)))
@@ -470,7 +521,11 @@ pub(crate) fn render_textarea(
             let element = this
                 .focusable()
                 .hover({
-                    let hover_border_color = theme.foreground_muted;
+                    let hover_border_color = if textarea.style == TextareaStyle::Composer {
+                        theme.info
+                    } else {
+                        theme.foreground_muted
+                    };
                     move |this| this.border_color(rgb(hover_border_color))
                 })
                 .on_key_down(move |event, window, cx| {
@@ -508,8 +563,27 @@ pub(crate) fn render_textarea(
                                 .id((textarea.id, 14usize))
                                 .size_full()
                                 .overflow_scroll()
-                                .scrollbar_width(px(TEXTAREA_SCROLLBAR_WIDTH))
+                                // GPUI 的滚动条宽度会永久预留轨道；置零后只使用下方按真实溢出量绘制的浮层滑块。
+                                .scrollbar_width(px(0.0))
                                 .track_scroll(&scroll_handle_for_viewport)
+                                .on_scroll_wheel(move |event, window, cx| {
+                                    if !has_user_content {
+                                        // 空文本域不消费滚轮，外层可滚动对话框应继续响应。
+                                        return;
+                                    }
+                                    let current_offset = scroll_handle_for_wheel.offset();
+                                    let next_offset = textarea_scroll_offset_for_wheel(
+                                        current_offset,
+                                        scroll_handle_for_wheel.max_offset(),
+                                        event.delta.pixel_delta(window.line_height()),
+                                    );
+                                    if next_offset != current_offset {
+                                        // 文本域尚可继续滚动时由自身消费；到达边界后不阻断事件，让外层页面接管。
+                                        scroll_handle_for_wheel.set_offset(next_offset);
+                                        window.refresh();
+                                        cx.stop_propagation();
+                                    }
+                                })
                                 .child(
                                     div()
                                         .relative()
@@ -562,6 +636,7 @@ pub(crate) fn render_textarea(
                             scroll_handle_for_bars,
                             scroll_state_for_bars,
                             theme.foreground_muted,
+                            has_user_content,
                         )),
                 ),
         )
@@ -570,12 +645,20 @@ pub(crate) fn render_textarea(
                 div()
                     .absolute()
                     .right(px(4.0))
-                    .top(px(4.0))
+                    .when(
+                        textarea.trailing_accessory_position == TextareaAccessoryPosition::TopRight,
+                        |this| this.top(px(4.0)),
+                    )
+                    .when(
+                        textarea.trailing_accessory_position
+                            == TextareaAccessoryPosition::BottomRight,
+                        |this| this.bottom(px(4.0)),
+                    )
                     .child(render_icon_button(
                         accessory.id,
                         accessory.icon,
                         accessory.tooltip,
-                        false,
+                        textarea.trailing_accessory_selected,
                         IconButtonSize::Tiny,
                         theme,
                         on_trailing_click,
@@ -1194,15 +1277,19 @@ fn render_textarea_scrollbars(
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
     color: u32,
+    has_user_content: bool,
 ) -> Vec<AnyElement> {
     let bounds = scroll_handle.bounds();
     let max_offset = scroll_handle.max_offset();
     let offset = scroll_handle.offset();
-    let has_vertical = max_offset.height > px(0.5);
-    let has_horizontal = max_offset.width > px(0.5);
+    let (has_horizontal, has_vertical) =
+        textarea_scrollbar_visibility(has_user_content, max_offset.width, max_offset.height);
     let mut scrollbars = Vec::new();
 
-    if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+    if (!has_horizontal && !has_vertical)
+        || bounds.size.width <= px(0.0)
+        || bounds.size.height <= px(0.0)
+    {
         return scrollbars;
     }
 
@@ -1255,6 +1342,21 @@ fn render_textarea_scrollbars(
     scrollbars
 }
 
+/// 根据用户真实内容和布局溢出量判断应显示的滚动条方向。
+fn textarea_scrollbar_visibility(
+    has_user_content: bool,
+    max_horizontal_offset: Pixels,
+    max_vertical_offset: Pixels,
+) -> (bool, bool) {
+    if !has_user_content {
+        return (false, false);
+    }
+    (
+        max_horizontal_offset > px(0.5),
+        max_vertical_offset > px(0.5),
+    )
+}
+
 /// 渲染可拖拽的文本域滚动条滑块。
 fn render_textarea_scrollbar_thumb(
     textarea_id: &'static str,
@@ -1276,7 +1378,8 @@ fn render_textarea_scrollbar_thumb(
         .opacity(0.55)
         .hover(|this| this.opacity(0.8))
         .cursor_pointer()
-        .occlude();
+        // 滚动条滑块只阻断点击拖拽，滚轮仍交给文本域或外层页面处理。
+        .block_mouse_except_scroll();
 
     thumb = if is_horizontal {
         thumb
@@ -2393,6 +2496,26 @@ fn textarea_scroll_offset_for_caret(
     )
 }
 
+/// 根据滚轮增量计算文本域的新偏移；到达边界时保持不变，以便调用方把事件交还外层滚动区。
+fn textarea_scroll_offset_for_wheel(
+    current_offset: gpui::Point<Pixels>,
+    max_offset: gpui::Size<Pixels>,
+    mut delta: gpui::Point<Pixels>,
+) -> gpui::Point<Pixels> {
+    // 触控板可能同时产生两个轴的微小增量；沿主方向滚动可避免文本域斜向漂移。
+    if delta.x != px(0.0) && delta.y != px(0.0) {
+        if delta.x.abs() > delta.y.abs() {
+            delta.y = px(0.0);
+        } else {
+            delta.x = px(0.0);
+        }
+    }
+    point(
+        (current_offset.x + delta.x).clamp(-max_offset.width.max(px(0.0)), px(0.0)),
+        (current_offset.y + delta.y).clamp(-max_offset.height.max(px(0.0)), px(0.0)),
+    )
+}
+
 /// 根据鼠标位置和 GPUI 字形布局计算文本域内的字符位置。
 fn textarea_character_index_from_pointer(
     value: &str,
@@ -2568,6 +2691,30 @@ mod tests {
         assert_eq!(offset, point(px(-80.0), px(-40.0)));
     }
 
+    /// 文本域仍有剩余内容时，滚轮应推进自身偏移并由文本域消费。
+    #[test]
+    fn textarea_wheel_scroll_moves_within_content_bounds() {
+        let offset = textarea_scroll_offset_for_wheel(
+            point(px(0.0), px(-20.0)),
+            size(px(0.0), px(100.0)),
+            point(px(0.0), px(-24.0)),
+        );
+
+        assert_eq!(offset, point(px(0.0), px(-44.0)));
+    }
+
+    /// 文本域到达滚动边界后偏移不得继续变化，外层页面据此接管同方向滚轮。
+    #[test]
+    fn textarea_wheel_scroll_releases_event_at_boundary() {
+        let offset = textarea_scroll_offset_for_wheel(
+            point(px(0.0), px(-100.0)),
+            size(px(0.0), px(100.0)),
+            point(px(0.0), px(-24.0)),
+        );
+
+        assert_eq!(offset, point(px(0.0), px(-100.0)));
+    }
+
     /// 同一光标和内容签名已经同步过时，不应再次强制滚动，避免覆盖用户手动滚动。
     #[test]
     fn textarea_caret_sync_signature_prevents_repeated_auto_scroll() {
@@ -2595,6 +2742,19 @@ mod tests {
         assert_eq!(
             textarea_scrollbar_metrics(px(120.0), px(0.0), px(0.0)),
             None
+        );
+    }
+
+    /// 空文本域即使滚动句柄残留旧溢出量，也不得继续显示任一方向的滚动条。
+    #[test]
+    fn textarea_scrollbars_hidden_without_user_content() {
+        assert_eq!(
+            textarea_scrollbar_visibility(false, px(80.0), px(160.0)),
+            (false, false)
+        );
+        assert_eq!(
+            textarea_scrollbar_visibility(true, px(80.0), px(160.0)),
+            (true, true)
         );
     }
 

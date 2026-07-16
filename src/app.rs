@@ -2,8 +2,9 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime 分析及远程连接状态。
+//! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析及远程连接状态。
 
+mod agent_actions;
 mod log_search_actions;
 mod log_text;
 mod placeholder_data;
@@ -80,6 +81,9 @@ use crate::remote::connection::ConnectionNodeId;
 use crate::remote::remote_file::RemoteFileSessionState;
 use crate::remote::terminal::TerminalSessionState;
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
+use crate::ui::agent_dialog::AgentLaunchDialog;
+use crate::ui::agent_window::AgentWindow;
+use crate::ui::ai_settings_editor::AiSettingsEditor;
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
 use crate::ui::file_preview_window::FilePreviewWindow;
@@ -212,7 +216,7 @@ fn input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize
 /// 又会忽略 `is_resizable` 导致窗口不可缩放。这里把红绿灯定位到窗口可视区外，既保留
 /// 可缩放能力，又不显示系统按钮，关闭操作改由标题栏右侧的自定义关闭按钮承担。
 /// 线程详情窗口与文件预览窗口共用此配置。
-fn frameless_resizable_titlebar() -> TitlebarOptions {
+pub(crate) fn frameless_resizable_titlebar() -> TitlebarOptions {
     TitlebarOptions {
         title: None,
         appears_transparent: true,
@@ -292,6 +296,16 @@ pub(crate) struct ArgusApp {
     pub source_picker: SourcePickerState,
     /// 日志来源选择器模态框子视图。
     pub source_picker_modal: Option<Entity<SourcePickerWindow>>,
+    /// AI 初始问题输入模态框子视图。
+    pub ai_agent_launch_modal: Option<Entity<AgentLaunchDialog>>,
+    /// AI 来源完整扫描 generation；关闭启动对话框或重新提交后用于丢弃过期后台结果。
+    pub ai_agent_source_scan_generation: usize,
+    /// 当前来源完整扫描取消令牌；关闭启动对话框后在下一来源节点边界停止。
+    pub ai_agent_source_scan_cancellation: Option<tokio_util::sync::CancellationToken>,
+    /// 当前唯一非终态或最近一次 AI 分析独立窗口句柄。
+    pub ai_agent_window_handle: Option<WindowHandle<AgentWindow>>,
+    /// AI 模型与日志类型配置编辑器模态框。
+    pub ai_settings_editor_modal: Option<Entity<AiSettingsEditor>>,
     /// 日志读取状态，以来源 ID 为键复用已打开的 reader。
     pub log_read_states: HashMap<SourceId, LogOpenState>,
     /// 日志读取 generation，用于丢弃后台任务返回的过期结果。
@@ -485,6 +499,11 @@ impl ArgusApp {
             archive_password_prompt: None,
             source_picker: SourcePickerState::default(),
             source_picker_modal: None,
+            ai_agent_launch_modal: None,
+            ai_agent_source_scan_generation: 0,
+            ai_agent_source_scan_cancellation: None,
+            ai_agent_window_handle: None,
+            ai_settings_editor_modal: None,
             log_read_states: HashMap::new(),
             log_reader_generations: HashMap::new(),
             log_tab_view_states: HashMap::new(),

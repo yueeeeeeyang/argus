@@ -1,6 +1,6 @@
 //! 文件职责：实现 Runtime 请求日志解析、聚合统计和读取入口。
 //! 创建日期：2026-06-25
-//! 修改日期：2026-06-25
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：解析运行期请求耗时日志，按请求地址合并统计并保留请求 SQL 明细。
 
@@ -8,7 +8,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -209,6 +212,8 @@ pub(crate) struct RuntimeAnalysisResult {
     pub total_files: usize,
     /// SQL 明细总数。
     pub total_sql_records: usize,
+    /// Agent 可取消入口实际读取或解压的日志字节数；常规 UI 入口不依赖该字段。
+    pub scanned_bytes: u64,
 }
 
 /// Runtime 分析过滤输入快照，保存用户在过滤栏中输入的原始文本。
@@ -324,6 +329,61 @@ pub(crate) fn analyze_runtime_targets(
     build_runtime_analysis_result(requests, skipped_files, total_files)
 }
 
+/// 从多个 Runtime 来源顺序读取并在文件、归档数据块和文本行边界响应取消。
+///
+/// 常规 UI 分析继续使用并行入口；Agent 会话使用该入口以保证关闭窗口后后台任务能够收敛。
+pub(crate) fn analyze_runtime_targets_with_cancel(
+    targets: Vec<RuntimeAnalysisTarget>,
+    default_encoding: String,
+    loader_config: LoaderConfig,
+    cancel_flag: Arc<AtomicBool>,
+) -> RuntimeAnalysisResult {
+    let mut file_targets = Vec::new();
+    let mut skipped_files = Vec::new();
+    for target in targets {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        match expand_runtime_target(target, &loader_config) {
+            Ok(mut expanded) => file_targets.append(&mut expanded),
+            Err((source_id, label, reason)) => skipped_files.push(RuntimeSkippedFile {
+                source_id,
+                label,
+                reason,
+            }),
+        }
+    }
+
+    let total_files = file_targets.len();
+    let mut requests = Vec::new();
+    let mut encoding_hint = None;
+    let mut scanned_bytes = 0_u64;
+    for (order, target) in file_targets.into_iter().enumerate() {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        match prepare_runtime_target(order, target, &loader_config) {
+            Ok(prepared) => match read_prepared_runtime_request_with_cancel(
+                prepared,
+                &default_encoding,
+                &mut encoding_hint,
+                &cancel_flag,
+            ) {
+                Ok((mut request, byte_len)) => {
+                    scanned_bytes = scanned_bytes.saturating_add(byte_len);
+                    request.index = requests.len();
+                    requests.push(request);
+                }
+                Err(skipped) => skipped_files.push(skipped),
+            },
+            Err(skipped) => skipped_files.push(skipped),
+        }
+    }
+    let mut result = build_runtime_analysis_result(requests, skipped_files, total_files);
+    result.scanned_bytes = scanned_bytes;
+    result
+}
+
 /// 解析单个 Runtime 日志文件文本。
 ///
 /// 参数说明：
@@ -422,6 +482,7 @@ pub(crate) fn build_runtime_analysis_result(
         skipped_files,
         total_files,
         total_sql_records,
+        scanned_bytes: 0,
     }
 }
 
@@ -1139,6 +1200,10 @@ fn has_log_extension(path: &Path) -> bool {
 /// Runtime 单文件解析结果；失败时直接转换为 UI 可展示的跳过记录。
 type RuntimeParseOutcome = std::result::Result<RuntimeRequestRecord, RuntimeSkippedFile>;
 
+/// Agent 可取消读取除了解析结果，还携带实际读取字节数供会话扫描预算核算。
+type RuntimeCancellableParseOutcome =
+    std::result::Result<(RuntimeRequestRecord, u64), RuntimeSkippedFile>;
+
 /// 已完成文件名和真实读取位置解析的 Runtime 文件目标。
 #[derive(Clone, Debug)]
 struct PreparedRuntimeTarget {
@@ -1590,6 +1655,125 @@ fn read_prepared_runtime_request(
         target.metadata,
         sql_records,
     ))
+}
+
+/// 读取一个 Agent Runtime 目标，并把取消或读取错误转换为统一跳过记录。
+fn read_prepared_runtime_request_with_cancel(
+    target: PreparedRuntimeTarget,
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+    cancel_flag: &AtomicBool,
+) -> RuntimeCancellableParseOutcome {
+    let source_id = target.source_id;
+    let label = target.label.clone();
+    let result = read_runtime_sql_records_from_location_with_cancel(
+        &target.location,
+        default_encoding,
+        encoding_hint,
+        &target.archive_passwords,
+        cancel_flag,
+    )
+    .with_context(|| format!("读取 Runtime 日志失败：{}", target.location.display_path()))
+    .map(|(sql_records, byte_len)| {
+        (
+            build_request_record(
+                0,
+                target.source_id,
+                target.label,
+                target.path,
+                target.metadata,
+                sql_records,
+            ),
+            byte_len,
+        )
+    });
+    result.map_err(|error| RuntimeSkippedFile {
+        source_id,
+        label,
+        reason: error.to_string(),
+    })
+}
+
+/// 以可取消方式读取 Runtime 原始字节或 UTF-8 行流。
+fn read_runtime_sql_records_from_location_with_cancel(
+    location: &SourceLocation,
+    default_encoding: &str,
+    encoding_hint: &mut Option<String>,
+    archive_passwords: &ArchivePasswordStore,
+    cancel_flag: &AtomicBool,
+) -> Result<(Vec<RuntimeSqlRecord>, u64)> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        bail!("Runtime 分析已取消");
+    }
+    let bytes = match location {
+        SourceLocation::LocalPath(path) => {
+            if should_stream_runtime_utf8_file(default_encoding, encoding_hint)
+                && let Ok(records) =
+                    read_runtime_sql_records_from_utf8_file_with_cancel(path, cancel_flag)
+            {
+                *encoding_hint = Some("UTF-8".to_string());
+                return Ok(records);
+            }
+            let bytes = fs::read(path)
+                .with_context(|| format!("无法读取 Runtime 日志文件：{}", path.display()))?;
+            if cancel_flag.load(Ordering::Relaxed) {
+                bail!("Runtime 分析已取消");
+            }
+            bytes
+        }
+        SourceLocation::ArchiveEntry { .. } => {
+            let mut bytes = Vec::new();
+            ArchiveStreamBackend::stream_to_consumer(location, archive_passwords, &mut |chunk| {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    bail!("Runtime 分析已取消");
+                }
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            })?;
+            bytes
+        }
+    };
+    let byte_len = bytes.len() as u64;
+    Ok((
+        parse_runtime_sql_records_from_bytes(&bytes, default_encoding, encoding_hint),
+        byte_len,
+    ))
+}
+
+/// 逐行解析本地 UTF-8 Runtime 日志，并在每行边界响应取消。
+fn read_runtime_sql_records_from_utf8_file_with_cancel(
+    path: &Path,
+    cancel_flag: &AtomicBool,
+) -> Result<(Vec<RuntimeSqlRecord>, u64)> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("无法打开 Runtime 日志文件：{}", path.display()))?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut parser = RuntimeSqlParser::default();
+    let mut line = String::new();
+    let mut is_first_line = true;
+    let mut byte_len = 0_u64;
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            bail!("Runtime 分析已取消");
+        }
+        line.clear();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .with_context(|| format!("无法按 UTF-8 读取 Runtime 日志：{}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        byte_len = byte_len.saturating_add(bytes_read as u64);
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        let content = if is_first_line {
+            is_first_line = false;
+            trimmed.strip_prefix('\u{FEFF}').unwrap_or(trimmed)
+        } else {
+            trimmed
+        };
+        parser.push_line(content);
+    }
+    Ok((parser.finish(), byte_len))
 }
 
 /// 直接读取 Runtime 日志原始字节并解析 SQL，避免构建通用日志展示文档的额外开销。

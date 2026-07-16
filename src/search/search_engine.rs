@@ -1,6 +1,6 @@
 //! 文件职责：执行真实日志关键字搜索。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：按日志来源逐文件读取、逐行匹配单个或多个关键字，并以批次形式回报全部搜索结果。
 
@@ -172,6 +172,8 @@ pub(crate) struct SearchTaskSummary {
     pub scanned_files: usize,
     /// 已扫描总行数。
     pub scanned_lines: usize,
+    /// 已打开并扫描的日志原始字节数；压缩条目按解压后大小计量。
+    pub scanned_bytes: u64,
     /// 匹配结果总数。
     pub matched_results: usize,
     /// 单文件读取失败等非致命错误。
@@ -455,12 +457,15 @@ impl SearchEngine {
             progress.total_lines = 0;
             progress_callback(progress.clone());
 
-            let handle = match LogFileReader::open(OpenLogRequest {
-                location: target.location.clone(),
-                label: target.label.clone(),
-                default_encoding: request.default_encoding.clone(),
-                archive_passwords: request.archive_passwords.clone(),
-            }) {
+            let handle = match LogFileReader::open_with_cancel_flag(
+                OpenLogRequest {
+                    location: target.location.clone(),
+                    label: target.label.clone(),
+                    default_encoding: request.default_encoding.clone(),
+                    archive_passwords: request.archive_passwords.clone(),
+                },
+                cancel_token.clone(),
+            ) {
                 Ok(handle) => handle,
                 Err(error) => {
                     summary.scanned_files += 1;
@@ -472,6 +477,10 @@ impl SearchEngine {
                     continue;
                 }
             };
+
+            // 日志读取器已经完成本地文件或归档条目的物化，此处记录真实字节数，
+            // 让 Agent 在来源元数据缺失时仍不能以 0 字节绕过会话扫描上限。
+            summary.scanned_bytes = summary.scanned_bytes.saturating_add(handle.byte_len());
 
             progress.total_lines = handle.line_count();
             progress_callback(progress.clone());
@@ -1944,7 +1953,8 @@ mod tests {
             std::process::id(),
             1
         ));
-        fs::write(&path, "INFO start\nERROR failed\nwarn\nerror again\n").unwrap();
+        let content = "INFO start\nERROR failed\nwarn\nerror again\n";
+        fs::write(&path, content).unwrap();
         let request = SearchRequest::new(
             SearchQuery::new("error".to_string()),
             vec![SearchTarget {
@@ -1967,6 +1977,7 @@ mod tests {
 
         assert!(!summary.was_cancelled);
         assert_eq!(summary.matched_results, 2);
+        assert_eq!(summary.scanned_bytes, content.len() as u64);
         assert_eq!(
             batches
                 .iter()

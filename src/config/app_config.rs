@@ -2,8 +2,9 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供外观、日志加载、日志搜索、链接、编码和升级设置的默认值、校验及 TOML 模型。
+//! 主要功能：提供 AI、外观、日志加载、日志搜索、链接、编码和升级设置的默认值及 TOML 模型。
 
+use crate::config::ai_config::AiConfig;
 use crate::remote::connection::ConnectionConfig;
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +63,9 @@ pub(crate) const DEFAULT_JSTACK_STACK_SEGMENT_FILTERS: &str = concat!(
 /// 应用配置根对象，字段结构与 `~/.argus/settings.toml` 保持一致。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct AppConfig {
+    /// AI 日志分析配置；API Key 不包含在该结构中。
+    #[serde(default)]
+    pub ai: AiConfig,
     /// 外观配置，控制主题文件选择和日志阅读区域字号。
     #[serde(default)]
     pub appearance: AppearanceConfig,
@@ -90,6 +94,7 @@ impl AppConfig {
     ///
     /// 返回值：所有数值型配置均被限制在当前 UI 可展示范围内，避免坏配置破坏界面状态。
     pub(crate) fn normalized(mut self) -> Self {
+        self.ai.normalize();
         self.appearance.theme_mode = match self.appearance.theme_mode.trim() {
             "" => "dark.toml".to_string(),
             value
@@ -130,6 +135,7 @@ impl Default for AppConfig {
     /// 构造应用默认配置，保证无设置文件时也能稳定启动。
     fn default() -> Self {
         Self {
+            ai: AiConfig::default(),
             appearance: AppearanceConfig::default(),
             loader: LoaderConfig::default(),
             log_search: LogSearchConfig::default(),
@@ -313,6 +319,7 @@ mod tests {
     #[test]
     fn normalized_clamps_numeric_settings() {
         let config = AppConfig {
+            ai: AiConfig::default(),
             appearance: AppearanceConfig {
                 theme_mode: "light".to_string(),
                 log_content_font_size: 99.0,

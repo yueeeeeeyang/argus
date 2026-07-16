@@ -1,6 +1,6 @@
 //! 文件职责：实现日志文件统一读取器和分页文档模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：根据日志大小选择内存行文档或分页文档，避免超大日志被整体解码成单个字符串。
 
@@ -9,6 +9,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
@@ -19,7 +20,7 @@ use crate::reader::encoding_detector::{
     DecodedText, decode_log_bytes, decode_log_bytes_with_known_encoding,
 };
 use crate::reader::line_index::{
-    LineIndex, LineIndexEntry, build_line_index_with_encoding, checked_line_span,
+    LineIndex, LineIndexEntry, build_line_index_with_encoding_and_cancel, checked_line_span,
 };
 use crate::reader::mmap_backend::MmapBackend;
 use crate::reader::spooled_backend::{SpoolCleanup, create_spool_file};
@@ -75,6 +76,8 @@ pub(crate) struct LogReaderHandle {
     pub path: String,
     /// 当前日志文档。
     document: LogDocument,
+    /// 本次打开实际读取或物化的原始字节数，供 Agent 扫描预算核算。
+    byte_len: u64,
 }
 
 impl LogReaderHandle {
@@ -86,6 +89,11 @@ impl LogReaderHandle {
     /// 返回总行数。
     pub(crate) fn line_count(&self) -> usize {
         self.document.line_count()
+    }
+
+    /// 返回本次读取的原始字节数；压缩条目使用解压后的日志大小。
+    pub(crate) fn byte_len(&self) -> u64 {
+        self.byte_len
     }
 
     /// 返回日志文本是否为空。
@@ -287,13 +295,29 @@ impl PagedLogDocument {
     /// - `spool_cleanup`：压缩日志临时文件清理器，本地文件传 `None`。
     ///
     /// 返回值：可按行分页读取的文档。
+    #[cfg(test)]
     pub(crate) fn open(
         path: PathBuf,
         preferred_encoding: String,
         spool_cleanup: Option<Arc<SpoolCleanup>>,
     ) -> Result<Self> {
+        Self::open_with_cancel_flag(
+            path,
+            preferred_encoding,
+            spool_cleanup,
+            &AtomicBool::new(false),
+        )
+    }
+
+    /// 从可 seek 路径创建分页文档，并允许后台 Agent 在行索引扫描块边界取消。
+    pub(crate) fn open_with_cancel_flag(
+        path: PathBuf,
+        preferred_encoding: String,
+        spool_cleanup: Option<Arc<SpoolCleanup>>,
+        cancel_flag: &AtomicBool,
+    ) -> Result<Self> {
         let encoding = detect_encoding_from_file_sample(&path, &preferred_encoding)?;
-        let line_index = build_line_index_with_encoding(&path, &encoding)?;
+        let line_index = build_line_index_with_encoding_and_cancel(&path, &encoding, cancel_flag)?;
 
         Ok(Self {
             path,
@@ -822,30 +846,59 @@ impl LogFileReader {
     ///
     /// 返回值：读取成功的句柄；失败时带上下文错误。
     pub(crate) fn open(request: OpenLogRequest) -> Result<LogReaderHandle> {
+        Self::open_with_cancel_flag(request, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// 打开日志并在归档数据块及主要阶段边界检查共享取消标记。
+    ///
+    /// 该入口供搜索和 Agent 工具使用；已有 UI 普通打开流程继续调用 [`Self::open`]。
+    pub(crate) fn open_with_cancel_flag(
+        request: OpenLogRequest,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<LogReaderHandle> {
+        if cancel_flag.load(Ordering::Relaxed) {
+            bail!("日志读取已取消");
+        }
         match &request.location {
-            SourceLocation::LocalPath(path) => open_local_log(request.clone(), path),
-            SourceLocation::ArchiveEntry { .. } => open_archive_log(request),
+            SourceLocation::LocalPath(path) => open_local_log(request.clone(), path, &cancel_flag),
+            SourceLocation::ArchiveEntry { .. } => open_archive_log(request, &cancel_flag),
         }
     }
 }
 
 /// 打开本地普通日志文件，根据大小选择内存或分页。
-fn open_local_log(request: OpenLogRequest, path: &Path) -> Result<LogReaderHandle> {
+fn open_local_log(
+    request: OpenLogRequest,
+    path: &Path,
+    cancel_flag: &AtomicBool,
+) -> Result<LogReaderHandle> {
     if !path.is_file() {
         bail!("日志来源不是普通文件：{}", path.display());
     }
     let metadata =
         std::fs::metadata(path).with_context(|| format!("无法读取日志文件：{}", path.display()))?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        bail!("日志读取已取消");
+    }
     if metadata.len() > LARGE_LOG_THRESHOLD_BYTES {
-        return build_paged_handle(request, path.to_path_buf(), None, metadata.len());
+        return build_paged_handle(
+            request,
+            path.to_path_buf(),
+            None,
+            metadata.len(),
+            cancel_flag,
+        );
     }
 
     let bytes = MmapBackend::read_to_bytes(path)?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        bail!("日志读取已取消");
+    }
     build_memory_handle(request, bytes)
 }
 
 /// 打开压缩包内部日志；小日志保存在内存，超阈值日志物化后分页。
-fn open_archive_log(request: OpenLogRequest) -> Result<LogReaderHandle> {
+fn open_archive_log(request: OpenLogRequest, cancel_flag: &AtomicBool) -> Result<LogReaderHandle> {
     let mut bytes = Vec::new();
     let mut spooled_file: Option<File> = None;
     let mut spooled_path: Option<PathBuf> = None;
@@ -856,6 +909,9 @@ fn open_archive_log(request: OpenLogRequest) -> Result<LogReaderHandle> {
         &request.location,
         &request.archive_passwords,
         &mut |chunk| {
+            if cancel_flag.load(Ordering::Relaxed) {
+                bail!("日志读取已取消");
+            }
             total_bytes = total_bytes.saturating_add(chunk.len() as u64);
             if spooled_file.is_none() && total_bytes > LARGE_LOG_THRESHOLD_BYTES {
                 let (mut file, path) = create_spool_file(&label)?;
@@ -893,7 +949,7 @@ fn open_archive_log(request: OpenLogRequest) -> Result<LogReaderHandle> {
             return Err(error);
         }
         drop(file);
-        return build_paged_handle(request, path, Some(cleanup), total_bytes);
+        return build_paged_handle(request, path, Some(cleanup), total_bytes, cancel_flag);
     }
 
     build_memory_handle(request, bytes)
@@ -901,6 +957,7 @@ fn open_archive_log(request: OpenLogRequest) -> Result<LogReaderHandle> {
 
 /// 从完整字节构建内存行文档。
 fn build_memory_handle(request: OpenLogRequest, bytes: Vec<u8>) -> Result<LogReaderHandle> {
+    let byte_len = bytes.len() as u64;
     let decoded = decode_log_bytes(&bytes, &request.default_encoding);
     let lines = split_decoded_lines(&decoded.text);
     let longest_line_index = longest_line_index(&lines);
@@ -917,6 +974,7 @@ fn build_memory_handle(request: OpenLogRequest, bytes: Vec<u8>) -> Result<LogRea
         label: request.label,
         path: request.location.display_path(),
         document,
+        byte_len,
     })
 }
 
@@ -925,18 +983,21 @@ fn build_paged_handle(
     request: OpenLogRequest,
     path: PathBuf,
     cleanup: Option<Arc<SpoolCleanup>>,
-    _total_bytes: u64,
+    total_bytes: u64,
+    cancel_flag: &AtomicBool,
 ) -> Result<LogReaderHandle> {
-    let document = LogDocument::Paged(PagedLogDocument::open(
+    let document = LogDocument::Paged(PagedLogDocument::open_with_cancel_flag(
         path,
         request.default_encoding.clone(),
         cleanup,
+        cancel_flag,
     )?);
 
     Ok(LogReaderHandle {
         label: request.label,
         path: request.location.display_path(),
         document,
+        byte_len: total_bytes,
     })
 }
 

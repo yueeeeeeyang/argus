@@ -1,8 +1,8 @@
 //! 文件职责：管理日志来源树节点注册和可见索引。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：集中维护来源 ID、父子关系、选择状态和虚拟列表可见节点。
+//! 主要功能：集中维护来源 ID、父子关系、选择状态、AI 分析根解析和虚拟列表可见节点。
 
 use std::collections::HashMap;
 
@@ -148,6 +148,22 @@ impl SourceRegistry {
     /// 返回当前被来源树强选中的节点 ID。
     pub(crate) fn selected_id(&self) -> Option<SourceId> {
         self.selected_id
+    }
+
+    /// 返回根来源 ID 列表，供 AI 会话在启动前解析唯一分析范围。
+    pub(crate) fn root_ids(&self) -> &[SourceId] {
+        &self.root_ids
+    }
+
+    /// 返回指定节点所属的顶层来源根。
+    ///
+    /// 返回值：节点不存在或父链损坏时返回 `None`，调用方不得猜测其它范围。
+    pub(crate) fn root_id_for(&self, id: SourceId) -> Option<SourceId> {
+        let mut current = self.node(id)?;
+        while let Some(parent_id) = current.parent_id {
+            current = self.node(parent_id)?;
+        }
+        Some(current.id)
     }
 
     /// 返回所有已加载节点的树形顺序 ID 列表，不受展开状态影响。

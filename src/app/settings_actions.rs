@@ -1,8 +1,8 @@
 //! 文件职责：维护设置模态框和设置编辑器窗口的交互状态。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：维护设置模态框、分类导航和 Jstack 线程段过滤编辑器窗口，同时复用主应用配置、日志搜索和升级偏好持久化逻辑。
+//! 主要功能：维护设置模态框、智能分析设置和 Jstack 线程段过滤编辑器，并统一持久化相关偏好。
 
 use std::borrow::Borrow;
 use std::ops::Range;
@@ -31,6 +31,103 @@ const JSTACK_STACK_SEGMENT_EDITOR_MIN_WIDTH: f32 = 680.0;
 const JSTACK_STACK_SEGMENT_EDITOR_MIN_HEIGHT: f32 = 520.0;
 
 impl ArgusApp {
+    /// 按设置列表索引打开模型编辑器；`None` 表示新增模型。
+    pub(crate) fn open_ai_model_editor(
+        &mut self,
+        profile_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if profile_index.is_none()
+            && self.config.ai.model_profiles.len()
+                >= crate::config::ai_config::MAX_AI_MODEL_PROFILE_COUNT
+        {
+            self.placeholder_notice = "最多配置 20 个模型".to_string();
+            return;
+        }
+        self.open_ai_settings_editor(
+            crate::ui::ai_settings_editor::AiSettingsEditorKind::Model(profile_index),
+            cx,
+        );
+    }
+
+    /// 按设置列表索引打开日志类型编辑器；`None` 表示新增日志类型。
+    pub(crate) fn open_ai_log_profile_editor(
+        &mut self,
+        profile_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if profile_index.is_none()
+            && self.config.ai.log_profiles.len() >= crate::config::ai_config::MAX_LOG_PROFILE_COUNT
+        {
+            self.placeholder_notice = "最多配置 100 个日志类型".to_string();
+            return;
+        }
+        self.open_ai_settings_editor(
+            crate::ui::ai_settings_editor::AiSettingsEditorKind::LogProfile(profile_index),
+            cx,
+        );
+    }
+
+    /// 按指定类型创建智能分析设置子对话框，并阻止多个编辑器相互覆盖草稿。
+    fn open_ai_settings_editor(
+        &mut self,
+        kind: crate::ui::ai_settings_editor::AiSettingsEditorKind,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ai_settings_editor_modal.is_some() {
+            self.placeholder_notice = "智能分析配置对话框已经打开".to_string();
+            return;
+        }
+        let app = cx.entity();
+        let theme = self.theme.clone();
+        let config = self.config.ai.clone();
+        self.ai_settings_editor_modal = Some(cx.new(|cx| {
+            crate::ui::ai_settings_editor::AiSettingsEditor::new(app, theme, config, kind, cx)
+        }));
+        self.clear_all_text_input_focus();
+        self.placeholder_notice = format!("已打开{}", kind.dialog_title());
+    }
+
+    /// 关闭 AI 配置编辑器，不保存尚未提交的草稿。
+    pub(crate) fn close_ai_settings_editor(&mut self) {
+        self.ai_settings_editor_modal = None;
+        self.placeholder_notice = "已关闭智能分析配置对话框".to_string();
+    }
+
+    /// 校验并持久化 AI 非敏感配置和可选 API Key。
+    pub(crate) fn save_ai_settings(
+        &mut self,
+        mut config: crate::config::AiConfig,
+        credential: Option<(String, String)>,
+    ) -> Result<(), String> {
+        config.normalize();
+        if !config.model_profiles.is_empty() {
+            config.validate_model_profiles()?;
+        }
+        config.validate_log_profiles()?;
+        if config.enabled {
+            config.validate()?;
+        }
+        if let Some((base_url, api_key)) = credential
+            && !api_key.trim().is_empty()
+        {
+            // 凭据按规范化端点作为系统凭据库账号键；相同端点下的多个模型安全复用密钥。
+            let mut credential_base_url = base_url.trim().trim_end_matches('/').to_string();
+            if !credential_base_url.is_empty() && !credential_base_url.ends_with("/v1") {
+                credential_base_url.push_str("/v1");
+            }
+            crate::config::ai_config::validate_ai_base_url(&credential_base_url)?;
+            crate::agent::save_api_key(&credential_base_url, api_key.trim())?;
+        }
+        self.config.ai = config;
+        self.config_manager
+            .save(&self.config)
+            .map_err(|error| format!("保存智能分析设置失败：{error}"))?;
+        self.ai_settings_editor_modal = None;
+        self.placeholder_notice = "智能分析设置已保存".to_string();
+        Ok(())
+    }
+
     /// 将指定设置文本输入统一写回配置并持久化。
     ///
     /// 键盘编辑、原生输入法提交以及显式清空均通过此入口提交，确保规范化规则、缓存刷新和提示一致。

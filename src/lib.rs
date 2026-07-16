@@ -4,6 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：封装全部内部模块，并提供稳定且最小化的启动入口。
 
+mod agent;
 mod analysis;
 mod app;
 mod assets;
