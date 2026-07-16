@@ -4,6 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：导出凭据、会话编排、报告、来源快照和结构化工具所需类型。
 
+pub(crate) mod advanced_tools;
 pub(crate) mod credential;
 pub(crate) mod model_gateway;
 pub(crate) mod orchestrator;

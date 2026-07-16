@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::report::DiagnosticReport;
-use crate::config::{AiConfig, LoaderConfig, LogTypeProfile};
+use crate::config::{AiConfig, LoaderConfig, LogNameMatcher, LogTypeProfile};
 use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::{SourceId, SourceLocation, SourceRegistry};
 
@@ -195,6 +195,10 @@ pub(crate) struct LogProfileSnapshot {
     pub profile_id: String,
     /// 用户可读类型名称。
     pub name: String,
+    /// 名称规则优先级，来源概览按该值解释重叠匹配。
+    pub priority: u16,
+    /// 会话创建时固化的名称规则，供元数据概览统计复用。
+    pub matchers: Vec<LogNameMatcher>,
     /// 分析说明正文。
     pub description: String,
     /// 说明内容摘要，供报告记录配置版本。
@@ -620,6 +624,8 @@ fn build_profile_snapshots(profiles: &[LogTypeProfile]) -> HashMap<String, LogPr
             let snapshot = LogProfileSnapshot {
                 profile_id: profile.profile_id.clone(),
                 name: profile.name.clone(),
+                priority: profile.priority,
+                matchers: profile.matchers.clone(),
                 description: profile.description.clone(),
                 description_sha256: hex::encode(Sha256::digest(profile.description.as_bytes())),
             };

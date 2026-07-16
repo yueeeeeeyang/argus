@@ -56,7 +56,7 @@ impl Drop for BlockingCancellationGuard {
 
 impl AgentToolError {
     /// 创建经过长度裁剪的工具错误。
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self(truncate_utf8_with_ellipsis(message.into(), 1024))
     }
 }
@@ -1192,7 +1192,7 @@ fn schema_value<T: JsonSchema>() -> serde_json::Value {
 }
 
 /// 根据引用筛选范围来源，任意未知引用都使整个调用失败关闭。
-fn selected_sources<'a>(
+pub(crate) fn selected_sources<'a>(
     context: &'a AgentOperationContext,
     source_refs: &[String],
 ) -> Result<Vec<&'a crate::agent::session::SnapshotSource>, AgentToolError> {
@@ -1214,14 +1214,14 @@ fn selected_sources<'a>(
 }
 
 /// 计算全量扫描的入口预留量；未知大小不得按 0 字节处理。
-fn estimated_full_scan_bytes(sources: &[&SnapshotSource]) -> u64 {
+pub(crate) fn estimated_full_scan_bytes(sources: &[&SnapshotSource]) -> u64 {
     sources.iter().fold(0_u64, |total, source| {
         total.saturating_add(source.size.unwrap_or(UNKNOWN_SOURCE_SCAN_RESERVATION_BYTES))
     })
 }
 
 /// 用读取器报告的真实扫描量核算预算，并立即向分析窗口发布最新快照。
-fn reconcile_tool_scan(
+pub(crate) fn reconcile_tool_scan(
     context: &AgentOperationContext,
     reserved_bytes: u64,
     actual_bytes: u64,
@@ -1235,7 +1235,7 @@ fn reconcile_tool_scan(
 }
 
 /// 建立内部来源 ID 到不透明引用的映射。
-fn source_ref_by_id(context: &AgentOperationContext) -> HashMap<usize, String> {
+pub(crate) fn source_ref_by_id(context: &AgentOperationContext) -> HashMap<usize, String> {
     context
         .scope
         .sources
@@ -1375,7 +1375,7 @@ fn read_local_detection_sample(location: &crate::loader::SourceLocation) -> Opti
 }
 
 /// 遮蔽常见凭据赋值和 Bearer Token；该规则是发送前的最后一道本地保护。
-fn redact_sensitive_text(text: &str) -> String {
+pub(crate) fn redact_sensitive_text(text: &str) -> String {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         [
@@ -1392,7 +1392,7 @@ fn redact_sensitive_text(text: &str) -> String {
 }
 
 /// 删除底层读取错误中可能出现的真实路径，只保留最后一段诊断文本。
-fn redact_error_path(message: String) -> String {
+pub(crate) fn redact_error_path(message: String) -> String {
     message
         .rsplit(['/', '\\'])
         .next()
@@ -1433,7 +1433,7 @@ pub(crate) fn validate_tool_output_size<T: Serialize>(value: &T) -> Result<(), A
 }
 
 /// 校验工具输出大小后原样返回，确保每个模型可见结果统一受 128 KiB 上限保护。
-fn checked_output<T: Serialize>(value: T) -> Result<T, AgentToolError> {
+pub(crate) fn checked_output<T: Serialize>(value: T) -> Result<T, AgentToolError> {
     validate_tool_output_size(&value)?;
     Ok(value)
 }
