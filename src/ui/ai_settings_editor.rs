@@ -1,8 +1,8 @@
-//! 文件职责：渲染智能分析的模型配置与日志类型说明子对话框。
+//! 文件职责：渲染智能分析的模型配置、日志类型说明与默认系统提示词子对话框。
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、原文授权、日志类型匹配规则和分析说明。
+//! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、原文授权、日志类型匹配规则、分析说明和专业提示词。
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement,
@@ -12,8 +12,8 @@ use secrecy::SecretString;
 
 use crate::app::{ArgusApp, TextInputState};
 use crate::config::{
-    AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, LogNameMatcher, LogNameMatcherMode,
-    LogNameMatcherTarget, LogTypeProfile,
+    AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, DEFAULT_AI_SYSTEM_PROMPT, LogNameMatcher,
+    LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::theme::AppTheme;
@@ -35,6 +35,10 @@ const AI_MODEL_EDITOR_HEIGHT: f32 = 520.0;
 const AI_LOG_PROFILE_EDITOR_WIDTH: f32 = 680.0;
 /// 单项日志类型说明对话框高度。
 const AI_LOG_PROFILE_EDITOR_HEIGHT: f32 = 600.0;
+/// 默认系统提示词编辑对话框宽度，给较长的专业指令保留可读行宽。
+const AI_SYSTEM_PROMPT_EDITOR_WIDTH: f32 = 760.0;
+/// 默认系统提示词编辑对话框高度。
+const AI_SYSTEM_PROMPT_EDITOR_HEIGHT: f32 = 620.0;
 /// 编辑器标题栏统一高度。
 const AI_EDITOR_HEADER_HEIGHT: f32 = 56.0;
 /// 编辑器底部操作区统一高度。
@@ -54,6 +58,8 @@ pub(crate) enum AiSettingsEditorKind {
     Model(Option<usize>),
     /// 新增日志类型，或按设置列表索引编辑现有日志类型。
     LogProfile(Option<usize>),
+    /// 编辑全局默认系统提示词。
+    SystemPrompt,
 }
 
 impl AiSettingsEditorKind {
@@ -64,6 +70,7 @@ impl AiSettingsEditorKind {
             Self::Model(None) => "新增模型",
             Self::LogProfile(Some(_)) => "编辑日志类型",
             Self::LogProfile(None) => "新增日志类型",
+            Self::SystemPrompt => "默认系统提示词",
         }
     }
 
@@ -72,6 +79,10 @@ impl AiSettingsEditorKind {
         match self {
             Self::Model(_) => (AI_MODEL_EDITOR_WIDTH, AI_MODEL_EDITOR_HEIGHT),
             Self::LogProfile(_) => (AI_LOG_PROFILE_EDITOR_WIDTH, AI_LOG_PROFILE_EDITOR_HEIGHT),
+            Self::SystemPrompt => (
+                AI_SYSTEM_PROMPT_EDITOR_WIDTH,
+                AI_SYSTEM_PROMPT_EDITOR_HEIGHT,
+            ),
         }
     }
 }
@@ -108,6 +119,8 @@ enum AiDraftField {
     MatcherPattern,
     /// 当前日志分析说明。
     ProfileDescription,
+    /// 全局默认系统提示词。
+    SystemPrompt,
 }
 
 /// 一条模型配置草稿；API Key 仅在当前对话框生命周期内存在。
@@ -162,8 +175,6 @@ struct ProfileDraft {
 /// 完整 AI 配置草稿。
 #[derive(Clone)]
 struct AiSettingsDraft {
-    /// 是否启用 AI 分析。
-    enabled: bool,
     /// 可供智能分析选择的模型配置草稿。
     models: Vec<ModelDraft>,
     /// 当前单项模型编辑索引。
@@ -174,6 +185,8 @@ struct AiSettingsDraft {
     consent_version: String,
     /// 模型请求超时秒数。
     request_timeout_seconds: u64,
+    /// 用户可编辑的专业分析系统提示词。
+    system_prompt: TextInputState,
     /// 日志类型配置草稿。
     profiles: Vec<ProfileDraft>,
     /// 当前选中日志类型。
@@ -197,12 +210,12 @@ impl AiSettingsDraft {
             .map(ProfileDraft::from_profile)
             .collect::<Vec<_>>();
         let mut draft = Self {
-            enabled: config.enabled,
             selected_model: None,
             models,
             allow_raw_log_content: config.allow_raw_log_content,
             consent_version: config.consent_version,
             request_timeout_seconds: config.request_timeout_seconds,
+            system_prompt: TextInputState::from_value(config.system_prompt),
             selected_profile: None,
             selected_matcher: 0,
             profiles,
@@ -222,6 +235,7 @@ impl AiSettingsDraft {
                 draft.profiles.push(ProfileDraft::new());
                 draft.selected_profile = Some(draft.profiles.len() - 1);
             }
+            AiSettingsEditorKind::SystemPrompt => {}
         }
         draft
     }
@@ -229,7 +243,6 @@ impl AiSettingsDraft {
     /// 转换为持久化配置；字段校验由主应用保存入口统一执行。
     fn to_config(&self) -> AiConfig {
         AiConfig {
-            enabled: self.enabled,
             base_url: String::new(),
             model: String::new(),
             model_profiles: self.models.iter().map(ModelDraft::to_profile).collect(),
@@ -237,6 +250,7 @@ impl AiSettingsDraft {
             consent_version: self.consent_version.clone(),
             budget_profile: crate::config::ai_config::AiBudgetProfile::Balanced,
             request_timeout_seconds: self.request_timeout_seconds,
+            system_prompt: self.system_prompt.value.clone(),
             log_profiles: self.profiles.iter().map(ProfileDraft::to_profile).collect(),
         }
     }
@@ -353,6 +367,10 @@ pub(crate) struct AiSettingsEditor {
     description_scroll: ScrollHandle,
     /// 分析说明滚动条交互状态。
     description_scroll_state: TextareaScrollState,
+    /// 默认系统提示词多行滚动状态。
+    system_prompt_scroll: ScrollHandle,
+    /// 默认系统提示词滚动条交互状态。
+    system_prompt_scroll_state: TextareaScrollState,
     /// 模型配置正文纵向滚动状态。
     model_scroll: ScrollHandle,
     /// 日志类型详情纵向滚动状态。
@@ -377,6 +395,7 @@ struct AiSettingsFocusHandles {
     profile_name: FocusHandle,
     matcher_pattern: FocusHandle,
     profile_description: FocusHandle,
+    system_prompt: FocusHandle,
 }
 
 impl AiSettingsFocusHandles {
@@ -391,6 +410,7 @@ impl AiSettingsFocusHandles {
             AiDraftField::ProfileName => self.profile_name.clone(),
             AiDraftField::MatcherPattern => self.matcher_pattern.clone(),
             AiDraftField::ProfileDescription => self.profile_description.clone(),
+            AiDraftField::SystemPrompt => self.system_prompt.clone(),
         }
     }
 }
@@ -426,9 +446,12 @@ impl AiSettingsEditor {
                 profile_name: cx.focus_handle(),
                 matcher_pattern: cx.focus_handle(),
                 profile_description: cx.focus_handle(),
+                system_prompt: cx.focus_handle(),
             },
             description_scroll: ScrollHandle::new(),
             description_scroll_state: TextareaScrollState::new(),
+            system_prompt_scroll: ScrollHandle::new(),
+            system_prompt_scroll_state: TextareaScrollState::new(),
             model_scroll: ScrollHandle::new(),
             profile_editor_scroll: ScrollHandle::new(),
             error_message: None,
@@ -457,6 +480,7 @@ impl AiSettingsEditor {
             AiDraftField::ProfileDescription => self
                 .selected_profile_mut()
                 .map(|profile| &mut profile.description),
+            AiDraftField::SystemPrompt => Some(&mut self.draft.system_prompt),
         }
     }
 
@@ -492,6 +516,7 @@ impl AiSettingsEditor {
             AiDraftField::ProfileName,
             AiDraftField::MatcherPattern,
             AiDraftField::ProfileDescription,
+            AiDraftField::SystemPrompt,
         ] {
             if let Some(input) = self.input_mut(candidate) {
                 input.is_focused = candidate == field;
@@ -510,7 +535,10 @@ impl AiSettingsEditor {
         event: &KeyDownEvent,
         cx: &mut Context<Self>,
     ) {
-        let multiline = field == AiDraftField::ProfileDescription;
+        let multiline = matches!(
+            field,
+            AiDraftField::ProfileDescription | AiDraftField::SystemPrompt
+        );
         let Some(input) = self.input_mut(field) else {
             return;
         };
@@ -590,7 +618,6 @@ impl AiSettingsEditor {
             return;
         }
         let mut config = self.draft.to_config();
-        config.enabled = true;
         config.allow_raw_log_content = false;
         config.consent_version.clear();
         config.log_profiles.clear();
@@ -668,11 +695,6 @@ impl AiSettingsEditor {
     fn delete_existing(&mut self, cx: &mut Context<Self>) {
         match self.kind {
             AiSettingsEditorKind::Model(Some(index)) if index < self.draft.models.len() => {
-                if self.draft.enabled && self.draft.models.len() == 1 {
-                    self.error_message =
-                        Some("智能分析启用时至少保留一个模型；请先关闭“启用智能分析”".to_string());
-                    return;
-                }
                 self.draft.models.remove(index);
             }
             AiSettingsEditorKind::LogProfile(Some(index)) if index < self.draft.profiles.len() => {
@@ -719,6 +741,9 @@ impl Render for AiSettingsEditor {
             AiSettingsEditorKind::LogProfile(_) => {
                 render_log_profile_configuration(self, entity.clone(), &draft, &theme)
             }
+            AiSettingsEditorKind::SystemPrompt => {
+                render_system_prompt_configuration(self, entity.clone(), &draft, &theme)
+            }
         };
 
         div()
@@ -760,6 +785,7 @@ impl Render for AiSettingsEditor {
                                 match kind {
                                     AiSettingsEditorKind::Model(_) => ArgusIcon::Settings,
                                     AiSettingsEditorKind::LogProfile(_) => ArgusIcon::Logs,
+                                    AiSettingsEditorKind::SystemPrompt => ArgusIcon::FileText,
                                 },
                                 theme.foreground_muted,
                                 16.0,
@@ -813,6 +839,10 @@ impl Render for AiSettingsEditor {
                                     }
                                     AiSettingsEditorKind::LogProfile(_) => {
                                         "名称规则按优先级匹配，日志说明会发送给所配置的模型服务"
+                                            .to_string()
+                                    }
+                                    AiSettingsEditorKind::SystemPrompt => {
+                                        "提示词只补充专业角色，不能覆盖固定流程和安全规则"
                                             .to_string()
                                     }
                                 }
@@ -889,7 +919,6 @@ fn render_model_configuration(
     let Some(model) = draft.models.get(model_index) else {
         return div().into_any_element();
     };
-    let toggle_enabled = entity.clone();
     let toggle_model = entity.clone();
     let toggle_raw = entity.clone();
     let test_connection = entity.clone();
@@ -914,18 +943,6 @@ fn render_model_configuration(
                 ))
                 .child(
                     editor_card(theme)
-                        .child(toggle_row(
-                            "启用智能分析",
-                            draft.enabled,
-                            theme,
-                            move |_, _, app_cx| {
-                                toggle_enabled.update(app_cx, |editor, cx| {
-                                    editor.draft.enabled = !editor.draft.enabled;
-                                    editor.error_message = None;
-                                    cx.notify();
-                                });
-                            },
-                        ))
                         .child(toggle_row(
                             "允许选择该模型",
                             model.enabled,
@@ -1417,12 +1434,16 @@ fn render_profile_editor(
             editor_card(theme)
                 .child(render_local_textarea(
                     entity,
+                    AiDraftField::ProfileDescription,
                     &profile.description,
                     editor
                         .focus_handles
                         .for_field(AiDraftField::ProfileDescription),
                     editor.description_scroll.clone(),
                     editor.description_scroll_state.clone(),
+                    "ai-profile-description",
+                    "说明日志来源、字段含义、关联方式、常见故障和分析建议（1 B～4 KiB）",
+                    7,
                     theme,
                 ))
                 .child(
@@ -1430,6 +1451,78 @@ fn render_profile_editor(
                         .text_size(px(10.0))
                         .text_color(rgb(theme.foreground_muted))
                         .child("建议填写字段含义、时区、关联 ID、已知故障特征和误判；不要填写密码、Token 或要求执行命令。"),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 渲染全局默认系统提示词编辑页。
+///
+/// 可编辑内容只作为低优先级专业指令注入；编排器中的固定分析流程、最高思考模式、工具权限和
+/// 强制证据校验不在此处展示或开放修改，避免配置误操作削弱安全边界。
+fn render_system_prompt_configuration(
+    editor: &AiSettingsEditor,
+    entity: Entity<AiSettingsEditor>,
+    draft: &AiSettingsDraft,
+    theme: &AppTheme,
+) -> AnyElement {
+    let reset_entity = entity.clone();
+    div()
+        .flex_1()
+        .min_h(px(0.0))
+        .p_5()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(editor_section_heading(
+            "专业分析提示",
+            "用于补充角色、领域知识和表达偏好；新安装与旧配置会自动采用内置默认值。",
+            theme,
+        ))
+        .child(
+            editor_card(theme)
+                .flex_1()
+                .min_h(px(0.0))
+                .child(render_local_textarea(
+                    entity,
+                    AiDraftField::SystemPrompt,
+                    &draft.system_prompt,
+                    editor.focus_handles.for_field(AiDraftField::SystemPrompt),
+                    editor.system_prompt_scroll.clone(),
+                    editor.system_prompt_scroll_state.clone(),
+                    "ai-system-prompt",
+                    "填写专业角色、领域知识和输出偏好",
+                    16,
+                    theme,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .text_size(px(10.0))
+                                .text_color(rgb(theme.foreground_muted))
+                                .child("最多 32 KiB。固定分析流程、工具沙箱、最高思考模式和证据校验不可被此提示词关闭。"),
+                        )
+                        .child(editor_button(
+                            "ai-system-prompt-reset",
+                            "恢复默认",
+                            false,
+                            theme,
+                            move |_, _, app_cx| {
+                                reset_entity.update(app_cx, |editor, cx| {
+                                    editor.draft.system_prompt =
+                                        TextInputState::from_value(DEFAULT_AI_SYSTEM_PROMPT.to_string());
+                                    editor.error_message = None;
+                                    cx.notify();
+                                });
+                            },
+                        )),
                 ),
         )
         .into_any_element()
@@ -1535,13 +1628,17 @@ fn render_local_input(
     .into_any_element()
 }
 
-/// 渲染分析说明多行输入框。
+/// 渲染分析说明或系统提示词使用的本地状态多行输入框。
 fn render_local_textarea(
     entity: Entity<AiSettingsEditor>,
+    field: AiDraftField,
     input: &TextInputState,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
+    id: &'static str,
+    placeholder: &'static str,
+    visible_lines: usize,
     theme: &AppTheme,
 ) -> AnyElement {
     let native_entity = entity.clone();
@@ -1550,8 +1647,8 @@ fn render_local_textarea(
     let pointer_entity = entity.clone();
     let native_input = NativeInput::new(focus_handle.clone(), move |edit, _, app_cx| {
         native_entity.update(app_cx, |editor, cx| {
-            editor.focus_field(AiDraftField::ProfileDescription);
-            if let Some(input) = editor.input_mut(AiDraftField::ProfileDescription) {
+            editor.focus_field(field);
+            if let Some(input) = editor.input_mut(field) {
                 input.apply_native_edit(&edit);
             }
             editor.error_message = None;
@@ -1560,8 +1657,8 @@ fn render_local_textarea(
     });
     render_textarea(
         Textarea {
-            id: "ai-profile-description",
-            placeholder: "说明日志来源、字段含义、关联方式、常见故障和分析建议（1 B～4 KiB）",
+            id,
+            placeholder,
             value: input.value.clone(),
             is_disabled: false,
             is_focused: input.is_focused,
@@ -1569,7 +1666,7 @@ fn render_local_textarea(
             selection_range: input.selection_range(),
             marked_range: input.marked_range.clone(),
             is_pointer_selecting: input.selection_drag.is_some(),
-            visible_lines: 7,
+            visible_lines,
             fill_height: false,
             scroll_handle,
             scroll_state,
@@ -1583,21 +1680,21 @@ fn render_local_textarea(
         theme,
         move |event, _, app_cx| {
             key_entity.update(app_cx, |editor, cx| {
-                editor.handle_input_key(AiDraftField::ProfileDescription, event, cx);
+                editor.handle_input_key(field, event, cx);
                 cx.notify();
             });
         },
         move |_, window, app_cx| {
             click_entity.update(app_cx, |editor, cx| {
-                editor.focus_field(AiDraftField::ProfileDescription);
+                editor.focus_field(field);
                 focus_handle.focus(window);
                 cx.notify();
             });
         },
         move |event, _, app_cx| {
             pointer_entity.update(app_cx, |editor, cx| {
-                editor.focus_field(AiDraftField::ProfileDescription);
-                if let Some(input) = editor.input_mut(AiDraftField::ProfileDescription) {
+                editor.focus_field(field);
+                if let Some(input) = editor.input_mut(field) {
                     apply_pointer_event(input, event);
                 }
                 cx.notify();
@@ -1895,6 +1992,7 @@ fn input_id(field: AiDraftField) -> &'static str {
         AiDraftField::ProfileName => "ai-profile-name-input",
         AiDraftField::MatcherPattern => "ai-matcher-pattern-input",
         AiDraftField::ProfileDescription => "ai-profile-description",
+        AiDraftField::SystemPrompt => "ai-system-prompt",
     }
 }
 

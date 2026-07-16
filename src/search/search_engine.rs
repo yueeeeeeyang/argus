@@ -1641,6 +1641,7 @@ mod tests {
         CurrentLogMatchDirection, CurrentLogMatchPosition, SearchEngine, SearchQuery,
         SearchRequest, SearchTarget, find_match_ranges,
     };
+    use crate::config::paths::{isolated_test_dir, isolated_test_file_path};
     use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
     use crate::reader::log_file_reader::{LogFileReader, OpenLogRequest};
@@ -1722,7 +1723,9 @@ mod tests {
                 source_id: SourceId(1),
                 label: "test.log".to_string(),
                 path: "test.log".to_string(),
-                location: SourceLocation::LocalPath(std::env::temp_dir().join("missing.log")),
+                location: SourceLocation::LocalPath(
+                    isolated_test_dir("search-invalid-regex").join("missing.log"),
+                ),
             }],
             "UTF-8".to_string(),
         );
@@ -1738,11 +1741,7 @@ mod tests {
     /// 验证当前日志快速扫描按出现次数计数，而不是按命中行数计数。
     #[test]
     fn current_log_scan_counts_occurrences_not_lines() {
-        let path = std::env::temp_dir().join(format!(
-            "argus-current-count-test-{}-{}.log",
-            std::process::id(),
-            2
-        ));
+        let path = isolated_test_file_path("search-current-count", "count.log");
         fs::write(&path, "ERROR ERROR\ninfo\nerror\n").unwrap();
         let source_id = SourceId(7);
         let handle = LogFileReader::open(OpenLogRequest {
@@ -1775,11 +1774,7 @@ mod tests {
     /// 验证当前日志计数接口只返回次数和扫描行数，不需要保留命中结果列表。
     #[test]
     fn current_log_count_returns_occurrences_without_results() {
-        let path = std::env::temp_dir().join(format!(
-            "argus-current-count-only-test-{}-{}.log",
-            std::process::id(),
-            6
-        ));
+        let path = isolated_test_file_path("search-current-count-only", "count.log");
         fs::write(&path, "ERROR ERROR\ninfo\nerror\n").unwrap();
         let handle = LogFileReader::open(OpenLogRequest {
             location: SourceLocation::LocalPath(path.clone()),
@@ -1804,11 +1799,7 @@ mod tests {
     /// 验证“下一个”只扫描到最近命中就停止，不会像计数一样扫完整文件。
     #[test]
     fn current_log_next_navigation_stops_at_first_match() {
-        let path = std::env::temp_dir().join(format!(
-            "argus-current-next-test-{}-{}.log",
-            std::process::id(),
-            3
-        ));
+        let path = isolated_test_file_path("search-current-next", "next.log");
         let mut text = String::from("INFO start\nERROR first\n");
         for index in 0..5000 {
             text.push_str(&format!("INFO filler {index}\n"));
@@ -1858,11 +1849,7 @@ mod tests {
     /// 验证同一行存在多个命中时，“下一个”会在行内移动到下一个范围。
     #[test]
     fn current_log_next_navigation_moves_within_same_line() {
-        let path = std::env::temp_dir().join(format!(
-            "argus-current-inline-next-test-{}-{}.log",
-            std::process::id(),
-            4
-        ));
+        let path = isolated_test_file_path("search-current-inline-next", "inline.log");
         fs::write(&path, "ERROR one ERROR two\n").unwrap();
         let source_id = SourceId(9);
         let handle = LogFileReader::open(OpenLogRequest {
@@ -1906,11 +1893,7 @@ mod tests {
     /// 验证“上一个”从文件开头命中处继续点击时会循环到最后一个命中。
     #[test]
     fn current_log_previous_navigation_wraps_to_last_match() {
-        let path = std::env::temp_dir().join(format!(
-            "argus-current-prev-test-{}-{}.log",
-            std::process::id(),
-            5
-        ));
+        let path = isolated_test_file_path("search-current-previous", "previous.log");
         fs::write(&path, "ERROR first\nINFO middle\nerror last\n").unwrap();
         let source_id = SourceId(10);
         let handle = LogFileReader::open(OpenLogRequest {
@@ -1948,11 +1931,7 @@ mod tests {
     /// 验证搜索引擎会扫描真实日志文件并返回全部匹配行。
     #[test]
     fn searches_real_file_and_reports_all_results() {
-        let path = std::env::temp_dir().join(format!(
-            "argus-search-test-{}-{}.log",
-            std::process::id(),
-            1
-        ));
+        let path = isolated_test_file_path("search-real-file", "search.log");
         let content = "INFO start\nERROR failed\nwarn\nerror again\n";
         fs::write(&path, content).unwrap();
         let request = SearchRequest::new(
@@ -1990,11 +1969,7 @@ mod tests {
     /// 验证快搜多关键字会一次扫描文件，并把同一行多个命中合并为一条结果。
     #[test]
     fn multi_query_search_merges_matches_on_same_line() {
-        let path = std::env::temp_dir().join(format!(
-            "argus-search-multi-test-{}-{}.log",
-            std::process::id(),
-            7
-        ));
+        let path = isolated_test_file_path("search-multi-query", "multi.log");
         fs::write(&path, "ERROR timeout\nWARN only\nINFO ok\n").unwrap();
         let request = SearchRequest::with_queries(
             vec![

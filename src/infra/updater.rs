@@ -1,6 +1,6 @@
 //! 文件职责：实现 Argus 自动升级核心流程。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-16
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：拉取升级清单、校验 Ed25519 签名、选择平台资源、下载校验安装包，并替换当前二进制或 macOS `.app`。
 
@@ -957,6 +957,7 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::*;
+    use crate::config::paths::isolated_test_dir;
 
     /// 内存 HTTP 客户端，用于模拟 manifest、签名和二进制下载。
     #[derive(Clone, Debug, Default)]
@@ -1054,7 +1055,7 @@ mod tests {
             http,
             Ed25519ManifestVerifier::from_public_key(public_key),
             FakeBinaryReplacer::default(),
-            std::env::temp_dir().join(format!("argus-updater-test-{}", std::process::id())),
+            isolated_test_dir("updater-service"),
         )
     }
 
@@ -1170,7 +1171,7 @@ mod tests {
             FakeHttpClient::default(),
             Ed25519ManifestVerifier::from_public_key(String::new()),
             FakeBinaryReplacer::default(),
-            std::env::temp_dir(),
+            isolated_test_dir("updater-missing-key"),
         );
         let config = UpgradeConfig {
             enabled: true,
@@ -1198,7 +1199,7 @@ mod tests {
                 .with_response("https://updates.example.com/manifest-v1.json.sig", b"bad"),
             Ed25519ManifestVerifier::from_public_key(BASE64_STANDARD.encode([8_u8; 32])),
             FakeBinaryReplacer::default(),
-            std::env::temp_dir(),
+            isolated_test_dir("updater-invalid-signature"),
         );
         let config = UpgradeConfig {
             enabled: true,
@@ -1267,8 +1268,7 @@ mod tests {
     #[test]
     fn download_prepares_macos_app_bundle_package() {
         let app_zip = app_bundle_zip_bytes(b"new-macos-binary");
-        let updates_dir =
-            std::env::temp_dir().join(format!("argus-updater-app-test-{}", std::process::id()));
+        let updates_dir = isolated_test_dir("updater-app-bundle");
         let service = UpgradeService::new(
             FakeHttpClient::default()
                 .with_response("https://updates.example.com/Argus.app.zip", app_zip.clone()),
@@ -1321,7 +1321,7 @@ mod tests {
             FakeHttpClient::default(),
             Ed25519ManifestVerifier::from_public_key(BASE64_STANDARD.encode([8_u8; 32])),
             replacer,
-            std::env::temp_dir(),
+            isolated_test_dir("updater-install-app-bundle"),
         );
         let prepared = PreparedUpgrade {
             version: "0.2.0".to_string(),

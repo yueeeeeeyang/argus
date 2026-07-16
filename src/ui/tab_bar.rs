@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义标题栏中的日志标签区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：展示可切换标签、右键菜单和多标签溢出下拉入口。
 
@@ -520,23 +520,15 @@ fn active_tab_connector(side: TabConnectorSide, theme: &AppTheme) -> impl IntoEl
 mod tests {
     use crate::app::{ArgusTab, TabKind};
     use crate::config::ConfigManager;
+    use crate::config::paths::isolated_test_dir;
     use crate::loader::SourceId;
     use gpui::{Modifiers, MouseDownEvent, MouseUpEvent, TestAppContext, point, px};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
-    /// 测试配置路径计数器，避免视觉测试读取真实用户配置。
-    static NEXT_VISUAL_TEST_CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
-
-    /// 构造使用进程临时目录的应用状态，避免视觉测试污染真实设置文件。
+    /// 构造使用 `.argus_test` 独立目录的应用状态，避免视觉测试污染真实设置文件。
     fn visual_test_app() -> ArgusApp {
-        let id = NEXT_VISUAL_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed);
-        let config_dir = std::env::temp_dir().join(format!(
-            "argus-tab-bar-visual-test-{}-{id}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&config_dir);
+        let config_dir = isolated_test_dir("tab-bar-visual");
         ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
     }
 

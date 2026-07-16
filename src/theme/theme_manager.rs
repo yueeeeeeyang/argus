@@ -1,6 +1,6 @@
 //! 文件职责：实现 Argus 主题文件加载与校验管理。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-12
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：从内置 TOML 和 `~/.argus/themes` 读取主题令牌，解析为运行期 AppTheme。
 
@@ -459,6 +459,7 @@ fn canonical_mode(mode: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::paths::isolated_test_dir;
 
     /// 验证内置深色 TOML 解析结果等价于当前代码中的深色 fallback。
     #[test]
@@ -523,8 +524,7 @@ success = "#1a7f37"
     /// 验证非法用户主题不会阻塞主题管理器创建。
     #[test]
     fn invalid_user_theme_is_skipped_with_warning() {
-        let dir =
-            std::env::temp_dir().join(format!("argus-theme-test-{}-invalid", std::process::id()));
+        let dir = isolated_test_dir("theme-invalid");
         fs::create_dir_all(&dir).expect("测试主题目录应可创建");
         fs::write(dir.join("broken.toml"), "name = [").expect("测试坏主题应可写入");
 
@@ -537,8 +537,7 @@ success = "#1a7f37"
     /// 验证主题下拉框用文件名作为 ID，但展示时去掉 `.toml` 扩展名。
     #[test]
     fn theme_options_use_toml_file_stems_as_labels() {
-        let dir =
-            std::env::temp_dir().join(format!("argus-theme-test-{}-options", std::process::id()));
+        let dir = isolated_test_dir("theme-options");
         fs::create_dir_all(&dir).expect("测试主题目录应可创建");
         fs::write(
             dir.join("custom_dark.toml"),

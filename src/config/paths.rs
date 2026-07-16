@@ -1,14 +1,23 @@
 //! 文件职责：集中管理 Argus 用户配置目录路径。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：提供 `~/.argus`、主题目录、升级缓存、仓库缓存和设置文件路径，避免路径规则散落在业务模块中。
+//! 主要功能：提供生产配置路径及仓库内隔离的 `.argus_test` 测试路径，避免路径规则散落在业务模块中。
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Argus 用户配置目录名称。
 const ARGUS_CONFIG_DIR_NAME: &str = ".argus";
+/// Argus 测试数据根目录名称；测试构建不得读写生产 `.argus` 目录。
+#[cfg(test)]
+const ARGUS_TEST_DIR_NAME: &str = ".argus_test";
 /// Argus 用户主题目录名称。
 const ARGUS_THEME_DIR_NAME: &str = "themes";
 /// Argus 用户设置文件名称。
@@ -21,15 +30,121 @@ const ARGUS_REPOSITORIES_DIR_NAME: &str = "repositories";
 const ARGUS_GIT_REPOSITORIES_DIR_NAME: &str = "git";
 /// SVN SSH 主机公钥记录文件名称。
 const ARGUS_SVN_KNOWN_HOSTS_FILE_NAME: &str = "svn_known_hosts";
+/// 当前测试进程的唯一目录，保证同一用户并发运行测试时互不覆盖。
+#[cfg(test)]
+static ARGUS_TEST_PROCESS_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// 测试子目录序号，保证同一进程内的并行用例也使用独立目录。
+#[cfg(test)]
+static NEXT_TEST_DIR_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// 返回当前用户的 Argus 配置目录。
 ///
-/// 返回值：优先使用 Unix/macOS 的 `HOME`，其次兼容 Windows 的 `USERPROFILE`
-/// 或 `HOMEDRIVE` + `HOMEPATH`，最后才回退当前目录下的 `.argus`。
+/// 返回值：生产构建使用 `~/.argus`；测试构建固定使用当前测试进程专属的
+/// `<项目根>/.argus_test/<进程标识>/config`，从路径入口阻断对生产配置的访问。
 pub(crate) fn argus_config_dir() -> PathBuf {
-    user_home_dir()
-        .map(|home| argus_config_dir_from_home(&home))
-        .unwrap_or_else(|| PathBuf::from(ARGUS_CONFIG_DIR_NAME))
+    #[cfg(test)]
+    {
+        argus_test_process_dir().join("config")
+    }
+
+    #[cfg(not(test))]
+    {
+        user_home_dir()
+            .map(|home| argus_config_dir_from_home(&home))
+            .unwrap_or_else(|| PathBuf::from(ARGUS_CONFIG_DIR_NAME))
+    }
+}
+
+/// 返回测试数据根目录，所有会写文件的单元测试都应落在该目录下。
+///
+/// 返回值：固定为 Cargo 项目根下的 `.argus_test`，既避免访问用户生产目录，也能在
+/// CI 和文件系统沙箱中稳定写入。
+#[cfg(test)]
+pub(crate) fn argus_test_root_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(ARGUS_TEST_DIR_NAME)
+}
+
+/// 返回本次测试进程独占的工作目录。
+///
+/// 进程号之外再加入启动时间，避免操作系统复用进程号时读到上次测试遗留的数据。
+#[cfg(test)]
+pub(crate) fn argus_test_process_dir() -> PathBuf {
+    ARGUS_TEST_PROCESS_DIR
+        .get_or_init(|| {
+            let started_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            argus_test_root_dir().join(format!("process-{}-{started_at}", std::process::id()))
+        })
+        .clone()
+}
+
+/// 为单个测试场景分配唯一工作目录。
+///
+/// 参数说明：
+/// - `scope`：简短的测试场景名称，仅用于提高遗留目录的可辨识度。
+///
+/// 返回值：位于当前进程测试目录下且不会与其他并行用例冲突的路径。
+#[cfg(test)]
+pub(crate) fn isolated_test_dir(scope: &str) -> PathBuf {
+    let safe_scope = scope
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+    argus_test_process_dir().join(format!("{safe_scope}-{id}"))
+}
+
+/// 为需要直接读写普通文件的测试创建独立父目录并返回文件路径。
+///
+/// 参数说明：
+/// - `scope`：测试场景名称；
+/// - `file_name`：测试文件名，不得依赖生产目录中的同名文件。
+///
+/// 返回值：位于唯一 `.argus_test` 子目录中的文件路径。
+#[cfg(test)]
+pub(crate) fn isolated_test_file_path(scope: &str, file_name: &str) -> PathBuf {
+    let directory = isolated_test_dir(scope);
+    std::fs::create_dir_all(&directory).expect("应创建独立的 .argus_test 测试目录");
+    directory.join(file_name)
+}
+
+/// 创建会在作用域结束时自动清理的独立测试目录。
+///
+/// 参数说明：
+/// - `scope`：测试场景名称，用于生成易于定位的目录前缀。
+///
+/// 返回值：位于当前 `.argus_test` 进程目录中的 `TempDir`；创建失败时直接终止测试。
+#[cfg(test)]
+pub(crate) fn temporary_test_dir(scope: &str) -> tempfile::TempDir {
+    let process_dir = argus_test_process_dir();
+    std::fs::create_dir_all(&process_dir).expect("应创建 .argus_test 测试进程目录");
+    tempfile::Builder::new()
+        .prefix(&format!("{scope}-"))
+        .tempdir_in(process_dir)
+        .expect("应在 .argus_test 中创建临时测试目录")
+}
+
+/// 断言测试文件路径位于 `.argus_test` 根目录内。
+///
+/// 该保护只存在于测试构建中，并由配置读写入口调用；一旦新测试误传
+/// `~/.argus/settings.toml` 或系统临时目录，测试会在实际 IO 前立即失败。
+#[cfg(test)]
+pub(crate) fn assert_isolated_test_path(path: &Path) {
+    let test_root = argus_test_root_dir();
+    assert!(
+        path.starts_with(&test_root),
+        "测试文件必须位于独立的 {} 目录，禁止访问生产目录或通用临时目录：{}",
+        test_root.display(),
+        path.display()
+    );
 }
 
 /// 返回当前用户的 Argus 主题目录。
@@ -138,6 +253,33 @@ mod tests {
             argus_config_dir_from_home(&home),
             PathBuf::from("/tmp/argus-home/.argus")
         );
+    }
+
+    /// 验证测试构建的默认配置不会指向生产 `.argus` 目录。
+    #[test]
+    fn default_config_dir_is_isolated_under_argus_test() {
+        let config_dir = argus_config_dir();
+
+        assert!(config_dir.starts_with(argus_test_root_dir()));
+        assert!(config_dir.ends_with("config"));
+        assert!(
+            !config_dir.starts_with(
+                user_home_dir()
+                    .map(|home| argus_config_dir_from_home(&home))
+                    .unwrap_or_else(|| PathBuf::from(ARGUS_CONFIG_DIR_NAME))
+            )
+        );
+    }
+
+    /// 验证每个测试场景都会取得不同的 `.argus_test` 子目录。
+    #[test]
+    fn isolated_test_dirs_are_unique_and_share_test_root() {
+        let first = isolated_test_dir("paths");
+        let second = isolated_test_dir("paths");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with(argus_test_root_dir()));
+        assert!(second.starts_with(argus_test_root_dir()));
     }
 
     /// 验证主题目录和设置文件路径都从同一个配置目录派生。

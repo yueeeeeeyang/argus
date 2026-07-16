@@ -989,8 +989,8 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::config::paths::{isolated_test_dir, isolated_test_file_path};
     use crate::loader::archive::ArchiveFormat;
     use crate::loader::{SourceKind, SourceLocation, SourceMetadata};
 
@@ -1335,14 +1335,7 @@ mod tests {
     /// 验证通过 LogFileReader 的读取集成路径，并记录失败来源。
     #[test]
     fn analyzes_targets_with_reader_and_skips_failures() {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("系统时间应晚于 UNIX_EPOCH")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "argus-jstack-analysis-{}-{timestamp}.log",
-            std::process::id()
-        ));
+        let path = isolated_test_file_path("jstack-reader", "thread.log");
         fs::write(&path, sample_jstack_text()).expect("应能写入 Jstack 测试日志");
         let missing_path = path.with_extension("missing");
 
@@ -1380,14 +1373,7 @@ mod tests {
     /// 验证本地目录目标会递归展开为多个 Jstack 快照，非候选文件不会进入统计。
     #[test]
     fn analyzes_local_directory_recursively() {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("系统时间应晚于 UNIX_EPOCH")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "argus-jstack-analysis-dir-{}-{timestamp}",
-            std::process::id()
-        ));
+        let dir = isolated_test_dir("jstack-recursive");
         let nested_dir = dir.join("nested");
         fs::create_dir_all(&nested_dir).expect("应能创建 Jstack 目录测试路径");
         fs::write(dir.join("thread-a.log"), sample_jstack_text()).expect("应能写入 Jstack 日志");
@@ -1420,14 +1406,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn jstack_directory_recursion_skips_symlink_cycles() {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("系统时间应晚于 UNIX_EPOCH")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "argus-jstack-analysis-symlink-{}-{timestamp}",
-            std::process::id()
-        ));
+        let dir = isolated_test_dir("jstack-symlink-cycle");
         fs::create_dir_all(&dir).expect("应能创建 Jstack 符号链接测试路径");
         fs::write(dir.join("thread-a.log"), sample_jstack_text()).expect("应能写入 Jstack 日志");
         std::os::unix::fs::symlink(&dir, dir.join("loop")).expect("应能创建目录符号链接回环");
@@ -1459,14 +1438,7 @@ mod tests {
     /// 验证 Jstack 分析能独立探测待识别的单文件压缩包，不依赖来源树先完成节点替换。
     #[test]
     fn analyzes_pending_single_file_archive_without_registry_replacement() {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("系统时间应晚于 UNIX_EPOCH")
-            .as_nanos();
-        let zip_path = std::env::temp_dir().join(format!(
-            "argus-jstack-analysis-{}-{timestamp}.zip",
-            std::process::id()
-        ));
+        let zip_path = isolated_test_file_path("jstack-archive", "thread.zip");
         let file = fs::File::create(&zip_path).expect("应能创建 Jstack ZIP 测试文件");
         let mut writer = ZipWriter::new(file);
         writer

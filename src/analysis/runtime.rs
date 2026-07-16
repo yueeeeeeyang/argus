@@ -2073,25 +2073,17 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use crate::config::paths::isolated_test_dir;
     use crate::loader::SourceLocation;
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
     use super::*;
 
-    /// 测试临时目录序号，避免并发测试复用同一路径。
-    static NEXT_TEST_DIR_ID: AtomicUsize = AtomicUsize::new(0);
-
     /// 创建 Runtime 分析测试使用的隔离临时目录。
     fn runtime_test_dir(label: &str) -> PathBuf {
-        let id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "argus-runtime-analysis-{label}-{}-{id}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = isolated_test_dir(&format!("runtime-analysis-{label}"));
         fs::create_dir_all(&dir).expect("应能创建 Runtime 测试目录");
         dir
     }

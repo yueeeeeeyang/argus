@@ -1,8 +1,8 @@
 //! 文件职责：渲染 Argus 主窗口设置模态框和独立设置编辑器。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：以主窗口模态框展示分类设置，并提供智能分析和 Jstack 线程段过滤编辑入口。
+//! 主要功能：以主窗口模态框展示分类设置，并提供智能分析、系统提示词和 Jstack 线程段过滤编辑入口。
 
 use std::sync::Arc;
 
@@ -107,12 +107,12 @@ struct SettingsModalSnapshot {
     selected_section: SettingsSection,
     /// 当前选中的主题 ID。
     selected_theme_id: String,
-    /// 是否启用 AI 日志分析。
-    ai_enabled: bool,
     /// 可供智能分析会话选择的模型配置列表。
     ai_model_profiles: Vec<AiModelProfile>,
     /// 自定义日志类型说明列表。
     ai_log_profiles: Vec<LogTypeProfile>,
+    /// 用户可编辑的默认专业系统提示词。
+    ai_system_prompt: String,
     /// 当前选中主题展示文案。
     selected_theme_label: String,
     /// 可选主题列表。
@@ -160,9 +160,9 @@ impl SettingsModalSnapshot {
             theme: app.theme.clone(),
             selected_section: app.selected_settings_section,
             selected_theme_id: app.selected_theme_id.clone(),
-            ai_enabled: app.config.ai.enabled,
             ai_model_profiles: app.config.ai.model_profiles.clone(),
             ai_log_profiles: app.config.ai.log_profiles.clone(),
+            ai_system_prompt: app.config.ai.system_prompt.clone(),
             selected_theme_label: app.selected_theme_label(),
             theme_options: app.theme_options(),
             is_theme_dropdown_open: app.is_theme_dropdown_open,
@@ -487,6 +487,13 @@ fn render_settings_sidebar(
                     app_handle,
                     theme,
                 ))
+                .child(settings_navigation_item(
+                    SettingsSection::AiSystemPrompt,
+                    ArgusIcon::FileText,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
                 .child(
                     div()
                         .mt_3()
@@ -597,6 +604,7 @@ fn settings_section_id(section: SettingsSection) -> &'static str {
         SettingsSection::Appearance => "appearance",
         SettingsSection::AiModel => "ai-model",
         SettingsSection::AiLogProfiles => "ai-log-profiles",
+        SettingsSection::AiSystemPrompt => "ai-system-prompt",
         SettingsSection::LogDisplay => "log-display",
         SettingsSection::LogSearch => "log-search",
         SettingsSection::LogLoading => "log-loading",
@@ -635,6 +643,9 @@ fn render_selected_settings_section(
         SettingsSection::AiLogProfiles => {
             render_ai_log_profiles_section(snapshot, app_handle, theme).into_any_element()
         }
+        SettingsSection::AiSystemPrompt => {
+            render_ai_system_prompt_section(snapshot, app_handle, theme).into_any_element()
+        }
         SettingsSection::LogDisplay => {
             render_log_display_section(snapshot, app_handle, input_focus_handles, theme)
                 .into_any_element()
@@ -665,13 +676,13 @@ fn render_ai_model_section(
                 "当前状态",
                 ai_settings_entry_control(
                     format!(
-                        "{} · {} 个模型",
-                        if snapshot.ai_enabled {
-                            "已启用"
-                        } else {
-                            "未启用"
-                        },
-                        snapshot.ai_model_profiles.len()
+                        "已配置 {} 个模型 · 可选择 {} 个",
+                        snapshot.ai_model_profiles.len(),
+                        snapshot
+                            .ai_model_profiles
+                            .iter()
+                            .filter(|model| model.enabled)
+                            .count()
                     ),
                     "新增模型",
                     "settings-add-ai-model",
@@ -843,6 +854,38 @@ fn render_ai_log_profiles_section(
                             })
                     }),
             ),
+        theme,
+    )
+    .into_any_element()
+}
+
+/// 渲染智能分析分组下的默认系统提示词入口。
+fn render_ai_system_prompt_section(
+    snapshot: &SettingsModalSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> AnyElement {
+    let edit_prompt_app = app_handle.clone();
+    let character_count = snapshot.ai_system_prompt.chars().count();
+    settings_section(
+        "系统提示词",
+        ArgusIcon::FileText,
+        setting_group(theme).child(setting_row(
+            "默认专业提示",
+            ai_settings_entry_control(
+                format!("已配置 {character_count} 个字符"),
+                "编辑",
+                "settings-edit-ai-system-prompt",
+                ArgusIcon::FileText,
+                theme,
+                move |cx| {
+                    update_settings_app(&edit_prompt_app, cx, |app, app_cx| {
+                        app.open_ai_system_prompt_editor(app_cx)
+                    });
+                },
+            ),
+            theme,
+        )),
         theme,
     )
     .into_any_element()

@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -11,6 +11,8 @@ use thiserror::Error;
 
 use crate::config::app_config::AppConfig;
 use crate::config::paths::argus_settings_file;
+#[cfg(test)]
+use crate::config::paths::assert_isolated_test_path;
 
 /// 配置读写错误，调用方可据此显示非阻塞提示。
 #[derive(Debug, Error)]
@@ -42,8 +44,10 @@ impl ConfigManager {
     /// 构造指定设置文件路径的配置管理器。
     ///
     /// 参数说明：
-    /// - `settings_path`：设置文件路径，测试可注入临时目录避免污染真实用户配置。
+    /// - `settings_path`：设置文件路径，测试必须注入 `.argus_test` 子目录避免污染真实用户配置。
     pub(crate) fn new(settings_path: PathBuf) -> Self {
+        #[cfg(test)]
+        assert_isolated_test_path(&settings_path);
         Self { settings_path }
     }
 
@@ -80,6 +84,8 @@ impl ConfigManager {
 
     /// 从指定路径读取配置，供单元测试和未来迁移逻辑复用。
     pub(crate) fn load_from_path(path: &Path) -> Result<AppConfig, ConfigError> {
+        #[cfg(test)]
+        assert_isolated_test_path(path);
         if !path.exists() {
             return Ok(AppConfig::default());
         }
@@ -91,6 +97,8 @@ impl ConfigManager {
 
     /// 将配置写入指定路径，先写临时文件再 rename，降低异常退出造成半文件的概率。
     pub(crate) fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
+        #[cfg(test)]
+        assert_isolated_test_path(path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -125,6 +133,7 @@ mod tests {
         AppearanceConfig, DEFAULT_JSTACK_STACK_SEGMENT_FILTERS, DEFAULT_JSTACK_THREAD_NAME_FILTERS,
         EncodingConfig, LoaderConfig, LogDisplayConfig, LogSearchConfig, UpgradeConfig,
     };
+    use crate::config::paths::{argus_config_dir_from_home, isolated_test_dir, user_home_dir};
     use crate::remote::connection::{
         ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SmbLinkConfig,
         SshLinkConfig, TrustedHostKeyConfig,
@@ -132,10 +141,26 @@ mod tests {
 
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
     fn test_settings_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "argus-config-test-{}-{name}/settings.toml",
-            std::process::id()
-        ))
+        isolated_test_dir(&format!("config-manager-{name}")).join("settings.toml")
+    }
+
+    /// 验证默认配置管理器始终绑定 `.argus_test`，不会读取当前用户的模型配置。
+    #[test]
+    fn default_manager_uses_isolated_test_settings_file() {
+        let manager = ConfigManager::default();
+
+        assert_isolated_test_path(manager.settings_path());
+    }
+
+    /// 验证测试代码一旦显式绑定生产设置文件会在执行 IO 前立即失败。
+    #[test]
+    #[should_panic(expected = "测试文件必须位于独立的")]
+    fn production_settings_path_is_rejected_in_tests() {
+        let production_root = user_home_dir()
+            .map(|home| argus_config_dir_from_home(&home))
+            .unwrap_or_else(|| PathBuf::from(".argus"));
+
+        let _manager = ConfigManager::new(production_root.join("settings.toml"));
     }
 
     /// 验证设置文件不存在时会返回默认配置。

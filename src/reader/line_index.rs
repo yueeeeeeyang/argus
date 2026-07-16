@@ -421,13 +421,14 @@ mod tests {
         build_line_index, build_line_index_with_encoding,
         build_line_index_with_encoding_and_cancel, checked_line_span,
     };
+    use crate::config::paths::isolated_test_file_path;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
 
     /// 构造隔离测试文件路径，避免依赖真实项目文件。
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("argus-line-index-{}-{name}", std::process::id()))
+        isolated_test_file_path("line-index", name)
     }
 
     /// 验证 LF、CRLF、CR 和末尾无换行都能得到正确字节范围。

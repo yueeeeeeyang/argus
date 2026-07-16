@@ -11,6 +11,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use regex::Regex;
@@ -21,7 +22,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::agent::session::{
-    AgentOperationContext, MAX_TOOL_RAW_BYTES, SnapshotSource, truncate_utf8_with_ellipsis,
+    AgentEvidenceStore, AgentOperationContext, EventOccurrenceSummary, MAX_TOOL_RAW_BYTES,
+    SnapshotSource, truncate_utf8_with_ellipsis,
 };
 use crate::agent::tools::{
     AgentToolError, checked_output, estimated_full_scan_bytes, reconcile_tool_scan,
@@ -371,6 +373,9 @@ struct BatchSearchHitOutput {
     line: usize,
     /// 授权后返回的脱敏、有界正文。
     text: Option<String>,
+    /// 脱敏和裁剪前的原始行内容指纹，不进入模型 JSON。
+    #[serde(skip)]
+    content_fingerprint: [u8; 32],
 }
 
 /// 一个批量模式的搜索结果。
@@ -474,6 +479,8 @@ impl Tool for SearchLogsBatchTool {
                         return;
                     };
                     for result in batch {
+                        let content_fingerprint =
+                            AgentEvidenceStore::fingerprint_text(&result.line_text);
                         for keyword in &result.matched_keywords {
                             let Some(index) = query_indices.get(keyword).copied() else {
                                 continue;
@@ -512,6 +519,7 @@ impl Tool for SearchLogsBatchTool {
                                 relative_path: result.path.clone(),
                                 line: result.line_number + 1,
                                 text,
+                                content_fingerprint,
                             });
                         }
                     }
@@ -569,7 +577,7 @@ impl Tool for SearchLogsBatchTool {
         for hit in output.patterns.iter().flat_map(|pattern| &pattern.hits) {
             self.0
                 .evidence_ranges
-                .record(&hit.source_ref, hit.line, hit.line)
+                .record_fingerprint(&hit.source_ref, hit.line, hit.content_fingerprint)
                 .map_err(AgentToolError::new)?;
         }
         checked_output(output)
@@ -682,6 +690,9 @@ struct SampledLineOutput {
     line: usize,
     /// 已脱敏且按字符边界裁剪的正文。
     text: String,
+    /// 脱敏和裁剪前的原始行内容指纹，不进入模型 JSON。
+    #[serde(skip)]
+    content_fingerprint: [u8; 32],
 }
 
 /// 有界日志采样输出。
@@ -730,26 +741,48 @@ impl Tool for SampleLogTool {
             .source(&args.source_ref)
             .ok_or_else(|| AgentToolError::new("source_ref 不在当前会话范围内"))?
             .clone();
-        let selected = vec![&source];
-        let scan_bytes = estimated_full_scan_bytes(&selected);
+        let cached_reader = self
+            .0
+            .log_reader_cache
+            .lock()
+            .map_err(|_| AgentToolError::new("日志读取器缓存状态已损坏"))?
+            .get(&args.source_ref);
+        let reader_cache_hit = cached_reader.is_some();
+        let scan_bytes = if reader_cache_hit {
+            0
+        } else {
+            estimated_full_scan_bytes(&[&source])
+        };
         self.0
             .begin_tool(Self::NAME, scan_bytes)
             .map_err(AgentToolError::new)?;
         let max_lines = args.max_lines.clamp(1, 60);
         let max_bytes = args.max_bytes.clamp(1, 32 * 1024);
         let strategy = args.strategy;
-        let scope = self.0.scope.clone();
+        let operation_context = self.0.clone();
+        let source_ref = args.source_ref.clone();
         let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let read = tokio::task::spawn_blocking(move || {
-            let handle = LogFileReader::open_with_cancel_flag(
-                OpenLogRequest {
-                    location: source.location.clone(),
-                    label: source.file_name.clone(),
-                    default_encoding: scope.default_encoding.clone(),
-                    archive_passwords: scope.archive_passwords.clone(),
-                },
-                cancel_flag.clone(),
-            )?;
+            let handle = match cached_reader {
+                Some(reader) => reader,
+                None => {
+                    let reader = LogFileReader::open_with_cancel_flag(
+                        OpenLogRequest {
+                            location: source.location.clone(),
+                            label: source.file_name.clone(),
+                            default_encoding: operation_context.scope.default_encoding.clone(),
+                            archive_passwords: operation_context.scope.archive_passwords.clone(),
+                        },
+                        cancel_flag.clone(),
+                    )?;
+                    operation_context
+                        .log_reader_cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("日志读取器缓存状态已损坏"))?
+                        .insert(source_ref, reader.clone());
+                    reader
+                }
+            };
             let indices = sample_line_indices(handle.line_count(), max_lines, strategy);
             let mut lines = Vec::with_capacity(indices.len());
             for line_index in indices {
@@ -770,11 +803,16 @@ impl Tool for SampleLogTool {
                 redact_error_path(error.to_string())
             ))
         })?;
-        reconcile_tool_scan(&self.0, scan_bytes, read.0)?;
+        reconcile_tool_scan(
+            &self.0,
+            scan_bytes,
+            if reader_cache_hit { 0 } else { read.0 },
+        )?;
         let mut raw_bytes = 0_usize;
         let mut byte_truncated = false;
         let mut lines = Vec::new();
         for line in read.2 {
+            let content_fingerprint = AgentEvidenceStore::fingerprint_text(&line.text);
             let remaining = max_bytes.saturating_sub(raw_bytes);
             if remaining == 0 {
                 byte_truncated = true;
@@ -790,6 +828,7 @@ impl Tool for SampleLogTool {
             lines.push(SampledLineOutput {
                 line: line.line_number + 1,
                 text,
+                content_fingerprint,
             });
             if was_truncated {
                 byte_truncated = true;
@@ -804,7 +843,7 @@ impl Tool for SampleLogTool {
         for line in &lines {
             self.0
                 .evidence_ranges
-                .record(&args.source_ref, line.line, line.line)
+                .record_fingerprint(&args.source_ref, line.line, line.content_fingerprint)
                 .map_err(AgentToolError::new)?;
         }
         checked_output(SampleLogOutput {
@@ -867,6 +906,9 @@ pub(crate) struct ExtractEventBlocksArgs {
     /// 最多返回的脱敏正文 UTF-8 字节数，范围 1～64 KiB。
     #[serde(default = "default_event_block_bytes")]
     pub max_bytes: usize,
+    /// 是否额外扫描完整来源并统计同指纹事件；默认关闭以保持快速取证。
+    #[serde(default)]
+    pub include_occurrences: bool,
 }
 
 /// 事件块中的一条日志行。
@@ -876,6 +918,9 @@ struct EventBlockLineOutput {
     line: usize,
     /// 已脱敏正文。
     text: String,
+    /// 脱敏和裁剪前的原始行内容指纹，不进入模型 JSON。
+    #[serde(skip)]
+    content_fingerprint: [u8; 32],
 }
 
 /// 多行事件块输出。
@@ -889,10 +934,12 @@ pub(crate) struct ExtractEventBlocksOutput {
     end_line: usize,
     /// 归一化首行的短 SHA-256 指纹。
     fingerprint: String,
-    /// 当前来源中相同归一化首行的出现次数。
-    occurrence_count: usize,
+    /// 当前来源中相同归一化首行的出现次数；未请求全量统计时为空。
+    occurrence_count: Option<usize>,
     /// 最多二十个同指纹事件起始行。
     occurrence_lines: Vec<usize>,
+    /// 是否已经完成同源全文件重复统计。
+    occurrence_statistics_included: bool,
     /// 实际返回的多行事件正文。
     lines: Vec<EventBlockLineOutput>,
     /// 是否因为行数或字节数截断事件块。
@@ -903,6 +950,40 @@ pub(crate) struct ExtractEventBlocksOutput {
     tail_truncated: bool,
     /// 去重口径说明。
     deduplication_basis: &'static str,
+}
+
+/// 事件块阻塞读取阶段的内部结果。
+struct ExtractedEventBlock {
+    /// 打开后可复用的日志读取器。
+    reader: LogReaderHandle,
+    /// 实际返回前尚未脱敏和裁剪的事件行。
+    block: Vec<crate::reader::log_file_reader::DisplayedLogLine>,
+    /// 真实事件首行生成的归一化签名。
+    signature: String,
+    /// 可选的精确重复统计。
+    occurrences: Option<EventOccurrenceSummary>,
+    /// 是否在本次调用中真实执行了全文件重复扫描。
+    occurrence_scan_performed: bool,
+    /// 事件首部是否因行数上限被省略。
+    head_truncated: bool,
+    /// 事件尾部是否因行数上限被省略。
+    tail_truncated: bool,
+    /// 打开、定位和统计阶段耗时。
+    timing: EventExtractionTiming,
+}
+
+/// 事件块工具的分阶段耗时与缓存命中状态，只进入安全轨迹而不发送给模型。
+struct EventExtractionTiming {
+    /// 日志读取器是否来自会话缓存。
+    reader_cache_hit: bool,
+    /// 打开、解压和索引阶段耗时。
+    open_duration: Duration,
+    /// 定位事件边界及读取目标正文耗时。
+    locate_duration: Duration,
+    /// 全文件重复统计或缓存查询耗时。
+    occurrence_duration: Duration,
+    /// 重复统计是否命中会话缓存。
+    occurrence_cache_hit: bool,
 }
 
 /// 提取异常堆栈等连续多行事件，并在同一来源内按归一化首行统计重复次数。
@@ -916,7 +997,7 @@ impl Tool for ExtractEventBlocksTool {
     type Output = ExtractEventBlocksOutput;
 
     fn description(&self) -> String {
-        "根据来源和行号提取完整异常堆栈或连续事件块，并统计相同归一化首行的出现次数。".to_string()
+        "根据来源和行号快速提取异常堆栈或连续事件块；默认不扫描全文件，只有 include_occurrences=true 时才统计同源重复次数。".to_string()
     }
 
     fn parameters(&self) -> Value {
@@ -936,29 +1017,56 @@ impl Tool for ExtractEventBlocksTool {
             .source(&args.source_ref)
             .ok_or_else(|| AgentToolError::new("source_ref 不在当前会话范围内"))?
             .clone();
-        let selected = vec![&source];
-        let scan_bytes = estimated_full_scan_bytes(&selected);
+        let cached_reader = self
+            .0
+            .log_reader_cache
+            .lock()
+            .map_err(|_| AgentToolError::new("日志读取器缓存状态已损坏"))?
+            .get(&args.source_ref);
+        let reader_cache_hit = cached_reader.is_some();
+        // 缓存未命中时打开日志本身需要完整解压或建立行索引；显式重复统计同样需要全量扫描。
+        let scan_bytes = if reader_cache_hit && !args.include_occurrences {
+            0
+        } else {
+            estimated_full_scan_bytes(&[&source])
+        };
         self.0
             .begin_tool(Self::NAME, scan_bytes)
             .map_err(AgentToolError::new)?;
         let max_lines = args.max_lines.clamp(1, 200);
         let max_bytes = args.max_bytes.clamp(1, MAX_TOOL_RAW_BYTES);
         let center = args.line - 1;
-        let scope = self.0.scope.clone();
+        let operation_context = self.0.clone();
+        let source_ref = args.source_ref.clone();
+        let include_occurrences = args.include_occurrences;
         let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let extracted = tokio::task::spawn_blocking(move || {
-            let handle = LogFileReader::open_with_cancel_flag(
-                OpenLogRequest {
-                    location: source.location.clone(),
-                    label: source.file_name.clone(),
-                    default_encoding: scope.default_encoding.clone(),
-                    archive_passwords: scope.archive_passwords.clone(),
-                },
-                cancel_flag.clone(),
-            )?;
+            let open_started = Instant::now();
+            let handle = match cached_reader {
+                Some(reader) => reader,
+                None => {
+                    let reader = LogFileReader::open_with_cancel_flag(
+                        OpenLogRequest {
+                            location: source.location.clone(),
+                            label: source.file_name.clone(),
+                            default_encoding: operation_context.scope.default_encoding.clone(),
+                            archive_passwords: operation_context.scope.archive_passwords.clone(),
+                        },
+                        cancel_flag.clone(),
+                    )?;
+                    operation_context
+                        .log_reader_cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("日志读取器缓存状态已损坏"))?
+                        .insert(source_ref.clone(), reader.clone());
+                    reader
+                }
+            };
+            let open_duration = open_started.elapsed();
             if center >= handle.line_count() {
                 anyhow::bail!("事件块中心行超过日志总行数");
             }
+            let locate_started = Instant::now();
             let event_start = find_event_start(&handle, center, &cancel_flag)?;
             let event_end = find_event_end(&handle, event_start, &cancel_flag)?;
             let selection = select_event_range(event_start, event_end, center, max_lines);
@@ -969,38 +1077,51 @@ impl Tool for ExtractEventBlocksTool {
                 .first()
                 .map(|line| normalize_event_signature(&line.text))
                 .unwrap_or_default();
-            let mut occurrence_count = 0_usize;
-            let mut occurrence_lines = Vec::new();
-            let mut start = 0_usize;
-            while start < handle.line_count() {
-                if cancel_flag.load(Ordering::Relaxed) {
-                    anyhow::bail!("事件块分析已取消");
-                }
-                let lines = handle.lines(start, ADVANCED_SCAN_BATCH_LINES)?;
-                if lines.is_empty() {
-                    break;
-                }
-                for line in &lines {
-                    if !is_event_continuation(&line.text)
-                        && normalize_event_signature(&line.text) == signature
-                    {
-                        occurrence_count = occurrence_count.saturating_add(1);
-                        if occurrence_lines.len() < 20 {
-                            occurrence_lines.push(line.line_number + 1);
-                        }
-                    }
-                }
-                start += lines.len();
-            }
-            anyhow::Ok((
-                handle.byte_len(),
+            let locate_duration = locate_started.elapsed();
+            let occurrence_started = Instant::now();
+            let cache_key = (source_ref.clone(), signature.clone());
+            let cached_occurrences = if include_occurrences {
+                operation_context
+                    .event_occurrence_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("事件重复统计缓存状态已损坏"))?
+                    .get(&cache_key)
+            } else {
+                None
+            };
+            let occurrence_cache_hit = cached_occurrences.is_some();
+            let mut occurrence_scan_performed = false;
+            let occurrences = if !include_occurrences {
+                None
+            } else if let Some(summary) = cached_occurrences {
+                Some(summary)
+            } else {
+                occurrence_scan_performed = true;
+                let summary = count_event_occurrences(&handle, &signature, &cancel_flag)?;
+                operation_context
+                    .event_occurrence_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("事件重复统计缓存状态已损坏"))?
+                    .insert(cache_key, summary.clone());
+                Some(summary)
+            };
+            let occurrence_duration = occurrence_started.elapsed();
+            anyhow::Ok(ExtractedEventBlock {
+                reader: handle,
                 block,
                 signature,
-                occurrence_count,
-                occurrence_lines,
-                selection.head_truncated,
-                selection.tail_truncated,
-            ))
+                occurrences,
+                occurrence_scan_performed,
+                head_truncated: selection.head_truncated,
+                tail_truncated: selection.tail_truncated,
+                timing: EventExtractionTiming {
+                    reader_cache_hit,
+                    open_duration,
+                    locate_duration,
+                    occurrence_duration,
+                    occurrence_cache_hit,
+                },
+            })
         })
         .await
         .map_err(|error| AgentToolError::new(format!("事件块提取任务异常结束：{error}")))?
@@ -1010,12 +1131,23 @@ impl Tool for ExtractEventBlocksTool {
                 redact_error_path(error.to_string())
             ))
         })?;
-        reconcile_tool_scan(&self.0, scan_bytes, extracted.0)?;
-        let expected_lines = extracted.1.len();
+        let actual_scan_bytes = if reader_cache_hit && !extracted.occurrence_scan_performed {
+            0
+        } else {
+            extracted.reader.byte_len()
+        };
+        reconcile_tool_scan(&self.0, scan_bytes, actual_scan_bytes)?;
+        self.0.trace(
+            crate::agent::session::AgentTraceKind::Tool,
+            "extract_event_blocks 执行阶段",
+            format_event_extraction_timing(&extracted.timing, include_occurrences),
+        );
+        let expected_lines = extracted.block.len();
         let mut raw_bytes = 0_usize;
         let mut byte_truncated = false;
         let mut lines = Vec::new();
-        for line in extracted.1 {
+        for line in extracted.block {
+            let content_fingerprint = AgentEvidenceStore::fingerprint_text(&line.text);
             let remaining = max_bytes.saturating_sub(raw_bytes);
             if remaining == 0 {
                 byte_truncated = true;
@@ -1031,6 +1163,7 @@ impl Tool for ExtractEventBlocksTool {
             lines.push(EventBlockLineOutput {
                 line: line.line_number + 1,
                 text,
+                content_fingerprint,
             });
             if was_truncated {
                 byte_truncated = true;
@@ -1042,17 +1175,23 @@ impl Tool for ExtractEventBlocksTool {
             .consume_raw_log_bytes(raw_bytes)
             .map_err(AgentToolError::new)?;
         self.0.publish_budget();
-        if let (Some(first), Some(last)) = (lines.first(), lines.last()) {
+        for line in &lines {
             self.0
                 .evidence_ranges
-                .record(&args.source_ref, first.line, last.line)
+                .record_fingerprint(&args.source_ref, line.line, line.content_fingerprint)
                 .map_err(AgentToolError::new)?;
         }
-        for line in &extracted.4 {
-            self.0
-                .evidence_ranges
-                .record(&args.source_ref, *line, *line)
-                .map_err(AgentToolError::new)?;
+        if let Some(occurrences) = &extracted.occurrences {
+            for (line, fingerprint) in occurrences
+                .occurrence_lines
+                .iter()
+                .zip(&occurrences.occurrence_fingerprints)
+            {
+                self.0
+                    .evidence_ranges
+                    .record_fingerprint(&args.source_ref, *line, *fingerprint)
+                    .map_err(AgentToolError::new)?;
+            }
         }
         let start_line = lines.first().map(|line| line.line).unwrap_or(args.line);
         let end_line = lines.last().map(|line| line.line).unwrap_or(args.line);
@@ -1060,15 +1199,114 @@ impl Tool for ExtractEventBlocksTool {
             source_ref: args.source_ref,
             start_line,
             end_line,
-            fingerprint: short_sha256(&extracted.2),
-            occurrence_count: extracted.3,
-            occurrence_lines: extracted.4,
-            truncated: extracted.5 || extracted.6 || byte_truncated || lines.len() < expected_lines,
-            head_truncated: extracted.5,
-            tail_truncated: extracted.6,
+            fingerprint: short_sha256(&extracted.signature),
+            occurrence_count: extracted
+                .occurrences
+                .as_ref()
+                .map(|summary| summary.occurrence_count),
+            occurrence_lines: extracted
+                .occurrences
+                .map(|summary| summary.occurrence_lines)
+                .unwrap_or_default(),
+            occurrence_statistics_included: include_occurrences,
+            truncated: extracted.head_truncated
+                || extracted.tail_truncated
+                || byte_truncated
+                || lines.len() < expected_lines,
+            head_truncated: extracted.head_truncated,
+            tail_truncated: extracted.tail_truncated,
             lines,
             deduplication_basis: "normalized_start_line",
         })
+    }
+}
+
+/// 扫描一个来源并统计与目标归一化签名相同的事件首行。
+///
+/// 参数说明：
+/// - `handle`：已经完成解压和索引的日志读取器；
+/// - `signature`：目标事件真实首行的归一化签名；
+/// - `cancel_flag`：会话取消桥接标记。
+///
+/// 返回值：精确出现次数和最多二十个事件首行位置。
+fn count_event_occurrences(
+    handle: &LogReaderHandle,
+    signature: &str,
+    cancel_flag: &AtomicBool,
+) -> anyhow::Result<EventOccurrenceSummary> {
+    let mut occurrence_count = 0_usize;
+    let mut occurrence_lines = Vec::new();
+    let mut occurrence_fingerprints = Vec::new();
+    let mut start = 0_usize;
+    while start < handle.line_count() {
+        if cancel_flag.load(Ordering::Relaxed) {
+            anyhow::bail!("事件块分析已取消");
+        }
+        let lines = handle.lines(start, ADVANCED_SCAN_BATCH_LINES)?;
+        if lines.is_empty() {
+            break;
+        }
+        for line in &lines {
+            if !is_event_continuation(&line.text)
+                && normalize_event_signature(&line.text) == signature
+            {
+                occurrence_count = occurrence_count.saturating_add(1);
+                if occurrence_lines.len() < 20 {
+                    occurrence_lines.push(line.line_number + 1);
+                    occurrence_fingerprints.push(AgentEvidenceStore::fingerprint_text(&line.text));
+                }
+            }
+        }
+        start += lines.len();
+    }
+    Ok(EventOccurrenceSummary {
+        occurrence_count,
+        occurrence_lines,
+        occurrence_fingerprints,
+    })
+}
+
+/// 把事件提取阶段耗时格式化为不包含路径和日志正文的安全轨迹。
+///
+/// 参数说明：
+/// - `timing`：阻塞任务采集的阶段耗时与缓存命中状态；
+/// - `include_occurrences`：调用方是否请求了全文件重复统计。
+///
+/// 返回值：适合分析瀑布流展示的一行中文摘要。
+fn format_event_extraction_timing(
+    timing: &EventExtractionTiming,
+    include_occurrences: bool,
+) -> String {
+    let open = if timing.reader_cache_hit {
+        "读取/索引：缓存命中".to_string()
+    } else {
+        format!(
+            "读取/解压/索引：{}",
+            format_phase_duration(timing.open_duration)
+        )
+    };
+    let occurrence = if !include_occurrences {
+        "重复统计：未请求".to_string()
+    } else if timing.occurrence_cache_hit {
+        "重复统计：缓存命中".to_string()
+    } else {
+        format!(
+            "重复统计：全量扫描 {}",
+            format_phase_duration(timing.occurrence_duration)
+        )
+    };
+    format!(
+        "{open}；事件定位：{}；{occurrence}",
+        format_phase_duration(timing.locate_duration)
+    )
+}
+
+/// 使用适合短阶段的毫秒精度格式化耗时，避免零毫秒造成误解。
+fn format_phase_duration(duration: Duration) -> String {
+    if duration.as_millis() == 0 {
+        "<1 ms".to_string()
+    } else {
+        format!("{} ms", duration.as_millis())
     }
 }
 
@@ -1207,6 +1445,9 @@ struct AggregateEvidenceOutput {
     source_ref: String,
     /// 1 基行号。
     line: usize,
+    /// 聚合时观察到的原始行内容指纹，不进入模型 JSON。
+    #[serde(skip)]
+    content_fingerprint: [u8; 32],
 }
 
 /// 一个时间桶的事件数量。
@@ -1348,18 +1589,18 @@ impl Tool for AggregateLogEventsTool {
         for signature in &signature_outputs {
             self.0
                 .evidence_ranges
-                .record(
+                .record_fingerprint(
                     &signature.first.source_ref,
                     signature.first.line,
-                    signature.first.line,
+                    signature.first.content_fingerprint,
                 )
                 .map_err(AgentToolError::new)?;
             self.0
                 .evidence_ranges
-                .record(
+                .record_fingerprint(
                     &signature.last.source_ref,
                     signature.last.line,
-                    signature.last.line,
+                    signature.last.content_fingerprint,
                 )
                 .map_err(AgentToolError::new)?;
         }
@@ -1580,6 +1821,7 @@ fn scan_aggregate_events(
                 let evidence = AggregateEvidenceOutput {
                     source_ref: source.source_ref.clone(),
                     line: line.line_number + 1,
+                    content_fingerprint: AgentEvidenceStore::fingerprint_text(&line.text),
                 };
                 let representative = allow_raw
                     .then(|| truncate_utf8_with_ellipsis(redact_sensitive_text(&line.text), 240));
@@ -1999,10 +2241,16 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::agent::report::{DiagnosticFinding, DiagnosticFindingStatus, EvidenceReference};
     use crate::agent::session::{
-        AgentBudget, AgentEvidenceStore, AgentOperationContext, LogProfileSnapshot,
-        SourceScopeSnapshot,
+        AgentAnalysisStageTracker, AgentBudget, AgentEvidenceStore, AgentOperationContext,
+        LogProfileSnapshot, SourceScopeSnapshot,
     };
+    use crate::agent::tools::{
+        ReadLogContextArgs, ReadLogContextTool, SubmitDiagnosticReportArgs,
+        SubmitDiagnosticReportTool,
+    };
+    use crate::config::paths::temporary_test_dir;
     use crate::config::{LoaderConfig, LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget};
     use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
@@ -2012,7 +2260,7 @@ mod tests {
         content: &str,
         allow_raw_log_content: bool,
     ) -> (Arc<AgentOperationContext>, TempDir, String) {
-        let directory = tempfile::tempdir().expect("应创建临时日志目录");
+        let directory = temporary_test_dir("advanced-tools");
         let path = directory.path().join("application.log");
         fs::write(&path, content).expect("应写入临时日志");
         let source_ref = "opaque-source".to_string();
@@ -2038,13 +2286,24 @@ mod tests {
         let context = Arc::new(AgentOperationContext {
             scope: Arc::new(scope),
             budget: Arc::new(AgentBudget::balanced()),
+            stage_tracker: Mutex::new(AgentAnalysisStageTracker::new(
+                0,
+                0,
+                "已扫描 1 个测试日志".to_string(),
+                "未匹配日志类型说明".to_string(),
+            )),
             cancellation: tokio_util::sync::CancellationToken::new(),
             event_sender,
             report: Mutex::new(None),
             artifacts: Mutex::new(HashMap::new()),
+            log_reader_cache: Mutex::new(Default::default()),
+            event_occurrence_cache: Mutex::new(Default::default()),
             evidence_ranges: AgentEvidenceStore::default(),
+            trusted_evidence_excerpts: Mutex::new(HashMap::new()),
             used_log_profiles: Mutex::new(BTreeSet::new()),
             question: "测试问题".to_string(),
+            accepted_user_messages: Mutex::new(Vec::new()),
+            is_independent_review: AtomicBool::new(false),
             pending_user_messages: Arc::new(AtomicUsize::new(0)),
         });
         (context, directory, source_ref)
@@ -2056,6 +2315,33 @@ mod tests {
             .enable_all()
             .build()
             .expect("应创建测试运行时")
+    }
+
+    /// 把测试上下文逐个推进到指定阶段，确保工具测试同样遵守生产状态机的固定顺序。
+    fn advance_test_stage(
+        context: &AgentOperationContext,
+        target: crate::agent::session::AgentAnalysisStage,
+    ) {
+        let current_index = context
+            .stage_tracker
+            .lock()
+            .expect("测试阶段状态不应损坏")
+            .snapshots()
+            .iter()
+            .position(|event| {
+                event.status == crate::agent::session::AgentAnalysisStageStatus::Running
+            })
+            .expect("测试上下文应存在运行阶段");
+        for stage in crate::agent::session::AgentAnalysisStage::ALL
+            .iter()
+            .copied()
+            .take(target.index() + 1)
+            .skip(current_index + 1)
+        {
+            context
+                .advance_analysis_stage(stage)
+                .expect("测试阶段应按顺序推进成功");
+        }
     }
 
     /// 验证均匀采样同时覆盖首尾并保持行号递增。
@@ -2125,6 +2411,10 @@ mod tests {
     #[test]
     fn sample_tool_returns_and_registers_real_lines() {
         let (context, _directory, source_ref) = test_context("first\nsecret=abc\nlast\n", true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::SearchAnomalies,
+        );
         let output = test_runtime()
             .block_on(SampleLogTool(context.clone()).call(SampleLogArgs {
                 source_ref: source_ref.clone(),
@@ -2140,11 +2430,328 @@ mod tests {
         assert!(context.evidence_ranges.contains(&source_ref, 2, 2).unwrap());
     }
 
+    /// 验证报告不能仅凭登记过的伪造范围通过，提交阶段必须在本地重新读到完整非空行。
+    #[test]
+    fn report_submission_rejects_evidence_that_cannot_be_reread() {
+        let (context, _directory, source_ref) = test_context("first\nsecond\n", true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
+        );
+        context
+            .evidence_ranges
+            .record_text(&source_ref, 10, "not-present")
+            .expect("测试应登记模型已观察范围");
+        let error = test_runtime()
+            .block_on(
+                SubmitDiagnosticReportTool(context).call(SubmitDiagnosticReportArgs {
+                    summary: "发现异常".to_string(),
+                    findings: vec![DiagnosticFinding {
+                        title: "测试问题".to_string(),
+                        severity: "medium".to_string(),
+                        status: DiagnosticFindingStatus::Confirmed,
+                        analysis: "引用行应真实存在".to_string(),
+                        impact: "测试影响".to_string(),
+                        recommendation: "修正证据引用".to_string(),
+                        confidence: 0.9,
+                        evidence: vec![EvidenceReference {
+                            source_ref,
+                            start_line: 10,
+                            end_line: 10,
+                            rationale: "该行用于确认问题".to_string(),
+                            display_excerpt: None,
+                        }],
+                        verification_steps: Vec::new(),
+                    }],
+                    used_log_profiles: Vec::new(),
+                    limitations: Vec::new(),
+                }),
+            )
+            .expect_err("超出本地真实行数的证据必须被拒绝");
+
+        assert!(error.to_string().contains("证据本地校验失败"));
+    }
+
+    /// 验证真实存在且已经由工具登记的非空行可以通过强制本地复读并进入报告槽。
+    #[test]
+    fn report_submission_accepts_locally_reread_evidence() {
+        let (context, _directory, source_ref) =
+            test_context("first\npassword=internal-secret\n", true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
+        );
+        context
+            .evidence_ranges
+            .record_text(&source_ref, 2, "password=internal-secret")
+            .expect("测试应登记真实证据范围");
+        let _output = test_runtime()
+            .block_on(SubmitDiagnosticReportTool(context.clone()).call(
+                SubmitDiagnosticReportArgs {
+                    summary: "第二行确认问题".to_string(),
+                    findings: vec![DiagnosticFinding {
+                        title: "有效证据".to_string(),
+                        severity: "low".to_string(),
+                        status: DiagnosticFindingStatus::Confirmed,
+                        analysis: "第二行可在本地复读".to_string(),
+                        impact: "测试影响".to_string(),
+                        recommendation: "保留引用".to_string(),
+                        confidence: 0.8,
+                        evidence: vec![EvidenceReference {
+                            source_ref,
+                            start_line: 2,
+                            end_line: 2,
+                            rationale: "第二行直接支持结论".to_string(),
+                            display_excerpt: None,
+                        }],
+                        verification_steps: Vec::new(),
+                    }],
+                    used_log_profiles: Vec::new(),
+                    limitations: Vec::new(),
+                },
+            ))
+            .expect("真实证据应通过提交校验");
+
+        let report_guard = context.report.lock().unwrap();
+        let report = report_guard.as_ref().expect("报告应进入共享槽");
+        let excerpt = report.findings[0].evidence[0]
+            .display_excerpt
+            .as_ref()
+            .expect("本地复读结果应直接生成界面证据片段");
+        assert_eq!(excerpt.lines[0].line_number, 2);
+        assert_eq!(excerpt.lines[0].text, "[REDACTED]");
+    }
+
+    /// 验证独立复核继承主分析的读取器和可信证据缓存，不重新扫描已经移除的底层日志。
+    #[test]
+    fn independent_review_reuses_trusted_log_and_evidence_caches() {
+        let (context, directory, source_ref) =
+            test_context("first\nERROR trusted failure\nlast\n", true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ExtractContext,
+        );
+        test_runtime()
+            .block_on(
+                ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
+                    source_ref: source_ref.clone(),
+                    line: 2,
+                    before: 0,
+                    after: 0,
+                }),
+            )
+            .expect("主分析应读取证据并填充会话缓存");
+
+        let report_args = || SubmitDiagnosticReportArgs {
+            summary: "第二行确认可信异常".to_string(),
+            findings: vec![DiagnosticFinding {
+                title: "可信异常".to_string(),
+                severity: "medium".to_string(),
+                status: DiagnosticFindingStatus::Confirmed,
+                analysis: "第二行直接记录失败".to_string(),
+                impact: "测试影响".to_string(),
+                recommendation: "检查失败原因".to_string(),
+                confidence: 0.9,
+                evidence: vec![EvidenceReference {
+                    source_ref: source_ref.clone(),
+                    start_line: 2,
+                    end_line: 2,
+                    rationale: "错误行直接支持结论".to_string(),
+                    display_excerpt: None,
+                }],
+                verification_steps: Vec::new(),
+            }],
+            used_log_profiles: Vec::new(),
+            limitations: Vec::new(),
+        };
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
+        );
+        test_runtime()
+            .block_on(SubmitDiagnosticReportTool(context.clone()).call(report_args()))
+            .expect("主分析报告应完成强制证据校验");
+        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+        assert_eq!(context.trusted_evidence_excerpts.lock().unwrap().len(), 1);
+        let scan_bytes_before_review = context.budget.snapshot().local_scan_bytes;
+
+        // 移除底层文件后，复核只能依赖会话内已验证缓存；任何重新打开都会使测试失败。
+        fs::remove_file(directory.path().join("application.log"))
+            .expect("应移除底层日志以验证独立复核不会重扫");
+        context.is_independent_review.store(true, Ordering::Release);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::IndependentReview,
+        );
+        test_runtime()
+            .block_on(
+                ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
+                    source_ref: source_ref.clone(),
+                    line: 2,
+                    before: 0,
+                    after: 0,
+                }),
+            )
+            .expect("独立复核应继续读取主分析留下的会话缓存");
+        test_runtime()
+            .block_on(SubmitDiagnosticReportTool(context.clone()).call(report_args()))
+            .expect("独立复核应直接复用主分析已经校验的精确证据");
+
+        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+        assert_eq!(
+            context.budget.snapshot().local_scan_bytes,
+            scan_bytes_before_review,
+            "独立复核期间不能新增本地日志扫描量"
+        );
+        let report_guard = context.report.lock().unwrap();
+        assert!(
+            report_guard.as_ref().unwrap().findings[0].evidence[0]
+                .display_excerpt
+                .is_some(),
+            "复核报告应继承主分析缓存的脱敏证据片段"
+        );
+    }
+
+    /// 验证独立复核无法绕过可信缓存重新扫描未缓存来源。
+    #[test]
+    fn independent_review_rejects_uncached_log_scan() {
+        let (context, _directory, source_ref) = test_context("INFO ready\n", true);
+        context.is_independent_review.store(true, Ordering::Release);
+
+        let error = test_runtime()
+            .block_on(ReadLogContextTool(context).call(ReadLogContextArgs {
+                source_ref,
+                line: 1,
+                before: 0,
+                after: 0,
+            }))
+            .expect_err("复核不应重新打开未进入主分析缓存的日志");
+
+        assert!(error.to_string().contains("不允许重新扫描日志"));
+    }
+
+    /// 验证报告提交不会用旧读取器缓存校验已经轮转或截断的日志。
+    #[test]
+    fn report_submission_reopens_source_after_log_truncation() {
+        let (context, directory, source_ref) = test_context("first\nsecond\n", true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ExtractContext,
+        );
+        test_runtime()
+            .block_on(
+                ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
+                    source_ref: source_ref.clone(),
+                    line: 2,
+                    before: 0,
+                    after: 0,
+                }),
+            )
+            .expect("首次读取应登记证据并填充会话缓存");
+        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+
+        // 模拟报告提交前发生日志轮转：旧缓存仍有第二行，而当前来源只剩一行。
+        fs::write(directory.path().join("application.log"), "replacement\n")
+            .expect("应截断并替换测试日志");
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
+        );
+        let error = test_runtime()
+            .block_on(
+                SubmitDiagnosticReportTool(context).call(SubmitDiagnosticReportArgs {
+                    summary: "旧第二行不能继续作为证据".to_string(),
+                    findings: vec![DiagnosticFinding {
+                        title: "轮转证据".to_string(),
+                        severity: "medium".to_string(),
+                        status: DiagnosticFindingStatus::Confirmed,
+                        analysis: "校验必须读取当前来源".to_string(),
+                        impact: "旧内容可能导致错误结论".to_string(),
+                        recommendation: "重新采集轮转后的证据".to_string(),
+                        confidence: 0.9,
+                        evidence: vec![EvidenceReference {
+                            source_ref,
+                            start_line: 2,
+                            end_line: 2,
+                            rationale: "此前观察到的第二行".to_string(),
+                            display_excerpt: None,
+                        }],
+                        verification_steps: Vec::new(),
+                    }],
+                    used_log_profiles: Vec::new(),
+                    limitations: Vec::new(),
+                }),
+            )
+            .expect_err("来源截断后旧缓存中的第二行必须失效");
+
+        assert!(error.to_string().contains("证据引用超出来源当前总行数"));
+    }
+
+    /// 验证日志保持相同行数但正文被覆盖时，报告引用会因观察指纹不一致而失效。
+    #[test]
+    fn report_submission_rejects_same_line_count_content_replacement() {
+        let (context, directory, source_ref) = test_context("first\nsecond\n", true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ExtractContext,
+        );
+        test_runtime()
+            .block_on(
+                ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
+                    source_ref: source_ref.clone(),
+                    line: 2,
+                    before: 0,
+                    after: 0,
+                }),
+            )
+            .expect("首次读取应登记第二行的原始内容指纹");
+
+        // 替换文本长度和行数都不变，确保测试只依赖内容指纹而非大小或行号边界。
+        fs::write(directory.path().join("application.log"), "first\nchange\n")
+            .expect("应覆盖测试日志正文");
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
+        );
+        let error = test_runtime()
+            .block_on(
+                SubmitDiagnosticReportTool(context).call(SubmitDiagnosticReportArgs {
+                    summary: "旧第二行不能继续作为证据".to_string(),
+                    findings: vec![DiagnosticFinding {
+                        title: "覆盖证据".to_string(),
+                        severity: "medium".to_string(),
+                        status: DiagnosticFindingStatus::Confirmed,
+                        analysis: "校验必须比较当前正文与观察指纹".to_string(),
+                        impact: "新内容可能推翻原结论".to_string(),
+                        recommendation: "重新读取并分析覆盖后的日志".to_string(),
+                        confidence: 0.9,
+                        evidence: vec![EvidenceReference {
+                            source_ref,
+                            start_line: 2,
+                            end_line: 2,
+                            rationale: "此前观察到的第二行".to_string(),
+                            display_excerpt: None,
+                        }],
+                        verification_steps: Vec::new(),
+                    }],
+                    used_log_profiles: Vec::new(),
+                    limitations: Vec::new(),
+                }),
+            )
+            .expect_err("相同行数的新正文不能通过旧证据指纹校验");
+
+        assert!(error.to_string().contains("证据内容与模型观察时不一致"));
+    }
+
     /// 验证批量搜索一次返回每个模式的独立计数和代表性证据。
     #[test]
     fn batch_search_reports_each_pattern_from_one_scan() {
         let (context, _directory, source_ref) =
             test_context("INFO start\nERROR timeout\nWARN retry\nERROR retry\n", true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::SearchAnomalies,
+        );
         let output = test_runtime()
             .block_on(SearchLogsBatchTool(context).call(SearchLogsBatchArgs {
                 patterns: vec![
@@ -2185,15 +2792,19 @@ mod tests {
         assert!(error.to_string().contains("broken"));
     }
 
-    /// 验证合法的最大批量搜索在原文预算耗尽时返回计数和部分命中，而不是整体失败。
+    /// 验证合法的最大批量搜索达到单工具原文边界时返回计数和部分命中，而不是整体失败。
     #[test]
-    fn batch_search_returns_partial_results_at_raw_budget() {
+    fn batch_search_returns_partial_results_at_tool_raw_boundary() {
         let keywords = (0..20)
             .map(|index| format!("PATTERN_{index}"))
             .collect::<Vec<_>>();
         let long_line = format!("{} {}\n", keywords.join(" "), "x".repeat(5000));
         let content = long_line.repeat(20);
         let (context, _directory, source_ref) = test_context(&content, true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::SearchAnomalies,
+        );
         let output = test_runtime()
             .block_on(
                 SearchLogsBatchTool(context).call(SearchLogsBatchArgs {
@@ -2211,7 +2822,7 @@ mod tests {
                     max_results_per_pattern: 20,
                 }),
             )
-            .expect("达到原文预算后仍应返回部分批量结果");
+            .expect("达到单工具原文边界后仍应返回部分批量结果");
 
         assert!(
             output
@@ -2248,6 +2859,10 @@ mod tests {
             "ERROR request 1 failed\n    at example.Service.run(Service.java:1)\nINFO retry\nERROR request 2 failed\n    at example.Service.run(Service.java:1)\n",
             true,
         );
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ExtractContext,
+        );
         let output = test_runtime()
             .block_on(
                 ExtractEventBlocksTool(context.clone()).call(ExtractEventBlocksArgs {
@@ -2255,14 +2870,17 @@ mod tests {
                     line: 2,
                     max_lines: 20,
                     max_bytes: 4096,
+                    include_occurrences: true,
                 }),
             )
             .expect("事件块提取应成功");
 
         assert_eq!(output.start_line, 1);
         assert_eq!(output.end_line, 2);
-        assert_eq!(output.occurrence_count, 2);
+        assert_eq!(output.occurrence_count, Some(2));
         assert_eq!(output.occurrence_lines, vec![1, 4]);
+        assert!(output.occurrence_statistics_included);
+        assert_eq!(context.event_occurrence_cache.lock().unwrap().len(), 1);
         assert!(context.evidence_ranges.contains(&source_ref, 1, 2).unwrap());
     }
 
@@ -2275,6 +2893,10 @@ mod tests {
         }
         content.push_str("INFO recovered\n");
         let (context, _directory, source_ref) = test_context(&content, true);
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ExtractContext,
+        );
         let output = test_runtime()
             .block_on(
                 ExtractEventBlocksTool(context).call(ExtractEventBlocksArgs {
@@ -2282,6 +2904,7 @@ mod tests {
                     line: 401,
                     max_lines: 20,
                     max_bytes: 64 * 1024,
+                    include_occurrences: false,
                 }),
             )
             .expect("超长事件块提取应成功");
@@ -2291,8 +2914,52 @@ mod tests {
         assert!(output.truncated);
         assert!(output.head_truncated);
         assert!(output.tail_truncated);
-        assert_eq!(output.occurrence_count, 1);
-        assert_eq!(output.occurrence_lines, vec![1]);
+        assert_eq!(output.occurrence_count, None);
+        assert!(output.occurrence_lines.is_empty());
+        assert!(!output.occurrence_statistics_included);
+    }
+
+    /// 验证上下文读取和事件提取共享会话读取器，后续工具无需重新打开和索引。
+    #[test]
+    fn event_block_tool_reuses_reader_cached_by_context_tool() {
+        let (context, directory, source_ref) = test_context(
+            "ERROR startup failed\n    at example.Main.run(Main.java:1)\nINFO stopped\n",
+            true,
+        );
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::ExtractContext,
+        );
+        test_runtime()
+            .block_on(
+                ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
+                    source_ref: source_ref.clone(),
+                    line: 2,
+                    before: 1,
+                    after: 1,
+                }),
+            )
+            .expect("上下文工具首次读取应成功");
+        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+        assert!(context.event_occurrence_cache.lock().unwrap().is_empty());
+        std::fs::remove_file(directory.path().join("application.log"))
+            .expect("应移除底层日志以验证缓存复用");
+
+        let output = test_runtime()
+            .block_on(
+                ExtractEventBlocksTool(context).call(ExtractEventBlocksArgs {
+                    source_ref,
+                    line: 2,
+                    max_lines: 20,
+                    max_bytes: 4096,
+                    include_occurrences: false,
+                }),
+            )
+            .expect("缓存命中后不应重新访问已移除的来源文件");
+
+        assert_eq!(output.start_line, 1);
+        assert_eq!(output.end_line, 2);
+        assert_eq!(output.occurrence_count, None);
     }
 
     /// 验证常见时间戳和级别能够生成稳定五分钟桶。
@@ -2312,6 +2979,10 @@ mod tests {
         let (context, _directory, source_ref) = test_context(
             "2026-07-16 12:01:00 ERROR request 1 failed\n2026-07-16 12:02:00 ERROR request 2 failed\n",
             false,
+        );
+        advance_test_stage(
+            &context,
+            crate::agent::session::AgentAnalysisStage::BuildTimeline,
         );
         let output = test_runtime()
             .block_on(
@@ -2345,6 +3016,7 @@ mod tests {
                 AggregateEvidenceOutput {
                     source_ref: "source".to_string(),
                     line: index + 1,
+                    content_fingerprint: AgentEvidenceStore::fingerprint_text(signature),
                 },
                 None,
             );

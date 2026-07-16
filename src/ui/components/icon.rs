@@ -44,6 +44,8 @@ pub(crate) enum ArgusIcon {
     Minus,
     /// 关闭标签或弹窗。
     Close,
+    /// 停止正在执行的任务。
+    Stop,
     /// Windows 主窗口最大化。
     WindowMaximize,
     /// Windows 主窗口从最大化状态还原。
@@ -133,6 +135,7 @@ impl ArgusIcon {
             Self::Plus,
             Self::Minus,
             Self::Close,
+            Self::Stop,
             Self::WindowMaximize,
             Self::WindowRestore,
             Self::Layout,
@@ -194,6 +197,7 @@ impl ArgusIcon {
             Self::Plus => "icons/plus.svg",
             Self::Minus => "icons/minus.svg",
             Self::Close => "icons/close.svg",
+            Self::Stop => "icons/stop.svg",
             Self::WindowMaximize => "icons/window-maximize.svg",
             Self::WindowRestore => "icons/window-restore.svg",
             Self::Layout => "icons/layout.svg",
@@ -272,6 +276,7 @@ impl ArgusIcon {
             Self::Plus => icondata::LuPlus,
             Self::Minus => icondata::LuMinus,
             Self::Close => icondata::LuX,
+            Self::Stop => icondata::LuSquare,
             Self::WindowMaximize => icondata::LuSquare,
             Self::WindowRestore => icondata::LuCopy,
             Self::Layout => icondata::LuPanelLeft,

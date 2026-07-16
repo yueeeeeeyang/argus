@@ -203,6 +203,8 @@ impl ArgusApp {
             scope,
             warnings,
             match_summaries,
+            source_scan_elapsed_seconds,
+            profile_elapsed_seconds,
         } = preparation;
         // 回填与生成快照使用同一注册表副本，确保报告中的内部来源 ID 可以继续导航到主窗口。
         self.source_child_load_generations.clear();
@@ -216,6 +218,8 @@ impl ArgusApp {
             scope,
             match_summaries,
             warnings.len(),
+            source_scan_elapsed_seconds,
+            profile_elapsed_seconds,
             cx,
         ) {
             self.finish_ai_agent_preparing_with_error(error, cx);
@@ -231,6 +235,8 @@ impl ArgusApp {
         scope: SourceScopeSnapshot,
         match_summaries: Vec<AgentLogProfileMatchSummary>,
         warning_count: usize,
+        source_scan_elapsed_seconds: u64,
+        profile_elapsed_seconds: u64,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let context_window_tokens = model.context_window_tokens;
@@ -320,6 +326,8 @@ impl ArgusApp {
             event_sender,
             pending_user_messages,
             user_message_gate,
+            source_scan_elapsed_seconds,
+            profile_elapsed_seconds,
         }));
         Ok(())
     }

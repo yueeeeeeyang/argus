@@ -1,6 +1,6 @@
 //! 文件职责：维护自定义日志来源选择器的应用状态与业务动作。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-07-14
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：替代系统文件选择器，提供跨平台目录浏览、多选和确认加载流程。
 
@@ -736,21 +736,12 @@ fn compare_entry_modified(
 mod tests {
     use super::*;
     use crate::config::ConfigManager;
-    use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::config::paths::isolated_test_dir;
     use std::time::{Duration, UNIX_EPOCH};
-
-    /// 测试配置路径计数器，避免污染真实用户配置。
-    static NEXT_TEST_CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
 
     /// 创建仅用于选择器状态测试的应用。
     fn test_app() -> ArgusApp {
-        let id = NEXT_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed);
-        let config_dir = std::env::temp_dir().join(format!(
-            "argus-source-picker-app-test-{}-{id}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&config_dir);
+        let config_dir = isolated_test_dir("source-picker");
         ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
     }
 

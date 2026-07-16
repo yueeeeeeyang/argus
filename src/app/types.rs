@@ -1,6 +1,6 @@
 //! 文件职责：提取应用通用类型定义。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：定义工作区、设置分类、标签页、文本输入目标和占位数据等跨功能域共享类型。
 
@@ -32,6 +32,8 @@ pub(crate) enum SettingsSection {
     AiModel,
     /// 智能分析分组下的日志类型说明。
     AiLogProfiles,
+    /// 智能分析分组下的默认系统提示词。
+    AiSystemPrompt,
     /// 日志显示设置，包含字号和 Jstack 过滤规则。
     LogDisplay,
     /// 日志搜索设置，包含快搜关键字。
@@ -48,6 +50,7 @@ impl SettingsSection {
             Self::Appearance => "外观",
             Self::AiModel => "模型配置",
             Self::AiLogProfiles => "日志类型说明",
+            Self::AiSystemPrompt => "系统提示词",
             Self::LogDisplay => "日志显示",
             Self::LogSearch => "日志搜索",
             Self::LogLoading => "日志加载",

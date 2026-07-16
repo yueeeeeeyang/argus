@@ -17,11 +17,12 @@ pub(crate) mod tools;
 pub(crate) use credential::{load_api_key, save_api_key};
 pub(crate) use model_gateway::probe_model_capabilities;
 pub(crate) use orchestrator::{AgentRunRequest, run_agent_session};
-pub(crate) use report::DiagnosticReport;
+pub(crate) use report::{DiagnosticFinding, DiagnosticReport};
 pub(crate) use runtime::agent_runtime;
 pub(crate) use session::{
-    AgentBudgetSnapshot, AgentEvent, AgentSessionStatus, AgentStreamKind, AgentTraceEntry,
-    AgentTraceKind, AgentUserMessage, AgentUserMessageStatus, SourceScopeSnapshot,
+    AgentAnalysisStage, AgentAnalysisStageEvent, AgentAnalysisStageStatus, AgentBudgetSnapshot,
+    AgentEvent, AgentSessionStatus, AgentStreamKind, AgentTraceEntry, AgentTraceKind,
+    AgentUserMessage, AgentUserMessageStatus, SourceScopeSnapshot,
 };
 pub(crate) use source_scan::{
     AgentLogProfileMatchSummary, AgentSourcePreparation, prepare_agent_source_scope,

@@ -1,6 +1,6 @@
 //! 文件职责：维护压缩格式适配器注册表。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：统一压缩包格式识别、能力声明查询、条目枚举、条目读取和错误上下文包装。
 
@@ -368,16 +368,14 @@ fn requires_name_confirmation(format: ArchiveFormat) -> bool {
 #[cfg(test)]
 mod tests {
     use super::ArchiveAdapterRegistry;
+    use crate::config::paths::isolated_test_file_path;
     use crate::loader::archive::detector::ArchiveFormat;
     use std::fs;
     use std::path::PathBuf;
 
     /// 构造压缩格式注册表测试文件路径，避免依赖真实用户目录。
     fn test_archive_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "argus-archive-registry-{}-{name}",
-            std::process::id()
-        ))
+        isolated_test_file_path("archive-registry", name)
     }
 
     /// 验证注册表可以通过扩展名识别所有内置格式。

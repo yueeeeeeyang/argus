@@ -1,6 +1,6 @@
 //! 文件职责：维护日志搜索窗口、后台搜索任务、来源树多选和结果跳转逻辑。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-25
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：把真实日志搜索能力接入 ArgusApp，同时保持搜索 UI 状态与日志读取状态解耦。
 
@@ -2670,10 +2670,11 @@ fn reset_log_search_input_state(input: &mut TextInputState) {
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::app::{ArgusTab, LogTextPosition, LogTextSelection, SEARCH_RESULT_PANEL_HEIGHT_MAX};
+    use crate::config::paths::{isolated_test_dir, isolated_test_file_path};
     use crate::config::{ConfigManager, LoaderConfig, SEARCH_RECENT_KEYWORDS_MAX};
     use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{
@@ -2681,15 +2682,9 @@ mod tests {
     };
     use crate::reader::log_file_reader::{LogFileReader, LogOpenState, OpenLogRequest};
 
-    /// 测试配置路径计数器，避免搜索状态测试污染真实用户配置。
-    static NEXT_TEST_CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
-
     /// 构造隔离配置路径的应用状态。
     fn test_app() -> ArgusApp {
-        let id = NEXT_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed);
-        let config_dir =
-            std::env::temp_dir().join(format!("argus-log-search-test-{}-{id}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&config_dir);
+        let config_dir = isolated_test_dir("log-search");
         ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
     }
 
@@ -2828,11 +2823,7 @@ mod tests {
     /// 验证目录搜索准备会在后台来源树快照中补齐未展开子目录，避免漏搜懒加载节点。
     #[test]
     fn directory_search_preparation_loads_unloaded_children_before_collecting_targets() {
-        let root = std::env::temp_dir().join(format!(
-            "argus-search-lazy-dir-{}-{}",
-            std::process::id(),
-            NEXT_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root = isolated_test_dir("log-search-lazy-directory");
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("lazy.log"), "INFO lazy child").unwrap();
@@ -3002,11 +2993,7 @@ mod tests {
     fn selected_log_text_prefills_search_keyword() {
         let (_registry, _root_id, first_id, _second_id) = registry_with_directory_logs();
         let mut app = test_app();
-        let log_path = std::env::temp_dir().join(format!(
-            "argus-selected-keyword-{}-{}.log",
-            std::process::id(),
-            NEXT_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed)
-        ));
+        let log_path = isolated_test_file_path("log-search-selected-keyword", "selected.log");
         std::fs::write(&log_path, "first ERROR line\nsecond line").unwrap();
         let handle = LogFileReader::open(OpenLogRequest {
             location: SourceLocation::LocalPath(log_path.clone()),

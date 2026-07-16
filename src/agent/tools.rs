@@ -2,9 +2,9 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：提供来源枚举、类型识别、分析说明、日志搜索、上下文读取、分析器、制品读取和报告提交。
+//! 主要功能：提供来源枚举、类型识别、日志搜索、上下文读取、分析器、制品读取和带本地证据复读的报告提交。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::sync::{
     Arc, OnceLock,
@@ -18,17 +18,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agent::report::{
-    DiagnosticFinding, DiagnosticReport, UsedLogProfileSummary, question_sha256,
+    DiagnosticFinding, DiagnosticReport, EvidenceDisplayExcerpt, EvidenceDisplayLine,
+    UsedLogProfileSummary, question_sha256,
 };
 use crate::agent::session::{
-    AgentOperationContext, AgentTraceKind, MAX_TOOL_RAW_BYTES, MAX_TOOL_RESULT_BYTES,
-    SnapshotSource, truncate_utf8_with_ellipsis,
+    AgentAnalysisStage, AgentEvidenceStore, AgentOperationContext, AgentTraceKind,
+    MAX_TOOL_RAW_BYTES, MAX_TOOL_RESULT_BYTES, SnapshotSource, truncate_utf8_with_ellipsis,
 };
 use crate::analysis::jstack::{JstackAnalysisTarget, analyze_jstack_targets_with_cancel};
 use crate::analysis::runtime::{
     RuntimeAnalysisTarget, RuntimeAnalysisTargetKind, analyze_runtime_targets_with_cancel,
 };
-use crate::reader::log_file_reader::{LogFileReader, OpenLogRequest};
+use crate::reader::log_file_reader::{DisplayedLogLine, LogFileReader, OpenLogRequest};
 use crate::search::search_engine::{SearchEngine, SearchQuery, SearchRequest, SearchTarget};
 
 /// 结构化工具统一错误；错误文本不得包含绝对路径、凭据或大段日志原文。
@@ -46,6 +47,16 @@ struct BlockingCancellationGuard {
 
 /// 来源元数据缺失时为全量扫描预留的保守字节数；执行后会再按读取器真实值核算。
 const UNKNOWN_SOURCE_SCAN_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;
+/// 最终报告最多附带的内存证据片段数量，避免大量引用占用无界界面内存。
+const MAX_REPORT_EVIDENCE_EXCERPTS: usize = 24;
+/// 单条报告证据最多展示的日志行数。
+const MAX_REPORT_EVIDENCE_LINES: usize = 12;
+/// 单行报告证据经过脱敏后最多保留的 UTF-8 字节数。
+const MAX_REPORT_EVIDENCE_LINE_BYTES: usize = 2 * 1024;
+/// 当前报告全部临时证据片段的累计 UTF-8 字节上限。
+const MAX_REPORT_EVIDENCE_BYTES: usize = 64 * 1024;
+/// 一条报告证据在会话范围内的稳定定位键。
+type EvidenceRangeKey = (String, usize, usize);
 
 impl Drop for BlockingCancellationGuard {
     fn drop(&mut self) {
@@ -64,6 +75,63 @@ impl AgentToolError {
 /// 空工具参数，仍使用对象 Schema 保持 OpenAI 兼容实现稳定。
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct EmptyArgs {}
+
+/// 模型显式声明即将进入的固定分析阶段。
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SetAnalysisStageArgs {
+    /// 十二阶段之一；状态只允许按固定顺序向后推进。
+    pub stage: AgentAnalysisStage,
+    /// 刚完成阶段的一句话结果摘要；首次声明当前阶段时可以为空。
+    #[serde(default)]
+    pub completed_stage_summary: Option<String>,
+}
+
+/// 阶段声明工具返回的轻量确认，不包含任何分析过程或日志内容。
+#[derive(Debug, Serialize)]
+pub(crate) struct SetAnalysisStageOutput {
+    /// 已接受的阶段标题。
+    stage_title: &'static str,
+}
+
+/// 更新右侧阶段时间线卡片的结构化工具，不影响证据、预算或日志读取状态。
+#[derive(Clone)]
+pub(crate) struct SetAnalysisStageTool(pub Arc<AgentOperationContext>);
+
+impl Tool for SetAnalysisStageTool {
+    const NAME: &'static str = "set_analysis_stage";
+    type Error = AgentToolError;
+    type Args = SetAnalysisStageArgs;
+    type Output = SetAnalysisStageOutput;
+
+    fn description(&self) -> String {
+        "进入固定分析流程的新阶段前调用；completed_stage_summary 用一句话概括刚完成阶段的结果。只更新 Argus 右侧阶段时间线，不提交思考过程、工具参数或日志原文，阶段必须单调向后推进。"
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        schema_value::<Self::Args>()
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.0
+            .begin_tool(Self::NAME, 0)
+            .map_err(AgentToolError::new)?;
+        let review_phase = self.0.is_independent_review.load(Ordering::Acquire);
+        if (!review_phase && args.stage.index() > AgentAnalysisStage::ValidateEvidence.index())
+            || (review_phase && args.stage.index() < AgentAnalysisStage::IndependentReview.index())
+        {
+            return Err(AgentToolError::new(
+                "当前模型上下文不能进入另一个分析阶段分区",
+            ));
+        }
+        self.0
+            .advance_analysis_stage_with_summary(args.stage, args.completed_stage_summary)
+            .map_err(AgentToolError::new)?;
+        checked_output(SetAnalysisStageOutput {
+            stage_title: args.stage.title(),
+        })
+    }
+}
 
 /// 来源列表分页参数。
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -361,6 +429,9 @@ struct SearchHitOutput {
     matched_keywords: Vec<String>,
     /// 未授权原文时为空；授权后也会进行敏感值遮蔽。
     text: Option<String>,
+    /// 脱敏和裁剪前的原始行内容指纹，只用于本地证据一致性校验，不进入模型 JSON。
+    #[serde(skip)]
+    content_fingerprint: [u8; 32],
 }
 
 /// 搜索工具输出。
@@ -459,6 +530,7 @@ impl Tool for SearchLogsTool {
         let hits = results
             .into_iter()
             .map(|result| {
+                let content_fingerprint = AgentEvidenceStore::fingerprint_text(&result.line_text);
                 let text = allow_raw.then(|| redact_sensitive_text(&result.line_text));
                 raw_bytes = raw_bytes.saturating_add(text.as_ref().map_or(0, String::len));
                 SearchHitOutput {
@@ -470,6 +542,7 @@ impl Tool for SearchLogsTool {
                     line: result.line_number + 1,
                     matched_keywords: result.matched_keywords,
                     text,
+                    content_fingerprint,
                 }
             })
             .collect::<Vec<_>>();
@@ -488,7 +561,7 @@ impl Tool for SearchLogsTool {
         for hit in &hits {
             self.0
                 .evidence_ranges
-                .record(&hit.source_ref, hit.line, hit.line)
+                .record_fingerprint(&hit.source_ref, hit.line, hit.content_fingerprint)
                 .map_err(AgentToolError::new)?;
         }
         checked_output(SearchLogsOutput {
@@ -522,6 +595,9 @@ pub(crate) struct ReadLogContextArgs {
 struct ContextLineOutput {
     line: usize,
     text: String,
+    /// 脱敏前的原始行内容指纹，只用于本地复读验证。
+    #[serde(skip)]
+    content_fingerprint: [u8; 32],
 }
 
 /// 日志上下文工具输出。
@@ -567,7 +643,18 @@ impl Tool for ReadLogContextTool {
             .source(&args.source_ref)
             .ok_or_else(|| AgentToolError::new("source_ref 不在当前会话范围内"))?
             .clone();
-        let scan_bytes = source.size.unwrap_or(UNKNOWN_SOURCE_SCAN_RESERVATION_BYTES);
+        let cached_reader = self
+            .0
+            .log_reader_cache
+            .lock()
+            .map_err(|_| AgentToolError::new("日志读取器缓存状态已损坏"))?
+            .get(&args.source_ref);
+        let reader_cache_hit = cached_reader.is_some();
+        let scan_bytes = if reader_cache_hit {
+            0
+        } else {
+            source.size.unwrap_or(UNKNOWN_SOURCE_SCAN_RESERVATION_BYTES)
+        };
         self.0
             .begin_tool(Self::NAME, scan_bytes)
             .map_err(AgentToolError::new)?;
@@ -576,7 +663,8 @@ impl Tool for ReadLogContextTool {
         let center = args.line.saturating_sub(1);
         let start = center.saturating_sub(before);
         let max_lines = before.saturating_add(after).saturating_add(1);
-        let scope = self.0.scope.clone();
+        let operation_context = self.0.clone();
+        let source_ref = args.source_ref.clone();
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let watcher_flag = cancel_flag.clone();
         let cancellation = self.0.cancellation.clone();
@@ -585,15 +673,26 @@ impl Tool for ReadLogContextTool {
             watcher_flag.store(true, Ordering::Relaxed);
         });
         let read_result = tokio::task::spawn_blocking(move || {
-            let handle = LogFileReader::open_with_cancel_flag(
-                OpenLogRequest {
-                    location: source.location.clone(),
-                    label: source.file_name.clone(),
-                    default_encoding: scope.default_encoding.clone(),
-                    archive_passwords: scope.archive_passwords.clone(),
-                },
-                cancel_flag,
-            )?;
+            let handle = match cached_reader {
+                Some(reader) => reader,
+                None => {
+                    let reader = LogFileReader::open_with_cancel_flag(
+                        OpenLogRequest {
+                            location: source.location.clone(),
+                            label: source.file_name.clone(),
+                            default_encoding: operation_context.scope.default_encoding.clone(),
+                            archive_passwords: operation_context.scope.archive_passwords.clone(),
+                        },
+                        cancel_flag,
+                    )?;
+                    operation_context
+                        .log_reader_cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("日志读取器缓存状态已损坏"))?
+                        .insert(source_ref, reader.clone());
+                    reader
+                }
+            };
             let byte_len = handle.byte_len();
             let line_count = handle.line_count();
             let lines = handle.lines(start, max_lines)?;
@@ -609,16 +708,22 @@ impl Tool for ReadLogContextTool {
                     redact_error_path(error.to_string())
                 ))
             })?;
-        reconcile_tool_scan(&self.0, scan_bytes, scanned_bytes)?;
+        reconcile_tool_scan(
+            &self.0,
+            scan_bytes,
+            if reader_cache_hit { 0 } else { scanned_bytes },
+        )?;
         let mut raw_bytes = 0usize;
         let lines = displayed
             .into_iter()
             .map(|line| {
+                let content_fingerprint = AgentEvidenceStore::fingerprint_text(&line.text);
                 let text = redact_sensitive_text(&line.text);
                 raw_bytes = raw_bytes.saturating_add(text.len());
                 ContextLineOutput {
                     line: line.line_number + 1,
                     text,
+                    content_fingerprint,
                 }
             })
             .collect::<Vec<_>>();
@@ -630,10 +735,10 @@ impl Tool for ReadLogContextTool {
             .consume_raw_log_bytes(raw_bytes)
             .map_err(AgentToolError::new)?;
         self.0.publish_budget();
-        if let (Some(first), Some(last)) = (lines.first(), lines.last()) {
+        for line in &lines {
             self.0
                 .evidence_ranges
-                .record(&args.source_ref, first.line, last.line)
+                .record_fingerprint(&args.source_ref, line.line, line.content_fingerprint)
                 .map_err(AgentToolError::new)?;
         }
         checked_output(ReadLogContextOutput {
@@ -1095,8 +1200,7 @@ impl Tool for SubmitDiagnosticReportTool {
     type Args = SubmitDiagnosticReportArgs;
     type Output = SubmitDiagnosticReportOutput;
     fn description(&self) -> String {
-        "提交最终结构化诊断报告。所有确定性发现应包含 source_ref 和行号证据；调用后结束分析。"
-            .to_string()
+        "提交三段式最终分析报告的数据：findings 用于问题分析，summary 与各项 recommendation 用于结论及建议；问题描述由 Argus 使用用户初始问题填充。所有有日志证据的发现应包含 source_ref 和行号，Argus 将据此展示脱敏日志片段；调用后结束分析。".to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         schema_value::<Self::Args>()
@@ -1136,7 +1240,7 @@ impl Tool for SubmitDiagnosticReportTool {
                 description_sha256: profile.description_sha256.clone(),
             })
             .collect();
-        let report = DiagnosticReport {
+        let mut report = DiagnosticReport {
             session_id: self.0.scope.session_id.clone(),
             question_sha256: question_sha256(&self.0.question),
             summary: args.summary,
@@ -1169,6 +1273,13 @@ impl Tool for SubmitDiagnosticReportTool {
             }
         }
         report.validate().map_err(AgentToolError::new)?;
+        let review_phase = self.0.is_independent_review.load(Ordering::Acquire);
+        if review_phase {
+            attach_trusted_review_evidence(&self.0, &mut report)?;
+        } else {
+            validate_and_attach_report_evidence(self.0.clone(), &mut report).await?;
+            cache_trusted_report_evidence(&self.0, &report)?;
+        }
         *self
             .0
             .report
@@ -1176,14 +1287,304 @@ impl Tool for SubmitDiagnosticReportTool {
             .map_err(|_| AgentToolError::new("报告存储已损坏"))? = Some(report);
         self.0.trace(
             AgentTraceKind::Report,
-            "结构化报告已提交",
-            "Argus 已完成字段与证据引用格式校验",
+            if review_phase {
+                "独立复核报告已提交"
+            } else {
+                "主分析草案已提交"
+            },
+            if review_phase {
+                "Argus 已完成字段校验并复用主分析阶段的可信证据"
+            } else {
+                "Argus 已完成字段校验、观察范围校验和本地证据复读"
+            },
         );
         Ok(SubmitDiagnosticReportOutput {
             accepted: true,
             session_id: self.0.scope.session_id.clone(),
         })
     }
+}
+
+/// 缓存主分析已经强制复读通过的内存证据片段，供独立复核直接继承。
+///
+/// 缓存只包含脱敏且受单条、总量边界约束的展示片段，不进入模型草案 JSON，也不持久化到报告。
+fn cache_trusted_report_evidence(
+    context: &AgentOperationContext,
+    report: &DiagnosticReport,
+) -> Result<(), AgentToolError> {
+    let mut trusted = context
+        .trusted_evidence_excerpts
+        .lock()
+        .map_err(|_| AgentToolError::new("可信证据缓存状态已损坏"))?;
+    for evidence in report
+        .findings
+        .iter()
+        .flat_map(|finding| finding.evidence.iter())
+    {
+        trusted.insert(
+            (
+                evidence.source_ref.clone(),
+                evidence.start_line,
+                evidence.end_line,
+            ),
+            evidence.display_excerpt.clone(),
+        );
+    }
+    Ok(())
+}
+
+/// 为独立复核报告挂载主分析已经验证的证据片段，不重新打开或扫描任何日志来源。
+///
+/// 复核可以删除发现、降低置信度和修改结论，但引用必须保持为主分析已验证的精确范围；这样既
+/// 保证最终报告仍可展示日志片段，也避免模型在不复读日志的前提下引入新的行号。
+fn attach_trusted_review_evidence(
+    context: &AgentOperationContext,
+    report: &mut DiagnosticReport,
+) -> Result<(), AgentToolError> {
+    let trusted = context
+        .trusted_evidence_excerpts
+        .lock()
+        .map_err(|_| AgentToolError::new("可信证据缓存状态已损坏"))?;
+    for evidence in report
+        .findings
+        .iter_mut()
+        .flat_map(|finding| finding.evidence.iter_mut())
+    {
+        let key = (
+            evidence.source_ref.clone(),
+            evidence.start_line,
+            evidence.end_line,
+        );
+        let trusted_excerpt = trusted.get(&key).ok_or_else(|| {
+            AgentToolError::new(
+                "独立复核只能引用主分析已经本地验证的精确证据范围，不能新增或改写日志行号",
+            )
+        })?;
+        evidence.display_excerpt = trusted_excerpt.clone();
+    }
+    Ok(())
+}
+
+/// 对报告证据执行不依赖模型的本地强制复读校验，并复用同一次读取生成界面片段。
+///
+/// 校验同时满足五项条件：来源仍属于固化范围、引用已被本会话工具观察、当前文件仍包含完整行区间、
+/// 当前内容与模型观察时的逐行指纹一致、区间至少有一行非空内容。每个来源都绕过会话缓存重新打开，
+/// 确保日志轮转、截断、删除或同等行数覆盖后不能用旧快照通过校验。脱敏片段只挂到跳过序列化的
+/// 内存字段，不返回模型、不写入报告 JSON；全部读取量仍计入本地扫描预算。
+async fn validate_and_attach_report_evidence(
+    context: Arc<AgentOperationContext>,
+    report: &mut DiagnosticReport,
+) -> Result<(), AgentToolError> {
+    let requests = report
+        .findings
+        .iter()
+        .flat_map(|finding| finding.evidence.iter())
+        .map(|evidence| {
+            (
+                evidence.source_ref.clone(),
+                evidence.start_line,
+                evidence.end_line,
+            )
+        })
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return Ok(());
+    }
+
+    // 按来源分组后逐个打开、校验和释放，避免同时保留数十个大日志映射或解压临时文件。
+    let mut grouped_ranges = BTreeMap::<String, BTreeSet<(usize, usize)>>::new();
+    let mut excerpt_keys = BTreeSet::<EvidenceRangeKey>::new();
+    for (source_ref, start_line, end_line) in &requests {
+        grouped_ranges
+            .entry(source_ref.clone())
+            .or_default()
+            .insert((*start_line, *end_line));
+        if excerpt_keys.len() < MAX_REPORT_EVIDENCE_EXCERPTS {
+            excerpt_keys.insert((source_ref.clone(), *start_line, *end_line));
+        }
+    }
+    let sources = grouped_ranges
+        .into_iter()
+        .map(|(source_ref, ranges)| {
+            let source = context
+                .scope
+                .source(&source_ref)
+                .ok_or_else(|| AgentToolError::new("证据来源已不在当前会话范围内"))?
+                .clone();
+            Ok((source_ref, source, ranges.into_iter().collect::<Vec<_>>()))
+        })
+        .collect::<Result<Vec<_>, AgentToolError>>()?;
+
+    let reserved_bytes = sources.iter().fold(0_u64, |total, (_, source, _)| {
+        total.saturating_add(source.size.unwrap_or(UNKNOWN_SOURCE_SCAN_RESERVATION_BYTES))
+    });
+    context
+        .budget
+        .reserve_internal_scan(reserved_bytes)
+        .map_err(AgentToolError::new)?;
+    context.publish_budget();
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let watcher_flag = cancel_flag.clone();
+    let cancellation = context.cancellation.clone();
+    let watcher = tokio::spawn(async move {
+        cancellation.cancelled().await;
+        watcher_flag.store(true, Ordering::Relaxed);
+    });
+    let default_encoding = context.scope.default_encoding.clone();
+    let archive_passwords = context.scope.archive_passwords.clone();
+    let evidence_context = context.clone();
+    let worker_cancel = cancel_flag.clone();
+    let validation = tokio::task::spawn_blocking(move || {
+        let mut actual_bytes = 0_u64;
+        let mut excerpts = HashMap::<EvidenceRangeKey, EvidenceDisplayExcerpt>::new();
+        let mut excerpt_bytes = 0usize;
+        let result = (|| -> anyhow::Result<()> {
+            for (source_ref, source, ranges) in sources {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    return Err(anyhow::anyhow!("证据本地校验已取消"));
+                }
+                // 强制新建读取器是证据椒盐的关键：禁止此前的缓存快照替代当前来源状态。
+                let reader = LogFileReader::open_with_cancel_flag(
+                    OpenLogRequest {
+                        location: source.location,
+                        label: source.file_name,
+                        default_encoding: default_encoding.clone(),
+                        archive_passwords: archive_passwords.clone(),
+                    },
+                    worker_cancel.clone(),
+                )?;
+                actual_bytes = actual_bytes.saturating_add(reader.byte_len());
+
+                for (start_line, end_line) in ranges {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return Err(anyhow::anyhow!("证据本地校验已取消"));
+                    }
+                    if end_line > reader.line_count() {
+                        return Err(anyhow::anyhow!(
+                            "证据引用超出来源当前总行数：{source_ref}:{start_line}-{end_line}"
+                        ));
+                    }
+                    let line_count = end_line.saturating_sub(start_line).saturating_add(1);
+                    let lines = reader.lines(start_line - 1, line_count)?;
+                    let is_complete = lines.len() == line_count
+                        && lines.first().map(|line| line.line_number + 1) == Some(start_line)
+                        && lines.last().map(|line| line.line_number + 1) == Some(end_line);
+                    if !is_complete {
+                        return Err(anyhow::anyhow!(
+                            "证据引用无法完整复读：{source_ref}:{start_line}-{end_line}"
+                        ));
+                    }
+                    let content_matches = evidence_context
+                        .evidence_ranges
+                        .matches_lines(
+                            &source_ref,
+                            lines
+                                .iter()
+                                .map(|line| (line.line_number + 1, line.text.as_str())),
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                    if !content_matches {
+                        return Err(anyhow::anyhow!(
+                            "证据内容与模型观察时不一致：{source_ref}:{start_line}-{end_line}"
+                        ));
+                    }
+                    if !lines.iter().any(|line| !line.text.trim().is_empty()) {
+                        return Err(anyhow::anyhow!(
+                            "证据引用仅包含空白行：{source_ref}:{start_line}-{end_line}"
+                        ));
+                    }
+
+                    let key = (source_ref.clone(), start_line, end_line);
+                    if excerpt_keys.contains(&key)
+                        && excerpt_bytes < MAX_REPORT_EVIDENCE_BYTES
+                        && let Some(excerpt) =
+                            build_evidence_display_excerpt(&lines, line_count, &mut excerpt_bytes)
+                    {
+                        excerpts.insert(key, excerpt);
+                    }
+                }
+                // 读取器在当前迭代末尾释放，不把新鲜校验快照写回长期会话缓存。
+            }
+            Ok(())
+        })();
+        (actual_bytes, result, excerpts)
+    })
+    .await;
+    watcher.abort();
+    let (actual_bytes, validation_result, excerpts) = validation
+        .map_err(|error| AgentToolError::new(format!("证据本地校验任务异常结束：{error}")))?;
+    // 无论校验是否成功都结束预留状态；失败或少读时仍按保守预留量计入安全预算。
+    reconcile_tool_scan(&context, reserved_bytes, actual_bytes)?;
+    validation_result.map_err(|error| {
+        AgentToolError::new(format!(
+            "证据本地校验失败：{}",
+            redact_error_path(error.to_string())
+        ))
+    })?;
+
+    for finding in &mut report.findings {
+        for evidence in &mut finding.evidence {
+            evidence.display_excerpt = excerpts
+                .get(&(
+                    evidence.source_ref.clone(),
+                    evidence.start_line,
+                    evidence.end_line,
+                ))
+                .cloned();
+        }
+    }
+    context.trace(
+        AgentTraceKind::Status,
+        "本地证据校验通过",
+        format!(
+            "已重新读取并验证 {} 条证据引用",
+            report
+                .findings
+                .iter()
+                .map(|finding| finding.evidence.len())
+                .sum::<usize>()
+        ),
+    );
+    Ok(())
+}
+
+/// 从已经通过本地复读的日志行生成有界、脱敏且仅驻留内存的报告展示片段。
+///
+/// `total_bytes` 是整份报告共享的累计字节数；函数会在 UTF-8 边界截断，并通过返回空值表示
+/// 全局展示预算已经耗尽。调用方仍会继续完成其余引用的强制校验。
+fn build_evidence_display_excerpt(
+    lines: &[DisplayedLogLine],
+    requested_line_count: usize,
+    total_bytes: &mut usize,
+) -> Option<EvidenceDisplayExcerpt> {
+    let mut display_lines = Vec::new();
+    let mut is_truncated = lines.len() > MAX_REPORT_EVIDENCE_LINES;
+    for line in lines.iter().take(MAX_REPORT_EVIDENCE_LINES) {
+        let remaining_bytes = MAX_REPORT_EVIDENCE_BYTES.saturating_sub(*total_bytes);
+        if remaining_bytes < '…'.len_utf8() {
+            is_truncated = true;
+            break;
+        }
+        let redacted = redact_sensitive_text(&line.text);
+        let allowed_bytes = MAX_REPORT_EVIDENCE_LINE_BYTES.min(remaining_bytes);
+        let text = if redacted.len() > allowed_bytes {
+            is_truncated = true;
+            truncate_utf8_with_ellipsis(redacted, allowed_bytes.saturating_sub('…'.len_utf8()))
+        } else {
+            redacted
+        };
+        *total_bytes = total_bytes.saturating_add(text.len());
+        display_lines.push(EvidenceDisplayLine {
+            line_number: line.line_number + 1,
+            text,
+        });
+    }
+    is_truncated |= display_lines.len() < requested_line_count;
+    (!display_lines.is_empty()).then_some(EvidenceDisplayExcerpt {
+        lines: display_lines,
+        is_truncated,
+    })
 }
 
 /// 把 Schemars 生成的参数 Schema 转换为 Rig 所需 JSON 值。
@@ -1448,6 +1849,31 @@ mod tests {
         let value = redact_sensitive_text("password=hunter2 Authorization: Bearer abc.def");
         assert!(!value.contains("hunter2"));
         assert!(!value.contains("abc.def"));
+    }
+
+    /// 验证报告展示片段限制行数、保留真实行号并在进入界面前遮蔽凭据。
+    #[test]
+    fn evidence_display_excerpt_is_bounded_and_redacted() {
+        let lines = (0..13)
+            .map(|line_number| DisplayedLogLine {
+                line_number,
+                text: if line_number == 0 {
+                    "password=internal-secret".to_string()
+                } else {
+                    format!("log line {}", line_number + 1)
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut total_bytes = 0;
+
+        let excerpt = build_evidence_display_excerpt(&lines, lines.len(), &mut total_bytes)
+            .expect("合法日志范围应生成展示片段");
+
+        assert_eq!(excerpt.lines.len(), MAX_REPORT_EVIDENCE_LINES);
+        assert_eq!(excerpt.lines[0].line_number, 1);
+        assert_eq!(excerpt.lines[0].text, "[REDACTED]");
+        assert!(excerpt.is_truncated);
+        assert!(total_bytes <= MAX_REPORT_EVIDENCE_BYTES);
     }
 
     /// 验证首期文件名启发式能识别 JSONL 和 Jstack。

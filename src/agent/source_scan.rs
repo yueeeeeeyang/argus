@@ -5,6 +5,7 @@
 //! 主要功能：复用现有来源加载器递归扫描未展开目录和归档，匹配日志类型说明，并返回可安全回填 UI 的注册表副本。
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use crate::agent::session::SourceScopeSnapshot;
 use crate::config::{
@@ -24,6 +25,10 @@ pub(crate) struct AgentSourcePreparation {
     pub warnings: Vec<String>,
     /// 当前所有已启用日志类型及其逐规则命中统计，只供会话窗口解释匹配结果。
     pub match_summaries: Vec<AgentLogProfileMatchSummary>,
+    /// 完整补齐来源树实际消耗秒数，供阶段时间线展示。
+    pub source_scan_elapsed_seconds: u64,
+    /// 生成范围快照并匹配日志类型实际消耗秒数，供阶段时间线展示。
+    pub profile_elapsed_seconds: u64,
 }
 
 /// 一个日志类型在当前来源范围内的匹配统计。
@@ -76,6 +81,7 @@ pub(crate) fn prepare_agent_source_scope(
     archive_passwords: ArchivePasswordStore,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentSourcePreparation, String> {
+    let source_scan_started_at = Instant::now();
     let root_id = resolve_scope_root(&registry, selected_id)?;
     let loader = LogSourceLoader::new(loader_config.clone())
         .with_archive_passwords(archive_passwords.clone());
@@ -111,6 +117,8 @@ pub(crate) fn prepare_agent_source_scope(
         return Err("来源树完整扫描已取消".to_string());
     }
 
+    let source_scan_elapsed_seconds = source_scan_started_at.elapsed().as_secs();
+    let profile_started_at = Instant::now();
     let warnings = warnings.into_iter().collect::<Vec<_>>();
     let scope = SourceScopeSnapshot::from_registry(
         &registry,
@@ -128,12 +136,15 @@ pub(crate) fn prepare_agent_source_scope(
         }
     })?;
     let match_summaries = build_match_summaries(&config.log_profiles, &scope);
+    let profile_elapsed_seconds = profile_started_at.elapsed().as_secs();
 
     Ok(AgentSourcePreparation {
         registry,
         scope,
         warnings,
         match_summaries,
+        source_scan_elapsed_seconds,
+        profile_elapsed_seconds,
     })
 }
 
@@ -246,17 +257,17 @@ fn apply_scan_child_report(
 mod tests {
     use std::fs;
 
-    use tempfile::tempdir;
     use uuid::Uuid;
 
     use super::*;
+    use crate::config::paths::temporary_test_dir;
     use crate::config::{LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile};
     use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
 
     /// 验证未展开且尚未加载的目录会在后台扫描中补齐，并按文件名匹配日志类型说明。
     #[test]
     fn source_scan_loads_collapsed_directory_and_matches_profile() {
-        let directory = tempdir().expect("应创建临时日志目录");
+        let directory = temporary_test_dir("source-scan-collapsed");
         fs::write(directory.path().join("application.log"), "startup failed")
             .expect("应写入测试日志");
 
@@ -330,7 +341,7 @@ mod tests {
     /// 验证每条规则独立计数，未命中规则保留零值，且同一文件可命中多条规则。
     #[test]
     fn source_scan_reports_each_matcher_hit_count() {
-        let directory = tempdir().expect("应创建临时日志目录");
+        let directory = temporary_test_dir("source-scan-match-count");
         fs::write(
             directory.path().join("memory_20260715.log"),
             "memory pressure",
@@ -408,7 +419,7 @@ mod tests {
     /// 验证启动对话框关闭后，已取消的来源扫描不会继续构建或回填会话范围。
     #[test]
     fn source_scan_stops_when_cancelled_before_start() {
-        let directory = tempdir().expect("应创建临时日志目录");
+        let directory = temporary_test_dir("source-scan-priority");
         fs::write(directory.path().join("application.log"), "started").expect("应写入测试日志");
         let mut registry = SourceRegistry::new();
         let root_id = registry.allocate_id();

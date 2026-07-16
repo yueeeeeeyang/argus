@@ -1071,6 +1071,7 @@ mod tests {
         LARGE_LOG_THRESHOLD_BYTES, LogDocument, LogFileReader, OpenLogRequest, PagedLogDocument,
         split_decoded_lines,
     };
+    use crate::config::paths::isolated_test_file_path;
     use crate::loader::SourceLocation;
     use crate::loader::archive::{ArchiveFormat, ArchivePasswordStore};
     use std::fs;
@@ -1081,7 +1082,7 @@ mod tests {
 
     /// 构造隔离的临时日志路径，避免单元测试依赖真实用户目录。
     fn temp_log_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("argus-reader-{}-{name}", std::process::id()))
+        isolated_test_file_path("log-file-reader", name)
     }
 
     /// 验证 LF、CRLF、CR 和末尾无换行均能正确拆行。

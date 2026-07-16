@@ -1,21 +1,15 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// 测试配置路径计数器，保证每个应用状态使用独立 settings.toml。
-static NEXT_TEST_CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
+use crate::config::paths::isolated_test_dir;
 
 /// 构造隔离真实用户目录的配置管理器。
 fn isolated_config_manager() -> ConfigManager {
-    let id = NEXT_TEST_CONFIG_ID.fetch_add(1, Ordering::Relaxed);
-    let config_dir =
-        std::env::temp_dir().join(format!("argus-app-test-{}-{id}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&config_dir);
+    let config_dir = isolated_test_dir("app");
     ConfigManager::new(config_dir.join("settings.toml"))
 }
 

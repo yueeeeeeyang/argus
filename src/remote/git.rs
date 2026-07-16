@@ -1,5 +1,6 @@
 //! 文件职责：使用内置 libgit2 实现 Git 仓库的只读缓存、浏览、预览与下载。
 //! 创建日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：维护按链接隔离的裸仓库缓存，显式完成 HTTPS/SSH 鉴权，并从 tree/blob 读取文件。
 
@@ -907,10 +908,11 @@ fn git_ssh_host_and_port(url: &str) -> Option<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::paths::temporary_test_dir;
 
     /// 使用 libgit2 在临时裸仓库中构造提交、分支、标签和特殊条目夹具。
     fn repository_fixture() -> (tempfile::TempDir, Repository) {
-        let temp_dir = tempfile::tempdir().expect("应创建 Git 测试目录");
+        let temp_dir = temporary_test_dir("git-fixture");
         let repository = Repository::init_bare(temp_dir.path()).expect("应初始化裸仓库");
         let signature =
             git2::Signature::now("Argus Test", "argus@example.com").expect("应创建测试签名");
@@ -1084,7 +1086,7 @@ mod tests {
     /// 后台缓存清理必须立即返回给调用方，并在活动会话释放链接锁后再删除目录。
     #[test]
     fn scheduled_cache_removal_waits_for_session_lock_off_ui_thread() {
-        let temp_dir = tempfile::tempdir().expect("应创建 Git 缓存测试目录");
+        let temp_dir = temporary_test_dir("git-cache-removal");
         let link_id = usize::MAX - 41;
         let cache_path = temp_dir.path().join(format!("{link_id}.git"));
         Repository::init_bare(&cache_path).expect("应创建待清理缓存");
@@ -1106,7 +1108,7 @@ mod tests {
     /// URL 编辑后的延迟清理不得删除已经按新远端重建的缓存。
     #[test]
     fn conditional_cache_removal_preserves_cache_for_new_remote() {
-        let temp_dir = tempfile::tempdir().expect("应创建 Git 缓存测试目录");
+        let temp_dir = temporary_test_dir("git-cache-preserve");
         let link_id = usize::MAX - 42;
         let cache_path = temp_dir.path().join(format!("{link_id}.git"));
         let repository = Repository::init_bare(&cache_path).expect("应创建缓存仓库");

@@ -1,8 +1,8 @@
 //! 文件职责：定义并持久化 AI 日志分析的结构化诊断报告。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：校验报告字段、保存证据引用和使用过的日志说明，并以原子替换方式写入报告目录。
+//! 主要功能：校验报告字段、保存证据引用和使用过的日志说明，并隔离仅供当前界面展示的日志片段。
 
 use std::fs;
 use std::io::Write;
@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 
 /// 默认最多保留的结构化 AI 报告数量。
 const REPORT_RETENTION_COUNT: usize = 100;
+/// 单份报告最多允许的证据引用总数，限制强制本地复读的资源消耗。
+const MAX_REPORT_EVIDENCE_REFERENCES: usize = 256;
+/// 单条证据允许引用的最大连续行数；更大范围必须拆成与结论直接相关的小片段。
+const MAX_REPORT_EVIDENCE_RANGE_LINES: usize = 200;
 
 /// 一条可由用户回到来源行复核的证据引用。
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -26,6 +30,30 @@ pub(crate) struct EvidenceReference {
     pub end_line: usize,
     /// 证据支持当前结论的简短说明，不保存日志原文。
     pub rationale: String,
+    /// 当前窗口展示的脱敏日志片段；不接受模型输入，也不进入报告 JSON。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub display_excerpt: Option<EvidenceDisplayExcerpt>,
+}
+
+/// 报告证据在当前会话窗口中的临时展示片段。
+///
+/// 该类型不实现序列化，生命周期只覆盖内存中的分析窗口，防止原始日志随结构化报告落盘。
+#[derive(Clone, Debug)]
+pub(crate) struct EvidenceDisplayExcerpt {
+    /// 经过敏感信息遮蔽的日志行。
+    pub lines: Vec<EvidenceDisplayLine>,
+    /// 原证据范围是否因界面行数或字节边界而被截断。
+    pub is_truncated: bool,
+}
+
+/// 报告引用块中的一行脱敏日志正文。
+#[derive(Clone, Debug)]
+pub(crate) struct EvidenceDisplayLine {
+    /// 与来源文件一致的 1 基行号。
+    pub line_number: usize,
+    /// 经过敏感信息遮蔽和长度裁剪的正文。
+    pub text: String,
 }
 
 /// 一条结构化问题发现。
@@ -118,6 +146,7 @@ impl DiagnosticReport {
         if self.findings.len() > 100 {
             return Err("诊断报告问题数量超过 100 条上限".to_string());
         }
+        let mut evidence_count = 0usize;
         for finding in &self.findings {
             if finding.title.trim().is_empty()
                 || finding.analysis.trim().is_empty()
@@ -152,13 +181,33 @@ impl DiagnosticReport {
                 _ => {}
             }
             for evidence in &finding.evidence {
+                evidence_count = evidence_count.saturating_add(1);
                 if evidence.start_line == 0 || evidence.end_line < evidence.start_line {
                     return Err("诊断证据行号必须为有效的 1 基闭区间".to_string());
+                }
+                if evidence
+                    .end_line
+                    .saturating_sub(evidence.start_line)
+                    .saturating_add(1)
+                    > MAX_REPORT_EVIDENCE_RANGE_LINES
+                {
+                    return Err(format!(
+                        "诊断发现“{}”的单条证据不能超过 {} 行",
+                        finding.title, MAX_REPORT_EVIDENCE_RANGE_LINES
+                    ));
+                }
+                if evidence.rationale.trim().is_empty() {
+                    return Err("诊断证据说明不能为空".to_string());
                 }
                 if evidence.rationale.len() > 4096 {
                     return Err("诊断证据说明不能超过 4 KiB".to_string());
                 }
             }
+        }
+        if evidence_count > MAX_REPORT_EVIDENCE_REFERENCES {
+            return Err(format!(
+                "诊断报告证据引用不能超过 {MAX_REPORT_EVIDENCE_REFERENCES} 条"
+            ));
         }
         if self.used_log_profiles.len() > 100 || self.limitations.len() > 100 {
             return Err("诊断报告配置摘要或限制说明数量超过 100 条".to_string());
@@ -232,6 +281,7 @@ fn prune_old_reports(report_dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::paths::temporary_test_dir;
 
     /// 构造持久化测试使用的最小有效报告。
     fn test_report(session_id: &str, question: &str) -> DiagnosticReport {
@@ -249,7 +299,7 @@ mod tests {
     /// 验证报告 JSON 不会持久化完整用户问题。
     #[test]
     fn persisted_report_excludes_full_question() {
-        let root = tempfile::tempdir().expect("应创建测试目录");
+        let root = temporary_test_dir("report-question-privacy");
         let question = "包含内部工单 secret-ticket-42 的分析问题";
         let path = persist_report(root.path(), &test_report("privacy-test", question))
             .expect("应保存报告");
@@ -258,10 +308,45 @@ mod tests {
         assert!(content.contains(&question_sha256(question)));
     }
 
+    /// 验证仅供界面使用的日志片段不会进入持久化报告。
+    #[test]
+    fn persisted_report_excludes_display_evidence_excerpt() {
+        let root = temporary_test_dir("report-evidence-privacy");
+        let mut report = test_report("excerpt-privacy", "question");
+        report.findings.push(DiagnosticFinding {
+            title: "内存异常".to_string(),
+            severity: "high".to_string(),
+            status: DiagnosticFindingStatus::Confirmed,
+            analysis: "日志显示内存不足".to_string(),
+            impact: "请求可能失败".to_string(),
+            recommendation: "检查堆使用量".to_string(),
+            confidence: 0.9,
+            evidence: vec![EvidenceReference {
+                source_ref: "source-ref".to_string(),
+                start_line: 42,
+                end_line: 42,
+                rationale: "出现内存不足错误".to_string(),
+                display_excerpt: Some(EvidenceDisplayExcerpt {
+                    lines: vec![EvidenceDisplayLine {
+                        line_number: 42,
+                        text: "secret-log-fragment".to_string(),
+                    }],
+                    is_truncated: false,
+                }),
+            }],
+            verification_steps: Vec::new(),
+        });
+
+        let path = persist_report(root.path(), &report).expect("应保存报告");
+        let content = fs::read_to_string(path).expect("应读取报告");
+        assert!(!content.contains("secret-log-fragment"));
+        assert!(!content.contains("display_excerpt"));
+    }
+
     /// 验证报告目录超过 100 份时淘汰最旧文件。
     #[test]
     fn report_retention_keeps_latest_hundred() {
-        let root = tempfile::tempdir().expect("应创建测试目录");
+        let root = temporary_test_dir("report-retention");
         for index in 0..=REPORT_RETENTION_COUNT {
             let session_id = format!("retention-{index:03}");
             persist_report(root.path(), &test_report(&session_id, "retention"))

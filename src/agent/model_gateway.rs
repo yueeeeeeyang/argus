@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：验证认证、Chat Completions 路径和结构化工具调用响应，不发送任何日志或用户问题。
+//! 主要功能：按端点支持能力启用最高推理强度，并验证认证、Chat Completions 路径和结构化工具调用响应。
 
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
@@ -115,7 +115,8 @@ pub(crate) async fn probe_model_capabilities(
 /// 构造兼容主流 Chat Completions 服务的最小工具探测请求。
 ///
 /// DeepSeek V4 thinking 模式支持工具调用，但不接受强制命名的 `tool_choice`，因此探测依靠
-/// 固定提示词触发工具。官方 DeepSeek 端点显式开启 thinking；其它兼容服务不会收到私有字段。
+/// 固定提示词触发工具。官方 DeepSeek 端点显式开启 thinking 和最高推理强度；其它兼容
+/// 端点只发送标准 Chat Completions 字段，避免不支持私有推理参数的服务返回 400。
 fn capability_probe_payload(model: &AiModelProfile) -> Value {
     let mut payload = serde_json::json!({
         "model": model.model,
@@ -136,17 +137,12 @@ fn capability_probe_payload(model: &AiModelProfile) -> Value {
                 }
             }
         }],
-        "temperature": 0,
         "max_tokens": 512
     });
     if is_official_deepseek_endpoint(&model.base_url) {
-        // DeepSeek thinking 模式忽略 temperature；从请求中删除该字段，保持探测协议与官方示例一致。
-        payload
-            .as_object_mut()
-            .expect("能力探测负载必须是 JSON 对象")
-            .remove("temperature");
+        // 只有协议能力已经明确的官方端点才接收推理扩展字段；未知兼容端点保持标准请求。
         payload["thinking"] = serde_json::json!({ "type": "enabled" });
-        payload["reasoning_effort"] = serde_json::json!("high");
+        payload["reasoning_effort"] = serde_json::json!("max");
     }
     payload
 }
@@ -219,13 +215,15 @@ mod tests {
         (AiConfig::default(), model)
     }
 
-    /// 验证通用探测请求不强制 `tool_choice`，避免 DeepSeek thinking 模式直接返回 400。
+    /// 验证通用探测请求只使用标准兼容字段且不强制 `tool_choice`。
     #[test]
     fn capability_payload_omits_forced_tool_choice() {
         let (_, model) = test_config("https://example.com/v1".to_string());
         let payload = capability_probe_payload(&model);
         assert!(payload.get("tool_choice").is_none());
         assert!(payload.get("thinking").is_none());
+        assert!(payload.get("reasoning_effort").is_none());
+        assert!(payload.get("temperature").is_none());
     }
 
     /// 验证 DeepSeek 官方端点在 thinking 模式探测工具能力，且不发送强制 `tool_choice`。
@@ -240,7 +238,7 @@ mod tests {
         );
         assert_eq!(
             payload.get("reasoning_effort").and_then(Value::as_str),
-            Some("high")
+            Some("max")
         );
         assert!(payload.get("temperature").is_none());
         assert!(payload.get("tool_choice").is_none());

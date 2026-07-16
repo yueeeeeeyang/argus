@@ -1,6 +1,6 @@
 # 文件职责：定义 Argus 桌面客户端的 Cargo 包信息与依赖版本。
 # 创建日期：2026-06-09
-# 修改日期：2026-07-15
+# 修改日期：2026-07-16
 # 作者：Argus 开发团队
 # 主要功能：配置 Rust 版本、包元信息以及 GPUI 界面依赖。
 
@@ -34,6 +34,8 @@ icondata = { version = "0.7.0", default-features = false, features = ["lucide"] 
 keyring = "4.1.5"
 memmap2 = "0.9.10"
 percent-encoding = "2.3.2"
+# 使用成熟的 CommonMark/GFM 事件解析器驱动 AI 消息 Markdown 展示，关闭未使用的 HTML 输出功能。
+pulldown-cmark = { version = "0.13.4", default-features = false }
 rars = "0.2.0"
 regex = "1.12.3"
 # Rig 使用 reqwest 发送 OpenAI 兼容请求；直接依赖用于设置每次模型请求的超时。

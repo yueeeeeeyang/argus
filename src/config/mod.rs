@@ -10,8 +10,8 @@ pub(crate) mod config_manager;
 pub(crate) mod paths;
 
 pub(crate) use ai_config::{
-    AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, LogNameMatcher, LogNameMatcherMode,
-    LogNameMatcherTarget, LogTypeProfile,
+    AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, DEFAULT_AI_SYSTEM_PROMPT, LogNameMatcher,
+    LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
 };
 pub(crate) use app_config::{AppConfig, LoaderConfig, SEARCH_RECENT_KEYWORDS_MAX, UpgradeConfig};
 pub(crate) use config_manager::ConfigManager;

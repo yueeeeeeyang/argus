@@ -1,6 +1,6 @@
 //! 文件职责：维护设置模态框和设置编辑器窗口的交互状态。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：维护设置模态框、智能分析设置和 Jstack 线程段过滤编辑器，并统一持久化相关偏好。
 
@@ -68,6 +68,14 @@ impl ArgusApp {
         );
     }
 
+    /// 打开全局默认系统提示词编辑器。
+    pub(crate) fn open_ai_system_prompt_editor(&mut self, cx: &mut Context<Self>) {
+        self.open_ai_settings_editor(
+            crate::ui::ai_settings_editor::AiSettingsEditorKind::SystemPrompt,
+            cx,
+        );
+    }
+
     /// 按指定类型创建智能分析设置子对话框，并阻止多个编辑器相互覆盖草稿。
     fn open_ai_settings_editor(
         &mut self,
@@ -105,8 +113,12 @@ impl ArgusApp {
             config.validate_model_profiles()?;
         }
         config.validate_log_profiles()?;
-        if config.enabled {
-            config.validate()?;
+        config.validate_system_prompt()?;
+        // 设置允许暂时停用全部模型；入口会把它解释为“当前无可选择模型”，而不是依赖已删除的全局开关。
+        if config.allow_raw_log_content
+            && config.consent_version != crate::config::AI_RAW_LOG_CONSENT_VERSION
+        {
+            return Err("日志原文授权说明已更新，请在设置中重新确认".to_string());
         }
         if let Some((base_url, api_key)) = credential
             && !api_key.trim().is_empty()

@@ -1,6 +1,6 @@
 //! 文件职责：构建真实日志来源目录树。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：加载本地文件、目录和压缩包结构，生成供 UI 虚拟列表消费的扁平注册表。
 
@@ -1574,6 +1574,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::config::LoaderConfig;
+    use crate::config::paths::isolated_test_dir;
     use crate::loader::archive::adapter::ArchiveEntryInfo;
     use crate::loader::archive::detector::ArchiveFormat;
     use crate::loader::dir_tree::{LogSourceLoader, SourceArchiveProbeRequest};
@@ -1585,9 +1586,9 @@ mod tests {
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
-    /// 创建隔离的临时目录；使用进程 ID 和测试名降低冲突概率。
+    /// 创建位于 `.argus_test` 下的隔离目录，避免测试访问生产数据。
     fn temp_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("argus_{name}_{}", std::process::id()))
+        isolated_test_dir(&format!("dir-tree-{name}"))
     }
 
     /// 构造内存 ZIP 字节，便于测试嵌套压缩包展开逻辑。

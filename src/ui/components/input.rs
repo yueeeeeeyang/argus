@@ -426,7 +426,12 @@ pub(crate) fn render_textarea(
         !textarea.is_disabled && (textarea.trailing_accessory_always_visible || textarea.is_focused)
     });
     let right_padding = if visible_trailing_accessory.is_some() {
-        trailing_button_size + horizontal_padding
+        if textarea.style == TextareaStyle::Composer {
+            // 对话编辑器在发送按钮左侧预留一个同尺寸操作位，供调用方放置停止等会话动作。
+            trailing_button_size * 2.0 + horizontal_padding + 4.0
+        } else {
+            trailing_button_size + horizontal_padding
+        }
     } else {
         horizontal_padding
     };

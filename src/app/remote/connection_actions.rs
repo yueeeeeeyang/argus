@@ -1,6 +1,6 @@
 //! 文件职责：实现链接工作区的树操作、表单校验、输入框编辑和配置持久化。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：处理多协议链接新增编辑、树选择与拖放移动、过滤、删除及会话打开能力。
 
@@ -1520,14 +1520,11 @@ pub(crate) fn normalized_connection_input_selection_range(
 mod tests {
     use super::*;
     use crate::config::ConfigManager;
+    use crate::config::paths::isolated_test_dir;
 
     /// 构造使用临时配置文件的应用，避免连接表单测试读写真实用户设置。
     fn test_app(name: &str) -> ArgusApp {
-        let config_dir = std::env::temp_dir().join(format!(
-            "argus-connection-actions-test-{}-{name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&config_dir);
+        let config_dir = isolated_test_dir(&format!("connection-actions-{name}"));
         ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
     }
 
@@ -1672,11 +1669,7 @@ mod tests {
     /// 新增 SVN 链接必须真实写入设置文件，并在重新创建应用后恢复。
     #[test]
     fn svn_link_survives_application_restart() {
-        let config_dir = std::env::temp_dir().join(format!(
-            "argus-connection-actions-test-{}-svn-restart",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&config_dir);
+        let config_dir = isolated_test_dir("connection-actions-svn-restart");
         let manager = ConfigManager::new(config_dir.join("settings.toml"));
         let mut app = ArgusApp::new_with_config_manager(manager.clone());
         let form = repository_link_form(ConnectionLinkKind::Svn, "http://10.1.3.12/svn/example/");
@@ -1699,11 +1692,7 @@ mod tests {
     /// 设置文件无法写入时，SVN 表单必须返回错误并回滚内存链接，避免制造重启后消失的假成功。
     #[test]
     fn svn_link_save_failure_is_reported_and_rolled_back() {
-        let config_dir = std::env::temp_dir().join(format!(
-            "argus-connection-actions-test-{}-svn-save-failure",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&config_dir);
+        let config_dir = isolated_test_dir("connection-actions-svn-save-failure");
         let settings_path = config_dir.join("settings.toml");
         std::fs::create_dir_all(&settings_path).expect("应创建用于触发保存失败的同名目录");
         let mut app = ArgusApp::new_with_config_manager(ConfigManager::new(settings_path));

@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：提供 OpenAI 兼容端点配置、预算档位、自定义日志类型匹配、校验及规范化逻辑。
+//! 主要功能：提供 OpenAI 兼容端点、专业系统提示词、预算档位、自定义日志类型匹配、校验及规范化逻辑。
 
 use regex::{Regex, RegexBuilder};
 use schemars::JsonSchema;
@@ -23,6 +23,21 @@ pub(crate) const MIN_AI_CONTEXT_WINDOW_TOKENS: u64 = 4_096;
 pub(crate) const MAX_AI_CONTEXT_WINDOW_TOKENS: u64 = 10_000_000;
 /// 当前原文授权说明版本；版本变化后用户需要重新确认。
 pub(crate) const AI_RAW_LOG_CONSENT_VERSION: &str = "2026-07-15";
+/// 用户可编辑系统提示词的最大 UTF-8 字节数，避免设置文件和每轮模型上下文异常膨胀。
+pub(crate) const MAX_AI_SYSTEM_PROMPT_BYTES: usize = 32 * 1024;
+/// 新安装和旧配置迁移时使用的专业分析提示词。
+///
+/// 该提示词只负责角色、分析质量和表达要求；工具权限、证据校验、固定分析流程等安全规则
+/// 由编排器另行注入，用户修改此字段不能覆盖那些强制规则。
+pub(crate) const DEFAULT_AI_SYSTEM_PROMPT: &str = r#"你是一名资深生产故障分析与日志取证专家。请以可复核、可证伪的方式工作，优先建立事实，再提出假设。
+
+分析要求：
+- 明确区分直接观察、合理推断和未知信息，不把相关性表述为因果关系。
+- 主动检查时间范围、时区、日志缺口、重复事件、采样偏差以及跨组件关联 ID。
+- 对每个候选根因同时寻找支持证据和反证；存在冲突时说明冲突及其影响。
+- 优先使用确定性统计、聚合和专用分析器缩小范围，再读取最少量的必要上下文。
+- 建议应具体、可执行并包含验证方法；无法确认时明确还需要哪些数据。
+- 使用准确、简洁的中文，不夸大置信度，不隐藏限制。"#;
 /// 进程内日志名称正则缓存上限，防止长时间编辑配置导致缓存无限增长。
 const LOG_MATCHER_REGEX_CACHE_LIMIT: usize = 2048;
 /// 已校验日志名称正则的共享缓存；完整来源扫描和命中统计复用同一编译结果。
@@ -31,9 +46,6 @@ static LOG_MATCHER_REGEX_CACHE: OnceLock<Mutex<HashMap<(String, bool), Regex>>> 
 /// AI 日志分析非敏感配置；API Key 始终存放在系统凭据库中。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct AiConfig {
-    /// 是否启用智能分析入口。
-    #[serde(default)]
-    pub enabled: bool,
     /// 旧版本单模型 API 根地址；仅用于向多模型配置迁移，不再由新界面写入。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
@@ -55,6 +67,9 @@ pub(crate) struct AiConfig {
     /// 单次模型请求超时秒数。
     #[serde(default = "default_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
+    /// 用户可编辑的专业分析系统提示词；不可覆盖编排器内置的权限、证据和流程规则。
+    #[serde(default = "default_ai_system_prompt")]
+    pub system_prompt: String,
     /// 用户定义的日志类型和分析说明。
     #[serde(default)]
     pub log_profiles: Vec<LogTypeProfile>,
@@ -88,6 +103,10 @@ impl AiConfig {
         self.base_url.clear();
         self.model.clear();
         self.request_timeout_seconds = self.request_timeout_seconds.clamp(10, 600);
+        self.system_prompt = self.system_prompt.trim().to_string();
+        if self.system_prompt.is_empty() {
+            self.system_prompt = default_ai_system_prompt();
+        }
         self.model_profiles.truncate(MAX_AI_MODEL_PROFILE_COUNT);
         for profile in &mut self.model_profiles {
             profile.normalize();
@@ -102,9 +121,6 @@ impl AiConfig {
     ///
     /// 返回值：配置可用于新会话时返回 `Ok`；否则返回第一条用户可读错误。
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if !self.enabled {
-            return Err("请先在设置中启用 AI 日志分析".to_string());
-        }
         if self.allow_raw_log_content && self.consent_version != AI_RAW_LOG_CONSENT_VERSION {
             return Err("日志原文授权说明已更新，请在设置中重新确认".to_string());
         }
@@ -113,10 +129,32 @@ impl AiConfig {
             return Err("请至少启用一个可用于智能分析的模型".to_string());
         }
         self.validate_log_profiles()?;
+        self.validate_system_prompt()?;
         Ok(())
     }
 
-    /// 校验全部日志类型配置和稳定 ID；即使全局 AI 关闭，设置保存也不能持久化歧义配置。
+    /// 校验用户可编辑的专业提示词，控制持久化大小并拒绝不可见控制字符。
+    pub(crate) fn validate_system_prompt(&self) -> Result<(), String> {
+        if self.system_prompt.trim().is_empty() {
+            return Err("默认系统提示词不能为空".to_string());
+        }
+        if self.system_prompt.len() > MAX_AI_SYSTEM_PROMPT_BYTES {
+            return Err(format!(
+                "默认系统提示词不能超过 {} KiB",
+                MAX_AI_SYSTEM_PROMPT_BYTES / 1024
+            ));
+        }
+        if self
+            .system_prompt
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            return Err("默认系统提示词包含不支持的控制字符".to_string());
+        }
+        Ok(())
+    }
+
+    /// 校验全部日志类型配置和稳定 ID；即使尚未配置模型，设置保存也不能持久化歧义配置。
     pub(crate) fn validate_log_profiles(&self) -> Result<(), String> {
         let mut profile_ids = HashSet::new();
         for profile in &self.log_profiles {
@@ -159,10 +197,9 @@ impl AiConfig {
 }
 
 impl Default for AiConfig {
-    /// 构造默认关闭的 AI 配置，避免新安装用户意外发起网络请求。
+    /// 构造默认未配置模型的 AI 配置；没有可用模型时不会发起任何网络请求。
     fn default() -> Self {
         Self {
-            enabled: false,
             base_url: String::new(),
             model: String::new(),
             model_profiles: Vec::new(),
@@ -170,9 +207,15 @@ impl Default for AiConfig {
             consent_version: String::new(),
             budget_profile: AiBudgetProfile::Balanced,
             request_timeout_seconds: default_request_timeout_seconds(),
+            system_prompt: default_ai_system_prompt(),
             log_profiles: Vec::new(),
         }
     }
+}
+
+/// 返回默认系统提示词的独立所有权副本，供 Serde 默认值、配置迁移和界面重置复用。
+fn default_ai_system_prompt() -> String {
+    DEFAULT_AI_SYSTEM_PROMPT.to_string()
 }
 
 /// 一项可独立启停和选择的 OpenAI 兼容模型配置。
@@ -529,7 +572,6 @@ mod tests {
         let mut duplicate = profile.clone();
         duplicate.name = "重复日志".to_string();
         let config = AiConfig {
-            enabled: true,
             model_profiles: vec![test_model("测试模型")],
             log_profiles: vec![profile, duplicate],
             ..AiConfig::default()
@@ -541,7 +583,6 @@ mod tests {
     #[test]
     fn ai_config_migrates_legacy_single_model() {
         let mut config = AiConfig {
-            enabled: true,
             base_url: "https://example.com/".to_string(),
             model: " legacy-tool-model ".to_string(),
             ..AiConfig::default()
@@ -593,7 +634,6 @@ mod tests {
         let mut disabled = test_model("模型二");
         disabled.enabled = false;
         let config = AiConfig {
-            enabled: true,
             model_profiles: vec![first.clone(), disabled.clone()],
             ..AiConfig::default()
         };
@@ -614,10 +654,43 @@ mod tests {
         let mut duplicate = test_model("模型二");
         duplicate.profile_id = first.profile_id.clone();
         let config = AiConfig {
-            enabled: true,
             model_profiles: vec![first, duplicate],
             ..AiConfig::default()
         };
         assert!(config.validate_model_profiles().is_err());
+    }
+
+    /// 验证旧配置缺少系统提示词时自动迁移到专业默认值。
+    #[test]
+    fn legacy_ai_config_uses_default_system_prompt() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({}))
+            .expect("缺少新字段的旧 AI 配置应可反序列化");
+        assert_eq!(config.system_prompt, DEFAULT_AI_SYSTEM_PROMPT);
+    }
+
+    /// 验证旧版全局关闭值不再覆盖模型可用性，重新保存后也不会继续写出废弃字段。
+    #[test]
+    fn legacy_global_enabled_flag_is_ignored_after_model_configuration() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "enabled": false,
+            "model_profiles": [test_model("已配置模型")]
+        }))
+        .expect("带旧版全局开关的配置应继续兼容读取");
+        config.validate().expect("有效模型配置应直接启用智能分析");
+        let serialized = serde_json::to_value(config).expect("AI 配置应可重新序列化");
+        assert!(serialized.get("enabled").is_none());
+    }
+
+    /// 验证空提示词会在规范化时恢复默认，超大提示词则被保存校验拒绝。
+    #[test]
+    fn ai_system_prompt_is_normalized_and_bounded() {
+        let mut config = AiConfig {
+            system_prompt: "  \n".to_string(),
+            ..AiConfig::default()
+        };
+        config.normalize();
+        assert_eq!(config.system_prompt, DEFAULT_AI_SYSTEM_PROMPT);
+        config.system_prompt = "x".repeat(MAX_AI_SYSTEM_PROMPT_BYTES + 1);
+        assert!(config.validate_system_prompt().is_err());
     }
 }

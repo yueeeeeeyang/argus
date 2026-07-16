@@ -1,6 +1,6 @@
 //! 文件职责：提供自定义日志来源选择器使用的跨平台文件系统浏览服务。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：枚举本地目录、识别可加载来源类型、生成常用位置入口。
 
@@ -262,15 +262,14 @@ fn push_location(locations: &mut Vec<BrowseLocation>, label: &str, path: PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::paths::isolated_test_dir;
     use std::io::Write;
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
     /// 为路径浏览测试创建隔离临时目录。
     fn temp_root(name: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("argus-path-browser-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = isolated_test_dir(&format!("path-browser-{name}"));
         fs::create_dir_all(&root).expect("应能创建测试目录");
         root
     }
