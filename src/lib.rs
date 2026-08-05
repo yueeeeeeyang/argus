@@ -14,6 +14,7 @@ mod fonts;
 mod highlight;
 mod infra;
 mod loader;
+mod log_io;
 mod platform;
 mod reader;
 mod remote;

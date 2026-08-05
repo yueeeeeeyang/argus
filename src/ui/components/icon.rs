@@ -1,8 +1,8 @@
 //! 文件职责：定义 Argus 界面使用的 Lucide 图标清单与 SVG 渲染入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：将稳定的业务语义、快搜和智能分析图标映射到 icondata Lucide 图标常量。
+//! 主要功能：将稳定的业务语义、快搜、智能分析和面板开关图标映射到 icondata Lucide 图标常量。
 
 use gpui::{IntoElement, prelude::*, px, rgb, svg};
 use icondata::Icon;
@@ -52,6 +52,10 @@ pub(crate) enum ArgusIcon {
     WindowRestore,
     /// 布局切换。
     Layout,
+    /// 展开主窗口右侧 Agent 助手面板。
+    PanelRightOpen,
+    /// 收起主窗口右侧 Agent 助手面板。
+    PanelRightClose,
     /// 更多操作。
     More,
     /// 后退。
@@ -139,6 +143,8 @@ impl ArgusIcon {
             Self::WindowMaximize,
             Self::WindowRestore,
             Self::Layout,
+            Self::PanelRightOpen,
+            Self::PanelRightClose,
             Self::More,
             Self::ArrowLeft,
             Self::ArrowUp,
@@ -201,6 +207,8 @@ impl ArgusIcon {
             Self::WindowMaximize => "icons/window-maximize.svg",
             Self::WindowRestore => "icons/window-restore.svg",
             Self::Layout => "icons/layout.svg",
+            Self::PanelRightOpen => "icons/panel-right-open.svg",
+            Self::PanelRightClose => "icons/panel-right-close.svg",
             Self::More => "icons/more.svg",
             Self::ArrowLeft => "icons/arrow-left.svg",
             Self::ArrowUp => "icons/arrow-up.svg",
@@ -280,6 +288,8 @@ impl ArgusIcon {
             Self::WindowMaximize => icondata::LuSquare,
             Self::WindowRestore => icondata::LuCopy,
             Self::Layout => icondata::LuPanelLeft,
+            Self::PanelRightOpen => icondata::LuPanelRightOpen,
+            Self::PanelRightClose => icondata::LuPanelRightClose,
             Self::More => icondata::LuEllipsis,
             Self::ArrowLeft => icondata::LuArrowLeft,
             Self::ArrowUp => icondata::LuArrowUp,

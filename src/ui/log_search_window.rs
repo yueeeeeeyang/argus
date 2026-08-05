@@ -1,6 +1,6 @@
 //! 文件职责：渲染独立日志搜索窗口。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-16
+//! 修改日期：2026-08-05
 //! 作者：Argus 开发团队
 //! 主要功能：提供无标题栏搜索窗口、关键字/目录输入和搜索范围切换控件。
 
@@ -794,6 +794,12 @@ fn render_keyword_history_overlay(
                 .border_color(rgb(theme.border))
                 .rounded(px(6.0))
                 .occlude()
+                // 输入框的透明指针层使用原始 bounds 处理 MouseDown，不会受 occlude 的
+                // 命中过滤约束。因此必须在按下阶段就终止事件，避免条目覆盖的目录
+                // 输入框先开始光标选择；仅在 on_click 阶段拦截已经太晚。
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                })
                 // 点击下拉内部空白（非条目）不冒泡到根，避免误关下拉；条目自带 stop_propagation。
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();

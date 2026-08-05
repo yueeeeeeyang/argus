@@ -1,5 +1,6 @@
 //! 文件职责：集中维护应用范围内的常量定义。
 //! 创建日期：2026-07-08
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
 //! 主要功能：提供侧栏宽度、日志正文字号、搜索结果面板尺寸、行号栏布局、Jstack 线程详情窗口、
 //!           远程文件预览窗口和 Runtime SQL 明细行高等常量，供界面渲染与命中测试统一引用。
@@ -12,6 +13,14 @@ pub(crate) const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 350.0;
 pub(crate) const SOURCE_PANEL_MIN_WIDTH: f32 = 244.0;
 /// 来源侧栏最大宽度，避免占位界面被侧栏挤压。
 pub(crate) const SOURCE_PANEL_MAX_WIDTH: f32 = 520.0;
+/// 主窗口右侧 Agent 助手默认宽度。
+pub(crate) const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 420.0;
+/// Agent 助手允许拖动到的最小宽度。
+pub(crate) const ASSISTANT_PANEL_MIN_WIDTH: f32 = 340.0;
+/// Agent 助手绝对最大宽度；运行时还会为主内容保留至少 480 像素。
+pub(crate) const ASSISTANT_PANEL_MAX_WIDTH: f32 = 680.0;
+/// 助手面板展开时主内容区必须保留的最小宽度。
+pub(crate) const ASSISTANT_PANEL_MAIN_CONTENT_MIN_WIDTH: f32 = 480.0;
 /// 日志内容字号最小值，避免主阅读区文字过小影响可读性。
 pub(crate) const LOG_CONTENT_FONT_SIZE_MIN: f32 = 12.0;
 /// 日志内容字号最大值，避免大字号破坏当前日志行布局。

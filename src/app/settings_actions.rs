@@ -107,6 +107,7 @@ impl ArgusApp {
         &mut self,
         mut config: crate::config::AiConfig,
         credential: Option<(String, String)>,
+        cx: &mut Context<Self>,
     ) -> Result<(), String> {
         config.normalize();
         if !config.model_profiles.is_empty() {
@@ -131,12 +132,33 @@ impl ArgusApp {
             crate::config::ai_config::validate_ai_base_url(&credential_base_url)?;
             crate::agent::save_api_key(&credential_base_url, api_key.trim())?;
         }
-        self.config.ai = config;
+        let assistant_scope_configuration_changed = self.config.ai.allow_raw_log_content
+            != config.allow_raw_log_content
+            || self.config.ai.consent_version != config.consent_version
+            || self.config.ai.log_profiles != config.log_profiles;
+        let mut next_app_config = self.config.clone();
+        next_app_config.ai = config;
         self.config_manager
-            .save(&self.config)
+            .save(&next_app_config)
             .map_err(|error| format!("保存智能分析设置失败：{error}"))?;
+        self.config = next_app_config;
         self.ai_settings_editor_modal = None;
         self.placeholder_notice = "智能分析设置已保存".to_string();
+        if let Some(panel) = self.assistant_panel.clone() {
+            let source_revision = self.source_content_revision;
+            let ai_config = self.config.ai.clone();
+            panel.update(cx, move |panel, panel_cx| {
+                panel.apply_model_configuration(ai_config);
+                if assistant_scope_configuration_changed {
+                    panel.invalidate_scope_for_analysis_configuration_change(
+                        source_revision,
+                        "日志类型说明或日志原文授权已经更新",
+                        panel_cx,
+                    );
+                }
+                panel_cx.notify();
+            });
+        }
         Ok(())
     }
 

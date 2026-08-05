@@ -1,8 +1,8 @@
 //! 文件职责：管理日志来源树节点注册和可见索引。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：集中维护来源 ID、父子关系、选择状态、AI 分析根解析和虚拟列表可见节点。
+//! 主要功能：集中维护来源 ID、父子关系、选择状态、批量树构建、AI 分析根解析和虚拟列表可见节点。
 
 use std::collections::HashMap;
 
@@ -68,6 +68,38 @@ impl SourceRegistry {
     /// 创建空来源注册表。
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// 从父节点先于子节点的有序节点序列一次性构建完整注册表。
+    ///
+    /// 参数说明：
+    /// - `ordered_nodes`：按根顺序和深度优先顺序排列的节点；节点 ID 必须唯一；
+    ///
+    /// 返回值：已经一次性建立树序、可见行和搜索索引的注册表。
+    ///
+    /// 该入口用于 Agent 独立扫描器等批量生产者，避免逐目录追加时反复重建整棵树索引。
+    pub(crate) fn from_ordered_nodes(ordered_nodes: Vec<SourceTreeNode>) -> Self {
+        let next_id = ordered_nodes
+            .iter()
+            .map(|node| node.id.0)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1)
+            .max(1);
+        let selected_id = ordered_nodes
+            .iter()
+            .find(|node| node.selected)
+            .map(|node| node.id);
+        let mut registry = Self {
+            next_id,
+            selected_id,
+            ..Self::default()
+        };
+        for node in ordered_nodes {
+            registry.insert_node(node);
+        }
+        registry.rebuild_all_indices();
+        registry
     }
 
     /// 返回是否不包含任何来源节点。

@@ -1,18 +1,18 @@
 //! 文件职责：在 AI 会话启动前完整补齐分析范围内的来源树并生成不可变范围快照。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-16
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：复用现有来源加载器递归扫描未展开目录和归档，匹配日志类型说明，并返回可安全回填 UI 的注册表副本。
+//! 主要功能：调用独立 AgentSourceScanner 全量扫描目录和归档，匹配日志类型说明，并返回可安全回填 UI 的注册表。
 
-use std::collections::BTreeSet;
 use std::time::Instant;
 
-use crate::agent::session::SourceScopeSnapshot;
+use crate::agent::session::{AgentScopeSelection, SourceScopeSnapshot};
+use crate::agent::source_scanner::AgentSourceScanner;
 use crate::config::{
     AiConfig, LoaderConfig, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
 };
 use crate::loader::archive::ArchivePasswordStore;
-use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceRegistry};
+use crate::loader::{SourceId, SourceRegistry};
 
 /// AI 来源扫描完成后的不可变会话范围及补齐后的来源注册表。
 #[derive(Debug)]
@@ -73,7 +73,7 @@ pub(crate) struct AgentLogRuleMatchSummary {
 ///
 /// 返回值：扫描成功且至少发现一个日志候选时返回完整注册表和范围快照。
 pub(crate) fn prepare_agent_source_scope(
-    mut registry: SourceRegistry,
+    registry: SourceRegistry,
     selected_id: Option<SourceId>,
     config: AiConfig,
     default_encoding: String,
@@ -81,51 +81,48 @@ pub(crate) fn prepare_agent_source_scope(
     archive_passwords: ArchivePasswordStore,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentSourcePreparation, String> {
+    prepare_agent_source_scope_for_selection(
+        registry,
+        AgentScopeSelection::SelectedRoot(selected_id),
+        config,
+        default_encoding,
+        loader_config,
+        archive_passwords,
+        cancellation,
+    )
+}
+
+/// 按显式单根或全部根范围完整扫描来源树并生成不可变会话快照。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_agent_source_scope_for_selection(
+    registry: SourceRegistry,
+    selection: AgentScopeSelection,
+    config: AiConfig,
+    default_encoding: String,
+    loader_config: LoaderConfig,
+    archive_passwords: ArchivePasswordStore,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<AgentSourcePreparation, String> {
     let source_scan_started_at = Instant::now();
-    let root_id = resolve_scope_root(&registry, selected_id)?;
-    let loader = LogSourceLoader::new(loader_config.clone())
-        .with_archive_passwords(archive_passwords.clone());
-    let mut pending_ids = vec![root_id];
-    let mut visited_ids = BTreeSet::new();
-    let mut warnings = BTreeSet::new();
-
-    while let Some(source_id) = pending_ids.pop() {
-        if cancellation.is_cancelled() {
-            return Err("来源树完整扫描已取消".to_string());
-        }
-        if !visited_ids.insert(source_id) {
-            continue;
-        }
-        let Some(node) = registry.node(source_id).cloned() else {
-            continue;
-        };
-
-        // 完整扫描只关心是否已经加载，不依赖节点的 expanded UI 状态；克隆树中的旧 loading 标记也由本任务接管。
-        if node.kind.can_expand() && !node.metadata.children_loaded {
-            registry.set_loading(source_id, true);
-            let report = loader.load_children(&node);
-            apply_scan_child_report(&mut registry, source_id, report, &mut warnings);
-        }
-
-        // 子级可能刚由上一步挂回注册表，必须重新读取索引并逆序入栈以保持原始树序遍历。
-        for child_id in registry.child_ids(source_id).iter().rev().copied() {
-            pending_ids.push(child_id);
-        }
-    }
-
-    if cancellation.is_cancelled() {
-        return Err("来源树完整扫描已取消".to_string());
-    }
+    let root_ids = resolve_scope_roots(&registry, selection)?;
+    let scan_result = AgentSourceScanner::new(
+        &registry,
+        loader_config,
+        archive_passwords.clone(),
+        cancellation,
+    )
+    .scan(&root_ids)
+    .map_err(|error| error.to_string())?;
+    let registry = scan_result.registry;
 
     let source_scan_elapsed_seconds = source_scan_started_at.elapsed().as_secs();
     let profile_started_at = Instant::now();
-    let warnings = warnings.into_iter().collect::<Vec<_>>();
-    let scope = SourceScopeSnapshot::from_registry(
+    let warnings = scan_result.warnings;
+    let scope = SourceScopeSnapshot::from_registry_selection(
         &registry,
-        selected_id,
+        selection,
         &config,
         default_encoding,
-        loader_config,
         archive_passwords,
     )
     .map_err(|error| {
@@ -166,7 +163,7 @@ fn build_match_summaries(
             for source in scope.sources.iter() {
                 let mut is_profile_matched = false;
                 for (rule_index, matcher) in profile.matchers.iter().enumerate() {
-                    if matcher.is_match(&source.file_name, &source.relative_path) {
+                    if matcher.is_match(&source.file_name, &source.profile_match_path) {
                         rule_match_counts[rule_index] += 1;
                         is_profile_matched = true;
                     }
@@ -204,60 +201,39 @@ fn build_match_summaries(
 }
 
 /// 解析当前分析根；多根来源继续要求明确选择，避免无提示扩大日志授权范围。
-fn resolve_scope_root(
+fn resolve_scope_roots(
     registry: &SourceRegistry,
-    selected_id: Option<SourceId>,
-) -> Result<SourceId, String> {
-    match selected_id {
-        Some(source_id) => registry
+    selection: AgentScopeSelection,
+) -> Result<Vec<SourceId>, String> {
+    match selection {
+        AgentScopeSelection::SelectedRoot(Some(source_id)) => registry
             .root_id_for(source_id)
+            .map(|root_id| vec![root_id])
             .ok_or_else(|| "当前选中来源不存在，无法确定 AI 分析范围".to_string()),
-        None if registry.root_ids().len() == 1 => Ok(registry.root_ids()[0]),
-        None if registry.root_ids().is_empty() => Err("请先加载日志来源".to_string()),
-        None => Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string()),
-    }
-}
-
-/// 把一次子级加载报告挂回扫描副本，并保留局部错误供启动轨迹提示。
-fn apply_scan_child_report(
-    registry: &mut SourceRegistry,
-    parent_id: SourceId,
-    report: LoadReport,
-    warnings: &mut BTreeSet<String>,
-) {
-    let LoadReport {
-        registry: child_registry,
-        errors,
-        password_request,
-        ..
-    } = report;
-    warnings.extend(errors.iter().cloned());
-    if let Some(password_request) = password_request {
-        warnings.insert(format!("归档需要密码：{password_request}"));
-    }
-
-    if child_registry.is_empty() && !errors.is_empty() {
-        registry.mark_children_load_failed(parent_id, errors.join("；"));
-        return;
-    }
-
-    let should_keep_expanded = registry
-        .node(parent_id)
-        .map(|node| node.expanded)
-        .unwrap_or(false);
-    registry.append_children_registry(parent_id, child_registry, should_keep_expanded);
-    if let Some(parent) = registry.node_mut(parent_id)
-        && !errors.is_empty()
-    {
-        parent.metadata.message = Some(errors.join("；"));
+        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().len() == 1 => {
+            Ok(vec![registry.root_ids()[0]])
+        }
+        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().is_empty() => {
+            Err("请先加载日志来源".to_string())
+        }
+        AgentScopeSelection::SelectedRoot(None) => {
+            Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string())
+        }
+        AgentScopeSelection::AllLoadedRoots if registry.root_ids().is_empty() => {
+            Err("请先加载日志来源".to_string())
+        }
+        AgentScopeSelection::AllLoadedRoots => Ok(registry.root_ids().to_vec()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
 
     use uuid::Uuid;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     use super::*;
     use crate::config::paths::temporary_test_dir;
@@ -414,6 +390,139 @@ mod tests {
         assert_eq!(summary.rules[0].matched_file_count, 1);
         assert_eq!(summary.rules[1].matched_file_count, 2);
         assert_eq!(summary.rules[2].matched_file_count, 0);
+    }
+
+    /// 验证交互助手一次补齐全部来源根，并为同名日志生成带根前缀的唯一展示路径。
+    #[test]
+    fn assistant_source_scan_covers_all_roots_and_disambiguates_paths() {
+        let first_directory = temporary_test_dir("assistant-source-scan-first");
+        let second_directory = temporary_test_dir("assistant-source-scan-second");
+        fs::write(first_directory.path().join("application.log"), "first root")
+            .expect("应写入第一个来源日志");
+        fs::write(
+            second_directory.path().join("application.log"),
+            "second root",
+        )
+        .expect("应写入第二个来源日志");
+
+        let mut registry = SourceRegistry::new();
+        for path in [first_directory.path(), second_directory.path()] {
+            let root_id = registry.allocate_id();
+            registry.insert_node(SourceTreeNode {
+                id: root_id,
+                parent_id: None,
+                depth: 0,
+                label: "logs".to_string(),
+                kind: SourceKind::Directory,
+                location: SourceLocation::LocalPath(path.to_path_buf()),
+                metadata: SourceMetadata::default(),
+                selected: false,
+                expanded: false,
+            });
+        }
+        registry.rebuild_all_indices();
+
+        let profile_id = Uuid::new_v4().to_string();
+        let config = AiConfig {
+            log_profiles: vec![LogTypeProfile {
+                profile_id: profile_id.clone(),
+                enabled: true,
+                name: "应用日志".to_string(),
+                priority: 100,
+                matchers: vec![LogNameMatcher {
+                    target: LogNameMatcherTarget::RelativePath,
+                    mode: LogNameMatcherMode::Exact,
+                    pattern: "application.log".to_string(),
+                    case_sensitive: false,
+                }],
+                description: "验证多根展示前缀不改变路径匹配".to_string(),
+            }],
+            ..AiConfig::default()
+        };
+        let preparation = prepare_agent_source_scope_for_selection(
+            registry,
+            AgentScopeSelection::AllLoadedRoots,
+            config,
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("助手应完整扫描全部根来源");
+
+        let paths = preparation
+            .scope
+            .sources
+            .iter()
+            .map(|source| source.relative_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(preparation.scope.sources.len(), 2);
+        assert!(paths.contains(&"logs (1)/application.log"));
+        assert!(paths.contains(&"logs (2)/application.log"));
+        assert!(preparation.scope.sources.iter().all(|source| {
+            source.profile_id.as_deref() == Some(profile_id.as_str())
+                && source.profile_match_path == "application.log"
+        }));
+        assert_eq!(preparation.match_summaries[0].matched_file_count, 2);
+        assert_eq!(preparation.registry.root_ids().len(), 2);
+        assert!(preparation.registry.root_ids().iter().all(|root_id| {
+            preparation
+                .registry
+                .node(*root_id)
+                .is_some_and(|root| root.metadata.children_loaded)
+        }));
+    }
+
+    /// 验证助手完整扫描会递归补齐尚未展开的归档目录和其中日志条目。
+    #[test]
+    fn assistant_source_scan_expands_unloaded_archive_tree() {
+        let directory = temporary_test_dir("assistant-source-scan-archive");
+        let archive_path = directory.path().join("logs.zip");
+        let mut writer = ZipWriter::new(fs::File::create(&archive_path).expect("应创建测试归档"));
+        writer
+            .start_file("application.log", SimpleFileOptions::default())
+            .expect("应创建首个日志条目");
+        writer.write_all(b"INFO ready").expect("应写入首个日志");
+        writer
+            .start_file("nested/error.log", SimpleFileOptions::default())
+            .expect("应创建嵌套日志条目");
+        writer.write_all(b"ERROR failed").expect("应写入嵌套日志");
+        writer.finish().expect("应完成测试归档");
+
+        let mut registry = SourceRegistry::new();
+        let root_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: root_id,
+            parent_id: None,
+            depth: 0,
+            label: "logs.zip".to_string(),
+            kind: SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
+            location: SourceLocation::LocalPath(archive_path),
+            metadata: SourceMetadata::default(),
+            selected: false,
+            expanded: false,
+        });
+        registry.rebuild_all_indices();
+        let preparation = prepare_agent_source_scope_for_selection(
+            registry,
+            AgentScopeSelection::AllLoadedRoots,
+            AiConfig::default(),
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("助手应递归补齐归档来源");
+
+        let file_names = preparation
+            .scope
+            .sources
+            .iter()
+            .map(|source| source.file_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(preparation.scope.sources.len(), 2);
+        assert!(file_names.contains(&"application.log"));
+        assert!(file_names.contains(&"error.log"));
     }
 
     /// 验证启动对话框关闭后，已取消的来源扫描不会继续构建或回填会话范围。

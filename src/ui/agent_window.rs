@@ -1,6 +1,6 @@
 //! 文件职责：渲染 AI 日志分析的独立轨迹与报告窗口。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-16
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
 //! 主要功能：流式展示模型思考、正文、工具轨迹与 Token 用量，并在底部悬浮文本域中接收会话追加提示。
 
@@ -18,8 +18,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::agent::{
-    AgentAnalysisStage, AgentAnalysisStageEvent, AgentAnalysisStageStatus, AgentBudgetSnapshot,
-    AgentEvent, AgentLogProfileMatchSummary, AgentSessionStatus, AgentStreamKind, AgentTraceEntry,
+    AgentAnalysisStageEvent, AgentAnalysisStageStatus, AgentBudgetSnapshot, AgentEvent,
+    AgentLogProfileMatchSummary, AgentSessionStatus, AgentStreamKind, AgentTraceEntry,
     AgentTraceKind, AgentUserMessage, AgentUserMessageStatus, DiagnosticFinding, DiagnosticReport,
     SourceScopeSnapshot,
 };
@@ -148,8 +148,10 @@ enum AgentStreamItem {
 /// 后台只发送结构化阶段、结果摘要与已耗时；界面不保存该阶段的思考或工具明细，避免卡片与
 /// 消息瀑布流重复。运行起点仅用于在终止事件到达时补齐最后一段阶段耗时。
 struct AgentStageViewState {
-    /// 固定分析阶段。
-    stage: AgentAnalysisStage,
+    /// 会话内稳定的动态阶段标识。
+    stage_id: String,
+    /// 模型根据当前问题生成的阶段标题。
+    title: String,
     /// 当前阶段结果。
     status: AgentAnalysisStageStatus,
     /// 后台最后确认的阶段耗时秒数。
@@ -161,14 +163,16 @@ struct AgentStageViewState {
 }
 
 impl AgentStageViewState {
-    /// 创建一个尚未开始的固定阶段视图状态。
-    fn pending(stage: AgentAnalysisStage) -> Self {
+    /// 从后台结构化事件创建一个动态阶段视图状态。
+    fn from_event(event: AgentAnalysisStageEvent) -> Self {
+        let running_since = (event.status == AgentAnalysisStageStatus::Running).then(Instant::now);
         Self {
-            stage,
-            status: AgentAnalysisStageStatus::Pending,
-            elapsed_seconds: 0,
-            result_summary: None,
-            running_since: None,
+            stage_id: event.stage_id,
+            title: event.title,
+            status: event.status,
+            elapsed_seconds: event.elapsed_seconds,
+            result_summary: event.result_summary,
+            running_since,
         }
     }
 
@@ -180,6 +184,7 @@ impl AgentStageViewState {
             self.running_since =
                 (event.status == AgentAnalysisStageStatus::Running).then(Instant::now);
         }
+        self.title = event.title;
         self.status = event.status;
         self.elapsed_seconds = event.elapsed_seconds;
         self.result_summary = event.result_summary;
@@ -204,26 +209,10 @@ impl AgentStageViewState {
                 match status {
                     AgentAnalysisStageStatus::Failed => "阶段因不可恢复错误中止",
                     AgentAnalysisStageStatus::Cancelled => "阶段已由用户主动取消",
-                    _ => self.stage.default_result_summary(),
+                    _ => "阶段已完成",
                 }
                 .to_string(),
             );
-        }
-    }
-
-    /// 在收到更晚阶段或成功终态时补齐可能因事件通道背压遗漏的完成状态。
-    fn complete_if_unfinished(&mut self) {
-        match self.status {
-            AgentAnalysisStageStatus::Pending => {
-                self.status = AgentAnalysisStageStatus::Completed;
-                self.result_summary = Some(self.stage.default_result_summary().to_string());
-            }
-            AgentAnalysisStageStatus::Running => {
-                self.finish_running(AgentAnalysisStageStatus::Completed);
-            }
-            AgentAnalysisStageStatus::Completed
-            | AgentAnalysisStageStatus::Failed
-            | AgentAnalysisStageStatus::Cancelled => {}
         }
     }
 }
@@ -240,8 +229,12 @@ pub(crate) struct AgentWindow {
     question: String,
     /// 当前状态机状态。
     status: AgentSessionStatus,
-    /// 固定分析流程的右侧悬浮时间线状态，只保留标题、结果摘要与耗时。
+    /// 模型动态规划的右侧悬浮时间线状态，只保留标题、结果摘要与耗时。
     analysis_stages: Vec<AgentStageViewState>,
+    /// 用户提交问题并开始来源扫描的时刻，用于计算包含预处理在内的整体耗时。
+    analysis_started_at: Instant,
+    /// 进入终态时冻结的整体耗时；运行中保持为空并使用单调时钟实时计算。
+    analysis_finished_elapsed_seconds: Option<u64>,
     /// 本次会话所选模型的上下文窗口 Token 数。
     context_window_tokens: u64,
     /// 增量轻量轨迹，不保存完整工具输出或日志原文。
@@ -320,6 +313,7 @@ impl AgentWindow {
         scope: Arc<SourceScopeSnapshot>,
         match_summaries: Vec<AgentLogProfileMatchSummary>,
         context_window_tokens: u64,
+        analysis_started_at: Instant,
         cx: &mut Context<Self>,
     ) -> Self {
         let _theme_observer = observe_app_theme(cx, &app, theme.clone(), |view, next_theme, _| {
@@ -353,6 +347,26 @@ impl AgentWindow {
             }
         })
         .detach();
+        // 顶部整体耗时必须独立于模型和工具事件每秒刷新；终态后立即退出，避免空闲窗口常驻任务。
+        cx.spawn(async move |view, cx| {
+            loop {
+                Timer::after(Duration::from_secs(1)).await;
+                let should_continue = view
+                    .update(cx, |window, cx| {
+                        if window.status.is_terminal() {
+                            false
+                        } else {
+                            cx.notify();
+                            true
+                        }
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        })
+        .detach();
         let message_input = TextInputState {
             is_focused: true,
             ..TextInputState::default()
@@ -364,11 +378,9 @@ impl AgentWindow {
             session_id,
             question,
             status: AgentSessionStatus::Created,
-            analysis_stages: AgentAnalysisStage::ALL
-                .iter()
-                .copied()
-                .map(AgentStageViewState::pending)
-                .collect(),
+            analysis_stages: Vec::new(),
+            analysis_started_at,
+            analysis_finished_elapsed_seconds: None,
             context_window_tokens,
             traces: Arc::new(vec![Arc::new(AgentTraceEntry::new(
                 AgentTraceKind::Status,
@@ -426,12 +438,12 @@ impl AgentWindow {
                     _ => None,
                 };
                 if let Some(stage_status) = terminal_stage_status {
+                    if self.analysis_finished_elapsed_seconds.is_none() {
+                        self.analysis_finished_elapsed_seconds =
+                            Some(self.analysis_started_at.elapsed().as_secs());
+                    }
                     for stage in &mut self.analysis_stages {
-                        if stage_status == AgentAnalysisStageStatus::Completed {
-                            stage.complete_if_unfinished();
-                        } else {
-                            stage.finish_running(stage_status);
-                        }
+                        stage.finish_running(stage_status);
                     }
                 }
                 self.push_trace(AgentTraceEntry::new(
@@ -443,19 +455,22 @@ impl AgentWindow {
             AgentEvent::Trace(trace) => self.push_trace(trace),
             AgentEvent::Budget(budget) => self.budget = budget,
             AgentEvent::Stage(event) => {
-                // 阶段事件单调递增；若有中间事件因有界通道拥塞被丢弃，较晚事件可以确定此前阶段
-                // 已经完成，因此先补齐前缀状态，避免时间线在成功会话中永久显示“待开始”。
-                if event.status != AgentAnalysisStageStatus::Pending {
-                    for stage in self.analysis_stages.iter_mut().take(event.stage.index()) {
-                        stage.complete_if_unfinished();
-                    }
-                }
                 if let Some(stage) = self
                     .analysis_stages
                     .iter_mut()
-                    .find(|stage| stage.stage == event.stage)
+                    .find(|stage| stage.stage_id == event.stage_id)
                 {
                     stage.apply(event);
+                } else {
+                    // 新运行阶段意味着此前运行阶段已经结束；即使其完成事件因有界通道背压
+                    // 被丢弃，也在这里保守关闭加载动画，但不伪造模型结果摘要。
+                    if event.status == AgentAnalysisStageStatus::Running {
+                        for stage in &mut self.analysis_stages {
+                            stage.finish_running(AgentAnalysisStageStatus::Completed);
+                        }
+                    }
+                    self.analysis_stages
+                        .push(AgentStageViewState::from_event(event));
                 }
             }
             AgentEvent::StreamDelta(kind, delta) => self.apply_stream_delta(kind, delta),
@@ -495,6 +510,8 @@ impl AgentWindow {
                 ));
                 self.start_report_stream(report, report_path, cx);
             }
+            // 交互助手使用独立右侧面板消费该事件，固定分析窗口不会收到它。
+            AgentEvent::AssistantCompleted { .. } | AgentEvent::AssistantAttemptReset => {}
             AgentEvent::Failed(message) => {
                 self.input_error = Some(message.clone());
                 self.push_trace(AgentTraceEntry::new(
@@ -698,6 +715,12 @@ impl AgentWindow {
         self.sync_trace_items();
     }
 
+    /// 返回从用户提交问题开始计算的整体分析耗时，包含来源扫描、模型、工具、复核和报告阶段。
+    fn overall_elapsed_seconds(&self) -> u64 {
+        self.analysis_finished_elapsed_seconds
+            .unwrap_or_else(|| self.analysis_started_at.elapsed().as_secs())
+    }
+
     /// 处理自定义关闭按钮；运行态先显示确认浮层。
     fn request_close(&mut self, window: &mut Window) {
         if self.status.is_terminal() {
@@ -735,7 +758,6 @@ fn build_agent_stream_items(
             matches!(
                 trace.kind,
                 AgentTraceKind::Status
-                    | AgentTraceKind::Model
                     | AgentTraceKind::Reasoning
                     | AgentTraceKind::Output
                     | AgentTraceKind::Tool
@@ -746,8 +768,11 @@ fn build_agent_stream_items(
     let mut trace_index = 0;
     while trace_index < traces.len() {
         let trace = &traces[trace_index];
-        // 最终报告由拆分后的虚拟卡片行展示，隐藏仅用于状态提示的报告轨迹。
-        if trace.kind == AgentTraceKind::Report && report.is_some() {
+        // 模型请求统计只在顶部信息栏展示；最终报告由拆分后的虚拟卡片行展示。
+        // 同时隐藏后台升级前残留的模型轨迹，确保重试或事件竞态不会让请求行重新出现。
+        if trace.kind == AgentTraceKind::Model
+            || (trace.kind == AgentTraceKind::Report && report.is_some())
+        {
             trace_index += 1;
             continue;
         }
@@ -1101,6 +1126,7 @@ impl Render for AgentWindow {
                             .child(render_budget_bar(
                                 self.budget,
                                 self.context_window_tokens,
+                                self.overall_elapsed_seconds(),
                                 status,
                                 &theme,
                             ))
@@ -1125,7 +1151,7 @@ impl Render for AgentWindow {
                                         &theme,
                                     )),
                             )
-                            .child(div().h(px(148.0)).flex_none())
+                            .child(div().h(px(128.0)).flex_none())
                             .when(show_jump_to_latest, |this| {
                                 this.child(
                                     div()
@@ -1134,7 +1160,7 @@ impl Render for AgentWindow {
                                         .right(px(
                                             AGENT_STAGE_CARD_WIDTH + AGENT_STAGE_CARD_GAP * 2.0,
                                         ))
-                                        .bottom(px(158.0))
+                                        .bottom(px(138.0))
                                         .px_5()
                                         .flex()
                                         .justify_center()
@@ -1215,6 +1241,7 @@ impl Render for AgentWindow {
                                                             }),
                                                             trailing_accessory_position: TextareaAccessoryPosition::BottomRight,
                                                             trailing_accessory_always_visible: true,
+                                                            reserve_secondary_accessory: true,
                                                             trailing_accessory_selected: can_send_message,
                                                             native_input: Some(native_input),
                                                         },
@@ -1277,19 +1304,6 @@ impl Render for AgentWindow {
                                                                 )),
                                                         )
                                                     }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .mt_2()
-                                                    .px_2()
-                                                    .flex()
-                                                    .items_center()
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(11.0))
-                                                            .text_color(rgb(if self.input_error.is_some() { theme.error } else { theme.foreground_muted }))
-                                                            .child(self.input_error.clone().unwrap_or_else(|| "消息将在当前模型或工具调用结束后串行消费".to_string())),
-                                                    ),
                                             ),
                                     ),
                             ),
@@ -1341,7 +1355,7 @@ impl Render for AgentWindow {
     }
 }
 
-/// 渲染窗口右侧悬浮的固定分析流程时间线卡片。
+/// 渲染窗口右侧悬浮的动态分析阶段时间线卡片。
 ///
 /// 卡片与窗口边缘保持间距，不参与主布局分栏；内容严格限制为阶段标题、结果摘要和耗时。
 /// 模型思考、工具参数及证据正文继续只在消息瀑布流展示。
@@ -1387,14 +1401,34 @@ fn render_analysis_stage_timeline_card(
                     div()
                         .text_size(px(9.0))
                         .text_color(rgb(theme.foreground_muted))
-                        .child(format!("{completed_count} / {} 已完成", stages.len())),
+                        .child(if stages.is_empty() {
+                            "模型规划中".to_string()
+                        } else {
+                            format!("{completed_count} / {} 已完成", stages.len())
+                        }),
                 ),
         )
-        .child(div().flex_1().min_h(px(0.0)).overflow_hidden().children(
-            stages.iter().enumerate().map(|(index, stage)| {
-                render_analysis_stage_timeline_item(index, stages.len(), stage, theme)
-            }),
-        ))
+        .child(
+            div()
+                .id("agent-analysis-stage-scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .scrollbar_width(px(4.0))
+                .when(stages.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_3()
+                            .text_size(px(10.0))
+                            .text_color(rgb(theme.foreground_muted))
+                            .child("模型会根据问题自行决定所需分析阶段"),
+                    )
+                })
+                .children(stages.iter().enumerate().map(|(index, stage)| {
+                    render_analysis_stage_timeline_item(index, stages.len(), stage, theme)
+                })),
+        )
 }
 
 /// 渲染单个紧凑时间线节点，完成节点同时展示阶段结果摘要与耗时。
@@ -1405,19 +1439,11 @@ fn render_analysis_stage_timeline_item(
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
     let (summary, duration, color) = analysis_stage_display(stage, theme);
+    let summary_lines = summary.lines().map(ToString::to_string).collect::<Vec<_>>();
     let node: AnyElement = match stage.status {
-        AgentAnalysisStageStatus::Running => render_loading_spinner(
-            ("agent-analysis-stage-loading", stage.stage.index()),
-            theme.info,
-            12.0,
-        ),
-        AgentAnalysisStageStatus::Pending => div()
-            .size(px(7.0))
-            .rounded_full()
-            .border_1()
-            .border_color(rgb(theme.foreground_muted))
-            .bg(rgb(theme.content))
-            .into_any_element(),
+        AgentAnalysisStageStatus::Running => {
+            render_loading_spinner(("agent-analysis-stage-loading", index), theme.info, 12.0)
+        }
         _ => div()
             .size(px(7.0))
             .rounded_full()
@@ -1430,8 +1456,9 @@ fn render_analysis_stage_timeline_item(
         theme.border
     };
     div()
-        .h(px(36.0))
+        .min_h(px(40.0))
         .px_3()
+        .py_1()
         .flex_none()
         .flex()
         .gap_2()
@@ -1483,23 +1510,24 @@ fn render_analysis_stage_timeline_item(
                         } else {
                             theme.foreground_muted
                         }))
-                        .child(stage.stage.title()),
+                        .child(stage.title.clone()),
                 )
                 .child(
                     div()
                         .mt(px(1.0))
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_2()
-                        .child(
-                            div()
-                                .min_w(px(0.0))
-                                .flex_1()
-                                .truncate()
-                                .text_size(px(9.0))
-                                .text_color(rgb(color))
-                                .child(summary),
-                        )
+                        .child(div().min_w(px(0.0)).flex_1().flex().flex_col().children(
+                            summary_lines.into_iter().map(|line| {
+                                div()
+                                    .whitespace_normal()
+                                    .line_height(px(12.0))
+                                    .text_size(px(9.0))
+                                    .text_color(rgb(color))
+                                    .child(line)
+                            }),
+                        ))
                         .when_some(duration, |this, duration| {
                             this.child(
                                 div()
@@ -1519,13 +1547,12 @@ fn analysis_stage_display(
     theme: &AppTheme,
 ) -> (String, Option<String>, u32) {
     match stage.status {
-        AgentAnalysisStageStatus::Pending => ("待开始".to_string(), None, theme.foreground_muted),
         AgentAnalysisStageStatus::Running => ("正在执行".to_string(), None, theme.info),
         AgentAnalysisStageStatus::Completed => (
             stage
                 .result_summary
                 .clone()
-                .unwrap_or_else(|| stage.stage.default_result_summary().to_string()),
+                .unwrap_or_else(|| "阶段已完成".to_string()),
             Some(format_stage_duration(stage.elapsed_seconds)),
             theme.success,
         ),
@@ -1548,19 +1575,31 @@ fn analysis_stage_display(
     }
 }
 
-/// 把阶段秒数压缩为适合悬浮时间线的一行耗时文本。
+/// 把阶段秒数压缩为适合悬浮时间线的易读耗时文本。
 fn format_stage_duration(seconds: u64) -> String {
     match seconds {
         0 => "< 1 秒".to_string(),
         1..=59 => format!("{seconds} 秒"),
-        _ => format!("{} 分 {} 秒", seconds / 60, seconds % 60),
+        60..=3599 => format!("{} 分 {} 秒", seconds / 60, seconds % 60),
+        _ => format!(
+            "{} 小时 {} 分 {} 秒",
+            seconds / 3600,
+            seconds % 3600 / 60,
+            seconds % 60
+        ),
     }
+}
+
+/// 格式化包含来源扫描在内的整体分析耗时，避免用户解读原始秒数。
+fn format_analysis_duration(seconds: u64) -> String {
+    format_stage_duration(seconds)
 }
 
 /// 渲染资源预算条。
 fn render_budget_bar(
     budget: AgentBudgetSnapshot,
     context_window_tokens: u64,
+    overall_elapsed_seconds: u64,
     status: AgentSessionStatus,
     theme: &AppTheme,
 ) -> impl IntoElement + use<> {
@@ -1605,8 +1644,11 @@ fn render_budget_bar(
             theme,
         )))
         .child(render_budget_divider(theme))
-        .child(div().w(px(78.0)).flex_none().child(render_budget_metric(
-            format!("耗时 {}s", budget.elapsed_seconds),
+        .child(div().w(px(160.0)).flex_none().child(render_budget_metric(
+            format!(
+                "总耗时 {}",
+                format_analysis_duration(overall_elapsed_seconds)
+            ),
             status.label().to_string(),
             theme,
         )))
@@ -2941,6 +2983,52 @@ mod tests {
         );
     }
 
+    /// 验证模型请求边界不会进入分析消息瀑布流，模型思考与可见输出仍正常保留。
+    #[test]
+    fn model_request_traces_are_hidden_from_analysis_stream() {
+        let traces = vec![
+            Arc::new(AgentTraceEntry::new(
+                AgentTraceKind::Status,
+                "分析中",
+                "会话已启动",
+            )),
+            Arc::new(AgentTraceEntry::new(
+                AgentTraceKind::Model,
+                "模型请求 #1",
+                "正在请求模型",
+            )),
+            Arc::new(AgentTraceEntry::new(
+                AgentTraceKind::Reasoning,
+                "思考过程",
+                "正在分析证据",
+            )),
+        ];
+        let items = build_agent_stream_items(
+            &traces,
+            AgentSessionStatus::Investigating,
+            None,
+            0,
+            0,
+            &[],
+            &HashSet::new(),
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, AgentStreamItem::Trace { trace_index: 0, .. }))
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, AgentStreamItem::Trace { trace_index: 2, .. }))
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, AgentStreamItem::Trace { trace_index: 1, .. }))
+        );
+    }
+
     /// 验证报告字符数只在接收报告时计算一次，并且各虚拟行之和覆盖完整流式内容。
     #[test]
     fn report_stream_rows_cover_all_dynamic_text() {
@@ -2983,9 +3071,9 @@ mod tests {
     /// 验证阶段视图接收运行与完成快照后保存结果和耗时，终态不会留下加载状态。
     #[test]
     fn analysis_stage_view_applies_structured_results() {
-        let mut stage = AgentStageViewState::pending(AgentAnalysisStage::ExtractContext);
-        stage.apply(AgentAnalysisStageEvent {
-            stage: AgentAnalysisStage::ExtractContext,
+        let mut stage = AgentStageViewState::from_event(AgentAnalysisStageEvent {
+            stage_id: "primary/context".to_string(),
+            title: "提取关键上下文".to_string(),
             status: AgentAnalysisStageStatus::Running,
             elapsed_seconds: 2,
             result_summary: None,
@@ -2994,18 +3082,20 @@ mod tests {
         assert!(stage.running_since.is_some());
 
         stage.apply(AgentAnalysisStageEvent {
-            stage: AgentAnalysisStage::ExtractContext,
+            stage_id: "primary/context".to_string(),
+            title: "提取关键上下文".to_string(),
             status: AgentAnalysisStageStatus::Completed,
             elapsed_seconds: 7,
-            result_summary: Some("已定位启动失败上下文".to_string()),
+            result_summary: Some("已定位启动失败上下文\n已确认时间窗口".to_string()),
         });
         assert_eq!(stage.status, AgentAnalysisStageStatus::Completed);
         assert_eq!(stage.elapsed_seconds, 7);
         assert_eq!(
             stage.result_summary.as_deref(),
-            Some("已定位启动失败上下文")
+            Some("已定位启动失败上下文\n已确认时间窗口")
         );
         assert!(stage.running_since.is_none());
         assert_eq!(format_stage_duration(7), "7 秒");
+        assert_eq!(format_analysis_duration(3_661), "1 小时 1 分 1 秒");
     }
 }

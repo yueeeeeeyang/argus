@@ -1,8 +1,8 @@
 //! 文件职责：定义 AI 分析会话状态、范围快照、资源预算、轨迹事件和追加消息。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-16
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：把来源树固化为不可变授权范围，并统一记录调用、Token、扫描量、独立复核和取消边界。
+//! 主要功能：把来源树固化为不可变授权范围，并统一记录 Agent 日志访问、调用、Token、扫描量、独立复核和取消边界。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{
@@ -12,24 +12,40 @@ use std::sync::{
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::agent::log_access::AgentLogAccess;
+
 use crate::agent::report::{DiagnosticReport, EvidenceDisplayExcerpt};
-use crate::config::{AiConfig, LoaderConfig, LogNameMatcher, LogTypeProfile};
+use crate::config::{AiConfig, LogNameMatcher, LogTypeProfile};
 use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::{SourceId, SourceLocation, SourceRegistry};
-use crate::reader::log_file_reader::LogReaderHandle;
+
+/// Agent 会话的产品运行模式；工具层据此决定是否开放报告与阶段展示能力。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentSessionMode {
+    /// 独立智能分析窗口使用的动态阶段和最终报告模式。
+    StructuredAnalysis,
+    /// 主窗口右侧助手使用的自由多轮交互模式。
+    InteractiveAssistant,
+}
+
+/// 来源快照的选择范围，避免交互助手复用单根入口时意外缩小授权范围。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentScopeSelection {
+    /// 根据当前选中节点解析一个根；保留现有智能分析行为。
+    SelectedRoot(Option<SourceId>),
+    /// 固化来源注册表中的全部已加载根。
+    AllLoadedRoots,
+}
 
 /// 单个工具 JSON 结果上限。
 pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 128 * 1024;
 /// 单个工具结果中的日志原文上限。
 pub(crate) const MAX_TOOL_RAW_BYTES: usize = 64 * 1024;
-/// 会话内最多缓存的日志读取器数量，限制解码正文、行索引和归档落盘文件占用。
-const MAX_AGENT_READER_CACHE_ENTRIES: usize = 2;
 /// 会话内最多缓存的事件签名统计数量，防止模型构造高基数签名耗尽内存。
 const MAX_EVENT_OCCURRENCE_CACHE_ENTRIES: usize = 256;
 
@@ -80,103 +96,22 @@ impl AgentSessionStatus {
     }
 }
 
-/// 固定日志分析流程中的十二个可展示阶段。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AgentAnalysisStage {
-    /// A：完整扫描来源树。
-    ScanSources,
-    /// B：匹配日志类型和结构化说明。
-    MatchLogTypes,
-    /// C：拆解用户问题。
-    BreakDownQuestion,
-    /// D：建立分析计划和覆盖清单。
-    BuildPlan,
-    /// E：分层采样与异常检索。
-    SearchAnomalies,
-    /// F：提取事件上下文。
-    ExtractContext,
-    /// G：构建跨来源时间线。
-    BuildTimeline,
-    /// H：形成候选假设。
-    FormHypotheses,
-    /// I：搜索支持证据和反证。
-    VerifyHypotheses,
-    /// J：本地验证引用。
-    ValidateEvidence,
-    /// K：独立复核结论。
-    IndependentReview,
-    /// L：生成三段式报告。
-    GenerateReport,
-}
-
-impl AgentAnalysisStage {
-    /// 固定阶段顺序，供状态跟踪器和右侧悬浮时间线共享。
-    pub(crate) const ALL: [Self; 12] = [
-        Self::ScanSources,
-        Self::MatchLogTypes,
-        Self::BreakDownQuestion,
-        Self::BuildPlan,
-        Self::SearchAnomalies,
-        Self::ExtractContext,
-        Self::BuildTimeline,
-        Self::FormHypotheses,
-        Self::VerifyHypotheses,
-        Self::ValidateEvidence,
-        Self::IndependentReview,
-        Self::GenerateReport,
-    ];
-
-    /// 返回阶段在固定流程中的零基位置。
-    pub(crate) fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|stage| *stage == self)
-            .expect("固定分析阶段必须存在于 ALL 中")
-    }
-
-    /// 返回阶段时间线使用的简洁中文标题。
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::ScanSources => "完整扫描来源树",
-            Self::MatchLogTypes => "匹配日志类型与说明",
-            Self::BreakDownQuestion => "拆解用户问题",
-            Self::BuildPlan => "建立计划与覆盖清单",
-            Self::SearchAnomalies => "分层采样与异常检索",
-            Self::ExtractContext => "提取事件上下文",
-            Self::BuildTimeline => "构建跨来源时间线",
-            Self::FormHypotheses => "形成候选假设",
-            Self::VerifyHypotheses => "搜索支持证据与反证",
-            Self::ValidateEvidence => "本地验证引用",
-            Self::IndependentReview => "独立复核结论",
-            Self::GenerateReport => "生成三段式报告",
-        }
-    }
-
-    /// 返回没有模型摘要时使用的保守阶段结果，保证完成节点始终存在结果说明。
-    pub(crate) fn default_result_summary(self) -> &'static str {
-        match self {
-            Self::ScanSources => "来源树扫描已完成",
-            Self::MatchLogTypes => "日志类型与说明匹配已完成",
-            Self::BreakDownQuestion => "用户问题已完成结构化拆解",
-            Self::BuildPlan => "分析计划与覆盖清单已建立",
-            Self::SearchAnomalies => "分层采样与异常检索已完成",
-            Self::ExtractContext => "候选事件上下文已提取",
-            Self::BuildTimeline => "跨来源时间线已构建",
-            Self::FormHypotheses => "候选假设已形成",
-            Self::VerifyHypotheses => "支持证据与反证检索已完成",
-            Self::ValidateEvidence => "报告引用已通过本地验证",
-            Self::IndependentReview => "结论已完成独立复核",
-            Self::GenerateReport => "三段式报告已生成",
-        }
-    }
-}
+/// 来源扫描是模型运行前由 Argus 确定性执行的系统阶段。
+const SOURCE_SCAN_STAGE_ID: &str = "scan_sources";
+/// 来源扫描阶段的用户可见标题。
+const SOURCE_SCAN_STAGE_TITLE: &str = "完整扫描来源树";
+/// 来源扫描摘要缺失时的保守结果。
+const SOURCE_SCAN_DEFAULT_SUMMARY: &str = "来源树扫描已完成";
+/// 日志类型匹配是模型运行前由 Argus 确定性执行的系统阶段。
+const LOG_PROFILE_STAGE_ID: &str = "match_log_types";
+/// 日志类型匹配阶段的用户可见标题。
+const LOG_PROFILE_STAGE_TITLE: &str = "匹配日志类型与说明";
+/// 日志类型匹配摘要缺失时的保守结果。
+const LOG_PROFILE_DEFAULT_SUMMARY: &str = "日志类型与说明匹配已完成";
 
 /// 单个分析阶段的最终结果或当前运行状态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AgentAnalysisStageStatus {
-    /// 尚未进入该阶段。
-    Pending,
     /// 当前正在执行。
     Running,
     /// 已正常完成。
@@ -190,8 +125,10 @@ pub(crate) enum AgentAnalysisStageStatus {
 /// 后台发送给阶段时间线卡片的结构化状态快照。
 #[derive(Clone, Debug)]
 pub(crate) struct AgentAnalysisStageEvent {
-    /// 对应固定阶段。
-    pub stage: AgentAnalysisStage,
+    /// 会话内稳定的阶段标识；模型可以根据问题动态定义。
+    pub stage_id: String,
+    /// 用户可见阶段标题。
+    pub title: String,
     /// 当前结果状态。
     pub status: AgentAnalysisStageStatus,
     /// 阶段已消耗秒数；运行态由界面在此基础上继续计时。
@@ -200,100 +137,125 @@ pub(crate) struct AgentAnalysisStageEvent {
     pub result_summary: Option<String>,
 }
 
-/// 十二阶段的单会话顺序跟踪器，只允许向后推进，避免模型让时间线状态倒退。
+/// 动态阶段的内部记录。
+struct TrackedAnalysisStage {
+    /// 会话内稳定标识。
+    stage_id: String,
+    /// 用户可见标题。
+    title: String,
+    /// 当前状态。
+    status: AgentAnalysisStageStatus,
+    /// 已确认耗时。
+    elapsed_seconds: u64,
+    /// 完成结果摘要。
+    result_summary: Option<String>,
+    /// 当前运行阶段的开始时刻。
+    started_at: Option<Instant>,
+    /// 摘要缺失时使用的保守说明。
+    default_result_summary: String,
+}
+
+/// 动态分析阶段的单会话跟踪器。
+///
+/// 跟踪器只保证同一时间最多一个运行阶段，并保持已经出现的阶段顺序；阶段数量、标题和
+/// 推进顺序完全由模型根据当前问题决定，不再隐式补齐任何固定流程。
 pub(crate) struct AgentAnalysisStageTracker {
-    /// 每个阶段的当前状态。
-    statuses: [AgentAnalysisStageStatus; 12],
-    /// 已完成阶段的最终耗时。
-    elapsed_seconds: [u64; 12],
-    /// 每个完成阶段的简短结果摘要。
-    result_summaries: [Option<String>; 12],
-    /// 当前运行阶段开始时间。
-    current_started_at: Instant,
+    /// 已经实际出现的阶段，保持展示顺序。
+    stages: Vec<TrackedAnalysisStage>,
 }
 
 impl AgentAnalysisStageTracker {
-    /// 使用启动前已经测得的来源扫描、类型匹配结果和耗时创建跟踪器，并从问题拆解阶段开始。
+    /// 使用启动前已经测得的来源扫描和类型匹配结果创建跟踪器。
+    ///
+    /// 后续不预建任何待执行阶段，首个模型阶段由模型根据问题自行声明。
     pub(crate) fn new(
         source_scan_seconds: u64,
         profile_seconds: u64,
         source_scan_summary: String,
         profile_summary: String,
     ) -> Self {
-        let mut statuses = [AgentAnalysisStageStatus::Pending; 12];
-        let mut elapsed_seconds = [0_u64; 12];
-        let mut result_summaries = std::array::from_fn(|_| None);
-        statuses[AgentAnalysisStage::ScanSources.index()] = AgentAnalysisStageStatus::Completed;
-        statuses[AgentAnalysisStage::MatchLogTypes.index()] = AgentAnalysisStageStatus::Completed;
-        statuses[AgentAnalysisStage::BreakDownQuestion.index()] = AgentAnalysisStageStatus::Running;
-        elapsed_seconds[AgentAnalysisStage::ScanSources.index()] = source_scan_seconds;
-        elapsed_seconds[AgentAnalysisStage::MatchLogTypes.index()] = profile_seconds;
-        result_summaries[AgentAnalysisStage::ScanSources.index()] = Some(
-            normalize_stage_result_summary(source_scan_summary, AgentAnalysisStage::ScanSources),
-        );
-        result_summaries[AgentAnalysisStage::MatchLogTypes.index()] = Some(
-            normalize_stage_result_summary(profile_summary, AgentAnalysisStage::MatchLogTypes),
-        );
         Self {
-            statuses,
-            elapsed_seconds,
-            result_summaries,
-            current_started_at: Instant::now(),
+            stages: vec![
+                TrackedAnalysisStage {
+                    stage_id: SOURCE_SCAN_STAGE_ID.to_string(),
+                    title: SOURCE_SCAN_STAGE_TITLE.to_string(),
+                    status: AgentAnalysisStageStatus::Completed,
+                    elapsed_seconds: source_scan_seconds,
+                    result_summary: Some(normalize_stage_result_summary(
+                        source_scan_summary,
+                        SOURCE_SCAN_DEFAULT_SUMMARY,
+                    )),
+                    started_at: None,
+                    default_result_summary: SOURCE_SCAN_DEFAULT_SUMMARY.to_string(),
+                },
+                TrackedAnalysisStage {
+                    stage_id: LOG_PROFILE_STAGE_ID.to_string(),
+                    title: LOG_PROFILE_STAGE_TITLE.to_string(),
+                    status: AgentAnalysisStageStatus::Completed,
+                    elapsed_seconds: profile_seconds,
+                    result_summary: Some(normalize_stage_result_summary(
+                        profile_summary,
+                        LOG_PROFILE_DEFAULT_SUMMARY,
+                    )),
+                    started_at: None,
+                    default_result_summary: LOG_PROFILE_DEFAULT_SUMMARY.to_string(),
+                },
+            ],
         }
     }
 
-    /// 返回全部阶段的当前快照。
+    /// 返回已经实际出现的全部阶段快照。
     pub(crate) fn snapshots(&self) -> Vec<AgentAnalysisStageEvent> {
-        AgentAnalysisStage::ALL
-            .iter()
-            .copied()
-            .map(|stage| self.event(stage))
-            .collect()
+        self.stages.iter().map(Self::event).collect()
     }
 
-    /// 按固定流程推进到紧邻的下一阶段，并返回发生变化的阶段事件。
+    /// 完成当前阶段并启动模型声明的任意新阶段。
     ///
-    /// 重复或倒序请求仍按幂等操作忽略；跨阶段请求会显式报错，避免尚未执行的阶段
-    /// 被错误标记为完成并在时间线中产生虚假的结果摘要。
-    pub(crate) fn advance(
+    /// 已出现的阶段标识按幂等请求处理，防止网络重试重复增加时间线节点；新阶段不与任何
+    /// 固定清单比较，因此模型可以自由选择阶段数量、名称和顺序。
+    pub(crate) fn advance_dynamic(
         &mut self,
-        target: AgentAnalysisStage,
+        stage_id: String,
+        title: String,
         completed_summary: Option<String>,
+        default_result_summary: String,
     ) -> Result<Vec<AgentAnalysisStageEvent>, String> {
-        let target_index = target.index();
-        let current_index = self
-            .statuses
-            .iter()
-            .position(|status| *status == AgentAnalysisStageStatus::Running)
-            .unwrap_or(target_index);
-        if target_index <= current_index {
+        validate_dynamic_stage(&stage_id, &title)?;
+        if self.stages.iter().any(|stage| stage.stage_id == stage_id) {
             return Ok(Vec::new());
-        }
-        if target_index != current_index + 1 {
-            let current_stage = AgentAnalysisStage::ALL[current_index];
-            let next_stage = AgentAnalysisStage::ALL[current_index + 1];
-            return Err(format!(
-                "分析阶段必须按固定顺序推进：当前为“{}”，下一阶段只能是“{}”，不能直接进入“{}”",
-                current_stage.title(),
-                next_stage.title(),
-                target.title()
-            ));
         }
 
         let mut events = Vec::new();
-        let current_stage = AgentAnalysisStage::ALL[current_index];
-        self.statuses[current_index] = AgentAnalysisStageStatus::Completed;
-        self.elapsed_seconds[current_index] = self.current_started_at.elapsed().as_secs();
-        self.result_summaries[current_index] = Some(normalize_stage_result_summary(
-            completed_summary.unwrap_or_default(),
-            current_stage,
-        ));
-        events.push(self.event(current_stage));
-        self.statuses[target_index] = AgentAnalysisStageStatus::Running;
-        self.elapsed_seconds[target_index] = 0;
-        self.result_summaries[target_index] = None;
-        self.current_started_at = Instant::now();
-        events.push(self.event(target));
+        if let Some(current) = self
+            .stages
+            .iter_mut()
+            .find(|stage| stage.status == AgentAnalysisStageStatus::Running)
+        {
+            current.status = AgentAnalysisStageStatus::Completed;
+            current.elapsed_seconds = current
+                .started_at
+                .take()
+                .map(|started_at| started_at.elapsed().as_secs())
+                .unwrap_or(current.elapsed_seconds);
+            current.result_summary = Some(normalize_stage_result_summary(
+                completed_summary.unwrap_or_default(),
+                &current.default_result_summary,
+            ));
+            events.push(Self::event(current));
+        }
+
+        self.stages.push(TrackedAnalysisStage {
+            stage_id,
+            title,
+            status: AgentAnalysisStageStatus::Running,
+            elapsed_seconds: 0,
+            result_summary: None,
+            started_at: Some(Instant::now()),
+            default_result_summary,
+        });
+        if let Some(current) = self.stages.last() {
+            events.push(Self::event(current));
+        }
         Ok(events)
     }
 
@@ -302,49 +264,77 @@ impl AgentAnalysisStageTracker {
         &mut self,
         completed_summary: Option<String>,
     ) -> Vec<AgentAnalysisStageEvent> {
-        let Some(current_index) = self
-            .statuses
-            .iter()
-            .position(|status| *status == AgentAnalysisStageStatus::Running)
+        let Some(current) = self
+            .stages
+            .iter_mut()
+            .find(|stage| stage.status == AgentAnalysisStageStatus::Running)
         else {
             return Vec::new();
         };
-        let current_stage = AgentAnalysisStage::ALL[current_index];
-        self.statuses[current_index] = AgentAnalysisStageStatus::Completed;
-        self.elapsed_seconds[current_index] = self.current_started_at.elapsed().as_secs();
-        self.result_summaries[current_index] = Some(normalize_stage_result_summary(
+        current.status = AgentAnalysisStageStatus::Completed;
+        current.elapsed_seconds = current
+            .started_at
+            .take()
+            .map(|started_at| started_at.elapsed().as_secs())
+            .unwrap_or(current.elapsed_seconds);
+        current.result_summary = Some(normalize_stage_result_summary(
             completed_summary.unwrap_or_default(),
-            current_stage,
+            &current.default_result_summary,
         ));
-        vec![self.event(current_stage)]
+        vec![Self::event(current)]
     }
 
     /// 构造单个阶段事件；运行态耗时包含当前已经经过的时间。
-    fn event(&self, stage: AgentAnalysisStage) -> AgentAnalysisStageEvent {
-        let index = stage.index();
-        let elapsed_seconds = if self.statuses[index] == AgentAnalysisStageStatus::Running {
-            self.current_started_at.elapsed().as_secs()
+    fn event(stage: &TrackedAnalysisStage) -> AgentAnalysisStageEvent {
+        let elapsed_seconds = if stage.status == AgentAnalysisStageStatus::Running {
+            stage
+                .started_at
+                .map(|started_at| started_at.elapsed().as_secs())
+                .unwrap_or(stage.elapsed_seconds)
         } else {
-            self.elapsed_seconds[index]
+            stage.elapsed_seconds
         };
         AgentAnalysisStageEvent {
-            stage,
-            status: self.statuses[index],
+            stage_id: stage.stage_id.clone(),
+            title: stage.title.clone(),
+            status: stage.status,
             elapsed_seconds,
-            result_summary: self.result_summaries[index].clone(),
+            result_summary: stage.result_summary.clone(),
         }
     }
 }
 
-/// 规范阶段结果摘要并限制展示长度，避免模型内容破坏时间线布局或复制大段日志。
-fn normalize_stage_result_summary(summary: String, stage: AgentAnalysisStage) -> String {
-    let compact = summary.split_whitespace().collect::<Vec<_>>().join(" ");
-    let value = if compact.is_empty() {
-        stage.default_result_summary().to_string()
+/// 校验模型提供的动态阶段标识和标题，防止不可见字符破坏界面稳定键与布局。
+fn validate_dynamic_stage(stage_id: &str, title: &str) -> Result<(), String> {
+    let valid_id = !stage_id.is_empty()
+        && stage_id.len() <= 96
+        && stage_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'/'));
+    if !valid_id {
+        return Err("阶段标识只能包含字母、数字、下划线、短横线或斜杠，且最长 96 字节".to_string());
+    }
+    let compact_title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact_title.is_empty() || compact_title.len() > 120 {
+        return Err("阶段标题不能为空且最长 120 字节".to_string());
+    }
+    Ok(())
+}
+
+/// 规范阶段结果摘要并保留显式换行，避免模型内容破坏时间线布局或复制大段日志。
+fn normalize_stage_result_summary(summary: String, default_summary: &str) -> String {
+    let multiline = summary
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let value = if multiline.is_empty() {
+        default_summary.to_string()
     } else {
-        compact
+        multiline
     };
-    truncate_utf8_with_ellipsis(value, 240)
+    truncate_utf8_with_ellipsis(value, 480)
 }
 
 /// Agent 轨迹条目类型。
@@ -450,6 +440,8 @@ pub(crate) struct SnapshotSource {
     pub file_name: String,
     /// 从分析根开始的相对展示路径。
     pub relative_path: String,
+    /// 日志类型规则使用的原始根内相对路径；多根展示前缀不得改变用户既有匹配语义。
+    pub profile_match_path: String,
     /// 读取位置，绝不序列化给模型。
     pub location: SourceLocation,
     /// 已知文件或归档条目大小。
@@ -488,8 +480,6 @@ pub(crate) struct SourceScopeSnapshot {
     pub profiles: Arc<HashMap<String, LogProfileSnapshot>>,
     /// 当前默认日志编码。
     pub default_encoding: String,
-    /// 现有 Jstack/Runtime 分析器使用的来源加载边界配置。
-    pub loader_config: LoaderConfig,
     /// 当前进程内压缩包密码快照，只供底层读取器使用。
     pub archive_passwords: ArchivePasswordStore,
     /// 是否允许把工具返回的必要日志原文发送给模型。
@@ -497,52 +487,58 @@ pub(crate) struct SourceScopeSnapshot {
 }
 
 impl SourceScopeSnapshot {
-    /// 从来源树的选中节点解析顶层根，并固化所有已加载日志候选。
-    ///
-    /// 参数说明：
-    /// - `registry`：当前来源树。
-    /// - `selected_id`：用户当前高亮节点；为空时仅允许来源树只有一个根。
-    /// - `config`：已规范化 AI 配置和日志说明。
-    /// - `default_encoding`：现有日志读取器使用的默认编码。
-    /// - `archive_passwords`：仅存在进程内的压缩包密码快照。
-    pub(crate) fn from_registry(
+    /// 按明确范围选择固化来源树；交互助手使用全部根，固定分析继续使用单根。
+    pub(crate) fn from_registry_selection(
         registry: &SourceRegistry,
-        selected_id: Option<SourceId>,
+        selection: AgentScopeSelection,
         config: &AiConfig,
         default_encoding: String,
-        loader_config: LoaderConfig,
         archive_passwords: ArchivePasswordStore,
     ) -> Result<Self, String> {
-        let root_id = match selected_id {
-            Some(id) => registry
-                .root_id_for(id)
-                .ok_or_else(|| "当前选中来源不存在，无法确定 AI 分析范围".to_string())?,
-            None if registry.root_ids().len() == 1 => registry.root_ids()[0],
-            None if registry.root_ids().is_empty() => {
-                return Err("请先加载日志来源".to_string());
-            }
-            None => return Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string()),
-        };
-        let root = registry
-            .node(root_id)
-            .ok_or_else(|| "来源根已经失效".to_string())?;
+        let root_ids = resolve_scope_root_ids(registry, selection)?;
+        let root_labels = root_ids
+            .iter()
+            .filter_map(|root_id| registry.node(*root_id).map(|root| root.label.clone()))
+            .collect::<Vec<_>>();
+        if root_labels.len() != root_ids.len() {
+            return Err("来源根已经失效".to_string());
+        }
+        let include_root_prefix = matches!(selection, AgentScopeSelection::AllLoadedRoots);
+        let root_display_labels = unique_root_display_labels(&root_ids, &root_labels);
         let mut profile_snapshots = build_profile_snapshots(&config.log_profiles);
         let mut sources = Vec::new();
         for source_id in registry.tree_order_source_ids() {
             let Some(node) = registry.node(*source_id) else {
                 continue;
             };
-            if !node.kind.is_log_candidate() || registry.root_id_for(*source_id) != Some(root_id) {
+            let Some(root_id) = registry.root_id_for(*source_id) else {
+                continue;
+            };
+            if !node.kind.is_log_candidate() || !root_ids.contains(&root_id) {
                 continue;
             }
-            let relative_path = relative_path_from_root(registry, root_id, *source_id);
-            let profile_id = select_profile(&config.log_profiles, &node.label, &relative_path)
+            let inner_path = relative_path_from_root(registry, root_id, *source_id);
+            let relative_path = if include_root_prefix {
+                let root_label = root_display_labels
+                    .get(&root_id)
+                    .map(String::as_str)
+                    .unwrap_or("来源");
+                if inner_path.is_empty() {
+                    root_label.to_string()
+                } else {
+                    format!("{root_label}/{inner_path}")
+                }
+            } else {
+                inner_path.clone()
+            };
+            let profile_id = select_profile(&config.log_profiles, &node.label, &inner_path)
                 .map(|profile| profile.profile_id.clone());
             sources.push(SnapshotSource {
                 source_ref: Uuid::new_v4().to_string(),
                 source_id: *source_id,
                 file_name: node.label.clone(),
                 relative_path,
+                profile_match_path: inner_path,
                 location: node.location.clone(),
                 size: node.metadata.size,
                 profile_id,
@@ -559,22 +555,52 @@ impl SourceScopeSnapshot {
         profile_snapshots.retain(|profile_id, _| matched_profile_ids.contains(profile_id.as_str()));
         Ok(Self {
             session_id: Uuid::new_v4().to_string(),
-            root_label: root.label.clone(),
+            root_label: if root_labels.len() == 1 {
+                root_labels[0].clone()
+            } else {
+                format!("全部已加载来源（{} 个根）", root_labels.len())
+            },
             sources: Arc::new(sources),
             profiles: Arc::new(profile_snapshots),
             default_encoding,
-            loader_config,
             archive_passwords,
             allow_raw_log_content: config.allow_raw_log_content,
         })
     }
 
-    /// 按不透明引用解析来源，未命中时拒绝而不是尝试解释成本地路径。
+    /// 按不透明引用解析当前不可变来源快照；该方法只读取 Agent 会话数据，不访问主窗口状态。
     pub(crate) fn source(&self, source_ref: &str) -> Option<&SnapshotSource> {
         self.sources
             .iter()
             .find(|source| source.source_ref == source_ref)
     }
+}
+
+/// 为多根来源生成稳定且互不重复的会话展示名；同名根按来源树顺序追加序号。
+fn unique_root_display_labels(
+    root_ids: &[SourceId],
+    root_labels: &[String],
+) -> HashMap<SourceId, String> {
+    let mut totals = HashMap::<&str, usize>::new();
+    for label in root_labels {
+        *totals.entry(label.as_str()).or_default() += 1;
+    }
+    let mut seen = HashMap::<&str, usize>::new();
+    root_ids
+        .iter()
+        .copied()
+        .zip(root_labels)
+        .map(|(root_id, label)| {
+            let sequence = seen.entry(label.as_str()).or_default();
+            *sequence += 1;
+            let display = if totals.get(label.as_str()).copied().unwrap_or(0) > 1 {
+                format!("{label} ({sequence})")
+            } else {
+                label.clone()
+            };
+            (root_id, display)
+        })
+        .collect()
 }
 
 /// 当前资源预算的只读快照，供轨迹窗口展示。
@@ -739,7 +765,7 @@ pub(crate) enum AgentEvent {
     Trace(AgentTraceEntry),
     /// 资源预算计数变化。
     Budget(AgentBudgetSnapshot),
-    /// 固定分析阶段的结构化状态变化，只供右侧悬浮时间线展示。
+    /// 动态分析阶段的结构化状态变化，只供右侧悬浮时间线展示。
     Stage(AgentAnalysisStageEvent),
     /// 模型思考或可见正文的流式增量；同类相邻事件由 UI 合并显示。
     StreamDelta(AgentStreamKind, String),
@@ -749,6 +775,19 @@ pub(crate) enum AgentEvent {
     UserMessageRejected(String, String),
     /// 最终结构化报告和可选持久化路径。
     Report(DiagnosticReport, Option<String>),
+    /// 交互助手一轮回答完成，并携带本轮本地验证引用和实际进入模型的用户消息。
+    AssistantCompleted {
+        /// 模型最终可见正文。
+        output: String,
+        /// 当前回答已经本地复读通过的日志引用。
+        citations: Vec<crate::agent::report::AssistantCitation>,
+        /// 初始问题和在模型边界成功消费的补充消息。
+        accepted_user_messages: Vec<String>,
+        /// 构造本轮模型历史时是否因上下文容量移除了较早轮次。
+        history_was_trimmed: bool,
+    },
+    /// 交互助手的可恢复模型故障即将重试；界面应丢弃本次尝试尚未完成的流式正文。
+    AssistantAttemptReset,
     /// 后台任务终止错误。
     Failed(String),
 }
@@ -762,57 +801,6 @@ pub(crate) struct EventOccurrenceSummary {
     pub occurrence_lines: Vec<usize>,
     /// 与 `occurrence_lines` 一一对应的原始行内容指纹；不持久化日志正文。
     pub occurrence_fingerprints: Vec<[u8; 32]>,
-}
-
-/// 会话内有界日志读取器缓存，复用已经完成的解压、编码检测和行索引。
-#[derive(Debug, Default)]
-pub(crate) struct AgentLogReaderCache {
-    /// 按最近使用顺序保存 `(source_ref, reader)`，队首为最久未使用项。
-    entries: VecDeque<(String, LogReaderHandle)>,
-}
-
-impl AgentLogReaderCache {
-    /// 获取并提升一个缓存读取器的最近使用顺序。
-    ///
-    /// 参数说明：
-    /// - `source_ref`：当前会话中的不透明来源引用。
-    ///
-    /// 返回值：命中时返回共享底层资源的轻量克隆，否则返回 `None`。
-    pub(crate) fn get(&mut self, source_ref: &str) -> Option<LogReaderHandle> {
-        let index = self
-            .entries
-            .iter()
-            .position(|(cached_ref, _)| cached_ref == source_ref)?;
-        let entry = self.entries.remove(index)?;
-        let reader = entry.1.clone();
-        self.entries.push_back(entry);
-        Some(reader)
-    }
-
-    /// 插入或替换日志读取器，并淘汰最久未使用项。
-    ///
-    /// 参数说明：
-    /// - `source_ref`：读取器对应的会话来源；
-    /// - `reader`：已经完成打开和索引的日志句柄。
-    pub(crate) fn insert(&mut self, source_ref: String, reader: LogReaderHandle) {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|(cached_ref, _)| cached_ref == &source_ref)
-        {
-            self.entries.remove(index);
-        }
-        self.entries.push_back((source_ref, reader));
-        while self.entries.len() > MAX_AGENT_READER_CACHE_ENTRIES {
-            self.entries.pop_front();
-        }
-    }
-
-    /// 返回当前缓存条目数，供回归测试验证有界淘汰行为。
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
 }
 
 /// 会话内有界事件重复统计缓存，按最近使用顺序淘汰旧签名。
@@ -872,11 +860,13 @@ impl AgentEventOccurrenceCache {
 
 /// 工具和编排 Hook 共享的会话运行上下文。
 pub(crate) struct AgentOperationContext {
+    /// 当前运行模式；交互助手不注册阶段与报告工具，但不绕过任何数据安全边界。
+    pub session_mode: AgentSessionMode,
     /// 不可变来源范围。
     pub scope: Arc<SourceScopeSnapshot>,
     /// 统一资源预算。
     pub budget: Arc<AgentBudget>,
-    /// 固定十二阶段的单调状态跟踪器。
+    /// 模型动态规划阶段的顺序状态跟踪器。
     pub stage_tracker: Mutex<AgentAnalysisStageTracker>,
     /// 取消令牌。
     pub cancellation: CancellationToken,
@@ -886,8 +876,8 @@ pub(crate) struct AgentOperationContext {
     pub report: Mutex<Option<DiagnosticReport>>,
     /// 会话内大型工具结果制品；完整内容不进入轨迹，模型按 ID 分页读取。
     pub artifacts: Mutex<HashMap<String, String>>,
-    /// 会话内有界日志读取器缓存；会话结束即释放，不持久化日志内容。
-    pub log_reader_cache: Mutex<AgentLogReaderCache>,
+    /// Agent 专用日志目录和只读访问服务；统一复用目录索引、解压结果与行读取器。
+    pub log_access: AgentLogAccess,
     /// 已完成的同源事件签名统计，避免相同事件重复触发全文件扫描。
     pub event_occurrence_cache: Mutex<AgentEventOccurrenceCache>,
     /// 由搜索或上下文工具实际返回过的证据行及内容指纹；报告只能引用这些已观察内容。
@@ -905,6 +895,8 @@ pub(crate) struct AgentOperationContext {
     pub is_independent_review: AtomicBool,
     /// 已排队但尚未注入模型上下文的用户提示数量。
     pub pending_user_messages: Arc<AtomicUsize>,
+    /// 交互助手当前回答已经通过本地验证的引用；固定分析模式保持为空。
+    pub assistant_citations: Mutex<Vec<crate::agent::report::AssistantCitation>>,
 }
 
 /// 会话内已经由确定性工具返回给模型的证据行内容指纹集合。
@@ -1033,22 +1025,23 @@ impl AgentOperationContext {
         }
     }
 
-    /// 按固定顺序推进分析阶段；重复或倒序请求被安全忽略，跨阶段请求会被拒绝。
-    pub(crate) fn advance_analysis_stage(&self, stage: AgentAnalysisStage) -> Result<(), String> {
-        self.advance_analysis_stage_with_summary(stage, None)
-    }
-
-    /// 单调推进分析阶段，并把模型提供的摘要保存为刚完成阶段的结果。
-    pub(crate) fn advance_analysis_stage_with_summary(
+    /// 启动模型自由定义的分析阶段，并完成此前运行阶段。
+    ///
+    /// 参数说明：
+    /// - `stage_id`：模型在当前上下文内生成的稳定短标识；调用方负责增加主分析或复核命名空间。
+    /// - `title`：右侧进度卡片展示的阶段标题。
+    /// - `completed_summary`：刚完成阶段的多行客观摘要。
+    pub(crate) fn advance_dynamic_analysis_stage(
         &self,
-        stage: AgentAnalysisStage,
+        stage_id: String,
+        title: String,
         completed_summary: Option<String>,
     ) -> Result<(), String> {
         let events = self
             .stage_tracker
             .lock()
             .map_err(|_| "分析阶段状态已损坏".to_string())?
-            .advance(stage, completed_summary)?;
+            .advance_dynamic(stage_id, title, completed_summary, "阶段已完成".to_string())?;
         for event in events {
             let _ = self.event_sender.try_send(AgentEvent::Stage(event));
         }
@@ -1086,27 +1079,8 @@ impl AgentOperationContext {
             );
         }
         let budget = self.budget.record_tool_call(scan_bytes)?;
-        let inferred_stage = match tool_name {
-            "search_logs" | "search_logs_batch" | "sample_log" => {
-                Some(AgentAnalysisStage::SearchAnomalies)
-            }
-            "read_log_context" | "extract_event_blocks" => Some(AgentAnalysisStage::ExtractContext),
-            "run_log_pipeline" | "aggregate_log_events" | "run_analyzer" => {
-                Some(AgentAnalysisStage::BuildTimeline)
-            }
-            "submit_diagnostic_report"
-                if self
-                    .is_independent_review
-                    .load(std::sync::atomic::Ordering::Acquire) =>
-            {
-                Some(AgentAnalysisStage::GenerateReport)
-            }
-            "submit_diagnostic_report" => Some(AgentAnalysisStage::ValidateEvidence),
-            _ => None,
-        };
-        if let Some(stage) = inferred_stage {
-            self.advance_analysis_stage(stage)?;
-        }
+        // 工具类型不再隐式决定分析阶段。模型可以根据问题复杂度自由组织搜索、读取、
+        // 聚合与验证步骤，右侧时间线只响应显式 `set_analysis_stage` 调用。
         let _ = self.event_sender.try_send(AgentEvent::Budget(budget));
         self.trace(
             AgentTraceKind::Tool,
@@ -1114,6 +1088,32 @@ impl AgentOperationContext {
             "参数已通过来源范围与数据安全校验",
         );
         Ok(())
+    }
+}
+
+/// 把来源选择解析为稳定根 ID 列表；全部来源模式保持注册表原始根顺序。
+fn resolve_scope_root_ids(
+    registry: &SourceRegistry,
+    selection: AgentScopeSelection,
+) -> Result<Vec<SourceId>, String> {
+    match selection {
+        AgentScopeSelection::SelectedRoot(Some(source_id)) => registry
+            .root_id_for(source_id)
+            .map(|root_id| vec![root_id])
+            .ok_or_else(|| "当前选中来源不存在，无法确定 AI 分析范围".to_string()),
+        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().len() == 1 => {
+            Ok(vec![registry.root_ids()[0]])
+        }
+        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().is_empty() => {
+            Err("请先加载日志来源".to_string())
+        }
+        AgentScopeSelection::SelectedRoot(None) => {
+            Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string())
+        }
+        AgentScopeSelection::AllLoadedRoots if registry.root_ids().is_empty() => {
+            Err("请先加载日志来源".to_string())
+        }
+        AgentScopeSelection::AllLoadedRoots => Ok(registry.root_ids().to_vec()),
     }
 }
 
@@ -1307,9 +1307,9 @@ mod tests {
         );
     }
 
-    /// 验证固定阶段只能逐个推进，跨越阶段会被拒绝且最后阶段可显式收尾。
+    /// 验证阶段由模型动态创建、重复标识幂等且多行结果摘要得到保留。
     #[test]
-    fn analysis_stage_tracker_advances_monotonically() {
+    fn analysis_stage_tracker_accepts_dynamic_model_plan() {
         let mut tracker = AgentAnalysisStageTracker::new(
             3,
             2,
@@ -1325,57 +1325,58 @@ mod tests {
         );
         assert_eq!(initial[1].status, AgentAnalysisStageStatus::Completed);
         assert_eq!(initial[1].elapsed_seconds, 2);
-        assert_eq!(initial[2].status, AgentAnalysisStageStatus::Running);
-
-        let error = tracker
-            .advance(
-                AgentAnalysisStage::ExtractContext,
-                Some("已拆解启动失败问题".to_string()),
-            )
-            .expect_err("跨越计划和检索阶段必须被拒绝");
-        assert!(error.contains("下一阶段只能是“建立计划与覆盖清单”"));
+        assert_eq!(initial.len(), 2);
 
         let events = tracker
-            .advance(
-                AgentAnalysisStage::BuildPlan,
-                Some("已拆解启动失败问题".to_string()),
+            .advance_dynamic(
+                "extract_context".to_string(),
+                "提取事件上下文".to_string(),
+                None,
+                "候选事件上下文已提取".to_string(),
             )
-            .expect("紧邻阶段应推进成功");
-        assert_eq!(events.last().unwrap().stage, AgentAnalysisStage::BuildPlan);
+            .expect("模型应能直接选择当前问题需要的阶段");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].stage_id, "extract_context");
+        assert_eq!(events[0].status, AgentAnalysisStageStatus::Running);
+
+        let events = tracker
+            .advance_dynamic(
+                "primary/compare_baseline".to_string(),
+                "比较正常基线".to_string(),
+                Some("已定位启动失败上下文\n已确定异常时间窗".to_string()),
+                "阶段已完成".to_string(),
+            )
+            .expect("自由命名的新阶段应推进成功");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].stage_id, "extract_context");
+        assert_eq!(events.last().unwrap().stage_id, "primary/compare_baseline");
         assert_eq!(
             events.last().unwrap().status,
             AgentAnalysisStageStatus::Running
         );
         assert_eq!(
             events[0].result_summary.as_deref(),
-            Some("已拆解启动失败问题")
+            Some("已定位启动失败上下文\n已确定异常时间窗")
         );
         assert!(
             tracker
-                .advance(AgentAnalysisStage::BreakDownQuestion, None)
-                .expect("倒序阶段请求应保持幂等")
+                .advance_dynamic(
+                    "primary/compare_baseline".to_string(),
+                    "比较正常基线".to_string(),
+                    None,
+                    "阶段已完成".to_string(),
+                )
+                .expect("重复阶段请求应保持幂等")
                 .is_empty(),
-            "倒序阶段请求不能让时间线状态回退"
+            "网络重试不能重复增加时间线节点"
         );
 
-        let events = tracker
-            .advance(AgentAnalysisStage::SearchAnomalies, None)
-            .expect("后续紧邻阶段应推进成功");
-        assert_eq!(events[0].stage, AgentAnalysisStage::BuildPlan);
-        let events = tracker
-            .advance(AgentAnalysisStage::ExtractContext, None)
-            .expect("上下文阶段应按顺序推进成功");
-        assert_eq!(
-            events.last().map(|event| event.stage),
-            Some(AgentAnalysisStage::ExtractContext)
-        );
-
-        let completed = tracker.complete_current(Some("已提取关键异常上下文".to_string()));
-        assert_eq!(completed[0].stage, AgentAnalysisStage::ExtractContext);
+        let completed = tracker.complete_current(Some("已完成正常与异常样本对比".to_string()));
+        assert_eq!(completed[0].stage_id, "primary/compare_baseline");
         assert_eq!(completed[0].status, AgentAnalysisStageStatus::Completed);
         assert_eq!(
             completed[0].result_summary.as_deref(),
-            Some("已提取关键异常上下文")
+            Some("已完成正常与异常样本对比")
         );
         assert!(tracker.complete_current(None).is_empty());
     }
@@ -1498,12 +1499,11 @@ mod tests {
             log_profiles: vec![matched.clone(), unmatched],
             ..AiConfig::default()
         };
-        let snapshot = SourceScopeSnapshot::from_registry(
+        let snapshot = SourceScopeSnapshot::from_registry_selection(
             &registry,
-            None,
+            AgentScopeSelection::SelectedRoot(None),
             &config,
             "UTF-8".to_string(),
-            LoaderConfig::default(),
             ArchivePasswordStore::default(),
         )
         .expect("应创建来源快照");

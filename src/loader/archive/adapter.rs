@@ -1,10 +1,11 @@
 //! 文件职责：定义压缩包统一适配器抽象。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：为 ZIP、TAR、压缩 TAR、7Z 和 RAR 等格式提供统一识别、枚举、读取和能力声明模型。
+//! 主要功能：为 ZIP、TAR、压缩 TAR、7Z 和 RAR 等格式提供统一识别、枚举、单条读取、批量访问和能力声明模型。
 
-use std::io::{Cursor, Read, Seek};
+use std::collections::HashSet;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
@@ -114,6 +115,9 @@ impl<T> ArchiveReadSeek for T where T: Read + Seek {}
 
 /// 压缩包条目流式输出回调；适配器每读取到一段解压后字节就调用一次。
 pub(crate) type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
+
+/// 多条归档日志的顺序访问回调；读取器只在回调期间有效，调用方必须当场消费完目标条目。
+pub(crate) type ArchiveEntriesConsumer<'a> = dyn FnMut(&str, &mut dyn Read) -> Result<()> + 'a;
 
 /// 压缩包适配器统一接口；每个格式自行声明识别规则、能力和读写入口。
 pub(crate) trait ArchiveAdapter: Sync {
@@ -235,6 +239,50 @@ pub(crate) trait ArchiveAdapter: Sync {
             password,
         )?;
         consumer(&bytes)
+    }
+
+    /// 打开一次本地物理容器，并顺序访问其中所有目标条目。
+    ///
+    /// 默认实现用于兼容不具备批量解包能力的扩展格式；ZIP、TAR、压缩 TAR、GZIP 和 7Z
+    /// 均覆盖此方法，保证一个物理容器只解析一次。
+    fn visit_entries(
+        &self,
+        path: &Path,
+        entry_paths: &HashSet<String>,
+        password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        for entry_path in entry_paths {
+            let bytes = self.read_entry_bytes(path, entry_path, password)?;
+            consumer(entry_path, &mut Cursor::new(bytes))?;
+        }
+        Ok(())
+    }
+
+    /// 在一个已经物化的嵌套容器上顺序访问全部目标条目。
+    ///
+    /// 默认实现会在每个兼容读取前把输入复位；核心格式均覆盖为单次解析实现。
+    fn visit_entries_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        entry_paths: &HashSet<String>,
+        source_label: &str,
+        password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        for entry_path in entry_paths {
+            reader.seek(SeekFrom::Start(0))?;
+            let bytes = self.read_entry_bytes_from_reader(
+                reader,
+                reader_len,
+                entry_path,
+                source_label,
+                password,
+            )?;
+            consumer(entry_path, &mut Cursor::new(bytes))?;
+        }
+        Ok(())
     }
 }
 

@@ -500,6 +500,7 @@ impl ArgusApp {
                             app.apply_search_worker_event(
                                 generation,
                                 SearchWorkerEvent::Prepared(Box::new(event)),
+                                cx,
                             );
                         }
                         if let Some(progress) = latest_progress {
@@ -512,12 +513,14 @@ impl ArgusApp {
                             app.apply_search_worker_event(
                                 generation,
                                 SearchWorkerEvent::Failed(message),
+                                cx,
                             );
                         }
                         if let Some(summary) = finished_summary {
                             app.apply_search_worker_event(
                                 generation,
                                 SearchWorkerEvent::Finished(summary),
+                                cx,
                             );
                         }
                         if receiver_disconnected {
@@ -1362,7 +1365,12 @@ impl ArgusApp {
     }
 
     /// 应用后台线程回传的搜索事件。
-    fn apply_search_worker_event(&mut self, generation: usize, event: SearchWorkerEvent) {
+    fn apply_search_worker_event(
+        &mut self,
+        generation: usize,
+        event: SearchWorkerEvent,
+        cx: &mut Context<Self>,
+    ) {
         if self.log_search.generation != generation {
             return;
         }
@@ -1373,6 +1381,7 @@ impl ArgusApp {
                     self.source_registry = registry;
                     self.sync_source_tree_selection_from_active_tab();
                     self.rebuild_filtered_source_ids();
+                    self.mark_source_content_changed(cx);
                 }
                 self.log_search.progress.total_files = event.total_files;
                 self.log_search.message =

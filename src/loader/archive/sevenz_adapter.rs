@@ -1,9 +1,10 @@
 //! 文件职责：实现 7Z 压缩包条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：使用 sevenz-rust 枚举 7Z 条目元信息，不读取日志正文。
+//! 主要功能：使用 sevenz-rust 枚举 7Z 条目元信息，并在单次 folder 解码中批量访问目标日志。
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -12,8 +13,8 @@ use anyhow::{Context as _, Result, bail};
 use sevenz_rust::{Error as SevenzError, Password, SevenZMethod, SevenZReader};
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
-    ArchiveRootProbe, ArchiveRootProbeState,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
+    ArchiveEntryInfo, ArchiveReadSeek, ArchiveRootProbe, ArchiveRootProbeState,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::password::ArchivePasswordError;
@@ -172,6 +173,95 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
             consumer,
         )
     }
+
+    /// 创建一个 7Z 解码器，并在单次 solid-folder 遍历中读取全部目标日志。
+    fn visit_entries(
+        &self,
+        path: &Path,
+        entry_paths: &HashSet<String>,
+        password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开 7Z 压缩包：{}", path.display()))?;
+        let reader_len = file
+            .metadata()
+            .with_context(|| format!("无法读取 7Z 文件大小：{}", path.display()))?
+            .len();
+        visit_sevenz_entries_from_reader(
+            file,
+            reader_len,
+            entry_paths,
+            &path.display().to_string(),
+            password,
+            consumer,
+        )
+    }
+
+    /// 在一个内存 7Z 解码器中读取全部目标日志。
+    fn visit_entries_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        reader_len: u64,
+        entry_paths: &HashSet<String>,
+        source_label: &str,
+        password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        visit_sevenz_entries_from_reader(
+            reader,
+            reader_len,
+            entry_paths,
+            source_label,
+            password,
+            consumer,
+        )
+    }
+}
+
+/// 单次遍历 7Z 的所有 folder，只消费目标集合中的日志条目。
+pub(crate) fn visit_sevenz_entries_from_reader<R>(
+    reader: R,
+    reader_len: u64,
+    entry_paths: &HashSet<String>,
+    source_label: &str,
+    password: Option<&str>,
+    consumer: &mut ArchiveEntriesConsumer<'_>,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
+    let targets = entry_paths
+        .iter()
+        .map(|path| normalize_archive_entry_path(path))
+        .collect::<HashSet<_>>();
+    let mut reader = open_sevenz_reader(reader, reader_len, password, source_label)?;
+    ensure_sevenz_password_if_encrypted(reader.archive(), password, source_label)?;
+    let mut visited = HashSet::with_capacity(targets.len());
+    let mut callback_error = None;
+
+    reader
+        .for_each_entries(|entry, entry_reader| {
+            let entry_path = normalize_archive_entry_path(entry.name());
+            if entry.is_directory()
+                || !targets.contains(&entry_path)
+                || !visited.insert(entry_path.clone())
+            {
+                return Ok(true);
+            }
+            if let Err(error) = consumer(&entry_path, entry_reader) {
+                callback_error = Some(error);
+                return Ok(false);
+            }
+            Ok(visited.len() != targets.len())
+        })
+        .map_err(|error| map_sevenz_error(error, source_label))
+        .with_context(|| format!("无法批量读取 7Z 条目：{source_label}"))?;
+
+    if let Some(error) = callback_error {
+        return Err(error).with_context(|| format!("无法消费 7Z 条目：{source_label}"));
+    }
+    Ok(())
 }
 
 /// 从任意 7Z 数据源短路探测根层单文件。

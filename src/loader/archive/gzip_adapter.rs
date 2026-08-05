@@ -1,9 +1,10 @@
 //! 文件职责：实现普通 GZIP 单文件压缩适配器。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：把 `.gz` 单文件压缩包展开为一个虚拟日志条目，并支持嵌套压缩链路流式读取。
+//! 主要功能：把 `.gz` 单文件压缩包展开为虚拟日志条目，并支持嵌套链路及批量引擎的流式读取。
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -12,8 +13,8 @@ use anyhow::{Context as _, Result, bail};
 use flate2::read::GzDecoder;
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
-    ArchiveRootProbe,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
+    ArchiveEntryInfo, ArchiveReadSeek, ArchiveRootProbe,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -137,6 +138,41 @@ impl ArchiveAdapter for GzipArchiveAdapter {
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         stream_gzip_entry(reader, entry_path, source_label, consumer)
+    }
+
+    /// 打开一次本地 GZIP，并把唯一虚拟日志的解压流交给调用方。
+    fn visit_entries(
+        &self,
+        path: &Path,
+        entry_paths: &HashSet<String>,
+        _password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        let source_label = path.display().to_string();
+        let entry_path = gzip_payload_label(&source_label);
+        if !entry_paths.contains(&entry_path) {
+            return Ok(());
+        }
+        let file =
+            File::open(path).with_context(|| format!("无法打开 GZIP 文件：{}", path.display()))?;
+        consumer(&entry_path, &mut GzDecoder::new(file))
+    }
+
+    /// 在内存 GZIP 上创建一次解压流，并访问唯一虚拟日志。
+    fn visit_entries_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        entry_paths: &HashSet<String>,
+        source_label: &str,
+        _password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        let entry_path = gzip_payload_label(source_label);
+        if !entry_paths.contains(&entry_path) {
+            return Ok(());
+        }
+        consumer(&entry_path, &mut GzDecoder::new(reader))
     }
 }
 

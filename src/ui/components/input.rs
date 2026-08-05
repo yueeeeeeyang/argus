@@ -182,6 +182,8 @@ pub(crate) struct Textarea {
     pub trailing_accessory_position: TextareaAccessoryPosition,
     /// 是否在文本域失焦时仍显示后置图标。
     pub trailing_accessory_always_visible: bool,
+    /// 是否为后置按钮左侧的第二个悬浮操作预留空间。
+    pub reserve_secondary_accessory: bool,
     /// 后置图标是否使用选中态背景，用于主要发送操作。
     pub trailing_accessory_selected: bool,
     /// 系统文本输入桥接配置；为空时退回按键事件输入。
@@ -426,7 +428,7 @@ pub(crate) fn render_textarea(
         !textarea.is_disabled && (textarea.trailing_accessory_always_visible || textarea.is_focused)
     });
     let right_padding = if visible_trailing_accessory.is_some() {
-        if textarea.style == TextareaStyle::Composer {
+        if textarea.style == TextareaStyle::Composer && textarea.reserve_secondary_accessory {
             // 对话编辑器在发送按钮左侧预留一个同尺寸操作位，供调用方放置停止等会话动作。
             trailing_button_size * 2.0 + horizontal_padding + 4.0
         } else {

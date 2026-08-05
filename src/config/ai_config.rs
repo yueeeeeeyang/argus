@@ -373,7 +373,7 @@ impl LogTypeProfile {
 pub(crate) enum LogNameMatcherTarget {
     /// 只匹配末级文件名。
     FileName,
-    /// 匹配来源根内统一使用 `/` 的相对展示路径。
+    /// 匹配来源根内统一使用 `/` 的原始相对路径；多根界面前缀不参与规则匹配。
     RelativePath,
 }
 

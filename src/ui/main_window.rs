@@ -1,8 +1,8 @@
 //! 文件职责：组合 Argus 主窗口的整体布局。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：渲染标题栏、来源侧栏、日志内容区、AI 分析弹窗、升级弹窗和设置模态框。
+//! 主要功能：渲染标题栏、来源侧栏、日志内容区、右侧 Agent 助手、AI 分析弹窗、升级弹窗和设置模态框。
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
@@ -64,14 +64,14 @@ pub(crate) fn render(
         )
         .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _window, cx| {
             let pointer_x = event.position.x / px(1.0);
-            if app.is_source_panel_resizing && app.resize_source_panel(pointer_x) {
+            if app.resize_panels_from_pointer(pointer_x, _window) {
                 cx.notify();
             }
         }))
         .on_mouse_up(
             MouseButton::Left,
             cx.listener(|app, _: &MouseUpEvent, _, cx| {
-                if app.finish_source_panel_resize() {
+                if app.finish_panel_resizes() {
                     cx.notify();
                 }
             }),
@@ -79,7 +79,7 @@ pub(crate) fn render(
         .on_mouse_up_out(
             MouseButton::Left,
             cx.listener(|app, _: &MouseUpEvent, _, cx| {
-                if app.finish_source_panel_resize() {
+                if app.finish_panel_resizes() {
                     cx.notify();
                 }
             }),
@@ -99,7 +99,8 @@ pub(crate) fn render(
                 .overflow_hidden()
                 .bg(rgb(theme.side_bar))
                 .child(animated_source_panel(app, cx))
-                .child(log_content_view::render(app, window, cx)),
+                .child(log_content_view::render(app, window, cx))
+                .child(animated_assistant_panel(app, window, cx)),
         )
         .when(!app.is_source_panel_collapsed, |this| {
             this.child(source_resizer::render(app, "source-resizer", cx))
@@ -147,6 +148,83 @@ pub(crate) fn render(
                 modal, &theme, cx,
             ))
         })
+}
+
+/// 渲染主内容右侧可动画的 Agent 助手容器；实体在首次展开后持续保留。
+fn animated_assistant_panel(
+    app: &ArgusApp,
+    window: &Window,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    let window_width = window.viewport_size().width / px(1.0);
+    let visible_width = app.current_assistant_panel_width_for_window(window_width);
+    let dynamic_max = app.assistant_panel_max_width_for_window(window_width);
+    let from_width = app.assistant_panel_animation_from_width.min(dynamic_max);
+    let to_width = app.assistant_panel_animation_to_width.min(dynamic_max);
+    let panel = div()
+        .id("animated-assistant-panel")
+        .relative()
+        .h_full()
+        .flex_none()
+        .overflow_hidden()
+        .flex()
+        .when_some(app.assistant_panel.clone(), |this, panel| {
+            this.child(div().flex_1().min_w(px(0.0)).h_full().child(panel))
+        })
+        // 透明拖动层最后加入元素树，确保覆盖在面板内容之上并保持稳定命中。
+        .when(!app.is_assistant_panel_collapsed, |this| {
+            this.child(render_assistant_resizer(app, cx))
+        });
+
+    if app.is_assistant_panel_resizing {
+        return panel.w(px(visible_width.max(0.0))).into_any_element();
+    }
+    panel
+        .with_animation(
+            (
+                "assistant-panel-width",
+                app.assistant_panel_animation_generation,
+            ),
+            Animation::new(Duration::from_millis(160)).with_easing(gpui::ease_out_quint()),
+            move |this, progress| {
+                let width = from_width + (to_width - from_width) * progress;
+                this.w(px(width.max(0.0))).opacity(if to_width == 0.0 {
+                    1.0 - progress * 0.12
+                } else {
+                    0.88 + progress * 0.12
+                })
+            },
+        )
+        .into_any_element()
+}
+
+/// 渲染助手面板左侧透明拖动命中区。
+///
+/// 命中层覆盖在 Agent 色块边缘，不占用布局宽度也不绘制分割线；主内容与侧栏仅通过
+/// `content`、`side_bar` 两种背景色区分，与左侧来源树保持相同视觉逻辑。
+fn render_assistant_resizer(_app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+    div()
+        .id("assistant-panel-resizer")
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(px(6.0))
+        .h_full()
+        .cursor_col_resize()
+        .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
+            if app.is_assistant_resizer_hovered != *hovered {
+                app.is_assistant_resizer_hovered = *hovered;
+                cx.notify();
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, event: &MouseDownEvent, _, cx| {
+                app.begin_assistant_panel_resize(event.position.x / px(1.0));
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
 }
 
 /// 渲染可动画宽度的来源侧栏容器；内容保持原宽度，外层负责裁剪。

@@ -1,14 +1,14 @@
 //! 文件职责：实现 Argus Agent 的高级来源概览、批量检索、采样、事件聚合和制品查询工具。
 //! 创建日期：2026-07-16
-//! 修改日期：2026-07-16
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：提供只接受声明式参数的 P0/P1 日志分析能力，并复用现有读取、预算、取消、脱敏和证据边界。
+//! 主要功能：提供只接受声明式参数的 P0/P1 日志分析能力，并复用 Agent 专用读取、预算、取消、脱敏和证据边界。
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -21,19 +21,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::agent::batch_search::AgentBatchSearchEngine;
+use crate::agent::log_access::AgentLogDocument;
+use crate::agent::log_search::AgentSearchPattern;
 use crate::agent::session::{
     AgentEvidenceStore, AgentOperationContext, EventOccurrenceSummary, MAX_TOOL_RAW_BYTES,
     SnapshotSource, truncate_utf8_with_ellipsis,
 };
 use crate::agent::tools::{
     AgentToolError, checked_output, estimated_full_scan_bytes, reconcile_tool_scan,
-    redact_error_path, redact_sensitive_text, selected_sources, source_ref_by_id,
-    validate_tool_output_size,
+    redact_error_path, redact_sensitive_text, selected_sources, validate_tool_output_size,
 };
-use crate::reader::log_file_reader::{LogFileReader, LogReaderHandle, OpenLogRequest};
-use crate::search::search_engine::{SearchEngine, SearchQuery, SearchRequest, SearchTarget};
 
-/// 批量搜索允许的最大模式数量；单次扫描复用现有多查询搜索引擎。
+/// 批量搜索允许的最大模式数量；单次扫描使用独立流式批量搜索引擎。
 const MAX_BATCH_SEARCH_PATTERNS: usize = 20;
 /// 来源概览单页最多返回的日志类型数量。
 const MAX_OVERVIEW_PROFILE_PAGE: usize = 20;
@@ -286,7 +286,7 @@ fn profile_overview(
     for source in sources {
         let mut matched = false;
         for (index, matcher) in profile.matchers.iter().enumerate() {
-            if matcher.is_match(&source.file_name, &source.relative_path) {
+            if matcher.is_match(&source.file_name, &source.profile_match_path) {
                 rule_counts[index] += 1;
                 matched = true;
             }
@@ -432,117 +432,74 @@ impl Tool for SearchLogsBatchTool {
             .begin_tool(Self::NAME, scan_bytes)
             .map_err(AgentToolError::new)?;
         let max_results = args.max_results_per_pattern.clamp(1, 20);
-        let queries = args
+        let patterns = args
             .patterns
             .iter()
-            .map(|pattern| SearchQuery {
-                keyword: pattern.query.clone(),
+            .map(|pattern| AgentSearchPattern {
+                pattern_id: pattern.pattern_id.clone(),
+                query: pattern.query.clone(),
                 case_sensitive: pattern.case_sensitive,
-                regex_enabled: pattern.regex,
+                regex: pattern.regex,
             })
             .collect::<Vec<_>>();
-        let request = SearchRequest::with_queries(
-            queries,
-            selected
-                .iter()
-                .map(|source| SearchTarget {
-                    source_id: source.source_id,
-                    label: source.file_name.clone(),
-                    path: source.relative_path.clone(),
-                    location: source.location.clone(),
-                })
-                .collect(),
-            self.0.scope.default_encoding.clone(),
-        )
-        .with_archive_passwords(self.0.scope.archive_passwords.clone());
-        let query_indices = args
-            .patterns
-            .iter()
-            .enumerate()
-            .map(|(index, pattern)| (pattern.query.clone(), index))
-            .collect::<HashMap<_, _>>();
-        let source_refs = source_ref_by_id(&self.0);
-        let accumulator = Arc::new(Mutex::new(BatchSearchAccumulator {
-            matched_lines: vec![0; args.patterns.len()],
-            hits: vec![Vec::new(); args.patterns.len()],
-            raw_bytes: 0,
-        }));
-        let callback_accumulator = accumulator.clone();
+        let sources = selected.into_iter().cloned().collect::<Vec<_>>();
+        let scope = self.0.scope.clone();
         let allow_raw = self.0.scope.allow_raw_log_content;
         let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
-        let summary = tokio::task::spawn_blocking(move || {
-            SearchEngine::search(
-                request,
-                |_| {},
-                move |batch| {
-                    let Ok(mut accumulator) = callback_accumulator.lock() else {
-                        return;
-                    };
-                    for result in batch {
-                        let content_fingerprint =
-                            AgentEvidenceStore::fingerprint_text(&result.line_text);
-                        for keyword in &result.matched_keywords {
-                            let Some(index) = query_indices.get(keyword).copied() else {
-                                continue;
-                            };
-                            accumulator.matched_lines[index] =
-                                accumulator.matched_lines[index].saturating_add(1);
-                            if accumulator.hits[index].len() >= max_results {
-                                continue;
-                            }
-                            let text = if allow_raw {
-                                // 按最终模型可见字节增量裁剪，合法的最大批量参数也必须返回部分结果而不是事后整体失败。
-                                let remaining = MAX_TOOL_RAW_BYTES
-                                    .saturating_sub(accumulator.raw_bytes)
-                                    .min(4096);
-                                if remaining == 0 {
-                                    continue;
-                                }
-                                let (text, _) = truncate_text_to_total_bytes(
-                                    redact_sensitive_text(&result.line_text),
-                                    remaining,
-                                );
-                                if text.is_empty() && !result.line_text.is_empty() {
-                                    continue;
-                                }
-                                accumulator.raw_bytes =
-                                    accumulator.raw_bytes.saturating_add(text.len());
-                                Some(text)
-                            } else {
-                                None
-                            };
-                            accumulator.hits[index].push(BatchSearchHitOutput {
-                                source_ref: source_refs
-                                    .get(&result.source_id.0)
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                relative_path: result.path.clone(),
-                                line: result.line_number + 1,
-                                text,
-                                content_fingerprint,
-                            });
-                        }
-                    }
-                },
-                cancel_flag,
-            )
+        let batch_output = tokio::task::spawn_blocking(move || {
+            AgentBatchSearchEngine::search(&scope, &sources, &patterns, max_results, cancel_flag)
         })
         .await
         .map_err(|error| AgentToolError::new(format!("批量日志搜索任务异常结束：{error}")))?;
+        let summary = batch_output.summary;
         reconcile_tool_scan(&self.0, scan_bytes, summary.scanned_bytes)?;
-        let accumulator = Arc::try_unwrap(accumulator)
-            .map_err(|_| AgentToolError::new("批量搜索结果仍被后台任务占用"))?
-            .into_inner()
-            .map_err(|_| AgentToolError::new("批量搜索结果状态已损坏"))?;
+        let mut candidate_raw_bytes = 0usize;
         let patterns = args
             .patterns
             .into_iter()
-            .enumerate()
-            .map(|(index, pattern)| BatchPatternResultOutput {
-                pattern_id: pattern.pattern_id,
-                matched_lines: accumulator.matched_lines[index],
-                truncated: accumulator.matched_lines[index] > accumulator.hits[index].len(),
-                hits: accumulator.hits[index].clone(),
+            .zip(batch_output.patterns)
+            .map(|(pattern, result)| {
+                let hits = result
+                    .hits
+                    .into_iter()
+                    .filter_map(|hit| {
+                        let content_fingerprint =
+                            AgentEvidenceStore::fingerprint_text(&hit.line_text);
+                        let text = if allow_raw {
+                            // 只对引擎保留的有界证据执行脱敏、裁剪和指纹登记，完整计数不复制正文。
+                            let remaining = MAX_TOOL_RAW_BYTES
+                                .saturating_sub(candidate_raw_bytes)
+                                .min(4096);
+                            if remaining == 0 {
+                                return None;
+                            }
+                            let (text, _) = truncate_text_to_total_bytes(
+                                redact_sensitive_text(&hit.line_text),
+                                remaining,
+                            );
+                            if text.is_empty() && !hit.line_text.is_empty() {
+                                return None;
+                            }
+                            candidate_raw_bytes = candidate_raw_bytes.saturating_add(text.len());
+                            Some(text)
+                        } else {
+                            None
+                        };
+                        Some(BatchSearchHitOutput {
+                            source_ref: hit.source_ref,
+                            relative_path: hit.relative_path,
+                            line: hit.line_number + 1,
+                            text,
+                            content_fingerprint,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                BatchPatternResultOutput {
+                    pattern_id: pattern.pattern_id,
+                    matched_lines: result.matched_lines,
+                    truncated: result.matched_lines > hits.len(),
+                    hits,
+                }
             })
             .collect();
         let error_count = summary.errors.len();
@@ -582,16 +539,6 @@ impl Tool for SearchLogsBatchTool {
         }
         checked_output(output)
     }
-}
-
-/// 阻塞批量搜索使用的有界累计状态。
-struct BatchSearchAccumulator {
-    /// 每个模式命中的行数。
-    matched_lines: Vec<usize>,
-    /// 每个模式保留的代表性命中。
-    hits: Vec<Vec<BatchSearchHitOutput>>,
-    /// 已保留模型可见原文的累计 UTF-8 字节数。
-    raw_bytes: usize,
 }
 
 /// 在保留每个模式计数的前提下裁剪代表性命中，确保最终 JSON 不会因合法参数整体失败。
@@ -643,16 +590,25 @@ fn validate_batch_patterns(patterns: &[BatchSearchPatternArgs]) -> Result<(), Ag
                 "批量搜索 query 不能重复，请合并相同查询",
             ));
         }
-        // 在预留全量扫描预算前复用现有搜索引擎编译正则，避免无效表达式产生虚假的扫描计量。
-        SearchEngine::validate_query(&SearchQuery {
-            keyword: pattern.query.clone(),
-            case_sensitive: pattern.case_sensitive,
-            regex_enabled: pattern.regex,
-        })
-        .map_err(|error| {
-            AgentToolError::new(format!("批量搜索模式“{}”无效：{error}", pattern.pattern_id))
-        })?;
     }
+    // 一次编译完整 Aho-Corasick 与 RegexSet，既验证组合结果，也避免按模式重复构建自动机。
+    let compiled_patterns = patterns
+        .iter()
+        .map(|pattern| AgentSearchPattern {
+            pattern_id: pattern.pattern_id.clone(),
+            query: pattern.query.clone(),
+            case_sensitive: pattern.case_sensitive,
+            regex: pattern.regex,
+        })
+        .collect::<Vec<_>>();
+    let pattern_ids = compiled_patterns
+        .iter()
+        .map(|pattern| pattern.pattern_id.as_str())
+        .collect::<Vec<_>>()
+        .join("、");
+    AgentBatchSearchEngine::validate_patterns(&compiled_patterns).map_err(|error| {
+        AgentToolError::new(format!("批量搜索模式“{pattern_ids}”无效：{error}"))
+    })?;
     Ok(())
 }
 
@@ -737,18 +693,16 @@ impl Tool for SampleLogTool {
         }
         let source = self
             .0
-            .scope
+            .log_access
             .source(&args.source_ref)
             .ok_or_else(|| AgentToolError::new("source_ref 不在当前会话范围内"))?
             .clone();
-        let cached_reader = self
+        let scan_bytes = if self
             .0
-            .log_reader_cache
-            .lock()
-            .map_err(|_| AgentToolError::new("日志读取器缓存状态已损坏"))?
-            .get(&args.source_ref);
-        let reader_cache_hit = cached_reader.is_some();
-        let scan_bytes = if reader_cache_hit {
+            .log_access
+            .has_cached_reader(&args.source_ref)
+            .map_err(|error| AgentToolError::new(error.to_string()))?
+        {
             0
         } else {
             estimated_full_scan_bytes(&[&source])
@@ -759,30 +713,12 @@ impl Tool for SampleLogTool {
         let max_lines = args.max_lines.clamp(1, 60);
         let max_bytes = args.max_bytes.clamp(1, 32 * 1024);
         let strategy = args.strategy;
-        let operation_context = self.0.clone();
+        let log_access = self.0.log_access.clone();
         let source_ref = args.source_ref.clone();
         let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let read = tokio::task::spawn_blocking(move || {
-            let handle = match cached_reader {
-                Some(reader) => reader,
-                None => {
-                    let reader = LogFileReader::open_with_cancel_flag(
-                        OpenLogRequest {
-                            location: source.location.clone(),
-                            label: source.file_name.clone(),
-                            default_encoding: operation_context.scope.default_encoding.clone(),
-                            archive_passwords: operation_context.scope.archive_passwords.clone(),
-                        },
-                        cancel_flag.clone(),
-                    )?;
-                    operation_context
-                        .log_reader_cache
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("日志读取器缓存状态已损坏"))?
-                        .insert(source_ref, reader.clone());
-                    reader
-                }
-            };
+            let opened = log_access.open(&source_ref, cancel_flag.clone())?;
+            let handle = opened.reader;
             let indices = sample_line_indices(handle.line_count(), max_lines, strategy);
             let mut lines = Vec::with_capacity(indices.len());
             for line_index in indices {
@@ -793,7 +729,15 @@ impl Tool for SampleLogTool {
                     lines.push(line);
                 }
             }
-            anyhow::Ok((handle.byte_len(), handle.line_count(), lines))
+            anyhow::Ok((
+                if opened.cache_hit {
+                    0
+                } else {
+                    handle.byte_len()
+                },
+                handle.line_count(),
+                lines,
+            ))
         })
         .await
         .map_err(|error| AgentToolError::new(format!("日志采样任务异常结束：{error}")))?
@@ -803,11 +747,7 @@ impl Tool for SampleLogTool {
                 redact_error_path(error.to_string())
             ))
         })?;
-        reconcile_tool_scan(
-            &self.0,
-            scan_bytes,
-            if reader_cache_hit { 0 } else { read.0 },
-        )?;
+        reconcile_tool_scan(&self.0, scan_bytes, read.0)?;
         let mut raw_bytes = 0_usize;
         let mut byte_truncated = false;
         let mut lines = Vec::new();
@@ -955,9 +895,9 @@ pub(crate) struct ExtractEventBlocksOutput {
 /// 事件块阻塞读取阶段的内部结果。
 struct ExtractedEventBlock {
     /// 打开后可复用的日志读取器。
-    reader: LogReaderHandle,
+    reader: AgentLogDocument,
     /// 实际返回前尚未脱敏和裁剪的事件行。
-    block: Vec<crate::reader::log_file_reader::DisplayedLogLine>,
+    block: Vec<crate::agent::log_access::AgentLogLine>,
     /// 真实事件首行生成的归一化签名。
     signature: String,
     /// 可选的精确重复统计。
@@ -1013,19 +953,18 @@ impl Tool for ExtractEventBlocksTool {
         }
         let source = self
             .0
-            .scope
+            .log_access
             .source(&args.source_ref)
             .ok_or_else(|| AgentToolError::new("source_ref 不在当前会话范围内"))?
             .clone();
-        let cached_reader = self
-            .0
-            .log_reader_cache
-            .lock()
-            .map_err(|_| AgentToolError::new("日志读取器缓存状态已损坏"))?
-            .get(&args.source_ref);
-        let reader_cache_hit = cached_reader.is_some();
-        // 缓存未命中时打开日志本身需要完整解压或建立行索引；显式重复统计同样需要全量扫描。
-        let scan_bytes = if reader_cache_hit && !args.include_occurrences {
+        // 局部事件提取可以复用主分析缓存；重复次数统计会重新遍历日志，独立复核阶段仍必须拒绝。
+        let scan_bytes = if !args.include_occurrences
+            && self
+                .0
+                .log_access
+                .has_cached_reader(&args.source_ref)
+                .map_err(|error| AgentToolError::new(error.to_string()))?
+        {
             0
         } else {
             estimated_full_scan_bytes(&[&source])
@@ -1037,31 +976,15 @@ impl Tool for ExtractEventBlocksTool {
         let max_bytes = args.max_bytes.clamp(1, MAX_TOOL_RAW_BYTES);
         let center = args.line - 1;
         let operation_context = self.0.clone();
+        let log_access = self.0.log_access.clone();
         let source_ref = args.source_ref.clone();
         let include_occurrences = args.include_occurrences;
         let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let extracted = tokio::task::spawn_blocking(move || {
             let open_started = Instant::now();
-            let handle = match cached_reader {
-                Some(reader) => reader,
-                None => {
-                    let reader = LogFileReader::open_with_cancel_flag(
-                        OpenLogRequest {
-                            location: source.location.clone(),
-                            label: source.file_name.clone(),
-                            default_encoding: operation_context.scope.default_encoding.clone(),
-                            archive_passwords: operation_context.scope.archive_passwords.clone(),
-                        },
-                        cancel_flag.clone(),
-                    )?;
-                    operation_context
-                        .log_reader_cache
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("日志读取器缓存状态已损坏"))?
-                        .insert(source_ref.clone(), reader.clone());
-                    reader
-                }
-            };
+            let opened = log_access.open(&source_ref, cancel_flag.clone())?;
+            let reader_cache_hit = opened.cache_hit;
+            let handle = opened.reader;
             let open_duration = open_started.elapsed();
             if center >= handle.line_count() {
                 anyhow::bail!("事件块中心行超过日志总行数");
@@ -1131,11 +1054,12 @@ impl Tool for ExtractEventBlocksTool {
                 redact_error_path(error.to_string())
             ))
         })?;
-        let actual_scan_bytes = if reader_cache_hit && !extracted.occurrence_scan_performed {
-            0
-        } else {
-            extracted.reader.byte_len()
-        };
+        let actual_scan_bytes =
+            if extracted.timing.reader_cache_hit && !extracted.occurrence_scan_performed {
+                0
+            } else {
+                extracted.reader.byte_len()
+            };
         reconcile_tool_scan(&self.0, scan_bytes, actual_scan_bytes)?;
         self.0.trace(
             crate::agent::session::AgentTraceKind::Tool,
@@ -1230,7 +1154,7 @@ impl Tool for ExtractEventBlocksTool {
 ///
 /// 返回值：精确出现次数和最多二十个事件首行位置。
 fn count_event_occurrences(
-    handle: &LogReaderHandle,
+    handle: &AgentLogDocument,
     signature: &str,
     cancel_flag: &AtomicBool,
 ) -> anyhow::Result<EventOccurrenceSummary> {
@@ -1325,7 +1249,7 @@ struct EventBlockRange {
 
 /// 从锚点向前分块定位真实事件首行，长堆栈也不会受固定窗口限制。
 fn find_event_start(
-    handle: &LogReaderHandle,
+    handle: &AgentLogDocument,
     center: usize,
     cancel_flag: &AtomicBool,
 ) -> anyhow::Result<usize> {
@@ -1352,7 +1276,7 @@ fn find_event_start(
 
 /// 从真实事件首行向后分块定位首个非连续行，返回事件排他结束行号。
 fn find_event_end(
-    handle: &LogReaderHandle,
+    handle: &AgentLogDocument,
     event_start: usize,
     cancel_flag: &AtomicBool,
 ) -> anyhow::Result<usize> {
@@ -1530,16 +1454,14 @@ impl Tool for AggregateLogEventsTool {
             .begin_tool(Self::NAME, scan_bytes)
             .map_err(AgentToolError::new)?;
         let sources = selected.into_iter().cloned().collect::<Vec<_>>();
-        let default_encoding = self.0.scope.default_encoding.clone();
-        let archive_passwords = self.0.scope.archive_passwords.clone();
+        let log_access = self.0.log_access.clone();
         let allow_raw = self.0.scope.allow_raw_log_content;
         let bucket_minutes = args.time_bucket_minutes.clamp(1, 1440);
         let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let scan = tokio::task::spawn_blocking(move || {
             scan_aggregate_events(
                 sources,
-                default_encoding,
-                archive_passwords,
+                log_access,
                 levels,
                 bucket_minutes,
                 allow_raw,
@@ -1751,8 +1673,7 @@ struct AggregateEventScanResult {
 /// 顺序扫描授权来源并聚合通用事件；来源和行批次边界均检查取消。
 fn scan_aggregate_events(
     sources: Vec<SnapshotSource>,
-    default_encoding: String,
-    archive_passwords: crate::loader::archive::ArchivePasswordStore,
+    log_access: crate::agent::log_access::AgentLogAccess,
     levels: BTreeSet<String>,
     bucket_minutes: u32,
     allow_raw: bool,
@@ -1773,22 +1694,17 @@ fn scan_aggregate_events(
             break;
         }
         result.scanned_files += 1;
-        let handle = match LogFileReader::open_with_cancel_flag(
-            OpenLogRequest {
-                location: source.location.clone(),
-                label: source.file_name.clone(),
-                default_encoding: default_encoding.clone(),
-                archive_passwords: archive_passwords.clone(),
-            },
-            cancel_flag.clone(),
-        ) {
-            Ok(handle) => handle,
+        let opened = match log_access.open(&source.source_ref, cancel_flag.clone()) {
+            Ok(opened) => opened,
             Err(error) => {
                 result.errors.push(error.to_string());
                 continue;
             }
         };
-        result.scanned_bytes = result.scanned_bytes.saturating_add(handle.byte_len());
+        let handle = opened.reader;
+        if !opened.cache_hit {
+            result.scanned_bytes = result.scanned_bytes.saturating_add(handle.byte_len());
+        }
         let mut start = 0_usize;
         while start < handle.line_count() {
             if cancel_flag.load(Ordering::Relaxed) {
@@ -2236,7 +2152,7 @@ fn default_artifact_query_limit() -> usize {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Mutex, atomic::AtomicUsize};
 
     use tempfile::TempDir;
 
@@ -2244,14 +2160,15 @@ mod tests {
     use crate::agent::report::{DiagnosticFinding, DiagnosticFindingStatus, EvidenceReference};
     use crate::agent::session::{
         AgentAnalysisStageTracker, AgentBudget, AgentEvidenceStore, AgentOperationContext,
-        LogProfileSnapshot, SourceScopeSnapshot,
+        AgentSessionMode, LogProfileSnapshot, SourceScopeSnapshot,
     };
     use crate::agent::tools::{
-        ReadLogContextArgs, ReadLogContextTool, SubmitDiagnosticReportArgs,
+        AssistantCitationRequest, ReadLogContextArgs, ReadLogContextTool,
+        RegisterAnswerCitationsArgs, RegisterAnswerCitationsTool, SubmitDiagnosticReportArgs,
         SubmitDiagnosticReportTool,
     };
     use crate::config::paths::temporary_test_dir;
-    use crate::config::{LoaderConfig, LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget};
+    use crate::config::{LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget};
     use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
 
@@ -2259,6 +2176,19 @@ mod tests {
     fn test_context(
         content: &str,
         allow_raw_log_content: bool,
+    ) -> (Arc<AgentOperationContext>, TempDir, String) {
+        test_context_with_mode(
+            content,
+            allow_raw_log_content,
+            AgentSessionMode::StructuredAnalysis,
+        )
+    }
+
+    /// 构造指定产品模式的隔离工具上下文，验证助手与固定分析共享安全边界。
+    fn test_context_with_mode(
+        content: &str,
+        allow_raw_log_content: bool,
+        session_mode: AgentSessionMode,
     ) -> (Arc<AgentOperationContext>, TempDir, String) {
         let directory = temporary_test_dir("advanced-tools");
         let path = directory.path().join("application.log");
@@ -2272,19 +2202,21 @@ mod tests {
                 source_id: SourceId(1),
                 file_name: "application.log".to_string(),
                 relative_path: "application.log".to_string(),
+                profile_match_path: "application.log".to_string(),
                 location: SourceLocation::LocalPath(path),
                 size: Some(content.len() as u64),
                 profile_id: None,
             }]),
             profiles: Arc::new(HashMap::new()),
             default_encoding: "UTF-8".to_string(),
-            loader_config: LoaderConfig::default(),
             archive_passwords: ArchivePasswordStore::default(),
             allow_raw_log_content,
         };
+        let scope = Arc::new(scope);
         let (event_sender, _event_receiver) = async_channel::bounded(64);
         let context = Arc::new(AgentOperationContext {
-            scope: Arc::new(scope),
+            session_mode,
+            scope: scope.clone(),
             budget: Arc::new(AgentBudget::balanced()),
             stage_tracker: Mutex::new(AgentAnalysisStageTracker::new(
                 0,
@@ -2296,7 +2228,7 @@ mod tests {
             event_sender,
             report: Mutex::new(None),
             artifacts: Mutex::new(HashMap::new()),
-            log_reader_cache: Mutex::new(Default::default()),
+            log_access: crate::agent::log_access::AgentLogAccess::new(scope.clone()),
             event_occurrence_cache: Mutex::new(Default::default()),
             evidence_ranges: AgentEvidenceStore::default(),
             trusted_evidence_excerpts: Mutex::new(HashMap::new()),
@@ -2305,6 +2237,7 @@ mod tests {
             accepted_user_messages: Mutex::new(Vec::new()),
             is_independent_review: AtomicBool::new(false),
             pending_user_messages: Arc::new(AtomicUsize::new(0)),
+            assistant_citations: Mutex::new(Vec::new()),
         });
         (context, directory, source_ref)
     }
@@ -2317,31 +2250,15 @@ mod tests {
             .expect("应创建测试运行时")
     }
 
-    /// 把测试上下文逐个推进到指定阶段，确保工具测试同样遵守生产状态机的固定顺序。
-    fn advance_test_stage(
-        context: &AgentOperationContext,
-        target: crate::agent::session::AgentAnalysisStage,
-    ) {
-        let current_index = context
-            .stage_tracker
-            .lock()
-            .expect("测试阶段状态不应损坏")
-            .snapshots()
-            .iter()
-            .position(|event| {
-                event.status == crate::agent::session::AgentAnalysisStageStatus::Running
-            })
-            .expect("测试上下文应存在运行阶段");
-        for stage in crate::agent::session::AgentAnalysisStage::ALL
-            .iter()
-            .copied()
-            .take(target.index() + 1)
-            .skip(current_index + 1)
-        {
-            context
-                .advance_analysis_stage(stage)
-                .expect("测试阶段应按顺序推进成功");
-        }
+    /// 为需要阶段前置条件的工具测试声明一个动态阶段。
+    fn advance_test_stage(context: &AgentOperationContext, stage_id: &str) {
+        context
+            .advance_dynamic_analysis_stage(
+                format!("test/{stage_id}"),
+                format!("测试阶段 {stage_id}"),
+                None,
+            )
+            .expect("测试动态阶段应成功创建");
     }
 
     /// 验证均匀采样同时覆盖首尾并保持行号递增。
@@ -2383,6 +2300,7 @@ mod tests {
                 source_id: SourceId(1),
                 file_name: "memory_20260715.log".to_string(),
                 relative_path: "monitor/memory_20260715.log".to_string(),
+                profile_match_path: "monitor/memory_20260715.log".to_string(),
                 location: SourceLocation::LocalPath(PathBuf::from("memory_20260715.log")),
                 size: Some(10),
                 profile_id: Some(profile.profile_id.clone()),
@@ -2392,6 +2310,7 @@ mod tests {
                 source_id: SourceId(2),
                 file_name: "application.log".to_string(),
                 relative_path: "application.log".to_string(),
+                profile_match_path: "application.log".to_string(),
                 location: SourceLocation::LocalPath(PathBuf::from("application.log")),
                 size: Some(20),
                 profile_id: None,
@@ -2411,10 +2330,7 @@ mod tests {
     #[test]
     fn sample_tool_returns_and_registers_real_lines() {
         let (context, _directory, source_ref) = test_context("first\nsecret=abc\nlast\n", true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::SearchAnomalies,
-        );
+        advance_test_stage(&context, "search_anomalies");
         let output = test_runtime()
             .block_on(SampleLogTool(context.clone()).call(SampleLogArgs {
                 source_ref: source_ref.clone(),
@@ -2434,10 +2350,7 @@ mod tests {
     #[test]
     fn report_submission_rejects_evidence_that_cannot_be_reread() {
         let (context, _directory, source_ref) = test_context("first\nsecond\n", true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
-        );
+        advance_test_stage(&context, "validate_evidence");
         context
             .evidence_ranges
             .record_text(&source_ref, 10, "not-present")
@@ -2477,10 +2390,7 @@ mod tests {
     fn report_submission_accepts_locally_reread_evidence() {
         let (context, _directory, source_ref) =
             test_context("first\npassword=internal-secret\n", true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
-        );
+        advance_test_stage(&context, "validate_evidence");
         context
             .evidence_ranges
             .record_text(&source_ref, 2, "password=internal-secret")
@@ -2522,15 +2432,84 @@ mod tests {
         assert_eq!(excerpt.lines[0].text, "[REDACTED]");
     }
 
+    /// 验证助手工具不推进固定阶段，并只登记已经观察且本地复读一致的可信引用。
+    #[test]
+    fn interactive_assistant_registers_only_observed_citations_without_stage_progression() {
+        let (context, _directory, source_ref) = test_context_with_mode(
+            "INFO ready\npassword=internal-secret\n",
+            true,
+            AgentSessionMode::InteractiveAssistant,
+        );
+        let running_stage_before = context
+            .stage_tracker
+            .lock()
+            .unwrap()
+            .snapshots()
+            .into_iter()
+            .find(|event| event.status == crate::agent::session::AgentAnalysisStageStatus::Running)
+            .map(|event| event.stage_id);
+        test_runtime()
+            .block_on(
+                ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
+                    source_ref: source_ref.clone(),
+                    line: 2,
+                    before: 0,
+                    after: 0,
+                }),
+            )
+            .expect("助手应直接读取上下文而不受固定阶段约束");
+
+        test_runtime()
+            .block_on(RegisterAnswerCitationsTool(context.clone()).call(
+                RegisterAnswerCitationsArgs {
+                    citations: vec![AssistantCitationRequest {
+                        source_ref: source_ref.clone(),
+                        start_line: 2,
+                        end_line: 2,
+                        rationale: "该行包含需要复核的敏感配置".to_string(),
+                    }],
+                },
+            ))
+            .expect("已经观察的真实日志行应通过助手引用登记");
+        let citations = context.assistant_citations.lock().unwrap();
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].start_line, 2);
+        assert_eq!(
+            citations[0].display_excerpt.as_ref().unwrap().lines[0].text,
+            "[REDACTED]"
+        );
+        drop(citations);
+
+        let error = test_runtime()
+            .block_on(RegisterAnswerCitationsTool(context.clone()).call(
+                RegisterAnswerCitationsArgs {
+                    citations: vec![AssistantCitationRequest {
+                        source_ref,
+                        start_line: 1,
+                        end_line: 1,
+                        rationale: "未被工具返回的行".to_string(),
+                    }],
+                },
+            ))
+            .expect_err("助手必须拒绝尚未观察的日志行");
+        assert!(error.to_string().contains("实际返回"));
+        let running_stage_after = context
+            .stage_tracker
+            .lock()
+            .unwrap()
+            .snapshots()
+            .into_iter()
+            .find(|event| event.status == crate::agent::session::AgentAnalysisStageStatus::Running)
+            .map(|event| event.stage_id);
+        assert_eq!(running_stage_before, running_stage_after);
+    }
+
     /// 验证独立复核继承主分析的读取器和可信证据缓存，不重新扫描已经移除的底层日志。
     #[test]
     fn independent_review_reuses_trusted_log_and_evidence_caches() {
         let (context, directory, source_ref) =
             test_context("first\nERROR trusted failure\nlast\n", true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ExtractContext,
-        );
+        advance_test_stage(&context, "extract_context");
         test_runtime()
             .block_on(
                 ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
@@ -2564,14 +2543,11 @@ mod tests {
             used_log_profiles: Vec::new(),
             limitations: Vec::new(),
         };
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
-        );
+        advance_test_stage(&context, "validate_evidence");
         test_runtime()
             .block_on(SubmitDiagnosticReportTool(context.clone()).call(report_args()))
             .expect("主分析报告应完成强制证据校验");
-        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+        assert_eq!(context.log_access.cached_reader_count(), 1);
         assert_eq!(context.trusted_evidence_excerpts.lock().unwrap().len(), 1);
         let scan_bytes_before_review = context.budget.snapshot().local_scan_bytes;
 
@@ -2579,10 +2555,7 @@ mod tests {
         fs::remove_file(directory.path().join("application.log"))
             .expect("应移除底层日志以验证独立复核不会重扫");
         context.is_independent_review.store(true, Ordering::Release);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::IndependentReview,
-        );
+        advance_test_stage(&context, "independent_review");
         test_runtime()
             .block_on(
                 ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
@@ -2597,7 +2570,7 @@ mod tests {
             .block_on(SubmitDiagnosticReportTool(context.clone()).call(report_args()))
             .expect("独立复核应直接复用主分析已经校验的精确证据");
 
-        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+        assert_eq!(context.log_access.cached_reader_count(), 1);
         assert_eq!(
             context.budget.snapshot().local_scan_bytes,
             scan_bytes_before_review,
@@ -2634,10 +2607,7 @@ mod tests {
     #[test]
     fn report_submission_reopens_source_after_log_truncation() {
         let (context, directory, source_ref) = test_context("first\nsecond\n", true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ExtractContext,
-        );
+        advance_test_stage(&context, "extract_context");
         test_runtime()
             .block_on(
                 ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
@@ -2648,15 +2618,12 @@ mod tests {
                 }),
             )
             .expect("首次读取应登记证据并填充会话缓存");
-        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+        assert_eq!(context.log_access.cached_reader_count(), 1);
 
         // 模拟报告提交前发生日志轮转：旧缓存仍有第二行，而当前来源只剩一行。
         fs::write(directory.path().join("application.log"), "replacement\n")
             .expect("应截断并替换测试日志");
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
-        );
+        advance_test_stage(&context, "validate_evidence");
         let error = test_runtime()
             .block_on(
                 SubmitDiagnosticReportTool(context).call(SubmitDiagnosticReportArgs {
@@ -2691,10 +2658,7 @@ mod tests {
     #[test]
     fn report_submission_rejects_same_line_count_content_replacement() {
         let (context, directory, source_ref) = test_context("first\nsecond\n", true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ExtractContext,
-        );
+        advance_test_stage(&context, "extract_context");
         test_runtime()
             .block_on(
                 ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
@@ -2709,10 +2673,7 @@ mod tests {
         // 替换文本长度和行数都不变，确保测试只依赖内容指纹而非大小或行号边界。
         fs::write(directory.path().join("application.log"), "first\nchange\n")
             .expect("应覆盖测试日志正文");
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ValidateEvidence,
-        );
+        advance_test_stage(&context, "validate_evidence");
         let error = test_runtime()
             .block_on(
                 SubmitDiagnosticReportTool(context).call(SubmitDiagnosticReportArgs {
@@ -2748,10 +2709,7 @@ mod tests {
     fn batch_search_reports_each_pattern_from_one_scan() {
         let (context, _directory, source_ref) =
             test_context("INFO start\nERROR timeout\nWARN retry\nERROR retry\n", true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::SearchAnomalies,
-        );
+        advance_test_stage(&context, "search_anomalies");
         let output = test_runtime()
             .block_on(SearchLogsBatchTool(context).call(SearchLogsBatchArgs {
                 patterns: vec![
@@ -2801,10 +2759,7 @@ mod tests {
         let long_line = format!("{} {}\n", keywords.join(" "), "x".repeat(5000));
         let content = long_line.repeat(20);
         let (context, _directory, source_ref) = test_context(&content, true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::SearchAnomalies,
-        );
+        advance_test_stage(&context, "search_anomalies");
         let output = test_runtime()
             .block_on(
                 SearchLogsBatchTool(context).call(SearchLogsBatchArgs {
@@ -2859,10 +2814,7 @@ mod tests {
             "ERROR request 1 failed\n    at example.Service.run(Service.java:1)\nINFO retry\nERROR request 2 failed\n    at example.Service.run(Service.java:1)\n",
             true,
         );
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ExtractContext,
-        );
+        advance_test_stage(&context, "extract_context");
         let output = test_runtime()
             .block_on(
                 ExtractEventBlocksTool(context.clone()).call(ExtractEventBlocksArgs {
@@ -2893,10 +2845,7 @@ mod tests {
         }
         content.push_str("INFO recovered\n");
         let (context, _directory, source_ref) = test_context(&content, true);
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ExtractContext,
-        );
+        advance_test_stage(&context, "extract_context");
         let output = test_runtime()
             .block_on(
                 ExtractEventBlocksTool(context).call(ExtractEventBlocksArgs {
@@ -2926,10 +2875,7 @@ mod tests {
             "ERROR startup failed\n    at example.Main.run(Main.java:1)\nINFO stopped\n",
             true,
         );
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::ExtractContext,
-        );
+        advance_test_stage(&context, "extract_context");
         test_runtime()
             .block_on(
                 ReadLogContextTool(context.clone()).call(ReadLogContextArgs {
@@ -2940,7 +2886,7 @@ mod tests {
                 }),
             )
             .expect("上下文工具首次读取应成功");
-        assert_eq!(context.log_reader_cache.lock().unwrap().len(), 1);
+        assert_eq!(context.log_access.cached_reader_count(), 1);
         assert!(context.event_occurrence_cache.lock().unwrap().is_empty());
         std::fs::remove_file(directory.path().join("application.log"))
             .expect("应移除底层日志以验证缓存复用");
@@ -2980,10 +2926,7 @@ mod tests {
             "2026-07-16 12:01:00 ERROR request 1 failed\n2026-07-16 12:02:00 ERROR request 2 failed\n",
             false,
         );
-        advance_test_stage(
-            &context,
-            crate::agent::session::AgentAnalysisStage::BuildTimeline,
-        );
+        advance_test_stage(&context, "build_timeline");
         let output = test_runtime()
             .block_on(
                 AggregateLogEventsTool(context).call(AggregateLogEventsArgs {

@@ -1,6 +1,6 @@
 # 文件职责：定义 Argus 桌面客户端的 Cargo 包信息与依赖版本。
 # 创建日期：2026-06-09
-# 修改日期：2026-07-16
+# 修改日期：2026-07-17
 # 作者：Argus 开发团队
 # 主要功能：配置 Rust 版本、包元信息以及 GPUI 界面依赖。
 
@@ -15,6 +15,8 @@ description = "Argus 高性能日志查看与分析桌面客户端"
 unreachable_pub = "warn"
 
 [dependencies]
+# Agent 批量搜索使用成熟的多模式自动机一次匹配全部普通关键字，避免逐模式正则扫描。
+aho-corasick = "1.1.4"
 anyhow = "1.0.102"
 async-channel = "2.5.0"
 base64 = "0.22.1"

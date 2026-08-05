@@ -1,8 +1,8 @@
 //! 文件职责：实现模型可调用的 Argus 结构化日志分析工具。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-16
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：提供来源枚举、类型识别、日志搜索、上下文读取、分析器、制品读取和带本地证据复读的报告提交。
+//! 主要功能：提供快速目录清单、来源枚举、类型识别、日志搜索、上下文读取、分析器、制品读取和带本地证据复读的报告提交。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
@@ -17,20 +17,18 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::agent::analyzers::AgentNativeAnalyzers;
+use crate::agent::log_access::AgentLogLine;
+use crate::agent::log_search::{AgentLogSearchEngine, AgentSearchPattern};
 use crate::agent::report::{
-    DiagnosticFinding, DiagnosticReport, EvidenceDisplayExcerpt, EvidenceDisplayLine,
-    UsedLogProfileSummary, question_sha256,
+    AssistantCitation, DiagnosticFinding, DiagnosticFindingStatus, DiagnosticReport,
+    EvidenceDisplayExcerpt, EvidenceDisplayLine, EvidenceReference, UsedLogProfileSummary,
+    question_sha256,
 };
 use crate::agent::session::{
-    AgentAnalysisStage, AgentEvidenceStore, AgentOperationContext, AgentTraceKind,
+    AgentEvidenceStore, AgentOperationContext, AgentSessionMode, AgentTraceKind,
     MAX_TOOL_RAW_BYTES, MAX_TOOL_RESULT_BYTES, SnapshotSource, truncate_utf8_with_ellipsis,
 };
-use crate::analysis::jstack::{JstackAnalysisTarget, analyze_jstack_targets_with_cancel};
-use crate::analysis::runtime::{
-    RuntimeAnalysisTarget, RuntimeAnalysisTargetKind, analyze_runtime_targets_with_cancel,
-};
-use crate::reader::log_file_reader::{DisplayedLogLine, LogFileReader, OpenLogRequest};
-use crate::search::search_engine::{SearchEngine, SearchQuery, SearchRequest, SearchTarget};
 
 /// 结构化工具统一错误；错误文本不得包含绝对路径、凭据或大段日志原文。
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +63,26 @@ impl Drop for BlockingCancellationGuard {
     }
 }
 
+impl BlockingCancellationGuard {
+    /// 为当前 Agent 工具建立取消标记，并保证工具 future 结束时同步通知阻塞任务。
+    fn new(context: &AgentOperationContext) -> (Arc<AtomicBool>, Self) {
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let watcher_flag = cancel_flag.clone();
+        let cancellation = context.cancellation.clone();
+        let watcher = tokio::spawn(async move {
+            cancellation.cancelled().await;
+            watcher_flag.store(true, Ordering::Relaxed);
+        });
+        (
+            cancel_flag.clone(),
+            Self {
+                cancel_flag,
+                watcher,
+            },
+        )
+    }
+}
+
 impl AgentToolError {
     /// 创建经过长度裁剪的工具错误。
     pub(crate) fn new(message: impl Into<String>) -> Self {
@@ -76,12 +94,14 @@ impl AgentToolError {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct EmptyArgs {}
 
-/// 模型显式声明即将进入的固定分析阶段。
+/// 模型显式声明即将进入的动态分析阶段。
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SetAnalysisStageArgs {
-    /// 十二阶段之一；状态只允许按固定顺序向后推进。
-    pub stage: AgentAnalysisStage,
-    /// 刚完成阶段的一句话结果摘要；首次声明当前阶段时可以为空。
+    /// 当前模型上下文内稳定且简短的阶段标识，例如 `triage_memory_pressure`。
+    pub stage_id: String,
+    /// 面向用户的简洁阶段标题，例如“定位内存增长时间窗”。
+    pub stage_title: String,
+    /// 刚完成阶段的客观结果摘要；支持换行，首次声明当前阶段时可以为空。
     #[serde(default)]
     pub completed_stage_summary: Option<String>,
 }
@@ -90,7 +110,7 @@ pub(crate) struct SetAnalysisStageArgs {
 #[derive(Debug, Serialize)]
 pub(crate) struct SetAnalysisStageOutput {
     /// 已接受的阶段标题。
-    stage_title: &'static str,
+    stage_title: String,
 }
 
 /// 更新右侧阶段时间线卡片的结构化工具，不影响证据、预算或日志读取状态。
@@ -104,7 +124,7 @@ impl Tool for SetAnalysisStageTool {
     type Output = SetAnalysisStageOutput;
 
     fn description(&self) -> String {
-        "进入固定分析流程的新阶段前调用；completed_stage_summary 用一句话概括刚完成阶段的结果。只更新 Argus 右侧阶段时间线，不提交思考过程、工具参数或日志原文，阶段必须单调向后推进。"
+        "由你根据当前问题自行决定分析阶段；进入一个新的实质性阶段前调用。stage_id 在当前主分析或独立复核上下文内保持唯一，stage_title 使用简洁中文，completed_stage_summary 客观概括刚完成阶段且可使用换行。该工具只更新 Argus 右侧时间线，不提交思考过程、工具参数或日志原文，不要求固定阶段数量或顺序。"
             .to_string()
     }
 
@@ -117,25 +137,36 @@ impl Tool for SetAnalysisStageTool {
             .begin_tool(Self::NAME, 0)
             .map_err(AgentToolError::new)?;
         let review_phase = self.0.is_independent_review.load(Ordering::Acquire);
-        if (!review_phase && args.stage.index() > AgentAnalysisStage::ValidateEvidence.index())
-            || (review_phase && args.stage.index() < AgentAnalysisStage::IndependentReview.index())
-        {
-            return Err(AgentToolError::new(
-                "当前模型上下文不能进入另一个分析阶段分区",
-            ));
+        // 主分析和独立复核拥有隔离的模型上下文，因此给自由阶段标识增加命名空间，
+        // 避免两个模型恰好选用同一标识时被误判为网络重试。
+        let namespace = if review_phase { "review" } else { "primary" };
+        let raw_stage_id = args.stage_id.trim();
+        if raw_stage_id.is_empty() {
+            return Err(AgentToolError::new("stage_id 不能为空"));
         }
+        let stage_id = format!("{namespace}/{raw_stage_id}");
+        let stage_title = args
+            .stage_title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         self.0
-            .advance_analysis_stage_with_summary(args.stage, args.completed_stage_summary)
+            .advance_dynamic_analysis_stage(
+                stage_id,
+                stage_title.clone(),
+                args.completed_stage_summary,
+            )
             .map_err(AgentToolError::new)?;
-        checked_output(SetAnalysisStageOutput {
-            stage_title: args.stage.title(),
-        })
+        checked_output(SetAnalysisStageOutput { stage_title })
     }
 }
 
 /// 来源列表分页参数。
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ListSourcesArgs {
+    /// 可选的来源展示路径前缀；通常来自助手“@”选择的文件夹。
+    #[serde(default)]
+    pub path_prefix: Option<String>,
     /// 0 基分页偏移。
     #[serde(default)]
     pub offset: usize,
@@ -181,8 +212,7 @@ impl Tool for ListSourcesTool {
     type Output = ListSourcesOutput;
 
     fn description(&self) -> String {
-        "分页列出当前分析范围内的日志来源元数据。只能使用返回的 source_ref 调用其它工具。"
-            .to_string()
+        "分页列出当前分析范围内的日志来源元数据；可用 path_prefix 精确筛选某个文件夹及其日志后代。只能使用返回的 source_ref 调用其它工具。".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -193,30 +223,157 @@ impl Tool for ListSourcesTool {
         self.0
             .begin_tool(Self::NAME, 0)
             .map_err(AgentToolError::new)?;
+        let path_prefix = args
+            .path_prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_end_matches('/'))
+            .filter(|prefix| !prefix.is_empty());
         let limit = args.limit.clamp(1, 200);
-        let end = args
-            .offset
-            .saturating_add(limit)
-            .min(self.0.scope.sources.len());
-        let sources = self
+        let (sources, total) = self
             .0
-            .scope
-            .sources
-            .get(args.offset..end)
-            .unwrap_or_default()
-            .iter()
+            .log_access
+            .source_page(path_prefix, args.offset, limit);
+        let sources = sources
+            .into_iter()
             .map(|source| SourceMetadataOutput {
-                source_ref: source.source_ref.clone(),
-                relative_path: source.relative_path.clone(),
+                source_ref: source.source_ref,
+                relative_path: source.relative_path,
                 size: source.size,
-                profile_id: source.profile_id.clone(),
+                profile_id: source.profile_id,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let next_offset = args.offset.min(total).saturating_add(sources.len());
         checked_output(ListSourcesOutput {
             root_label: self.0.scope.root_label.clone(),
             sources,
-            total: self.0.scope.sources.len(),
-            next_offset: (end < self.0.scope.sources.len()).then_some(end),
+            total,
+            next_offset: (next_offset < total).then_some(next_offset),
+        })
+    }
+}
+
+/// Agent 专用完整日志目录参数。
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct GetLogCatalogArgs {
+    /// 响应中直接展示的目录汇总数，范围 1～200；完整结构始终写入会话制品。
+    #[serde(default = "default_catalog_directory_limit")]
+    pub directory_limit: usize,
+    /// 响应中直接预览的日志文件数，范围 0～100；完整文件表始终写入会话制品。
+    #[serde(default = "default_catalog_file_preview_limit")]
+    pub file_preview_limit: usize,
+}
+
+/// 目录汇总模型输出。
+#[derive(Debug, Serialize)]
+struct LogCatalogDirectoryOutput {
+    path: String,
+    direct_file_count: usize,
+    descendant_file_count: usize,
+    known_total_bytes: u64,
+}
+
+/// 日志目录文件预览模型输出。
+#[derive(Debug, Serialize)]
+struct LogCatalogFileOutput {
+    source_ref: String,
+    relative_path: String,
+    size: Option<u64>,
+    profile_id: Option<String>,
+}
+
+/// Agent 专用完整日志目录输出。
+#[derive(Debug, Serialize)]
+pub(crate) struct GetLogCatalogOutput {
+    root_label: String,
+    total_directories: usize,
+    total_files: usize,
+    known_total_bytes: u64,
+    directories: Vec<LogCatalogDirectoryOutput>,
+    directories_truncated: bool,
+    file_preview: Vec<LogCatalogFileOutput>,
+    file_preview_truncated: bool,
+    /// 完整目录与文件清单的会话制品 ID；使用 get_artifact 分页读取。
+    artifact_id: String,
+    artifact_format: &'static str,
+    artifact_chars: usize,
+}
+
+/// 一次性生成完整日志目录清单；只访问预构建元数据索引，不打开或扫描日志正文。
+#[derive(Clone)]
+pub(crate) struct GetLogCatalogTool(pub Arc<AgentOperationContext>);
+
+impl Tool for GetLogCatalogTool {
+    const NAME: &'static str = "get_log_catalog";
+    type Error = AgentToolError;
+    type Args = GetLogCatalogArgs;
+    type Output = GetLogCatalogOutput;
+
+    fn description(&self) -> String {
+        "快速获取完整日志目录结构。直接返回目录汇总和文件预览，并把包含所有目录、文件、source_ref、大小及日志类型 ID 的完整 TSV 清单保存为会话制品；不读取日志正文。".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        schema_value::<Self::Args>()
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.0
+            .begin_tool(Self::NAME, 0)
+            .map_err(AgentToolError::new)?;
+        let directory_limit = args.directory_limit.clamp(1, 200);
+        let file_preview_limit = args.file_preview_limit.min(100);
+        let all_directories = self.0.log_access.directories();
+        let directories = all_directories
+            .iter()
+            .take(directory_limit)
+            .map(|directory| LogCatalogDirectoryOutput {
+                path: directory.path.clone(),
+                direct_file_count: directory.direct_file_count,
+                descendant_file_count: directory.descendant_file_count,
+                known_total_bytes: directory.known_total_bytes,
+            })
+            .collect::<Vec<_>>();
+        let (preview_sources, total_files) =
+            self.0.log_access.source_page(None, 0, file_preview_limit);
+        let file_preview = preview_sources
+            .into_iter()
+            .map(|source| LogCatalogFileOutput {
+                source_ref: source.source_ref,
+                relative_path: source.relative_path,
+                size: source.size,
+                profile_id: source.profile_id,
+            })
+            .collect::<Vec<_>>();
+        let known_total_bytes = self
+            .0
+            .scope
+            .sources
+            .iter()
+            .filter_map(|source| source.size)
+            .fold(0_u64, u64::saturating_add);
+        let artifact_chars = self.0.log_access.manifest_character_count();
+        let artifact_id = format!("log-catalog-{}", self.0.scope.session_id);
+        let mut artifacts = self
+            .0
+            .artifacts
+            .lock()
+            .map_err(|_| AgentToolError::new("日志目录制品状态已损坏"))?;
+        artifacts
+            .entry(artifact_id.clone())
+            .or_insert_with(|| self.0.log_access.manifest().to_string());
+        drop(artifacts);
+        checked_output(GetLogCatalogOutput {
+            root_label: self.0.scope.root_label.clone(),
+            total_directories: all_directories.len(),
+            total_files,
+            known_total_bytes,
+            directories_truncated: directories.len() < all_directories.len(),
+            directories,
+            file_preview_truncated: file_preview.len() < total_files,
+            file_preview,
+            artifact_id,
+            artifact_format: "TSV：kind, path, source_ref, size, profile_id, descendant_files",
+            artifact_chars,
         })
     }
 }
@@ -445,7 +602,7 @@ pub(crate) struct SearchLogsOutput {
     errors: Vec<String>,
 }
 
-/// 使用现有 `SearchEngine` 执行有预算、可取消、可引用的跨日志搜索。
+/// 使用 Agent 原生搜索器执行有预算、可取消、可引用的跨日志搜索。
 #[derive(Clone)]
 pub(crate) struct SearchLogsTool(pub Arc<AgentOperationContext>);
 
@@ -475,49 +632,34 @@ impl Tool for SearchLogsTool {
             .map_err(AgentToolError::new)?;
         let max_results = args.max_results.clamp(1, 100);
         let allow_raw = self.0.scope.allow_raw_log_content;
-        let scope = self.0.scope.clone();
-        let request = SearchRequest::with_queries(
-            vec![SearchQuery {
-                keyword: args.query,
-                case_sensitive: args.case_sensitive,
-                regex_enabled: args.regex,
-            }],
-            selected
-                .iter()
-                .map(|source| SearchTarget {
-                    source_id: source.source_id,
-                    label: source.file_name.clone(),
-                    path: source.relative_path.clone(),
-                    location: source.location.clone(),
-                })
-                .collect(),
-            scope.default_encoding.clone(),
-        )
-        .with_archive_passwords(scope.archive_passwords.clone());
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let watcher_flag = cancel_flag.clone();
-        let cancellation = self.0.cancellation.clone();
-        let watcher = tokio::spawn(async move {
-            cancellation.cancelled().await;
-            watcher_flag.store(true, Ordering::Relaxed);
-        });
+        let patterns = vec![AgentSearchPattern {
+            pattern_id: args.query.clone(),
+            query: args.query,
+            case_sensitive: args.case_sensitive,
+            regex: args.regex,
+        }];
+        AgentLogSearchEngine::validate_pattern(&patterns[0]).map_err(AgentToolError::new)?;
+        let sources = selected.into_iter().cloned().collect::<Vec<_>>();
         let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
         let result_collector = collected.clone();
+        let log_access = self.0.log_access.clone();
+        let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let search_result = tokio::task::spawn_blocking(move || {
-            SearchEngine::search(
-                request,
-                |_| {},
-                move |batch| {
-                    if let Ok(mut hits) = result_collector.lock() {
-                        let remaining = max_results.saturating_sub(hits.len());
-                        hits.extend(batch.into_iter().take(remaining));
+            AgentLogSearchEngine::search(
+                &log_access,
+                &sources,
+                &patterns,
+                cancel_flag,
+                move |hit| {
+                    if let Ok(mut hits) = result_collector.lock()
+                        && hits.len() < max_results
+                    {
+                        hits.push(hit);
                     }
                 },
-                cancel_flag,
             )
         })
         .await;
-        watcher.abort();
         let summary = search_result
             .map_err(|error| AgentToolError::new(format!("日志搜索任务异常结束：{error}")))?;
         reconcile_tool_scan(&self.0, scan_bytes, summary.scanned_bytes)?;
@@ -525,7 +667,6 @@ impl Tool for SearchLogsTool {
             .map_err(|_| AgentToolError::new("日志搜索结果仍被后台任务占用"))?
             .into_inner()
             .map_err(|_| AgentToolError::new("日志搜索结果状态已损坏"))?;
-        let source_refs = source_ref_by_id(&self.0);
         let mut raw_bytes = 0usize;
         let hits = results
             .into_iter()
@@ -534,13 +675,10 @@ impl Tool for SearchLogsTool {
                 let text = allow_raw.then(|| redact_sensitive_text(&result.line_text));
                 raw_bytes = raw_bytes.saturating_add(text.as_ref().map_or(0, String::len));
                 SearchHitOutput {
-                    source_ref: source_refs
-                        .get(&result.source_id.0)
-                        .cloned()
-                        .unwrap_or_default(),
-                    relative_path: result.path,
+                    source_ref: result.source_ref,
+                    relative_path: result.relative_path,
                     line: result.line_number + 1,
-                    matched_keywords: result.matched_keywords,
+                    matched_keywords: result.matched_pattern_ids,
                     text,
                     content_fingerprint,
                 }
@@ -639,18 +777,16 @@ impl Tool for ReadLogContextTool {
         }
         let source = self
             .0
-            .scope
+            .log_access
             .source(&args.source_ref)
             .ok_or_else(|| AgentToolError::new("source_ref 不在当前会话范围内"))?
             .clone();
-        let cached_reader = self
+        let scan_bytes = if self
             .0
-            .log_reader_cache
-            .lock()
-            .map_err(|_| AgentToolError::new("日志读取器缓存状态已损坏"))?
-            .get(&args.source_ref);
-        let reader_cache_hit = cached_reader.is_some();
-        let scan_bytes = if reader_cache_hit {
+            .log_access
+            .has_cached_reader(&args.source_ref)
+            .map_err(|error| AgentToolError::new(error.to_string()))?
+        {
             0
         } else {
             source.size.unwrap_or(UNKNOWN_SOURCE_SCAN_RESERVATION_BYTES)
@@ -663,43 +799,22 @@ impl Tool for ReadLogContextTool {
         let center = args.line.saturating_sub(1);
         let start = center.saturating_sub(before);
         let max_lines = before.saturating_add(after).saturating_add(1);
-        let operation_context = self.0.clone();
+        let log_access = self.0.log_access.clone();
         let source_ref = args.source_ref.clone();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let watcher_flag = cancel_flag.clone();
-        let cancellation = self.0.cancellation.clone();
-        let watcher = tokio::spawn(async move {
-            cancellation.cancelled().await;
-            watcher_flag.store(true, Ordering::Relaxed);
-        });
+        let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let read_result = tokio::task::spawn_blocking(move || {
-            let handle = match cached_reader {
-                Some(reader) => reader,
-                None => {
-                    let reader = LogFileReader::open_with_cancel_flag(
-                        OpenLogRequest {
-                            location: source.location.clone(),
-                            label: source.file_name.clone(),
-                            default_encoding: operation_context.scope.default_encoding.clone(),
-                            archive_passwords: operation_context.scope.archive_passwords.clone(),
-                        },
-                        cancel_flag,
-                    )?;
-                    operation_context
-                        .log_reader_cache
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("日志读取器缓存状态已损坏"))?
-                        .insert(source_ref, reader.clone());
-                    reader
-                }
-            };
+            let opened = log_access.open(&source_ref, cancel_flag)?;
+            let handle = opened.reader;
             let byte_len = handle.byte_len();
             let line_count = handle.line_count();
             let lines = handle.lines(start, max_lines)?;
-            anyhow::Ok((byte_len, line_count, lines))
+            anyhow::Ok((
+                if opened.cache_hit { 0 } else { byte_len },
+                line_count,
+                lines,
+            ))
         })
         .await;
-        watcher.abort();
         let (scanned_bytes, line_count, displayed) = read_result
             .map_err(|error| AgentToolError::new(format!("日志上下文任务异常结束：{error}")))?
             .map_err(|error| {
@@ -708,11 +823,7 @@ impl Tool for ReadLogContextTool {
                     redact_error_path(error.to_string())
                 ))
             })?;
-        reconcile_tool_scan(
-            &self.0,
-            scan_bytes,
-            if reader_cache_hit { 0 } else { scanned_bytes },
-        )?;
+        reconcile_tool_scan(&self.0, scan_bytes, scanned_bytes)?;
         let mut raw_bytes = 0usize;
         let lines = displayed
             .into_iter()
@@ -804,55 +915,37 @@ impl Tool for RunLogPipelineTool {
         self.0
             .begin_tool(Self::NAME, scan_bytes)
             .map_err(AgentToolError::new)?;
-        let keywords = args.keywords;
-        let request = SearchRequest::with_queries(
-            keywords
-                .iter()
-                .map(|keyword| SearchQuery {
-                    keyword: keyword.clone(),
-                    case_sensitive: false,
-                    regex_enabled: false,
-                })
-                .collect(),
-            selected
-                .iter()
-                .map(|source| SearchTarget {
-                    source_id: source.source_id,
-                    label: source.file_name.clone(),
-                    path: source.relative_path.clone(),
-                    location: source.location.clone(),
-                })
-                .collect(),
-            self.0.scope.default_encoding.clone(),
-        )
-        .with_archive_passwords(self.0.scope.archive_passwords.clone());
+        let patterns = args
+            .keywords
+            .into_iter()
+            .map(|keyword| AgentSearchPattern {
+                pattern_id: keyword.clone(),
+                query: keyword,
+                case_sensitive: false,
+                regex: false,
+            })
+            .collect::<Vec<_>>();
+        let sources = selected.into_iter().cloned().collect::<Vec<_>>();
         let counts = Arc::new(std::sync::Mutex::new(BTreeMap::<String, usize>::new()));
         let counts_collector = counts.clone();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let watcher_flag = cancel_flag.clone();
-        let cancellation = self.0.cancellation.clone();
-        let watcher = tokio::spawn(async move {
-            cancellation.cancelled().await;
-            watcher_flag.store(true, Ordering::Relaxed);
-        });
+        let log_access = self.0.log_access.clone();
+        let (cancel_flag, _cancel_guard) = BlockingCancellationGuard::new(&self.0);
         let search_result = tokio::task::spawn_blocking(move || {
-            SearchEngine::search(
-                request,
-                |_| {},
-                move |batch| {
+            AgentLogSearchEngine::search(
+                &log_access,
+                &sources,
+                &patterns,
+                cancel_flag,
+                move |hit| {
                     if let Ok(mut values) = counts_collector.lock() {
-                        for result in batch {
-                            for keyword in result.matched_keywords {
-                                *values.entry(keyword).or_default() += 1;
-                            }
+                        for pattern_id in hit.matched_pattern_ids {
+                            *values.entry(pattern_id).or_default() += 1;
                         }
                     }
                 },
-                cancel_flag,
             )
         })
         .await;
-        watcher.abort();
         let summary = search_result
             .map_err(|error| AgentToolError::new(format!("日志聚合任务异常结束：{error}")))?;
         reconcile_tool_scan(&self.0, scan_bytes, summary.scanned_bytes)?;
@@ -949,6 +1042,12 @@ impl Tool for RunAnalyzerTool {
         schema_value::<Self::Args>()
     }
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if !matches!(
+            args.analyzer.as_str(),
+            "jstack_state_summary" | "runtime_error_summary"
+        ) {
+            return Err(AgentToolError::new("未知分析器，请先调用 list_analyzers"));
+        }
         let selected = selected_sources(&self.0, &args.source_refs)?;
         if selected.is_empty() {
             return Err(AgentToolError::new("专项分析器至少需要一个来源"));
@@ -957,148 +1056,27 @@ impl Tool for RunAnalyzerTool {
         self.0
             .begin_tool(Self::NAME, scan_bytes)
             .map_err(AgentToolError::new)?;
-        let default_encoding = self.0.scope.default_encoding.clone();
-        let loader_config = self.0.scope.loader_config.clone();
-        let archive_passwords = self.0.scope.archive_passwords.clone();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let watcher_flag = cancel_flag.clone();
-        let cancellation = self.0.cancellation.clone();
-        let watcher = tokio::spawn(async move {
-            cancellation.cancelled().await;
-            watcher_flag.store(true, Ordering::Relaxed);
-        });
-        let _cancellation_guard = BlockingCancellationGuard {
-            cancel_flag: cancel_flag.clone(),
-            watcher,
-        };
-        let (artifact_value, summary, scanned_bytes) = match args.analyzer.as_str() {
+        let analyzer = args.analyzer;
+        let sources = selected.into_iter().cloned().collect::<Vec<_>>();
+        let log_access = self.0.log_access.clone();
+        let (cancel_flag, _cancellation_guard) = BlockingCancellationGuard::new(&self.0);
+        let result = tokio::task::spawn_blocking(move || match analyzer.as_str() {
             "jstack_state_summary" => {
-                let targets = selected
-                    .iter()
-                    .map(|source| JstackAnalysisTarget {
-                        source_id: source.source_id,
-                        location: source.location.clone(),
-                        archive_probe_node: None,
-                        label: source.file_name.clone(),
-                        path: source.relative_path.clone(),
-                        archive_passwords: archive_passwords.clone(),
-                    })
-                    .collect();
-                let analyzer_cancel = cancel_flag.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    analyze_jstack_targets_with_cancel(
-                        targets,
-                        default_encoding,
-                        loader_config,
-                        analyzer_cancel,
-                    )
-                })
-                .await
-                .map_err(|error| {
-                    AgentToolError::new(format!("Jstack 分析任务异常结束：{error}"))
-                })?;
-                let top_threads = result
-                    .rows
-                    .iter()
-                    .take(50)
-                    .map(|row| {
-                        serde_json::json!({
-                            "thread": row.display_label(),
-                            "total_count": row.total_count,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let value = serde_json::json!({
-                    "analyzer": "jstack_state_summary",
-                    "snapshot_count": result.snapshot_count(),
-                    "thread_count": result.thread_count(),
-                    "total_samples": result.total_samples,
-                    "skipped_count": result.skipped_count(),
-                    "top_threads": top_threads,
-                    "skipped": result.skipped_snapshots.iter().take(20).map(|item| serde_json::json!({
-                        "label": item.label,
-                        "reason": redact_error_path(item.reason.clone()),
-                    })).collect::<Vec<_>>(),
-                });
-                let summary = format!(
-                    "Jstack：解析 {} 个快照、{} 个线程、{} 个样本，跳过 {} 个文件",
-                    result.snapshot_count(),
-                    result.thread_count(),
-                    result.total_samples,
-                    result.skipped_count(),
-                );
-                (value, summary, result.scanned_bytes)
+                AgentNativeAnalyzers::analyze_jstack(&log_access, &sources, cancel_flag)
             }
             "runtime_error_summary" => {
-                let targets = selected
-                    .iter()
-                    .map(|source| RuntimeAnalysisTarget {
-                        source_id: source.source_id,
-                        location: source.location.clone(),
-                        archive_probe_node: None,
-                        label: source.file_name.clone(),
-                        path: source.relative_path.clone(),
-                        kind: RuntimeAnalysisTargetKind::File,
-                        archive_passwords: archive_passwords.clone(),
-                    })
-                    .collect();
-                let analyzer_cancel = cancel_flag.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    analyze_runtime_targets_with_cancel(
-                        targets,
-                        default_encoding,
-                        loader_config,
-                        analyzer_cancel,
-                    )
-                })
-                .await
-                .map_err(|error| {
-                    AgentToolError::new(format!("Runtime 分析任务异常结束：{error}"))
-                })?;
-                let top_requests = result
-                    .summaries
-                    .iter()
-                    .take(100)
-                    .map(|row| {
-                        serde_json::json!({
-                            "request_path": row.request_path,
-                            "request_count": row.request_count,
-                            "average_duration_ms": row.average_duration_ms,
-                            "slow_request_count": row.slow_request_count,
-                            "slow_sql_ratio": row.slow_sql_ratio,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let value = serde_json::json!({
-                    "analyzer": "runtime_error_summary",
-                    "total_files": result.total_files,
-                    "request_count": result.request_count(),
-                    "summary_count": result.summary_count(),
-                    "total_sql_records": result.total_sql_records,
-                    "skipped_count": result.skipped_count(),
-                    "top_requests": top_requests,
-                    "skipped": result.skipped_files.iter().take(20).map(|item| serde_json::json!({
-                        "label": item.label,
-                        "reason": redact_error_path(item.reason.clone()),
-                    })).collect::<Vec<_>>(),
-                });
-                let summary = format!(
-                    "Runtime：解析 {} 个请求、{} 个地址和 {} 条 SQL，跳过 {} 个文件",
-                    result.request_count(),
-                    result.summary_count(),
-                    result.total_sql_records,
-                    result.skipped_count(),
-                );
-                (value, summary, result.scanned_bytes)
+                AgentNativeAnalyzers::analyze_runtime(&log_access, &sources, cancel_flag)
             }
-            _ => return Err(AgentToolError::new("未知分析器，请先调用 list_analyzers")),
-        };
-        reconcile_tool_scan(&self.0, scan_bytes, scanned_bytes)?;
+            _ => unreachable!("分析器名称已在工具入口校验"),
+        })
+        .await
+        .map_err(|error| AgentToolError::new(format!("Agent 专项分析任务异常结束：{error}")))?;
+        reconcile_tool_scan(&self.0, scan_bytes, result.scanned_bytes)?;
         if self.0.cancellation.is_cancelled() {
             return Err(AgentToolError::new("会话已取消"));
         }
         let artifact_id = Uuid::new_v4().to_string();
-        let artifact = serde_json::to_string_pretty(&artifact_value)
+        let artifact = serde_json::to_string_pretty(&result.artifact)
             .map_err(|error| AgentToolError::new(format!("序列化分析制品失败：{error}")))?;
         self.0
             .artifacts
@@ -1107,7 +1085,7 @@ impl Tool for RunAnalyzerTool {
             .insert(artifact_id.clone(), artifact);
         checked_output(RunAnalyzerOutput {
             artifact_id,
-            summary,
+            summary: result.summary,
         })
     }
 }
@@ -1139,7 +1117,8 @@ impl Tool for GetArtifactTool {
     type Args = GetArtifactArgs;
     type Output = GetArtifactOutput;
     fn description(&self) -> String {
-        "分页读取 run_analyzer 生成的会话制品。制品只在当前会话内有效。".to_string()
+        "分页读取 get_log_catalog 或 run_analyzer 生成的会话制品。制品只在当前会话内有效。"
+            .to_string()
     }
     fn parameters(&self) -> serde_json::Value {
         schema_value::<Self::Args>()
@@ -1156,17 +1135,28 @@ impl Tool for GetArtifactTool {
         let artifact = store
             .get(&args.artifact_id)
             .ok_or_else(|| AgentToolError::new("artifact_id 不存在或不属于当前会话"))?;
-        let characters: Vec<char> = artifact.chars().collect();
         let limit = args.limit.clamp(1, 16 * 1024);
-        let end = args.offset.saturating_add(limit).min(characters.len());
-        let content = characters
-            .get(args.offset..end)
-            .unwrap_or_default()
-            .iter()
-            .collect();
+        // 制品可能是包含数万日志的完整目录清单；直接定位 UTF-8 字节边界，避免每次分页都
+        // 把整个制品收集成 `Vec<char>`，从而让小页读取产生与制品总大小成正比的临时内存。
+        let start_byte = if args.offset == 0 {
+            0
+        } else {
+            artifact
+                .char_indices()
+                .nth(args.offset)
+                .map_or(artifact.len(), |(index, _)| index)
+        };
+        let remaining = artifact.get(start_byte..).unwrap_or_default();
+        let end_byte = remaining
+            .char_indices()
+            .nth(limit)
+            .map_or(remaining.len(), |(index, _)| index);
+        let content = remaining.get(..end_byte).unwrap_or_default().to_string();
+        let consumed_characters = content.chars().count();
+        let end_offset = args.offset.saturating_add(consumed_characters);
         checked_output(GetArtifactOutput {
             content,
-            next_offset: (end < characters.len()).then_some(end),
+            next_offset: (end_byte < remaining.len()).then_some(end_offset),
         })
     }
 }
@@ -1188,6 +1178,170 @@ pub(crate) struct SubmitDiagnosticReportArgs {
 pub(crate) struct SubmitDiagnosticReportOutput {
     accepted: bool,
     session_id: String,
+}
+
+/// 交互助手登记的一条回答证据参数。
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub(crate) struct AssistantCitationRequest {
+    /// 当前会话来源范围中的不透明引用。
+    pub source_ref: String,
+    /// 1 基起始行号。
+    pub start_line: usize,
+    /// 1 基结束行号。
+    pub end_line: usize,
+    /// 该日志片段与回答结论的对应关系。
+    pub rationale: String,
+}
+
+/// 一次回答引用登记参数；全部引用会原子替换当前回答之前登记的内容。
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RegisterAnswerCitationsArgs {
+    /// 当前回答要展示的日志引用，最多二十四条。
+    #[serde(default)]
+    pub citations: Vec<AssistantCitationRequest>,
+}
+
+/// 引用登记回执；只返回稳定标记和定位元数据，不把日志片段再次发给模型。
+#[derive(Debug, Serialize)]
+pub(crate) struct RegisterAnswerCitationsOutput {
+    /// 是否已经通过本地复读并登记。
+    accepted: bool,
+    /// 模型可在最终正文中使用的 `[E1]` 等引用标记。
+    markers: Vec<String>,
+}
+
+/// 为交互助手当前回答登记经过观察范围和本地内容指纹校验的日志引用。
+#[derive(Clone)]
+pub(crate) struct RegisterAnswerCitationsTool(pub Arc<AgentOperationContext>);
+
+impl Tool for RegisterAnswerCitationsTool {
+    const NAME: &'static str = "register_answer_citations";
+    type Error = AgentToolError;
+    type Args = RegisterAnswerCitationsArgs;
+    type Output = RegisterAnswerCitationsOutput;
+
+    fn description(&self) -> String {
+        "在给出最终回答前登记需要展示和跳转的日志证据。每条引用必须来自本轮搜索或上下文工具实际返回的连续日志行；Argus 会重新读取原来源并校验内容指纹。登记成功后在回答中使用 [E1]、[E2] 等标记。"
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        schema_value::<Self::Args>()
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.0
+            .begin_tool(Self::NAME, 0)
+            .map_err(AgentToolError::new)?;
+        if self.0.session_mode != AgentSessionMode::InteractiveAssistant {
+            return Err(AgentToolError::new(
+                "回答引用登记工具只供主窗口交互助手使用",
+            ));
+        }
+        if args.citations.len() > MAX_REPORT_EVIDENCE_EXCERPTS {
+            return Err(AgentToolError::new(format!(
+                "单次回答最多登记 {MAX_REPORT_EVIDENCE_EXCERPTS} 条日志引用"
+            )));
+        }
+
+        let mut evidences = Vec::with_capacity(args.citations.len());
+        for citation in args.citations {
+            if self.0.log_access.source(&citation.source_ref).is_none() {
+                return Err(AgentToolError::new(format!(
+                    "回答引用了范围外的 source_ref：{}",
+                    citation.source_ref
+                )));
+            }
+            let line_count = citation
+                .end_line
+                .saturating_sub(citation.start_line)
+                .saturating_add(1);
+            if citation.start_line == 0
+                || citation.end_line < citation.start_line
+                || line_count > 200
+            {
+                return Err(AgentToolError::new(
+                    "回答证据行号必须为最多 200 行的有效 1 基闭区间",
+                ));
+            }
+            if citation.rationale.trim().is_empty() || citation.rationale.len() > 4096 {
+                return Err(AgentToolError::new("回答证据说明不能为空且不能超过 4 KiB"));
+            }
+            if !self
+                .0
+                .evidence_ranges
+                .contains(&citation.source_ref, citation.start_line, citation.end_line)
+                .map_err(AgentToolError::new)?
+            {
+                return Err(AgentToolError::new(
+                    "回答证据必须来自本轮搜索或上下文工具实际返回的日志行",
+                ));
+            }
+            evidences.push(EvidenceReference {
+                source_ref: citation.source_ref,
+                start_line: citation.start_line,
+                end_line: citation.end_line,
+                rationale: citation.rationale,
+                display_excerpt: None,
+            });
+        }
+
+        // 复用报告证据的强制复读实现，保证两种产品入口拥有完全相同的椒盐与脱敏边界。
+        let mut validation_report = DiagnosticReport {
+            session_id: self.0.scope.session_id.clone(),
+            question_sha256: question_sha256(&self.0.question),
+            summary: "交互助手回答引用校验".to_string(),
+            findings: vec![DiagnosticFinding {
+                title: "交互助手回答".to_string(),
+                severity: "info".to_string(),
+                status: DiagnosticFindingStatus::Confirmed,
+                analysis: "只用于复用本地证据校验流程".to_string(),
+                impact: "无".to_string(),
+                recommendation: "无".to_string(),
+                confidence: 1.0,
+                evidence: evidences,
+                verification_steps: Vec::new(),
+            }],
+            used_log_profiles: Vec::new(),
+            limitations: Vec::new(),
+            completed_at: chrono::Utc::now().to_rfc3339(),
+        };
+        validate_and_attach_report_evidence(self.0.clone(), &mut validation_report).await?;
+        let citations = validation_report
+            .findings
+            .pop()
+            .map(|finding| {
+                finding
+                    .evidence
+                    .into_iter()
+                    .map(|evidence| AssistantCitation {
+                        source_ref: evidence.source_ref,
+                        start_line: evidence.start_line,
+                        end_line: evidence.end_line,
+                        rationale: evidence.rationale,
+                        display_excerpt: evidence.display_excerpt,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let markers = (1..=citations.len())
+            .map(|index| format!("[E{index}]"))
+            .collect::<Vec<_>>();
+        *self
+            .0
+            .assistant_citations
+            .lock()
+            .map_err(|_| AgentToolError::new("回答引用状态已损坏"))? = citations;
+        self.0.trace(
+            AgentTraceKind::Status,
+            "回答引用已验证",
+            format!("已本地复读并登记 {} 条日志引用", markers.len()),
+        );
+        checked_output(RegisterAnswerCitationsOutput {
+            accepted: true,
+            markers,
+        })
+    }
 }
 
 /// 接受并校验结构化最终报告；会话 ID、问题和时间由 Argus 填充。
@@ -1251,7 +1405,7 @@ impl Tool for SubmitDiagnosticReportTool {
         };
         for finding in &report.findings {
             for evidence in &finding.evidence {
-                if self.0.scope.source(&evidence.source_ref).is_none() {
+                if self.0.log_access.source(&evidence.source_ref).is_none() {
                     return Err(AgentToolError::new(format!(
                         "报告引用了范围外的 source_ref：{}",
                         evidence.source_ref
@@ -1431,8 +1585,7 @@ async fn validate_and_attach_report_evidence(
         cancellation.cancelled().await;
         watcher_flag.store(true, Ordering::Relaxed);
     });
-    let default_encoding = context.scope.default_encoding.clone();
-    let archive_passwords = context.scope.archive_passwords.clone();
+    let log_access = context.log_access.clone();
     let evidence_context = context.clone();
     let worker_cancel = cancel_flag.clone();
     let validation = tokio::task::spawn_blocking(move || {
@@ -1440,20 +1593,12 @@ async fn validate_and_attach_report_evidence(
         let mut excerpts = HashMap::<EvidenceRangeKey, EvidenceDisplayExcerpt>::new();
         let mut excerpt_bytes = 0usize;
         let result = (|| -> anyhow::Result<()> {
-            for (source_ref, source, ranges) in sources {
+            for (source_ref, _source, ranges) in sources {
                 if worker_cancel.load(Ordering::Relaxed) {
                     return Err(anyhow::anyhow!("证据本地校验已取消"));
                 }
                 // 强制新建读取器是证据椒盐的关键：禁止此前的缓存快照替代当前来源状态。
-                let reader = LogFileReader::open_with_cancel_flag(
-                    OpenLogRequest {
-                        location: source.location,
-                        label: source.file_name,
-                        default_encoding: default_encoding.clone(),
-                        archive_passwords: archive_passwords.clone(),
-                    },
-                    worker_cancel.clone(),
-                )?;
+                let reader = log_access.open_fresh(&source_ref, worker_cancel.clone())?;
                 actual_bytes = actual_bytes.saturating_add(reader.byte_len());
 
                 for (start_line, end_line) in ranges {
@@ -1554,7 +1699,7 @@ async fn validate_and_attach_report_evidence(
 /// `total_bytes` 是整份报告共享的累计字节数；函数会在 UTF-8 边界截断，并通过返回空值表示
 /// 全局展示预算已经耗尽。调用方仍会继续完成其余引用的强制校验。
 fn build_evidence_display_excerpt(
-    lines: &[DisplayedLogLine],
+    lines: &[AgentLogLine],
     requested_line_count: usize,
     total_bytes: &mut usize,
 ) -> Option<EvidenceDisplayExcerpt> {
@@ -1607,7 +1752,7 @@ pub(crate) fn selected_sources<'a>(
         .iter()
         .map(|source_ref| {
             context
-                .scope
+                .log_access
                 .source(source_ref)
                 .ok_or_else(|| AgentToolError::new(format!("未知 source_ref：{source_ref}")))
         })
@@ -1633,16 +1778,6 @@ pub(crate) fn reconcile_tool_scan(
         .reconcile_tool_scan(reserved_bytes, actual_bytes.max(reserved_bytes));
     context.publish_budget();
     result.map(|_| ()).map_err(AgentToolError::new)
-}
-
-/// 建立内部来源 ID 到不透明引用的映射。
-pub(crate) fn source_ref_by_id(context: &AgentOperationContext) -> HashMap<usize, String> {
-    context
-        .scope
-        .sources
-        .iter()
-        .map(|source| (source.source_id.0, source.source_ref.clone()))
-        .collect()
 }
 
 /// 使用文件名和最多 64 KiB 本地样本识别首期内置日志格式。
@@ -1807,6 +1942,17 @@ pub(crate) fn redact_error_path(message: String) -> String {
 fn default_source_limit() -> usize {
     100
 }
+
+/// 完整目录工具默认直接展示的目录数量。
+fn default_catalog_directory_limit() -> usize {
+    100
+}
+
+/// 完整目录工具默认直接预览的文件数量。
+fn default_catalog_file_preview_limit() -> usize {
+    50
+}
+
 /// 搜索默认命中上限。
 fn default_search_limit() -> usize {
     50
@@ -1855,7 +2001,7 @@ mod tests {
     #[test]
     fn evidence_display_excerpt_is_bounded_and_redacted() {
         let lines = (0..13)
-            .map(|line_number| DisplayedLogLine {
+            .map(|line_number| AgentLogLine {
                 line_number,
                 text: if line_number == 0 {
                     "password=internal-secret".to_string()

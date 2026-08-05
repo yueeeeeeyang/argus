@@ -1,10 +1,11 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析及远程连接状态。
+//! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析、助手面板及远程连接状态。
 
 mod agent_actions;
+mod assistant_actions;
 mod log_search_actions;
 mod log_text;
 mod placeholder_data;
@@ -84,6 +85,7 @@ use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::agent_dialog::AgentLaunchDialog;
 use crate::ui::agent_window::AgentWindow;
 use crate::ui::ai_settings_editor::AiSettingsEditor;
+use crate::ui::assistant_panel::AssistantPanel;
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
 use crate::ui::file_preview_window::FilePreviewWindow;
@@ -304,6 +306,28 @@ pub(crate) struct ArgusApp {
     pub ai_agent_source_scan_cancellation: Option<tokio_util::sync::CancellationToken>,
     /// 当前唯一非终态或最近一次 AI 分析独立窗口句柄。
     pub ai_agent_window_handle: Option<WindowHandle<AgentWindow>>,
+    /// 主窗口右侧 Agent 助手面板；首次展开时延迟创建，收起后继续保留会话。
+    pub assistant_panel: Option<Entity<AssistantPanel>>,
+    /// 右侧 Agent 助手面板是否收起；启动时固定收起且不持久化。
+    pub is_assistant_panel_collapsed: bool,
+    /// 右侧 Agent 助手面板当前宽度。
+    pub assistant_panel_width: f32,
+    /// 是否正在拖动助手面板左侧分割线。
+    pub is_assistant_panel_resizing: bool,
+    /// 助手面板分割线当前是否悬停。
+    pub is_assistant_resizer_hovered: bool,
+    /// 助手面板拖动起点的窗口横坐标。
+    pub assistant_resize_start_x: f32,
+    /// 助手面板拖动开始时的宽度。
+    pub assistant_resize_start_width: f32,
+    /// 助手面板宽度动画 generation。
+    pub assistant_panel_animation_generation: usize,
+    /// 助手面板动画起始宽度。
+    pub assistant_panel_animation_from_width: f32,
+    /// 助手面板动画目标宽度。
+    pub assistant_panel_animation_to_width: f32,
+    /// 来源树真实内容版本；选中、展开和筛选等纯界面操作不会递增。
+    pub source_content_revision: u64,
     /// AI 模型与日志类型配置编辑器模态框。
     pub ai_settings_editor_modal: Option<Entity<AiSettingsEditor>>,
     /// 日志读取状态，以来源 ID 为键复用已打开的 reader。
@@ -503,6 +527,17 @@ impl ArgusApp {
             ai_agent_source_scan_generation: 0,
             ai_agent_source_scan_cancellation: None,
             ai_agent_window_handle: None,
+            assistant_panel: None,
+            is_assistant_panel_collapsed: true,
+            assistant_panel_width: ASSISTANT_PANEL_DEFAULT_WIDTH,
+            is_assistant_panel_resizing: false,
+            is_assistant_resizer_hovered: false,
+            assistant_resize_start_x: 0.0,
+            assistant_resize_start_width: ASSISTANT_PANEL_DEFAULT_WIDTH,
+            assistant_panel_animation_generation: 0,
+            assistant_panel_animation_from_width: 0.0,
+            assistant_panel_animation_to_width: 0.0,
+            source_content_revision: 0,
             ai_settings_editor_modal: None,
             log_read_states: HashMap::new(),
             log_reader_generations: HashMap::new(),

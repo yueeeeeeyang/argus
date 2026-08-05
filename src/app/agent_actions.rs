@@ -1,16 +1,17 @@
 //! 文件职责：连接来源树智能分析入口、问题模态框、Agent 独立窗口和后台编排任务。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-16
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
 //! 主要功能：解析分析根范围、读取系统凭据、先创建独立窗口，再在专用 Tokio 运行时启动单会话 Agent。
 
 use gpui::{AppContext, Bounds, Context, WindowBounds, WindowOptions, px, size};
+use std::time::Instant;
 
 use crate::agent::{
     AgentLogProfileMatchSummary, AgentRunRequest, AgentSourcePreparation, SourceScopeSnapshot,
     agent_runtime, load_api_key, prepare_agent_source_scope, run_agent_session,
 };
-use crate::app::{ArgusApp, frameless_resizable_titlebar};
+use crate::app::{ArgusApp, Workspace, frameless_resizable_titlebar};
 use crate::config::{AiConfig, AiModelProfile};
 use crate::loader::SourceId;
 use crate::search::search_engine::SearchResult;
@@ -121,6 +122,8 @@ impl ArgusApp {
         load_api_key(&model.base_url)?;
         self.ai_agent_scope_unavailable_reason()
             .map_or(Ok(()), Err)?;
+        // 整体耗时从用户提交问题后正式开始准备来源时计算，覆盖扫描、模型、工具、复核与报告。
+        let analysis_started_at = Instant::now();
 
         let scan_generation = self.ai_agent_source_scan_generation.wrapping_add(1);
         self.ai_agent_source_scan_generation = scan_generation;
@@ -157,6 +160,7 @@ impl ArgusApp {
             view.update(cx, |app, cx| {
                 app.finish_ai_agent_source_scan(
                     scan_generation,
+                    analysis_started_at,
                     question,
                     config,
                     model,
@@ -175,6 +179,7 @@ impl ArgusApp {
     fn finish_ai_agent_source_scan(
         &mut self,
         scan_generation: usize,
+        analysis_started_at: Instant,
         question: String,
         config: AiConfig,
         model: AiModelProfile,
@@ -211,7 +216,9 @@ impl ArgusApp {
         self.clear_source_archive_probe_state();
         self.source_registry = registry;
         self.rebuild_filtered_source_ids();
+        self.mark_source_content_changed(cx);
         if let Err(error) = self.launch_prepared_ai_agent(
+            analysis_started_at,
             question,
             config,
             model,
@@ -229,6 +236,7 @@ impl ArgusApp {
     /// 使用已经完整扫描并匹配日志类型的来源快照创建窗口和后台模型会话。
     fn launch_prepared_ai_agent(
         &mut self,
+        analysis_started_at: Instant,
         question: String,
         config: AiConfig,
         model: AiModelProfile,
@@ -296,6 +304,7 @@ impl ArgusApp {
                         window_scope,
                         window_match_summaries,
                         context_window_tokens,
+                        analysis_started_at,
                         cx,
                     )
                 })
@@ -364,6 +373,8 @@ impl ArgusApp {
             self.placeholder_notice = "证据来源已变化，当前节点不再是可读取日志".to_string();
             return;
         }
+        // 引用可能来自“链接”工作区常驻的助手面板，导航前必须先恢复日志分析布局。
+        self.switch_workspace(Workspace::LogAnalysis);
         self.select_source(source_id);
         self.request_open_log_content(source_id, cx);
         self.scroll_source_into_view(source_id);

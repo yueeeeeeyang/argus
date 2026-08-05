@@ -37,6 +37,8 @@ const TAB_EMERGENCY_MIN_WIDTH: f32 = 48.0;
 const TAB_MAX_WIDTH: f32 = 230.0;
 /// 下拉按钮占位宽度；按钮始终展示，便于从固定入口查看全部标签。
 const TAB_OVERFLOW_BUTTON_WIDTH: f32 = 32.0;
+/// Agent 助手面板开关占位宽度；固定放在全部标签按钮右侧。
+const TAB_ASSISTANT_BUTTON_WIDTH: f32 = 32.0;
 /// 标签页和右侧下拉按钮之间的最小间距；更多空间优先让标签页使用。
 const TITLE_RIGHT_DRAG_MIN_WIDTH: f32 = 64.0;
 /// 标题栏中标签栏左侧外部留白，对应 `custom_title_bar` 中的间距。
@@ -149,6 +151,7 @@ pub(crate) fn render(
         )
         .child(tab_drag_area(cx))
         .child(render_overflow_button(overflow_selected, &theme, cx))
+        .child(render_assistant_panel_button(app, &theme, cx))
 }
 
 /// 根据窗口宽度估算标签栏可用空间。
@@ -180,7 +183,10 @@ pub(crate) fn calculate_tab_layout(
         };
     }
 
-    let tab_area_width = (available_width - TAB_OVERFLOW_BUTTON_WIDTH - TITLE_RIGHT_DRAG_MIN_WIDTH)
+    let tab_area_width = (available_width
+        - TAB_OVERFLOW_BUTTON_WIDTH
+        - TAB_ASSISTANT_BUTTON_WIDTH
+        - TITLE_RIGHT_DRAG_MIN_WIDTH)
         .max(TAB_EMERGENCY_MIN_WIDTH);
     let ideal_widths = tabs
         .iter()
@@ -491,6 +497,40 @@ fn render_overflow_button(
                 } else {
                     app.open_tab_overflow_menu(event.position());
                 }
+                cx.notify();
+            }),
+        ))
+}
+
+/// 渲染固定在全部标签按钮右侧的 Agent 助手面板开关。
+fn render_assistant_panel_button(
+    app: &ArgusApp,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let is_collapsed = app.is_assistant_panel_collapsed;
+    div()
+        .w(px(TAB_ASSISTANT_BUTTON_WIDTH))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(render_icon_button(
+            "assistant-panel-toggle",
+            // 与左侧来源树开关复用同一布局图标，保持主窗口左右面板控制语义一致。
+            ArgusIcon::Layout,
+            if is_collapsed {
+                "展开 Agent 助手"
+            } else {
+                "收起 Agent 助手"
+            },
+            false,
+            IconButtonSize::Small,
+            theme,
+            cx.listener(|app, _, _, cx| {
+                cx.stop_propagation();
+                app.toggle_assistant_panel(cx);
                 cx.notify();
             }),
         ))

@@ -1,9 +1,10 @@
 //! 文件职责：实现压缩 TAR 归档条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：处理 tar.gz、tar.bz2、tar.xz 外层解压并复用 TAR 条目枚举逻辑。
+//! 主要功能：处理 tar.gz、tar.bz2、tar.xz 外层解压，并复用 TAR 条目枚举与单遍批量访问逻辑。
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -14,12 +15,13 @@ use flate2::read::GzDecoder;
 use xz2::read::XzDecoder;
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
-    ArchiveRootProbe,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
+    ArchiveEntryInfo, ArchiveReadSeek, ArchiveRootProbe,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::tar_adapter::{
     list_tar_entries, probe_tar_single_file_root, read_tar_entry_bytes, stream_tar_entry,
+    visit_tar_entries,
 };
 
 /// tar.gz 可识别扩展名。
@@ -175,6 +177,63 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         consumer: &mut ArchiveEntryConsumer<'_>,
     ) -> Result<()> {
         stream_compressed_tar_entry(reader, self.format, entry_path, source_label, consumer)
+    }
+
+    /// 只解压一次外层压缩流，并顺序遍历其中所有目标 TAR 条目。
+    fn visit_entries(
+        &self,
+        path: &Path,
+        entry_paths: &HashSet<String>,
+        _password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        let file = File::open(path)
+            .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
+        visit_compressed_tar_entries(
+            file,
+            self.format,
+            entry_paths,
+            &path.display().to_string(),
+            consumer,
+        )
+    }
+
+    /// 只解压一次内存压缩流，并顺序遍历其中所有目标 TAR 条目。
+    fn visit_entries_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        entry_paths: &HashSet<String>,
+        source_label: &str,
+        _password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        visit_compressed_tar_entries(reader, self.format, entry_paths, source_label, consumer)
+    }
+}
+
+/// 解码一次压缩 TAR 外层，并把目标集合交给 TAR 单遍访问器。
+pub(crate) fn visit_compressed_tar_entries<R>(
+    reader: R,
+    format: ArchiveFormat,
+    entry_paths: &HashSet<String>,
+    source_label: &str,
+    consumer: &mut ArchiveEntriesConsumer<'_>,
+) -> Result<()>
+where
+    R: Read,
+{
+    match format {
+        ArchiveFormat::TarGz => {
+            visit_tar_entries(GzDecoder::new(reader), entry_paths, source_label, consumer)
+        }
+        ArchiveFormat::TarBz2 => {
+            visit_tar_entries(BzDecoder::new(reader), entry_paths, source_label, consumer)
+        }
+        ArchiveFormat::TarXz => {
+            visit_tar_entries(XzDecoder::new(reader), entry_paths, source_label, consumer)
+        }
+        _ => bail!("{} 不是压缩 TAR 格式", format.label()),
     }
 }
 

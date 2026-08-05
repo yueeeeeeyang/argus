@@ -1,9 +1,10 @@
 //! 文件职责：实现 ZIP 压缩包条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-10
+//! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：打开本地 ZIP 文件并枚举目录树所需的条目元信息。
+//! 主要功能：打开 ZIP、枚举条目元信息，并在单个容器句柄上批量流式访问目标条目。
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -13,8 +14,8 @@ use zip::ZipArchive;
 use zip::result::ZipError;
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
-    ArchiveRootProbe, ArchiveRootProbeState,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
+    ArchiveEntryInfo, ArchiveReadSeek, ArchiveRootProbe, ArchiveRootProbeState,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::password::ArchivePasswordError;
@@ -138,6 +139,73 @@ impl ArchiveAdapter for ZipArchiveAdapter {
     ) -> Result<()> {
         stream_zip_entry_from_reader(reader, entry_path, source_label, password, consumer)
     }
+
+    /// 单次解析 ZIP 中央目录，并在同一个 `ZipArchive` 上读取全部目标日志。
+    fn visit_entries(
+        &self,
+        path: &Path,
+        entry_paths: &HashSet<String>,
+        password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开 ZIP 压缩包：{}", path.display()))?;
+        visit_zip_entries_from_reader(
+            file,
+            entry_paths,
+            &path.display().to_string(),
+            password,
+            consumer,
+        )
+    }
+
+    /// 单次解析内存 ZIP 中央目录，并读取全部目标日志。
+    fn visit_entries_from_reader(
+        &self,
+        reader: &mut dyn ArchiveReadSeek,
+        _reader_len: u64,
+        entry_paths: &HashSet<String>,
+        source_label: &str,
+        password: Option<&str>,
+        consumer: &mut ArchiveEntriesConsumer<'_>,
+    ) -> Result<()> {
+        visit_zip_entries_from_reader(reader, entry_paths, source_label, password, consumer)
+    }
+}
+
+/// 在一个 ZIP 句柄上按中央目录顺序访问所有目标条目，避免每条日志重复解析中央目录。
+pub(crate) fn visit_zip_entries_from_reader<R>(
+    reader: R,
+    entry_paths: &HashSet<String>,
+    source_label: &str,
+    password: Option<&str>,
+    consumer: &mut ArchiveEntriesConsumer<'_>,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
+    let targets = entry_paths
+        .iter()
+        .map(|path| normalize_archive_entry_path(path))
+        .collect::<HashSet<_>>();
+    let mut archive =
+        ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
+    let mut visited = HashSet::with_capacity(targets.len());
+
+    for index in 0..archive.len() {
+        let (entry_path, is_dir, _size, encrypted) =
+            read_zip_entry_metadata(&mut archive, index, source_label)?;
+        if is_dir || !targets.contains(&entry_path) || !visited.insert(entry_path.clone()) {
+            continue;
+        }
+        let mut file =
+            open_zip_entry_by_index(&mut archive, index, encrypted, password, source_label)?;
+        consumer(&entry_path, &mut file)?;
+        if visited.len() == targets.len() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// 从任意可读可 seek 的 ZIP 输入中短路探测根层单文件。

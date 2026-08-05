@@ -312,6 +312,7 @@ impl Render for AgentLaunchDialog {
                     trailing_accessory: None,
                     trailing_accessory_position: TextareaAccessoryPosition::TopRight,
                     trailing_accessory_always_visible: false,
+                    reserve_secondary_accessory: false,
                     trailing_accessory_selected: false,
                     native_input: Some(native_input),
                 },

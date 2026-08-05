@@ -56,6 +56,24 @@ pub(crate) struct EvidenceDisplayLine {
     pub text: String,
 }
 
+/// 交互助手一条已经由 Argus 本地复读验证的日志引用。
+///
+/// 类型只驻留当前进程内，不序列化模型提供的路径或内部来源 ID；界面导航始终使用
+/// `SourceScopeSnapshot` 对 `source_ref` 的可信解析结果。
+#[derive(Clone, Debug)]
+pub(crate) struct AssistantCitation {
+    /// 会话范围内的不透明来源引用。
+    pub source_ref: String,
+    /// 1 基起始行号。
+    pub start_line: usize,
+    /// 1 基结束行号。
+    pub end_line: usize,
+    /// 证据支持当前回答的简短说明。
+    pub rationale: String,
+    /// 已脱敏且受界面边界控制的日志片段。
+    pub display_excerpt: Option<EvidenceDisplayExcerpt>,
+}
+
 /// 一条结构化问题发现。
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub(crate) struct DiagnosticFinding {

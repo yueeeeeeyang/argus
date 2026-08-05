@@ -1,4 +1,8 @@
 //! 文件职责：提取来源树选择、展开折叠、子级懒加载、压缩包探测和分析能力判定等方法到独立子模块。
+//! 创建日期：2026-07-08
+//! 修改日期：2026-07-16
+//! 作者：Argus 开发团队
+//! 主要功能：维护来源树语义状态、异步子级加载、归档探测，并通知助手真实来源内容版本变化。
 
 use super::*;
 
@@ -270,7 +274,7 @@ impl ArgusApp {
     /// 应用根来源加载报告。
     ///
     /// 每次成功加载真实来源都会替换旧来源，避免不同批次日志结构混在同一棵树中。
-    pub(crate) fn apply_load_report(&mut self, report: LoadReport) {
+    pub(crate) fn apply_load_report(&mut self, report: LoadReport) -> bool {
         self.is_source_loading = false;
         let added_count = report.added_count;
 
@@ -280,7 +284,7 @@ impl ArgusApp {
             } else {
                 format!("来源加载失败：{}", report.errors.join("；"))
             };
-            return;
+            return false;
         }
 
         self.source_registry = report.registry;
@@ -301,6 +305,7 @@ impl ArgusApp {
                 report.errors.join("；")
             )
         };
+        true
     }
 
     /// 在 UI 事件中应用根来源加载报告，并同步清理 Jstack 方块悬浮气泡。
@@ -308,7 +313,7 @@ impl ArgusApp {
         &mut self,
         report: LoadReport,
         retry_action: Option<crate::app::ArchivePasswordRetryAction>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         self.clear_jstack_cell_hover_preview();
         if let Some(password_error) = report.password_request.clone()
@@ -318,7 +323,9 @@ impl ArgusApp {
             self.is_source_loading = false;
             return;
         }
-        self.apply_load_report(report);
+        if self.apply_load_report(report) {
+            self.reset_assistant_after_log_reload(cx);
+        }
     }
 
     /// 应用懒加载子级报告，并挂回指定父节点。
@@ -340,7 +347,22 @@ impl ArgusApp {
         report: LoadReport,
         cx: &mut Context<Self>,
     ) {
+        let node_count_before = self.source_registry.tree_order_source_ids().len();
+        let children_loaded_before = self
+            .source_registry
+            .node(parent_id)
+            .is_some_and(|node| node.metadata.children_loaded);
         if self.apply_child_load_report_internal(parent_id, load_generation, report) {
+            let node_count_after = self.source_registry.tree_order_source_ids().len();
+            let children_loaded_after = self
+                .source_registry
+                .node(parent_id)
+                .is_some_and(|node| node.metadata.children_loaded);
+            if node_count_before != node_count_after
+                || children_loaded_before != children_loaded_after
+            {
+                self.mark_source_content_changed(cx);
+            }
             self.resume_pending_source_analysis(parent_id, cx);
         }
     }
@@ -712,6 +734,7 @@ impl ArgusApp {
         if changed_count > 0 {
             self.source_registry.rebuild_all_indices();
             self.rebuild_filtered_source_ids();
+            self.mark_source_content_changed(cx);
         }
 
         for source_id in open_log_ids {
