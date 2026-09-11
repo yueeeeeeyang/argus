@@ -122,8 +122,6 @@ impl ArgusApp {
         if self.source_content_revision != expected_revision {
             return Err("日志来源在扫描期间发生变化，请重新发送问题".to_string());
         }
-        self.source_child_load_generations.clear();
-        self.clear_source_archive_probe_state();
         self.source_registry = registry;
         self.rebuild_filtered_source_ids();
         self.source_content_revision = self.source_content_revision.wrapping_add(1);

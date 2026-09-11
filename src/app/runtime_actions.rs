@@ -8,14 +8,6 @@ impl ArgusApp {
         source_id: SourceId,
         cx: &mut Context<Self>,
     ) {
-        if !self.ensure_source_directory_ready_for_analysis(
-            source_id,
-            PendingSourceAnalysisAction::Runtime { source_id },
-            cx,
-        ) {
-            return;
-        }
-
         let targets = self.runtime_targets_for_context(source_id);
         if targets.is_empty() {
             self.placeholder_notice = "请选择至少一个 Runtime 日志文件或本地目录".to_string();
@@ -247,7 +239,6 @@ impl ArgusApp {
                 Some(RuntimeAnalysisTarget {
                     source_id: *source_id,
                     location: node.location.clone(),
-                    archive_probe_node: self.runtime_archive_probe_node(*source_id),
                     label: node.label.clone(),
                     path: node.location.display_path(),
                     kind,
@@ -255,13 +246,6 @@ impl ArgusApp {
                 })
             })
             .collect()
-    }
-
-    /// 为 Runtime 分析生成待探测压缩包快照；已识别日志节点不需要额外探测。
-    pub(super) fn runtime_archive_probe_node(&self, source_id: SourceId) -> Option<SourceTreeNode> {
-        let node = self.source_registry.node(source_id)?;
-        (!node.kind.is_log_candidate() && self.is_source_selectable_for_search_selection(source_id))
-            .then(|| node.clone())
     }
 
     /// 应用后台 Runtime 分析结果，过期 generation 会被忽略。

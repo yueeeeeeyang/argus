@@ -1,20 +1,14 @@
-//! 文件职责：提供分析器共享的来源展开与单文件压缩包定位逻辑。
+//! 文件职责：提供分析器共享的来源目录遍历逻辑。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-15
+//! 修改日期：2026-09-07
 //! 作者：Argus 开发团队
-//! 主要功能：统一目录稳定遍历、符号链接循环防护和压缩包探测，同时允许分析器注入候选文件规则。
+//! 主要功能：统一目录稳定遍历和符号链接循环防护，同时允许分析器注入候选文件规则。
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-
-use crate::config::LoaderConfig;
-use crate::loader::archive::ArchivePasswordStore;
-use crate::loader::{
-    LogSourceLoader, SourceArchiveProbeRequest, SourceId, SourceLocation, SourceTreeNode,
-};
 
 /// 递归收集满足分析器规则的本地文件，并按完整路径稳定排序。
 ///
@@ -90,26 +84,4 @@ fn collect_directory_files(
     }
 
     Ok(())
-}
-
-/// 解析分析目标的真实读取位置；普通来源直接返回，待探测压缩包只接受单文件根层。
-pub(super) fn resolve_analysis_location(
-    source_id: SourceId,
-    location: &SourceLocation,
-    archive_probe_node: Option<&SourceTreeNode>,
-    archive_passwords: &ArchivePasswordStore,
-    loader_config: &LoaderConfig,
-) -> Result<SourceLocation> {
-    let Some(node) = archive_probe_node.cloned() else {
-        return Ok(location.clone());
-    };
-
-    LogSourceLoader::new(loader_config.clone())
-        .with_archive_passwords(archive_passwords.clone())
-        .probe_archive_nodes(vec![SourceArchiveProbeRequest { source_id, node }])
-        .into_iter()
-        .next()
-        .and_then(|result| result.patch)
-        .map(|patch| patch.location)
-        .ok_or_else(|| anyhow!("压缩包根层不是单文件日志，请展开后选择具体日志条目"))
 }

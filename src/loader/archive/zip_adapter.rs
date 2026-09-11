@@ -15,7 +15,7 @@ use zip::result::ZipError;
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
-    ArchiveEntryInfo, ArchiveReadSeek, ArchiveRootProbe, ArchiveRootProbeState,
+    ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::password::ArchivePasswordError;
@@ -62,28 +62,6 @@ impl ArchiveAdapter for ZipArchiveAdapter {
         password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         list_zip_entries_from_reader(reader, source_label, password)
-    }
-
-    /// 轻量探测 ZIP 根层单文件，发现第二个根层项或目录后立即停止。
-    fn probe_single_file_root(
-        &self,
-        path: &Path,
-        password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        let file =
-            File::open(path).with_context(|| format!("无法打开 ZIP 压缩包：{}", path.display()))?;
-        probe_zip_single_file_root_from_reader(file, &path.display().to_string(), password)
-    }
-
-    /// 从内存 ZIP 数据源轻量探测根层单文件。
-    fn probe_single_file_root_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        source_label: &str,
-        password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        probe_zip_single_file_root_from_reader(reader, source_label, password)
     }
 
     /// 从本地 ZIP 读取指定条目字节。
@@ -206,44 +184,6 @@ where
         }
     }
     Ok(())
-}
-
-/// 从任意可读可 seek 的 ZIP 输入中短路探测根层单文件。
-pub(crate) fn probe_zip_single_file_root_from_reader<R>(
-    reader: R,
-    source_label: &str,
-    password: Option<&str>,
-) -> Result<ArchiveRootProbe>
-where
-    R: Read + Seek,
-{
-    let mut archive =
-        ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
-    let mut state = ArchiveRootProbeState::default();
-    let mut password_verified = false;
-
-    for index in 0..archive.len() {
-        let (entry_path, is_dir, size, encrypted) =
-            read_zip_entry_metadata(&mut archive, index, source_label)?;
-        if encrypted && !password_verified {
-            ensure_zip_entry_password(&mut archive, index, encrypted, password, source_label)?;
-            password_verified = true;
-        }
-        if entry_path.is_empty() {
-            continue;
-        }
-
-        let entry = ArchiveEntryInfo {
-            path: entry_path,
-            is_dir,
-            size: Some(size),
-        };
-        if !state.observe(entry) {
-            break;
-        }
-    }
-
-    Ok(state.finish())
 }
 
 /// 从任意可读可 seek 的输入枚举 ZIP 条目。

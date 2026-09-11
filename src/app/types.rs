@@ -103,30 +103,6 @@ pub(crate) struct ArgusTab {
     pub kind: TabKind,
 }
 
-/// 子级懒加载完成后需要自动续做的来源树分析动作。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PendingSourceAnalysisAction {
-    /// 加载完成后打开 Jstack 线程日志分析。
-    Jstack {
-        /// 触发右键菜单的来源目录 ID。
-        source_id: SourceId,
-    },
-    /// 加载完成后打开 Runtime 日志解析。
-    Runtime {
-        /// 触发右键菜单的来源目录 ID。
-        source_id: SourceId,
-    },
-}
-
-impl PendingSourceAnalysisAction {
-    /// 返回等待加载的来源目录 ID，便于子级加载回调精确匹配。
-    pub(crate) fn source_id(self) -> SourceId {
-        match self {
-            Self::Jstack { source_id } | Self::Runtime { source_id } => source_id,
-        }
-    }
-}
-
 /// 日志搜索窗口输入框类型，用于复用同一套输入状态处理。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LogSearchInputKind {

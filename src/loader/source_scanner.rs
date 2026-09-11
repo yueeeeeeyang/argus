@@ -1,6 +1,6 @@
-//! 文件职责：实现完全独立于 UI 来源加载流程的 Agent 全量来源扫描器。
+//! 文件职责：实现来源树全量扫描器，为 AI 会话准备和目录树完整初始化提供统一的树构建能力。
 //! 创建日期：2026-07-17
-//! 修改日期：2026-07-17
+//! 修改日期：2026-09-07
 //! 作者：Argus 开发团队
 //! 主要功能：一次遍历本地目录、一次枚举每个归档容器、递归展开嵌套归档，并在结束时批量构建来源注册表。
 
@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::config::LoaderConfig;
-use crate::loader::archive::adapter::{ArchiveEntryInfo, stream_archive_entry_with_passwords};
+use crate::loader::archive::adapter::{
+    ArchiveEntryInfo, read_archive_entry_bytes_with_passwords, stream_archive_entry_with_passwords,
+};
 use crate::loader::archive::detector::{
     ArchiveFormat, detect_archive_format, detect_archive_format_by_name,
 };
@@ -24,17 +26,17 @@ use crate::loader::{
 };
 use crate::utils::path::{display_name, normalize_archive_entry_path};
 
-/// Agent 来源扫描结果；注册表已经完成一次性索引构建，可直接生成会话快照或回填主窗口。
+/// 来源树扫描结果；注册表已经完成一次性索引构建，可直接生成会话快照或回填主窗口。
 #[derive(Debug)]
-pub(crate) struct AgentSourceScanResult {
+pub(crate) struct SourceTreeScanResult {
     /// 完整扫描后的来源注册表；未在当前授权范围内的根保持原状。
     pub registry: SourceRegistry,
     /// 可容忍的目录、归档和符号链接读取警告。
     pub warnings: Vec<String>,
 }
 
-/// 只供 Agent 会话准备使用的来源扫描器，不调用 UI 展开或渐进探测逻辑。
-pub(crate) struct AgentSourceScanner<'a> {
+/// 来源树全量扫描器，一次构建完整来源树，不调用 UI 展开或渐进探测逻辑。
+pub(crate) struct SourceTreeScanner<'a> {
     /// 扫描前的来源树，只用于取得根位置、复用稳定 ID 和保留未选根。
     original_registry: &'a SourceRegistry,
     /// 目录、符号链接和嵌套归档深度配置。
@@ -43,6 +45,8 @@ pub(crate) struct AgentSourceScanner<'a> {
     archive_passwords: ArchivePasswordStore,
     /// 用户主动停止时由所有目录和归档边界检查的取消令牌。
     cancellation: tokio_util::sync::CancellationToken,
+    /// 可选的进度上报通道；目录和归档边界发送已处理节点数，仅完整加载入口使用。
+    progress: Option<std::sync::mpsc::Sender<usize>>,
     /// 已有来源身份到稳定 ID 的映射和新增 ID 分配状态。
     stable_ids: StableSourceIds,
     /// 已访问真实目录，跟随符号链接时用于阻止循环。
@@ -53,7 +57,7 @@ pub(crate) struct AgentSourceScanner<'a> {
     ordered_nodes: Vec<SourceTreeNode>,
 }
 
-impl<'a> AgentSourceScanner<'a> {
+impl<'a> SourceTreeScanner<'a> {
     /// 为来源树副本创建独立扫描器；构造阶段不访问文件系统。
     pub(crate) fn new(
         original_registry: &'a SourceRegistry,
@@ -66,6 +70,7 @@ impl<'a> AgentSourceScanner<'a> {
             config,
             archive_passwords,
             cancellation,
+            progress: None,
             stable_ids: StableSourceIds::from_registry(original_registry),
             visited_directories: HashSet::new(),
             warnings: BTreeSet::new(),
@@ -73,12 +78,57 @@ impl<'a> AgentSourceScanner<'a> {
         }
     }
 
+    /// 从用户给定路径列表一次性完整构建整棵来源树；每个路径合成一个深度为 0 的扫描根。
+    ///
+    /// 参数说明：
+    /// - `paths`：待加载的本地文件、目录或压缩包路径。
+    /// - `config`：目录、符号链接和嵌套归档深度配置。
+    /// - `archive_passwords`：当前进程已授权的归档密码快照。
+    /// - `cancellation`：新加载请求到来时用于中断本次扫描的取消令牌。
+    /// - `progress`：可选进度通道，在目录和归档处理边界发送已生成节点数。
+    ///
+    /// 说明：整树替换场景没有既有注册表，内部以空注册表创建扫描器，稳定 ID 自然从 1 开始分配；
+    /// 目录递归与每个压缩包的内容枚举（含嵌套，深度上限沿用 `config.max_archive_depth`）在一次调用内完成。
+    pub(crate) fn scan_paths(
+        paths: Vec<PathBuf>,
+        config: LoaderConfig,
+        archive_passwords: ArchivePasswordStore,
+        cancellation: tokio_util::sync::CancellationToken,
+        progress: Option<std::sync::mpsc::Sender<usize>>,
+    ) -> Result<SourceTreeScanResult> {
+        let original_registry = SourceRegistry::new();
+        let mut scanner =
+            SourceTreeScanner::new(&original_registry, config, archive_passwords, cancellation);
+        scanner.progress = progress;
+        scanner.scan_path_roots(paths)
+    }
+
+    /// 以指定归档节点为根重新扫描其指向的压缩包，生成以该节点为根的独立注册表。
+    ///
+    /// 与整树扫描的降级策略不同：密码错误等枚举失败直接作为 `Err` 上抛，
+    /// 供界面区分密码错误再次弹窗，而不是降级为警告节点。
+    pub(crate) fn scan_archive_subtree(
+        node: &SourceTreeNode,
+        config: LoaderConfig,
+        archive_passwords: ArchivePasswordStore,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<SourceTreeScanResult> {
+        let original_registry = SourceRegistry::new();
+        let mut scanner =
+            SourceTreeScanner::new(&original_registry, config, archive_passwords, cancellation);
+        scanner.scan_archive_subtree_root(node)?;
+        Ok(SourceTreeScanResult {
+            registry: SourceRegistry::from_ordered_nodes(scanner.ordered_nodes),
+            warnings: scanner.warnings.into_iter().collect(),
+        })
+    }
+
     /// 完整扫描指定根；其它根的已有子树保持不变，避免单根智能分析破坏主窗口其它来源。
-    pub(crate) fn scan(mut self, selected_root_ids: &[SourceId]) -> Result<AgentSourceScanResult> {
+    pub(crate) fn scan(mut self, selected_root_ids: &[SourceId]) -> Result<SourceTreeScanResult> {
         self.ensure_not_cancelled()?;
         let selected_roots = selected_root_ids.iter().copied().collect::<HashSet<_>>();
         if selected_roots.is_empty() {
-            bail!("Agent 来源扫描至少需要一个来源根");
+            bail!("来源树扫描至少需要一个来源根");
         }
 
         // 未授权根不会参与扫描，但它们的 ID 必须提前保留，防止相同真实路径被选中根误复用。
@@ -100,10 +150,105 @@ impl<'a> AgentSourceScanner<'a> {
             }
         }
 
-        Ok(AgentSourceScanResult {
+        Ok(SourceTreeScanResult {
             registry: SourceRegistry::from_ordered_nodes(self.ordered_nodes),
             warnings: self.warnings.into_iter().collect(),
         })
+    }
+
+    /// 逐个扫描用户给定路径；每个路径边界都检查取消令牌，保证新加载请求能及时中断在途扫描。
+    fn scan_path_roots(mut self, paths: Vec<PathBuf>) -> Result<SourceTreeScanResult> {
+        self.ensure_not_cancelled()?;
+        if paths.is_empty() {
+            bail!("来源树扫描至少需要一个来源路径");
+        }
+        for path in paths {
+            self.ensure_not_cancelled()?;
+            let label = display_name(&path);
+            self.scan_local_path(None, 0, label, path, None)?;
+            self.report_progress();
+        }
+        Ok(SourceTreeScanResult {
+            registry: SourceRegistry::from_ordered_nodes(self.ordered_nodes),
+            warnings: self.warnings.into_iter().collect(),
+        })
+    }
+
+    /// 以归档节点为根严格重扫其子树；密码错误必须上抛，由调用方决定再次弹窗或放弃。
+    fn scan_archive_subtree_root(&mut self, node: &SourceTreeNode) -> Result<()> {
+        self.ensure_not_cancelled()?;
+        let nested_format = match &node.kind {
+            SourceKind::Archive(format) => *format,
+            _ => bail!("来源树子树重试目标不是压缩包节点"),
+        };
+        match &node.location {
+            SourceLocation::LocalPath(path) => {
+                // 本地压缩包节点：严格枚举一次，失败直接上抛而不生成降级节点。
+                let entries = self.list_local_archive(path, nested_format)?;
+                self.ensure_not_cancelled()?;
+                self.emit_local_archive_tree(
+                    None,
+                    0,
+                    node.label.clone(),
+                    path.clone(),
+                    nested_format,
+                    None,
+                    entries,
+                )
+            }
+            SourceLocation::ArchiveEntry {
+                archive_path,
+                root_format,
+                container_entries,
+                entry_path,
+                format,
+                archive_depth,
+            } => {
+                // 嵌套压缩包节点：沿容器链路逐层读出该压缩包字节，再严格枚举其内容。
+                let bytes = read_archive_entry_bytes_with_passwords(
+                    archive_path,
+                    *root_format,
+                    container_entries,
+                    entry_path,
+                    &self.archive_passwords,
+                )?;
+                self.ensure_not_cancelled()?;
+                let mut nested_container_entries = container_entries.clone();
+                nested_container_entries.push(entry_path.clone());
+                let source_label = nested_container_entries.join("!/");
+                let password_key =
+                    ArchivePasswordKey::new(archive_path.clone(), &nested_container_entries);
+                let mut reader = Cursor::new(bytes);
+                let reader_len = reader.get_ref().len() as u64;
+                let entries = archive_registry().list_entries_from_reader_with_password_context(
+                    nested_format,
+                    &mut reader,
+                    reader_len,
+                    &source_label,
+                    self.archive_passwords.get(&password_key),
+                    password_key,
+                )?;
+                self.ensure_not_cancelled()?;
+                let context = ArchiveContainerContext {
+                    archive_path: archive_path.clone(),
+                    root_format: *root_format,
+                    container_entries: container_entries.clone(),
+                    format: *format,
+                    archive_depth: *archive_depth,
+                };
+                self.emit_nested_archive_tree(
+                    None,
+                    0,
+                    node.label.clone(),
+                    entry_path,
+                    node.metadata.size,
+                    nested_format,
+                    node.location.clone(),
+                    &context,
+                    entries,
+                )
+            }
+        }
     }
 
     /// 根据根节点的真实位置重新发现其完整内容，并始终保留根 ID。
@@ -112,7 +257,7 @@ impl<'a> AgentSourceScanner<'a> {
             .original_registry
             .node(root_id)
             .cloned()
-            .ok_or_else(|| anyhow!("Agent 来源根不存在"))?;
+            .ok_or_else(|| anyhow!("来源树根不存在"))?;
         match &root.location {
             SourceLocation::LocalPath(path) => {
                 self.scan_local_root(&root, path.clone())?;
@@ -122,7 +267,7 @@ impl<'a> AgentSourceScanner<'a> {
                 root_format,
                 ..
             } if root.parent_id.is_none() => {
-                // 单文件归档根的 UI 位置已经折叠到内部条目；Agent 必须从真实外层归档重新枚举。
+                // 单文件归档根的 UI 位置已经折叠到内部条目；必须从真实外层归档重新枚举。
                 self.scan_local_archive(
                     None,
                     root.depth,
@@ -143,27 +288,39 @@ impl<'a> AgentSourceScanner<'a> {
         Ok(())
     }
 
-    /// 扫描本地目录、普通文件或归档根。
+    /// 扫描本地目录、普通文件或归档根；保持根 ID 稳定。
     fn scan_local_root(&mut self, root: &SourceTreeNode, path: PathBuf) -> Result<()> {
+        self.scan_local_path(None, root.depth, root.label.clone(), path, Some(root.id))
+    }
+
+    /// 扫描任意本地路径并生成对应来源节点；`preferred_id` 仅在重建既有根时保留稳定 ID。
+    fn scan_local_path(
+        &mut self,
+        parent_id: Option<SourceId>,
+        depth: usize,
+        label: String,
+        path: PathBuf,
+        preferred_id: Option<SourceId>,
+    ) -> Result<()> {
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
                 self.push_node(
-                    None,
-                    root.depth,
-                    root.label.clone(),
+                    parent_id,
+                    depth,
+                    label.clone(),
                     SourceKind::Unsupported("来源不可读".to_string()),
                     SourceLocation::LocalPath(path),
                     SourceMetadata {
-                        message: Some("Agent 无法读取该来源".to_string()),
+                        message: Some("无法读取该来源".to_string()),
                         ..SourceMetadata::default()
                     },
-                    Some(root.id),
+                    preferred_id,
                     &[],
                 );
                 self.warnings.insert(format!(
                     "无法读取来源根“{}”：{}",
-                    root.label,
+                    label,
                     safe_io_error(&error)
                 ));
                 return Ok(());
@@ -172,9 +329,9 @@ impl<'a> AgentSourceScanner<'a> {
 
         if metadata.file_type().is_symlink() && !self.config.follow_symlinks {
             self.push_node(
-                None,
-                root.depth,
-                root.label.clone(),
+                parent_id,
+                depth,
+                label,
                 SourceKind::Unsupported("符号链接".to_string()),
                 SourceLocation::LocalPath(path),
                 SourceMetadata {
@@ -182,7 +339,7 @@ impl<'a> AgentSourceScanner<'a> {
                     message: Some("已跳过符号链接，避免目录循环".to_string()),
                     ..SourceMetadata::default()
                 },
-                Some(root.id),
+                preferred_id,
                 &[],
             );
             return Ok(());
@@ -195,38 +352,38 @@ impl<'a> AgentSourceScanner<'a> {
         };
         if followed_metadata.is_dir() {
             self.remember_directory(&path)?;
-            let root_id = self.push_node(
-                None,
-                root.depth,
-                root.label.clone(),
+            let directory_id = self.push_node(
+                parent_id,
+                depth,
+                label,
                 SourceKind::Directory,
                 SourceLocation::LocalPath(path.clone()),
                 SourceMetadata {
                     children_loaded: true,
                     ..SourceMetadata::default()
                 },
-                Some(root.id),
+                preferred_id,
                 &[],
             );
-            self.scan_local_directory(root_id, &path, root.depth.saturating_add(1))?;
+            self.scan_local_directory(directory_id, &path, depth.saturating_add(1))?;
             return Ok(());
         }
 
         if let Some(format) = detect_archive_format(&path) {
             if format.is_supported() {
                 return self.scan_local_archive(
-                    None,
-                    root.depth,
-                    root.label.clone(),
+                    parent_id,
+                    depth,
+                    label,
                     path,
                     format,
-                    Some(root.id),
+                    preferred_id,
                 );
             }
             self.push_node(
-                None,
-                root.depth,
-                root.label.clone(),
+                parent_id,
+                depth,
+                label,
                 SourceKind::Unsupported(format.label().to_string()),
                 SourceLocation::LocalPath(path),
                 SourceMetadata {
@@ -235,16 +392,16 @@ impl<'a> AgentSourceScanner<'a> {
                     message: Some("该压缩格式当前不可展开".to_string()),
                     ..SourceMetadata::default()
                 },
-                Some(root.id),
+                preferred_id,
                 &[],
             );
             return Ok(());
         }
 
         self.push_node(
-            None,
-            root.depth,
-            root.label.clone(),
+            parent_id,
+            depth,
+            label,
             SourceKind::LogFile,
             SourceLocation::LocalPath(path),
             SourceMetadata {
@@ -252,7 +409,7 @@ impl<'a> AgentSourceScanner<'a> {
                 children_loaded: true,
                 ..SourceMetadata::default()
             },
-            Some(root.id),
+            preferred_id,
             &[],
         );
         Ok(())
@@ -417,6 +574,7 @@ impl<'a> AgentSourceScanner<'a> {
                 &[],
             );
         }
+        self.report_progress();
         Ok(())
     }
 
@@ -436,7 +594,10 @@ impl<'a> AgentSourceScanner<'a> {
         let entries = match self.list_local_archive(&archive_path, format) {
             Ok(entries) => entries,
             Err(error) => {
-                let reason = archive_scan_error(&error);
+                let size = fs::metadata(&archive_path)
+                    .ok()
+                    .map(|metadata| metadata.len());
+                let (metadata, reason) = archive_scan_failure(&error, size);
                 self.warnings
                     .insert(format!("无法枚举归档“{label}”：{reason}"));
                 self.push_node(
@@ -445,21 +606,41 @@ impl<'a> AgentSourceScanner<'a> {
                     label,
                     SourceKind::Archive(format),
                     compressed_location,
-                    SourceMetadata {
-                        size: fs::metadata(&archive_path)
-                            .ok()
-                            .map(|metadata| metadata.len()),
-                        children_loaded: false,
-                        message: Some(reason),
-                        ..SourceMetadata::default()
-                    },
+                    metadata,
                     preferred_id,
                     &[],
                 );
+                self.report_progress();
                 return Ok(());
             }
         };
         self.ensure_not_cancelled()?;
+        let result = self.emit_local_archive_tree(
+            parent_id,
+            depth,
+            label,
+            archive_path,
+            format,
+            preferred_id,
+            entries,
+        );
+        self.report_progress();
+        result
+    }
+
+    /// 本地归档枚举成功后构建其子树；恰好一个普通文件时折叠为单文件叶子。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_local_archive_tree(
+        &mut self,
+        parent_id: Option<SourceId>,
+        depth: usize,
+        label: String,
+        archive_path: PathBuf,
+        format: ArchiveFormat,
+        preferred_id: Option<SourceId>,
+        entries: Vec<ArchiveEntryInfo>,
+    ) -> Result<()> {
+        let compressed_location = SourceLocation::LocalPath(archive_path.clone());
         let tree = ArchiveTreeNode::from_entries(entries);
         if let Some(single_file) = tree.single_plain_file() {
             let location = SourceLocation::ArchiveEntry {
@@ -650,7 +831,7 @@ impl<'a> AgentSourceScanner<'a> {
                 if self.cancellation.is_cancelled() {
                     bail!("来源树完整扫描已取消");
                 }
-                let reason = archive_scan_error(&error);
+                let (metadata, reason) = archive_scan_failure(&error, child.size);
                 self.warnings
                     .insert(format!("无法读取嵌套归档“{}”：{reason}", child.name));
                 self.push_node(
@@ -659,15 +840,11 @@ impl<'a> AgentSourceScanner<'a> {
                     child.name.clone(),
                     SourceKind::Archive(nested_format),
                     compressed_location,
-                    SourceMetadata {
-                        size: child.size,
-                        children_loaded: false,
-                        message: Some(reason),
-                        ..SourceMetadata::default()
-                    },
+                    metadata,
                     None,
                     &[],
                 );
+                self.report_progress();
                 return Ok(());
             }
         }
@@ -690,7 +867,7 @@ impl<'a> AgentSourceScanner<'a> {
         ) {
             Ok(entries) => entries,
             Err(error) => {
-                let reason = archive_scan_error(&error);
+                let (metadata, reason) = archive_scan_failure(&error, child.size);
                 self.warnings
                     .insert(format!("无法枚举嵌套归档“{nested_label}”：{reason}"));
                 self.push_node(
@@ -699,20 +876,47 @@ impl<'a> AgentSourceScanner<'a> {
                     nested_label,
                     SourceKind::Archive(nested_format),
                     compressed_location,
-                    SourceMetadata {
-                        size: child.size,
-                        children_loaded: false,
-                        message: Some(reason),
-                        ..SourceMetadata::default()
-                    },
+                    metadata,
                     None,
                     &[],
                 );
+                self.report_progress();
                 return Ok(());
             }
         };
         self.ensure_not_cancelled()?;
+        let result = self.emit_nested_archive_tree(
+            Some(parent_id),
+            depth,
+            nested_label,
+            &child.full_path,
+            child.size,
+            nested_format,
+            compressed_location,
+            context,
+            entries,
+        );
+        self.report_progress();
+        result
+    }
+
+    /// 嵌套归档枚举成功后生成其子树；恰好一个普通文件时折叠为单文件叶子。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_nested_archive_tree(
+        &mut self,
+        parent_id: Option<SourceId>,
+        depth: usize,
+        nested_label: String,
+        nested_entry_path: &str,
+        nested_size: Option<u64>,
+        nested_format: ArchiveFormat,
+        compressed_location: SourceLocation,
+        context: &ArchiveContainerContext,
+        entries: Vec<ArchiveEntryInfo>,
+    ) -> Result<()> {
         let tree = ArchiveTreeNode::from_entries(entries);
+        let mut nested_container_entries = context.container_entries.clone();
+        nested_container_entries.push(nested_entry_path.to_string());
         let nested_depth = context.archive_depth.saturating_add(1);
         if let Some(single_file) = tree.single_plain_file() {
             let location = SourceLocation::ArchiveEntry {
@@ -724,7 +928,7 @@ impl<'a> AgentSourceScanner<'a> {
                 archive_depth: nested_depth,
             };
             self.push_node(
-                Some(parent_id),
+                parent_id,
                 depth,
                 nested_label,
                 SourceKind::SingleFileArchive(nested_format),
@@ -741,13 +945,13 @@ impl<'a> AgentSourceScanner<'a> {
         }
 
         let archive_id = self.push_node(
-            Some(parent_id),
+            parent_id,
             depth,
             nested_label,
             SourceKind::Archive(nested_format),
             compressed_location,
             SourceMetadata {
-                size: child.size,
+                size: nested_size,
                 children_loaded: true,
                 ..SourceMetadata::default()
             },
@@ -843,6 +1047,13 @@ impl<'a> AgentSourceScanner<'a> {
             bail!("来源树完整扫描已取消");
         }
         Ok(())
+    }
+
+    /// 在目录或归档处理边界上报已生成节点数；接收端随加载任务结束释放后，发送失败可安全忽略。
+    fn report_progress(&self) {
+        if let Some(progress) = &self.progress {
+            let _ = progress.send(self.ordered_nodes.len());
+        }
     }
 }
 
@@ -1118,6 +1329,30 @@ fn archive_scan_error(error: &anyhow::Error) -> String {
     }
 }
 
+/// 归档枚举失败的降级节点元信息和警告原因；提示文案以密码标记为准，
+/// 保证节点展示与"输入密码后仅重试该子树"的界面入口语义一致。
+fn archive_scan_failure(error: &anyhow::Error, size: Option<u64>) -> (SourceMetadata, String) {
+    let reason = archive_scan_error(error);
+    let metadata = SourceMetadata {
+        size,
+        children_loaded: false,
+        archive_password_required: find_archive_password_error(error).is_some(),
+        ..SourceMetadata::default()
+    };
+    let message = if metadata.archive_password_required {
+        "需要密码访问".to_string()
+    } else {
+        reason.clone()
+    };
+    (
+        SourceMetadata {
+            message: Some(message),
+            ..metadata
+        },
+        reason,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -1128,6 +1363,7 @@ mod tests {
 
     use super::*;
     use crate::config::paths::temporary_test_dir;
+    use crate::loader::archive::ArchivePasswordErrorKind;
 
     /// 构造一个尚未加载子级的本地目录根。
     fn unloaded_directory_registry(path: &Path) -> (SourceRegistry, SourceId) {
@@ -1157,7 +1393,7 @@ mod tests {
             .expect("应写入测试日志");
         let (registry, root_id) = unloaded_directory_registry(directory.path());
 
-        let result = AgentSourceScanner::new(
+        let result = SourceTreeScanner::new(
             &registry,
             LoaderConfig::default(),
             ArchivePasswordStore::default(),
@@ -1215,7 +1451,7 @@ mod tests {
         });
         registry.rebuild_all_indices();
 
-        let result = AgentSourceScanner::new(
+        let result = SourceTreeScanner::new(
             &registry,
             LoaderConfig::default(),
             ArchivePasswordStore::default(),
@@ -1264,7 +1500,7 @@ mod tests {
         registry.node_mut(root_id).unwrap().metadata.children_loaded = true;
         registry.rebuild_all_indices();
 
-        let result = AgentSourceScanner::new(
+        let result = SourceTreeScanner::new(
             &registry,
             LoaderConfig::default(),
             ArchivePasswordStore::default(),
@@ -1322,7 +1558,7 @@ mod tests {
         });
         registry.rebuild_all_indices();
 
-        let result = AgentSourceScanner::new(
+        let result = SourceTreeScanner::new(
             &registry,
             LoaderConfig::default(),
             ArchivePasswordStore::default(),
@@ -1365,7 +1601,7 @@ mod tests {
         let cancellation = tokio_util::sync::CancellationToken::new();
         cancellation.cancel();
 
-        let error = AgentSourceScanner::new(
+        let error = SourceTreeScanner::new(
             &registry,
             LoaderConfig::default(),
             ArchivePasswordStore::default(),
@@ -1375,5 +1611,525 @@ mod tests {
         .expect_err("取消后的独立扫描必须立即停止");
 
         assert!(error.to_string().contains("已取消"));
+    }
+
+    /// 生成一个 AES 加密的测试 ZIP；与 zip 适配器读取路径保持同一加密特性。
+    fn write_encrypted_zip(path: &Path, password: &str, entries: &[(&str, &[u8])]) {
+        let mut writer = ZipWriter::new(fs::File::create(path).expect("应创建加密测试归档"));
+        for (name, content) in entries {
+            writer
+                .start_file(
+                    *name,
+                    SimpleFileOptions::default()
+                        .with_aes_encryption(zip::AesMode::Aes256, password),
+                )
+                .expect("应创建加密条目");
+            writer.write_all(content).expect("应写入加密条目");
+        }
+        writer.finish().expect("应完成加密测试归档");
+    }
+
+    /// 收集注册表中全部节点的树序标签。
+    fn tree_order_labels(registry: &SourceRegistry) -> Vec<&str> {
+        registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| registry.node(*source_id))
+            .map(|node| node.label.as_str())
+            .collect()
+    }
+
+    /// 验证 scan_paths 从混合路径列表一次性完整建树：目录递归、压缩包枚举、单文件折叠全部在加载时完成。
+    #[test]
+    fn scan_paths_builds_complete_tree_from_mixed_paths() {
+        let directory = temporary_test_dir("scan-paths-mixed");
+        let root_label = display_name(directory.path());
+        fs::create_dir(directory.path().join("subdir")).expect("应创建子目录");
+        fs::write(directory.path().join("subdir/deep.log"), "deep").expect("应写入深层日志");
+        fs::write(directory.path().join("alpha.log"), "alpha").expect("应写入顶层日志");
+        let bundle_path = directory.path().join("bundle.zip");
+        let mut bundle_writer =
+            ZipWriter::new(fs::File::create(&bundle_path).expect("应创建多文件归档"));
+        bundle_writer
+            .start_file("logs/a.log", SimpleFileOptions::default())
+            .expect("应创建归档条目 a");
+        bundle_writer.write_all(b"a").expect("应写入归档条目 a");
+        bundle_writer
+            .start_file("logs/b.log", SimpleFileOptions::default())
+            .expect("应创建归档条目 b");
+        bundle_writer.write_all(b"b").expect("应写入归档条目 b");
+        bundle_writer.finish().expect("应完成多文件归档");
+
+        let extra = temporary_test_dir("scan-paths-extra");
+        let standalone_path = extra.path().join("standalone.log");
+        fs::write(&standalone_path, "solo").expect("应写入独立日志");
+        let solo_zip_path = extra.path().join("solo.zip");
+        let mut solo_writer =
+            ZipWriter::new(fs::File::create(&solo_zip_path).expect("应创建单文件归档"));
+        solo_writer
+            .start_file("only.txt", SimpleFileOptions::default())
+            .expect("应创建单文件条目");
+        solo_writer.write_all(b"only").expect("应写入单文件条目");
+        solo_writer.finish().expect("应完成单文件归档");
+
+        let result = SourceTreeScanner::scan_paths(
+            vec![
+                directory.path().to_path_buf(),
+                standalone_path,
+                solo_zip_path,
+            ],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("混合路径完整扫描应成功");
+
+        assert_eq!(
+            tree_order_labels(&result.registry),
+            vec![
+                root_label.as_str(),
+                "subdir",
+                "deep.log",
+                "alpha.log",
+                "bundle.zip",
+                "logs",
+                "a.log",
+                "b.log",
+                "standalone.log",
+                "solo.zip"
+            ]
+        );
+        // 完整初始化语义：所有可展开节点的子级都已加载，不存在懒加载占位。
+        assert!(
+            result
+                .registry
+                .tree_order_source_ids()
+                .iter()
+                .all(|source_id| {
+                    let node = result.registry.node(*source_id).unwrap();
+                    !node.kind.can_expand() || node.metadata.children_loaded
+                })
+        );
+        // 单文件压缩包折叠为 SingleFileArchive，位置指向内部唯一文件。
+        let solo_node = result
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| result.registry.node(*source_id))
+            .find(|node| node.label == "solo.zip")
+            .expect("单文件压缩包根应存在");
+        assert!(matches!(
+            solo_node.kind,
+            SourceKind::SingleFileArchive(ArchiveFormat::Zip)
+        ));
+        assert!(matches!(
+            &solo_node.location,
+            SourceLocation::ArchiveEntry { entry_path, .. } if entry_path == "only.txt"
+        ));
+    }
+
+    /// 验证 scan_paths 按 max_archive_depth 展开嵌套压缩包，超限层级降级为不可展开节点。
+    #[test]
+    fn scan_paths_expands_nested_archives_up_to_configured_depth() {
+        let directory = temporary_test_dir("scan-paths-nested-depth");
+        let mut inner_cursor = Cursor::new(Vec::new());
+        {
+            let mut inner_writer = ZipWriter::new(&mut inner_cursor);
+            inner_writer
+                .start_file("deep.log", SimpleFileOptions::default())
+                .expect("应创建最内层日志");
+            inner_writer.write_all(b"deep").expect("应写入最内层日志");
+            inner_writer.finish().expect("应完成最内层归档");
+        }
+        let mut middle_cursor = Cursor::new(Vec::new());
+        {
+            let mut middle_writer = ZipWriter::new(&mut middle_cursor);
+            middle_writer
+                .start_file("inner.zip", SimpleFileOptions::default())
+                .expect("应创建内层嵌套归档条目");
+            middle_writer
+                .write_all(inner_cursor.get_ref())
+                .expect("应写入内层嵌套归档");
+            middle_writer.finish().expect("应完成中层归档");
+        }
+        let outer_path = directory.path().join("outer.zip");
+        let mut outer_writer =
+            ZipWriter::new(fs::File::create(&outer_path).expect("应创建外层归档"));
+        outer_writer
+            .start_file("middle.zip", SimpleFileOptions::default())
+            .expect("应创建外层嵌套归档条目");
+        outer_writer
+            .write_all(middle_cursor.get_ref())
+            .expect("应写入外层嵌套归档");
+        outer_writer.finish().expect("应完成外层归档");
+
+        // 深度上限为 1 时：middle.zip 展开，inner.zip 超出深度降级。
+        let limited = SourceTreeScanner::scan_paths(
+            vec![outer_path.clone()],
+            LoaderConfig {
+                max_archive_depth: 1,
+                ..LoaderConfig::default()
+            },
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("限制深度的完整扫描应成功");
+        assert_eq!(
+            tree_order_labels(&limited.registry),
+            vec!["outer.zip", "middle.zip", "inner.zip"]
+        );
+        let inner_node = limited
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| limited.registry.node(*source_id))
+            .find(|node| node.label == "inner.zip")
+            .expect("超限嵌套归档节点应存在");
+        assert!(matches!(inner_node.kind, SourceKind::Unsupported(_)));
+        assert!(inner_node.metadata.children_loaded);
+        assert!(!inner_node.metadata.archive_password_required);
+
+        // 默认深度上限为 2 时：inner.zip 展开且因单文件折叠为日志叶子。
+        let full = SourceTreeScanner::scan_paths(
+            vec![outer_path.clone()],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("默认深度的完整扫描应成功");
+        assert_eq!(
+            tree_order_labels(&full.registry),
+            vec!["outer.zip", "middle.zip", "inner.zip"]
+        );
+        let folded_node = full
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| full.registry.node(*source_id))
+            .find(|node| node.label == "inner.zip")
+            .expect("内层嵌套归档节点应存在");
+        assert!(matches!(
+            folded_node.kind,
+            SourceKind::SingleFileArchive(ArchiveFormat::Zip)
+        ));
+        assert!(matches!(
+            &folded_node.location,
+            SourceLocation::ArchiveEntry {
+                container_entries,
+                entry_path,
+                archive_depth: 2,
+                ..
+            } if container_entries == &["middle.zip".to_string(), "inner.zip".to_string()]
+                && entry_path == "deep.log"
+        ));
+    }
+
+    /// 验证加密压缩包在完整加载中降级为需要密码的提示节点，不中断整体扫描，且可凭密码仅重试该子树。
+    #[test]
+    fn scan_paths_marks_encrypted_archive_password_required_without_stopping() {
+        let directory = temporary_test_dir("scan-paths-encrypted");
+        fs::write(directory.path().join("normal.log"), "ready").expect("应写入普通日志");
+        let secret_path = directory.path().join("secret.zip");
+        write_encrypted_zip(&secret_path, "s3cret", &[("hidden.log", b"hidden")]);
+
+        let result = SourceTreeScanner::scan_paths(
+            vec![directory.path().to_path_buf()],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("含加密压缩包的扫描应整体成功");
+
+        // 普通日志仍被发现，加密压缩包降级为需要密码节点。
+        assert!(tree_order_labels(&result.registry).contains(&"normal.log"));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("secret.zip"))
+        );
+        let secret_node = result
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| result.registry.node(*source_id))
+            .find(|node| node.label == "secret.zip")
+            .expect("加密压缩包节点应存在");
+        assert!(matches!(
+            secret_node.kind,
+            SourceKind::Archive(ArchiveFormat::Zip)
+        ));
+        assert!(!secret_node.metadata.children_loaded);
+        assert!(secret_node.metadata.archive_password_required);
+        assert_eq!(
+            secret_node.metadata.message.as_deref(),
+            Some("需要密码访问")
+        );
+
+        // 模拟点击重试：写入正确密码后仅重扫该子树，单文件归档折叠为日志叶子。
+        let mut passwords = ArchivePasswordStore::default();
+        passwords.insert(
+            ArchivePasswordKey::root(secret_path.clone()),
+            "s3cret".to_string(),
+        );
+        let subtree = SourceTreeScanner::scan_archive_subtree(
+            secret_node,
+            LoaderConfig::default(),
+            passwords,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("写入正确密码后重试加密子树应成功");
+        assert_eq!(tree_order_labels(&subtree.registry), vec!["secret.zip"]);
+        let subtree_root = subtree
+            .registry
+            .node(subtree.registry.root_ids()[0])
+            .expect("子树根应存在");
+        assert!(matches!(
+            subtree_root.kind,
+            SourceKind::SingleFileArchive(ArchiveFormat::Zip)
+        ));
+        assert!(!subtree_root.metadata.archive_password_required);
+    }
+
+    /// 验证按节点重试子树：无密码或密码错误直接上抛 Err，写入正确密码后成功返回完整子树。
+    #[test]
+    fn scan_archive_subtree_surfaces_password_errors_and_succeeds_after_unlock() {
+        let directory = temporary_test_dir("scan-archive-subtree");
+        let secret_path = directory.path().join("secret.zip");
+        write_encrypted_zip(
+            &secret_path,
+            "s3cret",
+            &[("hidden/a.log", b"a"), ("hidden/b.log", b"b")],
+        );
+        let node = SourceTreeNode {
+            id: SourceId(7),
+            parent_id: None,
+            depth: 0,
+            label: "secret.zip".to_string(),
+            kind: SourceKind::Archive(ArchiveFormat::Zip),
+            location: SourceLocation::LocalPath(secret_path.clone()),
+            metadata: SourceMetadata {
+                archive_password_required: true,
+                message: Some("需要密码访问".to_string()),
+                ..SourceMetadata::default()
+            },
+            selected: false,
+            expanded: false,
+        };
+
+        // 无密码：必须上抛缺少密码错误，不得降级为警告节点。
+        let error = SourceTreeScanner::scan_archive_subtree(
+            &node,
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect_err("缺少密码时必须直接失败");
+        assert_eq!(
+            find_archive_password_error(&error).map(|error| error.kind),
+            Some(ArchivePasswordErrorKind::Required)
+        );
+
+        // 错误密码：上抛密码无效错误，供界面再次弹窗。
+        let mut wrong_passwords = ArchivePasswordStore::default();
+        wrong_passwords.insert(
+            ArchivePasswordKey::root(secret_path.clone()),
+            "wrong".to_string(),
+        );
+        let error = SourceTreeScanner::scan_archive_subtree(
+            &node,
+            LoaderConfig::default(),
+            wrong_passwords,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect_err("密码错误时必须直接失败");
+        assert_eq!(
+            find_archive_password_error(&error).map(|error| error.kind),
+            Some(ArchivePasswordErrorKind::Invalid)
+        );
+
+        // 正确密码：成功返回以该节点为根的完整子树。
+        let mut passwords = ArchivePasswordStore::default();
+        passwords.insert(
+            ArchivePasswordKey::root(secret_path.clone()),
+            "s3cret".to_string(),
+        );
+        let result = SourceTreeScanner::scan_archive_subtree(
+            &node,
+            LoaderConfig::default(),
+            passwords,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("写入正确密码后子树重扫应成功");
+
+        assert_eq!(
+            tree_order_labels(&result.registry),
+            vec!["secret.zip", "hidden", "a.log", "b.log"]
+        );
+        let root = result
+            .registry
+            .node(result.registry.root_ids()[0])
+            .expect("子树根应存在");
+        assert!(matches!(root.kind, SourceKind::Archive(ArchiveFormat::Zip)));
+        assert!(root.metadata.children_loaded);
+        assert!(!root.metadata.archive_password_required);
+    }
+
+    /// 验证嵌套压缩包节点的子树重试沿容器链路逐层读取，成功后子条目携带完整容器链路。
+    #[test]
+    fn scan_archive_subtree_reads_nested_container_chain() {
+        let directory = temporary_test_dir("scan-archive-subtree-nested");
+        let mut inner_cursor = Cursor::new(Vec::new());
+        {
+            let mut inner_writer = ZipWriter::new(&mut inner_cursor);
+            for (name, content) in [("x.log", &b"x"[..]), ("y.log", &b"y"[..])] {
+                inner_writer
+                    .start_file(
+                        name,
+                        SimpleFileOptions::default()
+                            .with_aes_encryption(zip::AesMode::Aes256, "pw"),
+                    )
+                    .expect("应创建加密内层条目");
+                inner_writer.write_all(content).expect("应写入加密内层条目");
+            }
+            inner_writer.finish().expect("应完成加密内层归档");
+        }
+        let outer_path = directory.path().join("outer.zip");
+        let mut outer_writer =
+            ZipWriter::new(fs::File::create(&outer_path).expect("应创建外层归档"));
+        outer_writer
+            .start_file("inner.zip", SimpleFileOptions::default())
+            .expect("应创建嵌套归档条目");
+        outer_writer
+            .write_all(inner_cursor.get_ref())
+            .expect("应写入嵌套归档");
+        outer_writer.finish().expect("应完成外层归档");
+
+        let node = SourceTreeNode {
+            id: SourceId(9),
+            parent_id: None,
+            depth: 0,
+            label: "inner.zip".to_string(),
+            kind: SourceKind::Archive(ArchiveFormat::Zip),
+            location: SourceLocation::ArchiveEntry {
+                archive_path: outer_path.clone(),
+                root_format: ArchiveFormat::Zip,
+                container_entries: Vec::new(),
+                entry_path: "inner.zip".to_string(),
+                format: ArchiveFormat::Zip,
+                archive_depth: 0,
+            },
+            metadata: SourceMetadata {
+                archive_password_required: true,
+                message: Some("需要密码访问".to_string()),
+                ..SourceMetadata::default()
+            },
+            selected: false,
+            expanded: false,
+        };
+
+        // 无密码：沿容器链路读到嵌套压缩包后枚举失败，缺少密码错误直接上抛。
+        let error = SourceTreeScanner::scan_archive_subtree(
+            &node,
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect_err("嵌套压缩包缺少密码时必须直接失败");
+        assert_eq!(
+            find_archive_password_error(&error).map(|error| error.kind),
+            Some(ArchivePasswordErrorKind::Required)
+        );
+
+        // 正确密码写入嵌套容器键后重试成功。
+        let mut passwords = ArchivePasswordStore::default();
+        passwords.insert(
+            ArchivePasswordKey::new(outer_path.clone(), &["inner.zip".to_string()]),
+            "pw".to_string(),
+        );
+        let result = SourceTreeScanner::scan_archive_subtree(
+            &node,
+            LoaderConfig::default(),
+            passwords,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("写入嵌套容器密码后子树重扫应成功");
+
+        assert_eq!(
+            tree_order_labels(&result.registry),
+            vec!["inner.zip", "x.log", "y.log"]
+        );
+        let child = result
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| result.registry.node(*source_id))
+            .find(|node| node.label == "x.log")
+            .expect("嵌套子条目应存在");
+        assert!(matches!(
+            &child.location,
+            SourceLocation::ArchiveEntry {
+                archive_path,
+                container_entries,
+                entry_path,
+                archive_depth: 1,
+                ..
+            } if archive_path == &outer_path
+                && container_entries == &["inner.zip".to_string()]
+                && entry_path == "x.log"
+        ));
+    }
+
+    /// 验证取消令牌生效时 scan_paths 在路径边界检查处中断并返回 Err。
+    #[test]
+    fn scan_paths_stops_when_cancelled() {
+        let directory = temporary_test_dir("scan-paths-cancelled");
+        fs::write(directory.path().join("app.log"), "ready").expect("应写入测试日志");
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+
+        let error = SourceTreeScanner::scan_paths(
+            vec![directory.path().to_path_buf()],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            cancellation,
+            None,
+        )
+        .expect_err("取消后的完整加载必须立即停止");
+
+        assert!(error.to_string().contains("已取消"));
+    }
+
+    /// 验证完整加载在目录和归档边界通过进度通道单调上报已处理节点数，最终计数等于节点总数。
+    #[test]
+    fn scan_paths_reports_progress_at_directory_and_archive_boundaries() {
+        let directory = temporary_test_dir("scan-paths-progress");
+        fs::create_dir(directory.path().join("subdir")).expect("应创建子目录");
+        fs::write(directory.path().join("subdir/deep.log"), "deep").expect("应写入深层日志");
+        fs::write(directory.path().join("top.log"), "top").expect("应写入顶层日志");
+
+        let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
+        let result = SourceTreeScanner::scan_paths(
+            vec![directory.path().to_path_buf()],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            Some(progress_sender),
+        )
+        .expect("带进度的完整扫描应成功");
+
+        let total = result.registry.tree_order_source_ids().len();
+        // 扫描器随结果返回后释放发送端，通道自然断开，可一次性收取全部进度。
+        let counts = progress_receiver.try_iter().collect::<Vec<_>>();
+        assert!(!counts.is_empty());
+        assert!(
+            counts.windows(2).all(|pair| pair[0] <= pair[1]),
+            "进度计数必须单调不减：{counts:?}"
+        );
+        assert_eq!(counts.last().copied(), Some(total));
     }
 }

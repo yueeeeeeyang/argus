@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
-    ArchiveEntryInfo, ArchiveReadSeek, ArchiveRootProbe, ArchiveRootProbeState,
+    ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -57,28 +57,6 @@ impl ArchiveAdapter for TarArchiveAdapter {
         _password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         list_tar_entries(reader, source_label)
-    }
-
-    /// 轻量探测 TAR 根层单文件，读取到足以判定后即停止。
-    fn probe_single_file_root(
-        &self,
-        path: &Path,
-        _password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        let file =
-            File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
-        probe_tar_single_file_root(file, &path.display().to_string())
-    }
-
-    /// 从内存 TAR 数据源轻量探测根层单文件。
-    fn probe_single_file_root_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        source_label: &str,
-        _password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        probe_tar_single_file_root(reader, source_label)
     }
 
     /// 从本地 TAR 读取指定条目字节。
@@ -192,40 +170,6 @@ where
         }
     }
     Ok(())
-}
-
-/// 从任意 TAR 读取器短路探测根层单文件。
-pub(crate) fn probe_tar_single_file_root<R>(
-    reader: R,
-    source_label: &str,
-) -> Result<ArchiveRootProbe>
-where
-    R: std::io::Read,
-{
-    let mut archive = tar::Archive::new(reader);
-    let mut state = ArchiveRootProbeState::default();
-
-    for entry in archive
-        .entries()
-        .with_context(|| format!("无法读取 TAR 条目：{source_label}"))?
-    {
-        let entry = entry.with_context(|| format!("无法解析 TAR 条目：{source_label}"))?;
-        let entry_path = normalize_archive_entry_path(&entry.path()?.to_string_lossy());
-        if entry_path.is_empty() {
-            continue;
-        }
-
-        let entry_info = ArchiveEntryInfo {
-            path: entry_path,
-            is_dir: entry.header().entry_type().is_dir(),
-            size: Some(entry.size()),
-        };
-        if !state.observe(entry_info) {
-            break;
-        }
-    }
-
-    Ok(state.finish())
 }
 
 /// 从任意读取器中枚举 TAR 条目，供普通 TAR 和压缩 TAR 复用。

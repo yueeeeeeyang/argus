@@ -14,7 +14,7 @@ use sevenz_rust::{Error as SevenzError, Password, SevenZMethod, SevenZReader};
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
-    ArchiveEntryInfo, ArchiveReadSeek, ArchiveRootProbe, ArchiveRootProbeState,
+    ArchiveEntryInfo, ArchiveReadSeek,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::password::ArchivePasswordError;
@@ -63,37 +63,6 @@ impl ArchiveAdapter for SevenzArchiveAdapter {
         password: Option<&str>,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         list_sevenz_entries_from_reader(reader, reader_len, source_label, password)
-    }
-
-    /// 轻量探测 7Z 根层单文件；只读取 7Z 元数据，不解压正文。
-    fn probe_single_file_root(
-        &self,
-        path: &Path,
-        password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        let file =
-            File::open(path).with_context(|| format!("无法打开 7Z 压缩包：{}", path.display()))?;
-        let reader_len = file
-            .metadata()
-            .with_context(|| format!("无法读取 7Z 文件大小：{}", path.display()))?
-            .len();
-        probe_sevenz_single_file_root_from_reader(
-            file,
-            reader_len,
-            &path.display().to_string(),
-            password,
-        )
-    }
-
-    /// 从内存 7Z 数据源轻量探测根层单文件。
-    fn probe_single_file_root_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        reader_len: u64,
-        source_label: &str,
-        password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        probe_sevenz_single_file_root_from_reader(reader, reader_len, source_label, password)
     }
 
     /// 从本地 7Z 读取指定条目字节。
@@ -262,39 +231,6 @@ where
         return Err(error).with_context(|| format!("无法消费 7Z 条目：{source_label}"));
     }
     Ok(())
-}
-
-/// 从任意 7Z 数据源短路探测根层单文件。
-pub(crate) fn probe_sevenz_single_file_root_from_reader<R>(
-    reader: R,
-    reader_len: u64,
-    source_label: &str,
-    password: Option<&str>,
-) -> Result<ArchiveRootProbe>
-where
-    R: Read + Seek,
-{
-    let reader = open_sevenz_reader(reader, reader_len, password, source_label)?;
-    ensure_sevenz_password_if_encrypted(reader.archive(), password, source_label)?;
-    let mut state = ArchiveRootProbeState::default();
-
-    for entry in reader.archive().files.iter() {
-        let entry_path = normalize_archive_entry_path(entry.name());
-        if entry_path.is_empty() {
-            continue;
-        }
-
-        let entry_info = ArchiveEntryInfo {
-            path: entry_path,
-            is_dir: entry.is_directory(),
-            size: Some(entry.size()),
-        };
-        if !state.observe(entry_info) {
-            break;
-        }
-    }
-
-    Ok(state.finish())
 }
 
 /// 从任意可读可 seek 的输入枚举 7Z 条目。

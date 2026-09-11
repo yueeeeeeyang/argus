@@ -263,7 +263,6 @@ private_key_passphrase = " phrase "
             },
             loader: LoaderConfig {
                 max_archive_depth: 4,
-                archive_probe_concurrency: 6,
                 follow_symlinks: true,
             },
             log_search: LogSearchConfig {
@@ -341,7 +340,6 @@ private_key_passphrase = " phrase "
         assert_eq!(loaded.appearance.theme_mode, "custom_dark.toml");
         assert_eq!(loaded.appearance.log_content_font_size, 16.0);
         assert_eq!(loaded.loader.max_archive_depth, 4);
-        assert_eq!(loaded.loader.archive_probe_concurrency, 6);
         assert!(loaded.loader.follow_symlinks);
         assert_eq!(loaded.log_search.quick_keywords, "ERROR,WARN");
         assert_eq!(

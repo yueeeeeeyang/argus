@@ -13,7 +13,6 @@ use anyhow::{Context as _, Result};
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveReadSeek,
-    ArchiveRootProbe,
 };
 use crate::loader::archive::compressed_tar::CompressedTarArchiveAdapter;
 use crate::loader::archive::detector::ArchiveFormat;
@@ -184,65 +183,6 @@ impl ArchiveAdapterRegistry {
         password_key: ArchivePasswordKey,
     ) -> Result<Vec<ArchiveEntryInfo>> {
         self.list_entries_from_reader(format, reader, reader_len, source_label, password)
-            .map_err(|error| {
-                annotate_archive_password_error(error, password_key, source_label.to_string())
-            })
-    }
-
-    /// 轻量探测本地压缩包根层是否恰好只有一个普通文件。
-    pub(crate) fn probe_single_file_root(
-        &self,
-        format: ArchiveFormat,
-        path: &Path,
-        password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        let adapter = self.require_adapter(format)?;
-        let label = adapter.capabilities().label;
-        adapter
-            .probe_single_file_root(path, password)
-            .with_context(|| format!("{label} 根层单文件探测失败：{}", path.display()))
-    }
-
-    /// 轻量探测本地压缩包根层是否恰好只有一个普通文件，并补充密码上下文。
-    pub(crate) fn probe_single_file_root_with_password_context(
-        &self,
-        format: ArchiveFormat,
-        path: &Path,
-        password: Option<&str>,
-        password_key: ArchivePasswordKey,
-        source_label: String,
-    ) -> Result<ArchiveRootProbe> {
-        self.probe_single_file_root(format, path, password)
-            .map_err(|error| annotate_archive_password_error(error, password_key, source_label))
-    }
-
-    /// 轻量探测内存压缩包根层是否恰好只有一个普通文件。
-    pub(crate) fn probe_single_file_root_from_reader(
-        &self,
-        format: ArchiveFormat,
-        reader: &mut dyn ArchiveReadSeek,
-        reader_len: u64,
-        source_label: &str,
-        password: Option<&str>,
-    ) -> Result<ArchiveRootProbe> {
-        let adapter = self.require_adapter(format)?;
-        let label = adapter.capabilities().label;
-        adapter
-            .probe_single_file_root_from_reader(reader, reader_len, source_label, password)
-            .with_context(|| format!("{label} 内存根层单文件探测失败：{source_label}"))
-    }
-
-    /// 轻量探测内存压缩包根层是否恰好只有一个普通文件，并补充密码上下文。
-    pub(crate) fn probe_single_file_root_from_reader_with_password_context(
-        &self,
-        format: ArchiveFormat,
-        reader: &mut dyn ArchiveReadSeek,
-        reader_len: u64,
-        source_label: &str,
-        password: Option<&str>,
-        password_key: ArchivePasswordKey,
-    ) -> Result<ArchiveRootProbe> {
-        self.probe_single_file_root_from_reader(format, reader, reader_len, source_label, password)
             .map_err(|error| {
                 annotate_archive_password_error(error, password_key, source_label.to_string())
             })

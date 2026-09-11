@@ -109,6 +109,8 @@ pub(crate) struct SourceMetadata {
     pub is_loading: bool,
     /// 加载失败或能力受限说明。
     pub message: Option<String>,
+    /// 枚举压缩包内容因缺少密码或密码错误失败；界面据此引导输入密码后仅重试该子树。
+    pub archive_password_required: bool,
 }
 
 /// 来源树节点；树关系由注册表集中维护，节点自身只保存父级 ID。

@@ -5,14 +5,6 @@ use super::*;
 impl ArgusApp {
     /// 创建 Jstack 分析标签页，并启动后台读取与聚合任务。
     pub(crate) fn open_jstack_analysis_tab(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
-        if !self.ensure_source_directory_ready_for_analysis(
-            source_id,
-            PendingSourceAnalysisAction::Jstack { source_id },
-            cx,
-        ) {
-            return;
-        }
-
         let target_ids = self.jstack_source_ids_for_context(source_id);
         if target_ids.is_empty() {
             self.placeholder_notice = "请选择至少一个可分析的 Jstack 日志文件".to_string();
@@ -533,7 +525,7 @@ impl ArgusApp {
         source_ids
     }
 
-    /// 递归收集已加载后代文件；未加载目录不主动展开，避免在纯读取阶段阻塞 UI。
+    /// 递归收集后代文件；来源树已完整初始化，可展开目录的子级必然已加载。
     pub(super) fn collect_loaded_descendant_analysis_source_ids(
         &self,
         parent_id: SourceId,
@@ -550,7 +542,7 @@ impl ArgusApp {
                 source_ids.push(child_id);
             }
 
-            if child.kind.can_expand() && child.metadata.children_loaded {
+            if child.kind.can_expand() {
                 self.collect_loaded_descendant_analysis_source_ids(child_id, source_ids);
             }
         }
@@ -571,23 +563,12 @@ impl ArgusApp {
                 Some(JstackAnalysisTarget {
                     source_id: *source_id,
                     location: node.location.clone(),
-                    archive_probe_node: self.jstack_archive_probe_node(*source_id),
                     label: node.label.clone(),
                     path: node.location.display_path(),
                     archive_passwords: self.archive_passwords.clone(),
                 })
             })
             .collect()
-    }
-
-    /// 为 Jstack 分析生成待探测压缩包快照；已识别日志节点不需要额外探测。
-    pub(super) fn jstack_archive_probe_node(&self, source_id: SourceId) -> Option<SourceTreeNode> {
-        if !self.is_source_selectable_for_search_selection(source_id) {
-            return None;
-        }
-
-        let node = self.source_registry.node(source_id)?;
-        (!node.kind.is_log_candidate()).then(|| node.clone())
     }
 
     /// 应用后台 Jstack 分析结果，过期 generation 会被忽略。

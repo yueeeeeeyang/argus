@@ -110,7 +110,6 @@ impl AppConfig {
         self.appearance.log_content_font_size =
             self.appearance.log_content_font_size.clamp(12.0, 20.0);
         self.loader.max_archive_depth = self.loader.max_archive_depth.min(8);
-        self.loader.archive_probe_concurrency = self.loader.archive_probe_concurrency.clamp(1, 16);
         self.log_search.quick_keywords = self.log_search.quick_keywords.trim().to_string();
         self.log_search
             .recent_keywords
@@ -171,9 +170,6 @@ impl Default for AppearanceConfig {
 pub(crate) struct LoaderConfig {
     /// 允许展开的嵌套压缩包最大层级，默认 2 层。
     pub max_archive_depth: usize,
-    /// 当前目录层单文件压缩包探测并发数，默认 4，避免大量压缩包串行探测过慢。
-    #[serde(default = "default_archive_probe_concurrency")]
-    pub archive_probe_concurrency: usize,
     /// 是否跟随符号链接；默认关闭以避免大目录扫描时出现循环。
     pub follow_symlinks: bool,
 }
@@ -183,15 +179,9 @@ impl Default for LoaderConfig {
     fn default() -> Self {
         Self {
             max_archive_depth: 2,
-            archive_probe_concurrency: default_archive_probe_concurrency(),
             follow_symlinks: false,
         }
     }
-}
-
-/// 返回默认单文件压缩包探测并发数。
-fn default_archive_probe_concurrency() -> usize {
-    4
 }
 
 /// 搜索关键字历史最多保留条数；超出时丢弃最旧项。
@@ -326,7 +316,6 @@ mod tests {
             },
             loader: LoaderConfig {
                 max_archive_depth: 99,
-                archive_probe_concurrency: 99,
                 follow_symlinks: true,
             },
             log_search: LogSearchConfig {
@@ -354,7 +343,6 @@ mod tests {
         assert_eq!(config.appearance.log_content_font_size, 20.0);
         assert_eq!(config.appearance.theme_mode, "dark.toml");
         assert_eq!(config.loader.max_archive_depth, 8);
-        assert_eq!(config.loader.archive_probe_concurrency, 16);
         assert_eq!(config.log_search.quick_keywords, "ERROR, WARN");
         assert_eq!(
             config.log_display.jstack_thread_name_filters,
@@ -372,12 +360,6 @@ mod tests {
         assert_eq!(config.upgrade.public_key_base64, "TEST_PUBLIC_KEY_BASE64");
         assert_eq!(config.upgrade.skipped_version.as_deref(), Some("0.2.0"));
         assert_eq!(config.upgrade.last_check_at, None);
-    }
-
-    /// 验证默认压缩包探测并发数为 4，兼顾展开速度和后台资源占用。
-    #[test]
-    fn default_archive_probe_concurrency_is_four() {
-        assert_eq!(LoaderConfig::default().archive_probe_concurrency, 4);
     }
 
     /// 验证新安装用户默认使用设计文档要求的 12px 日志字号。

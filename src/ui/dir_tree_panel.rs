@@ -125,7 +125,6 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
                     visible_count,
                     cx.processor(|app, range: Range<usize>, _window, cx| {
                         let visible_ids = app.visible_source_ids()[range].to_vec();
-                        app.prioritize_visible_source_archive_probes(&visible_ids, cx);
                         let theme = app.theme.clone();
                         let mut rows = Vec::with_capacity(visible_ids.len());
 

@@ -212,8 +212,6 @@ impl ArgusApp {
             profile_elapsed_seconds,
         } = preparation;
         // 回填与生成快照使用同一注册表副本，确保报告中的内部来源 ID 可以继续导航到主窗口。
-        self.source_child_load_generations.clear();
-        self.clear_source_archive_probe_state();
         self.source_registry = registry;
         self.rebuild_filtered_source_ids();
         self.mark_source_content_changed(cx);

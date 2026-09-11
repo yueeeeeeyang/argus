@@ -7,17 +7,21 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use gpui::{AppContext, Context, Keystroke, ScrollStrategy, UniformListScrollHandle};
+use gpui::{AppContext, Context, Keystroke, ScrollStrategy, Timer, UniformListScrollHandle};
 
 use crate::app::{ArgusApp, InputTextSelectionDrag, Workspace};
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, word_range_at,
 };
-use crate::loader::{BrowseEntry, BrowseLocation, BrowseResult, LogSourceLoader, PathBrowser};
+use crate::loader::{BrowseEntry, BrowseLocation, BrowseResult, PathBrowser, SourceTreeScanner};
 use crate::ui::source_picker::SourcePickerWindow;
 use crate::utils::path::display_path;
+
+/// 完整加载进度前台轮询间隔；与搜索 worker 事件轮询保持同一量级。
+const SOURCE_LOAD_PROGRESS_POLL_INTERVAL_MS: u64 = 100;
 
 /// 来源选择器列表支持的排序字段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,10 +206,6 @@ impl SourcePickerState {
 impl ArgusApp {
     /// 打开主窗口内的自定义来源选择器模态框，并在后台刷新当前目录条目。
     pub(crate) fn open_source_picker(&mut self, cx: &mut Context<Self>) {
-        if self.is_source_loading {
-            self.placeholder_notice = "日志来源正在加载中，请稍候".to_string();
-            return;
-        }
         if self.source_picker.is_open && self.source_picker_modal.is_some() {
             self.placeholder_notice = "日志来源选择器已打开".to_string();
             return;
@@ -338,6 +338,8 @@ impl ArgusApp {
     }
 
     /// 确认选择器路径并复用现有来源加载流程，返回是否成功进入加载状态。
+    ///
+    /// 完整初始化语义下新加载会取消在途任务，因此选择非空时必然启动加载。
     pub(crate) fn confirm_source_picker_selection(&mut self, cx: &mut Context<Self>) -> bool {
         let paths = self.source_picker.selected_paths.clone();
         if paths.is_empty() {
@@ -345,35 +347,36 @@ impl ArgusApp {
             return false;
         }
 
-        let started = self.load_sources_from_paths(paths, ExternalSourceTrigger::SourcePicker, cx);
-        if !started && self.source_picker.error_message.is_none() {
-            self.source_picker.error_message = Some("日志来源正在加载中，请稍候".to_string());
-        }
-        started
+        self.load_sources_from_paths(paths, ExternalSourceTrigger::SourcePicker, cx)
     }
 
-    /// 统一加载外部传入的日志来源路径。
+    /// 统一加载外部传入的日志来源路径，后台一次性完整初始化整棵来源树。
     ///
     /// 参数说明：
     /// - `paths`：待加载的本地文件、目录或压缩包路径。
     /// - `trigger`：触发来源，用于生成用户可读提示。
     /// - `cx`：应用上下文，用于派发后台加载任务。
     ///
-    /// 返回值：成功启动后台任务返回 `true`；已有加载任务或路径为空返回 `false`。
+    /// 返回值：成功启动后台任务返回 `true`；路径为空返回 `false`。
     pub(crate) fn load_sources_from_paths(
         &mut self,
         paths: Vec<PathBuf>,
         trigger: ExternalSourceTrigger,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.is_source_loading {
-            self.placeholder_notice = "日志来源正在加载中，请稍候".to_string();
-            return false;
-        }
         if paths.is_empty() {
             self.placeholder_notice = "未收到可加载的日志来源路径".to_string();
             return false;
         }
+
+        // 新加载请求取消在途扫描，避免多个完整初始化任务并行争用磁盘和内存。
+        if let Some(cancellation) = self.source_load_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.source_load_generation = self.source_load_generation.wrapping_add(1);
+        let load_generation = self.source_load_generation;
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        self.source_load_cancellation = Some(cancellation.clone());
 
         self.activate_log_analysis_for_source_load();
         self.source_picker.is_open = false;
@@ -381,38 +384,84 @@ impl ArgusApp {
         self.source_picker.error_message = None;
         self.source_picker.selected_paths.clear();
         self.is_source_loading = true;
-        self.placeholder_notice = format!("正在加载 {} 个{}", paths.len(), trigger.loading_label());
+        self.placeholder_notice = format!(
+            "正在完整加载 {} 个{}…",
+            paths.len(),
+            trigger.loading_label()
+        );
         let loader_config = self.config.loader.clone();
         let archive_passwords = self.archive_passwords.clone();
-        let retry_paths = paths.clone();
+        let (progress_sender, progress_receiver) = std::sync::mpsc::channel::<usize>();
 
         cx.spawn(async move |view, cx| {
-            let report = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move {
-                    LogSourceLoader::new(loader_config)
-                        .with_archive_passwords(archive_passwords)
-                        .with_deferred_archive_probe()
-                        .load_paths(paths)
+                    SourceTreeScanner::scan_paths(
+                        paths,
+                        loader_config,
+                        archive_passwords,
+                        cancellation,
+                        Some(progress_sender),
+                    )
                 })
                 .await;
 
             view.update(cx, |app, cx| {
-                app.apply_load_report_with_context(
-                    report,
-                    Some(crate::app::ArchivePasswordRetryAction::LoadPaths {
-                        paths: retry_paths,
-                        trigger,
-                    }),
-                    cx,
-                );
+                app.apply_source_load_result(load_generation, result, cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
 
+        Self::poll_source_load_progress(load_generation, trigger, progress_receiver, cx);
+
         true
+    }
+
+    /// 前台定时轮询完整加载进度并更新状态提示；后台任务结束通道断开后轮询自然退出。
+    fn poll_source_load_progress(
+        load_generation: usize,
+        trigger: ExternalSourceTrigger,
+        progress_receiver: std::sync::mpsc::Receiver<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |view, cx| {
+            loop {
+                // 合并一轮内的全部进度，只展示最新已扫描节点数。
+                let mut latest_scanned = None;
+                loop {
+                    match progress_receiver.try_recv() {
+                        Ok(scanned) => latest_scanned = Some(scanned),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    }
+                }
+
+                let should_continue = view
+                    .update(cx, |app, cx| {
+                        if app.source_load_generation != load_generation || !app.is_source_loading {
+                            return false;
+                        }
+                        if let Some(scanned) = latest_scanned {
+                            app.placeholder_notice = format!(
+                                "正在完整加载{}…已扫描 {scanned} 项",
+                                trigger.loading_label()
+                            );
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    return;
+                }
+
+                Timer::after(Duration::from_millis(SOURCE_LOAD_PROGRESS_POLL_INTERVAL_MS)).await;
+            }
+        })
+        .detach();
     }
 
     /// 开始加载日志来源前返回日志分析工作区，并同步对应侧栏的动画宽度。
@@ -431,7 +480,7 @@ impl ArgusApp {
     /// - `paths`：GPUI 从系统拖拽事件中解析出的本地路径切片。
     /// - `cx`：应用上下文，用于启动统一来源加载任务。
     ///
-    /// 返回值：成功启动后台加载任务返回 `true`；无路径或已有任务时返回 `false`。
+    /// 返回值：成功启动后台加载任务返回 `true`；无路径时返回 `false`。
     pub(crate) fn load_dropped_sources(
         &mut self,
         paths: &[PathBuf],

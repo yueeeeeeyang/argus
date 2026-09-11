@@ -123,8 +123,6 @@ struct SettingsModalSnapshot {
     log_content_font_size: f32,
     /// 最大嵌套压缩包深度。
     max_archive_depth: usize,
-    /// 当前目录层单文件压缩包探测并发数。
-    archive_probe_concurrency: usize,
     /// 是否跟随符号链接。
     follow_symlinks: bool,
     /// 快搜关键字输入框状态。
@@ -168,7 +166,6 @@ impl SettingsModalSnapshot {
             is_theme_dropdown_open: app.is_theme_dropdown_open,
             log_content_font_size: app.log_content_font_size,
             max_archive_depth: app.config.loader.max_archive_depth,
-            archive_probe_concurrency: app.config.loader.archive_probe_concurrency,
             follow_symlinks: app.config.loader.follow_symlinks,
             quick_keywords_input: app.settings_quick_keywords_input.clone(),
             jstack_thread_name_filter_input: app.settings_jstack_thread_name_filter_input.clone(),
@@ -1400,15 +1397,6 @@ fn render_log_loading_section(
             theme,
         ))
         .child(setting_row(
-            "探测并发数",
-            archive_probe_concurrency_control(
-                snapshot.archive_probe_concurrency,
-                app_handle,
-                theme,
-            ),
-            theme,
-        ))
-        .child(setting_row(
             "符号链接策略",
             follow_symlink_control(snapshot.follow_symlinks, app_handle, theme),
             theme,
@@ -1947,48 +1935,6 @@ fn archive_depth_control(
             theme,
             move |_, _, cx| {
                 update_settings_app(&plus_app, cx, |app, _| app.adjust_max_archive_depth(1));
-            },
-        ))
-}
-
-/// 渲染单文件压缩包探测并发数步进控件。
-fn archive_probe_concurrency_control(
-    concurrency: usize,
-    app_handle: &Entity<ArgusApp>,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let minus_app = app_handle.clone();
-    let plus_app = app_handle.clone();
-
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(render_icon_button(
-            "settings-archive-probe-concurrency-minus",
-            ArgusIcon::Minus,
-            "减少探测并发数",
-            false,
-            IconButtonSize::Small,
-            theme,
-            move |_, _, cx| {
-                update_settings_app(&minus_app, cx, |app, _| {
-                    app.adjust_archive_probe_concurrency(-1)
-                });
-            },
-        ))
-        .child(value_badge(format!("{concurrency} 个"), theme))
-        .child(render_icon_button(
-            "settings-archive-probe-concurrency-plus",
-            ArgusIcon::Plus,
-            "增加探测并发数",
-            false,
-            IconButtonSize::Small,
-            theme,
-            move |_, _, cx| {
-                update_settings_app(&plus_app, cx, |app, _| {
-                    app.adjust_archive_probe_concurrency(1)
-                });
             },
         ))
 }

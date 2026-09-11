@@ -17,7 +17,6 @@ pub(crate) mod report;
 pub(crate) mod runtime;
 pub(crate) mod session;
 pub(crate) mod source_scan;
-pub(crate) mod source_scanner;
 pub(crate) mod tools;
 
 pub(crate) use assistant::{AssistantHistoryTurn, AssistantRunRequest, run_assistant_turn};
@@ -50,13 +49,10 @@ mod architecture_tests {
         "src/agent/log_search.rs",
         "src/agent/analyzers.rs",
         "src/agent/source_scan.rs",
-        "src/agent/source_scanner.rs",
     ];
     /// 主窗口业务模块的导入前缀；模型工具不得重新接回这些展示或交互流程。
     const FORBIDDEN_BUSINESS_IMPORTS: &[&str] =
         &["crate::reader::", "crate::search::", "crate::analysis::"];
-    /// UI 来源树加载器属于渐进交互流程，Agent 完整扫描器不得通过它逐节点展开。
-    const FORBIDDEN_SOURCE_LOADER_NAMES: &[&str] = &["LogSourceLoader", "LoadReport"];
 
     /// 防止后续功能扩展把 Agent 工具重新绑定到主窗口阅读、搜索或分析页面实现。
     #[test]
@@ -70,16 +66,6 @@ mod architecture_tests {
                     !source.contains(forbidden_import),
                     "Agent 工具实现 {relative_path} 禁止导入主窗口业务模块 {forbidden_import}"
                 );
-            }
-            if relative_path.ends_with("source_scan.rs")
-                || relative_path.ends_with("source_scanner.rs")
-            {
-                for forbidden_name in FORBIDDEN_SOURCE_LOADER_NAMES {
-                    assert!(
-                        !source.contains(forbidden_name),
-                        "Agent 来源扫描实现 {relative_path} 禁止复用 UI 来源加载类型 {forbidden_name}"
-                    );
-                }
             }
             if relative_path.ends_with("batch_search.rs") {
                 assert!(

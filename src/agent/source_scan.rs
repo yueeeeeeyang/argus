@@ -2,16 +2,16 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-17
 //! 作者：Argus 开发团队
-//! 主要功能：调用独立 AgentSourceScanner 全量扫描目录和归档，匹配日志类型说明，并返回可安全回填 UI 的注册表。
+//! 主要功能：调用 SourceTreeScanner 全量扫描目录和归档，匹配日志类型说明，并返回可安全回填 UI 的注册表。
 
 use std::time::Instant;
 
 use crate::agent::session::{AgentScopeSelection, SourceScopeSnapshot};
-use crate::agent::source_scanner::AgentSourceScanner;
 use crate::config::{
     AiConfig, LoaderConfig, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
 };
 use crate::loader::archive::ArchivePasswordStore;
+use crate::loader::source_scanner::SourceTreeScanner;
 use crate::loader::{SourceId, SourceRegistry};
 
 /// AI 来源扫描完成后的不可变会话范围及补齐后的来源注册表。
@@ -105,7 +105,7 @@ pub(crate) fn prepare_agent_source_scope_for_selection(
 ) -> Result<AgentSourcePreparation, String> {
     let source_scan_started_at = Instant::now();
     let root_ids = resolve_scope_roots(&registry, selection)?;
-    let scan_result = AgentSourceScanner::new(
+    let scan_result = SourceTreeScanner::new(
         &registry,
         loader_config,
         archive_passwords.clone(),

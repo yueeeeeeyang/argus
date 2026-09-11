@@ -302,7 +302,7 @@ impl SourceRegistry {
 
     /// 替换节点的类型、位置和元信息。
     ///
-    /// 说明：后台单文件压缩包探测完成后会把可展开压缩包修正为可直接打开的叶子节点。
+    /// 说明：加密压缩包输入密码重扫成功后，可展开压缩包可能被修正为可直接打开的单文件叶子节点。
     /// 调用方应在批量替换后统一调用 `rebuild_all_indices`，避免大量节点逐个重建。
     pub(crate) fn replace_node_payload(
         &mut self,
@@ -330,47 +330,59 @@ impl SourceRegistry {
         true
     }
 
-    /// 将子级注册表追加到指定父节点下，并重映射子节点 ID。
-    pub(crate) fn append_children_registry(
+    /// 用另一注册表中指定子树根替换当前节点的载荷，并把该根的子级接挂到当前节点下。
+    ///
+    /// 说明：按节点密码重试成功后，子树根承载最新的类型、位置和元信息（可能折叠为单文件叶子），
+    /// 其子级统一分配新 ID 接挂，避免与现有节点冲突。
+    ///
+    /// 返回值：当前节点和子树根都存在时返回接挂的节点数量（不含被替换节点自身）。
+    pub(crate) fn replace_node_subtree_from(
         &mut self,
-        parent_id: SourceId,
-        other: SourceRegistry,
-        should_expand_parent: bool,
-    ) -> usize {
-        self.remove_existing_children(parent_id);
-        self.children.insert(parent_id, Vec::new());
+        node_id: SourceId,
+        other: &SourceRegistry,
+        other_root: SourceId,
+        should_expand: bool,
+    ) -> Option<usize> {
+        let subtree_root = other.node(other_root)?.clone();
+        if !self.replace_node_payload(
+            node_id,
+            subtree_root.kind,
+            subtree_root.location,
+            subtree_root.metadata,
+        ) {
+            return None;
+        }
+
+        if !self
+            .nodes
+            .get(&node_id)
+            .is_some_and(|node| node.kind.can_expand())
+        {
+            self.rebuild_all_indices();
+            return Some(0);
+        }
+
+        self.remove_existing_children(node_id);
+        self.children.insert(node_id, Vec::new());
         let mut id_map = HashMap::new();
         let mut added_count = 0;
-
-        for old_id in other.root_ids.iter().copied() {
+        for child_id in other.child_ids(other_root).iter().copied() {
             self.append_subtree_from(
-                &other,
-                old_id,
-                Some(parent_id),
+                other,
+                child_id,
+                Some(node_id),
                 &mut id_map,
                 &mut added_count,
             );
         }
 
-        if let Some(parent) = self.nodes.get_mut(&parent_id) {
-            parent.metadata.children_loaded = true;
-            parent.metadata.is_loading = false;
-            parent.metadata.message = None;
-            parent.expanded = should_expand_parent;
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.metadata.children_loaded = true;
+            node.metadata.is_loading = false;
+            node.expanded = should_expand;
         }
         self.rebuild_all_indices();
-        added_count
-    }
-
-    /// 标记子级加载失败，保留未加载状态以便用户下次点击重试。
-    pub(crate) fn mark_children_load_failed(&mut self, parent_id: SourceId, message: String) {
-        if let Some(parent) = self.nodes.get_mut(&parent_id) {
-            parent.metadata.children_loaded = false;
-            parent.metadata.is_loading = false;
-            parent.metadata.message = Some(message);
-            parent.expanded = false;
-        }
-        self.rebuild_visible_index();
+        Some(added_count)
     }
 
     /// 同时重建树序、行元数据和可见索引，供结构变化后调用。
@@ -554,6 +566,7 @@ mod tests {
                 children_loaded: true,
                 is_loading: false,
                 message: None,
+                archive_password_required: false,
             },
             selected: false,
             expanded,

@@ -1,8 +1,8 @@
-//! 文件职责：提取来源树选择、展开折叠、子级懒加载、压缩包探测和分析能力判定等方法到独立子模块。
+//! 文件职责：提取来源树选择、展开折叠、完整加载回填和按节点密码重试等方法到独立子模块。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-07
 //! 作者：Argus 开发团队
-//! 主要功能：维护来源树语义状态、异步子级加载、归档探测，并通知助手真实来源内容版本变化。
+//! 主要功能：维护来源树语义状态、整树替换式加载回填、加密压缩包子树重试，并通知助手真实来源内容版本变化。
 
 use super::*;
 
@@ -31,7 +31,7 @@ impl ArgusApp {
         })
     }
 
-    /// 判断来源节点是否是压缩包内目录；需要先加载子级再收集已加载后代文件。
+    /// 判断来源节点是否是压缩包内目录；分析时直接收集已加载后代文件。
     pub(super) fn source_is_archive_directory(&self, source_id: SourceId) -> bool {
         self.source_registry
             .node(source_id)
@@ -53,36 +53,6 @@ impl ArgusApp {
         })
     }
 
-    /// 确保压缩包内目录子级已经加载；未加载时先触发加载并记录待续做动作。
-    pub(super) fn ensure_source_directory_ready_for_analysis(
-        &mut self,
-        source_id: SourceId,
-        pending_action: PendingSourceAnalysisAction,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !self.source_is_archive_directory(source_id) {
-            return true;
-        }
-
-        let Some(node) = self.source_registry.node(source_id).cloned() else {
-            self.placeholder_notice = "未找到可分析的来源目录".to_string();
-            return false;
-        };
-        if node.metadata.children_loaded {
-            return true;
-        }
-
-        self.pending_source_analysis_after_load = Some(pending_action);
-        if node.metadata.is_loading {
-            self.placeholder_notice = format!("正在加载 {} 的子级，完成后自动开始分析", node.label);
-            return false;
-        }
-
-        self.start_source_child_load(source_id, node.clone(), cx);
-        self.placeholder_notice = format!("正在加载 {} 的子级，完成后自动开始分析", node.label);
-        false
-    }
-
     /// 根据节点 ID 选择来源树节点。
     pub(crate) fn select_source(&mut self, source_id: SourceId) {
         let Some(selected_node) = self.source_registry.select(source_id) else {
@@ -97,8 +67,8 @@ impl ArgusApp {
         }
     }
 
-    /// 展开或折叠目录、压缩包等来源节点。
-    pub(crate) fn toggle_source_expanded(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+    /// 展开或折叠目录、压缩包等来源节点；加密压缩包降级节点转为密码输入引导。
+    pub(crate) fn toggle_source_expanded(&mut self, source_id: SourceId, _cx: &mut Context<Self>) {
         let Some(node) = self.source_registry.node(source_id).cloned() else {
             self.placeholder_notice = "未找到可展开来源节点".to_string();
             return;
@@ -109,86 +79,177 @@ impl ArgusApp {
             return;
         }
 
+        // 完整初始化后子级始终就绪；只有枚举时被密码拦截的归档节点需要在点击时引导输入密码。
+        if matches!(node.kind, SourceKind::Archive(_)) && node.metadata.archive_password_required {
+            self.present_archive_password_prompt_for_source_node(&node);
+            return;
+        }
+
         if node.metadata.is_loading {
-            if let Some(node) = self.source_registry.node_mut(source_id) {
+            // 密码重扫进行中的节点允许先行切换展开状态，结果回填时保留用户选择。
+            let expanded = if let Some(node) = self.source_registry.node_mut(source_id) {
                 node.expanded = !node.expanded;
-            }
+                node.expanded
+            } else {
+                return;
+            };
             self.source_registry.rebuild_visible_index();
             self.rebuild_filtered_source_ids();
-            self.placeholder_notice = if node.expanded {
-                format!("已折叠 {}，后台加载完成后保持收起", node.label)
+            self.placeholder_notice = if expanded {
+                format!("已展开 {}，正在等待密码重扫完成", node.label)
             } else {
-                format!("已展开 {}，正在等待后台加载完成", node.label)
+                format!("已折叠 {}", node.label)
             };
             return;
         }
 
-        if node.expanded {
-            self.source_registry.toggle_expanded(source_id);
-            self.rebuild_filtered_source_ids();
-            self.placeholder_notice = format!("已折叠 {}", node.label);
-            return;
-        }
-
-        if node.metadata.children_loaded {
-            self.source_registry.toggle_expanded(source_id);
-            self.rebuild_filtered_source_ids();
-            self.placeholder_notice = format!("已展开 {}", node.label);
-            return;
-        }
-
-        if matches!(node.kind, SourceKind::Archive(_))
-            && !self.source_archive_probe_completed_ids.contains(&source_id)
-        {
-            let label = node.label.clone();
-            self.start_direct_source_archive_probe(source_id, node, cx);
-            self.placeholder_notice = format!("正在识别 {label}，完成后继续打开或展开");
-            return;
-        }
-
-        self.start_source_child_load(source_id, node, cx);
+        let expanded = self
+            .source_registry
+            .toggle_expanded(source_id)
+            .unwrap_or(false);
+        self.rebuild_filtered_source_ids();
+        self.placeholder_notice = if expanded {
+            format!("已展开 {}", node.label)
+        } else {
+            format!("已折叠 {}", node.label)
+        };
     }
 
-    /// 启动指定可展开节点的子级后台加载。
-    pub(super) fn start_source_child_load(
+    /// 为加密压缩包降级节点构造缺少密码错误并弹出密码输入框。
+    ///
+    /// 密码键必须与扫描器读取该节点时使用的容器键一致：本地归档用根键，
+    /// 嵌套归档用外层路径加完整容器条目链路，否则输入的密码无法在重扫时命中。
+    pub(super) fn present_archive_password_prompt_for_source_node(
+        &mut self,
+        node: &SourceTreeNode,
+    ) {
+        let source_label = node.location.display_path();
+        let key = match &node.location {
+            SourceLocation::LocalPath(path) => ArchivePasswordKey::root(path.clone()),
+            SourceLocation::ArchiveEntry {
+                archive_path,
+                container_entries,
+                entry_path,
+                ..
+            } => {
+                let mut container_chain = container_entries.clone();
+                container_chain.push(entry_path.clone());
+                ArchivePasswordKey::new(archive_path.clone(), &container_chain)
+            }
+        };
+        let error =
+            ArchivePasswordError::required(source_label.clone()).with_context(key, source_label);
+        self.present_archive_password_prompt(
+            error,
+            ArchivePasswordRetryAction::ReloadArchiveNode { source_id: node.id },
+        );
+    }
+
+    /// 密码提交后在后台仅重扫目标压缩包子树；节点保持转圈直到结果回填。
+    pub(super) fn start_archive_node_password_retry(
         &mut self,
         source_id: SourceId,
-        node: SourceTreeNode,
         cx: &mut Context<Self>,
     ) {
-        if !node.kind.can_expand() || node.metadata.children_loaded || node.metadata.is_loading {
+        let Some(node) = self.source_registry.node(source_id).cloned() else {
+            self.placeholder_notice = "未找到需要密码的压缩包节点".to_string();
             return;
-        }
+        };
 
-        if let Some(node) = self.source_registry.node_mut(source_id) {
-            node.expanded = true;
-            node.metadata.is_loading = true;
-        }
+        self.source_registry.set_loading(source_id, true);
         self.source_registry.rebuild_visible_index();
         self.rebuild_filtered_source_ids();
-        self.placeholder_notice = format!("正在加载 {} 的子级", node.label);
+        self.placeholder_notice = format!("正在按密码重新扫描 {}", node.label);
 
         let loader_config = self.config.loader.clone();
         let archive_passwords = self.archive_passwords.clone();
-        let load_generation = self.next_source_child_load_generation(source_id);
         cx.spawn(async move |view, cx| {
-            let report = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move {
-                    LogSourceLoader::new(loader_config)
-                        .with_archive_passwords(archive_passwords)
-                        .with_deferred_archive_probe()
-                        .load_children(&node)
+                    SourceTreeScanner::scan_archive_subtree(
+                        &node,
+                        loader_config,
+                        archive_passwords,
+                        tokio_util::sync::CancellationToken::new(),
+                    )
                 })
                 .await;
 
             view.update(cx, |app, cx| {
-                app.apply_child_load_report_with_context(source_id, load_generation, report, cx);
+                app.apply_archive_node_retry_result(source_id, result, cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// 应用按节点密码重试的扫描结果：成功原子替换子树，密码错误再弹窗，其它错误标记到节点。
+    pub(super) fn apply_archive_node_retry_result(
+        &mut self,
+        source_id: SourceId,
+        result: anyhow::Result<SourceTreeScanResult>,
+        cx: &mut Context<Self>,
+    ) {
+        let scan_result = match result {
+            Ok(scan_result) => scan_result,
+            Err(error) => {
+                self.source_registry.set_loading(source_id, false);
+                // 密码仍不正确：沿用现有 Invalid 流程清除错误密码缓存后再次弹窗。
+                if let Some(password_error) = find_archive_password_error(&error)
+                    && self.present_archive_password_prompt(
+                        password_error,
+                        ArchivePasswordRetryAction::ReloadArchiveNode { source_id },
+                    )
+                {
+                    self.rebuild_filtered_source_ids();
+                    return;
+                }
+                let label = self
+                    .source_registry
+                    .node(source_id)
+                    .map(|node| node.label.clone())
+                    .unwrap_or_else(|| "压缩包".to_string());
+                if let Some(node) = self.source_registry.node_mut(source_id) {
+                    node.metadata.message = Some(error.to_string());
+                }
+                self.rebuild_filtered_source_ids();
+                self.placeholder_notice = format!("重新扫描 {label} 失败：{error}");
+                return;
+            }
+        };
+
+        let Some(&subtree_root_id) = scan_result.registry.root_ids().first() else {
+            // 严格重扫成功必然包含子树根；防御性兜底，避免静默吞掉异常结果。
+            self.source_registry.set_loading(source_id, false);
+            self.placeholder_notice = "压缩包重试扫描未返回有效内容".to_string();
+            return;
+        };
+        let label = self
+            .source_registry
+            .node(source_id)
+            .map(|node| node.label.clone())
+            .unwrap_or_else(|| "压缩包".to_string());
+        if self
+            .source_registry
+            .replace_node_subtree_from(source_id, &scan_result.registry, subtree_root_id, true)
+            .is_none()
+        {
+            self.placeholder_notice = "压缩包节点已不在当前来源树中，请重新加载来源".to_string();
+            return;
+        }
+        self.rebuild_filtered_source_ids();
+        self.mark_source_content_changed(cx);
+        self.placeholder_notice = if scan_result.warnings.is_empty() {
+            format!("已解锁并展开 {label}")
+        } else {
+            format!(
+                "已解锁并展开 {label}，{} 项警告：{}",
+                scan_result.warnings.len(),
+                scan_result.warnings.join("；")
+            )
+        };
     }
 
     /// 收起来源目录树中的所有可展开节点。
@@ -268,497 +329,64 @@ impl ArgusApp {
         self.filtered_source_ids.clear();
         self.source_tree_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
-        self.pending_source_analysis_after_load = None;
     }
 
-    /// 应用根来源加载报告。
+    /// 应用整树完整加载结果。
     ///
     /// 每次成功加载真实来源都会替换旧来源，避免不同批次日志结构混在同一棵树中。
-    pub(crate) fn apply_load_report(&mut self, report: LoadReport) -> bool {
+    pub(crate) fn apply_load_report(&mut self, result: SourceTreeScanResult) -> bool {
         self.is_source_loading = false;
-        let added_count = report.added_count;
+        let SourceTreeScanResult { registry, warnings } = result;
 
-        if report.registry.is_empty() {
-            self.placeholder_notice = if report.errors.is_empty() {
+        if registry.is_empty() {
+            self.placeholder_notice = if warnings.is_empty() {
                 "未加载任何日志来源".to_string()
             } else {
-                format!("来源加载失败：{}", report.errors.join("；"))
+                format!("来源加载失败：{}", warnings.join("；"))
             };
             return false;
         }
 
-        self.source_registry = report.registry;
+        let added_count = registry.tree_order_source_ids().len();
+        self.source_registry = registry;
         self.has_loaded_real_sources = true;
-        self.source_child_load_generations.clear();
-        self.clear_source_archive_probe_state();
         self.source_picker.selected_paths.clear();
         self.reset_log_workspace_after_source_replace();
-        let probe_ids = self.source_registry.tree_order_source_ids().to_vec();
-        self.enqueue_source_archive_probe_ids(&probe_ids, false);
 
-        self.placeholder_notice = if report.errors.is_empty() {
+        self.placeholder_notice = if warnings.is_empty() {
             format!("已加载 {added_count} 个来源节点，请选择日志")
         } else {
             format!(
-                "已加载 {added_count} 个来源节点，{} 项失败：{}",
-                report.errors.len(),
-                report.errors.join("；")
+                "已加载 {added_count} 个来源节点，{} 项警告：{}",
+                warnings.len(),
+                warnings.join("；")
             )
         };
         true
     }
 
-    /// 在 UI 事件中应用根来源加载报告，并同步清理 Jstack 方块悬浮气泡。
-    pub(crate) fn apply_load_report_with_context(
+    /// 应用后台完整加载结果；过期 generation（已被更新的加载请求取消）直接丢弃。
+    pub(crate) fn apply_source_load_result(
         &mut self,
-        report: LoadReport,
-        retry_action: Option<crate::app::ArchivePasswordRetryAction>,
+        load_generation: usize,
+        result: anyhow::Result<SourceTreeScanResult>,
         cx: &mut Context<Self>,
     ) {
+        if self.source_load_generation != load_generation {
+            return;
+        }
+        self.source_load_cancellation = None;
         self.clear_jstack_cell_hover_preview();
-        if let Some(password_error) = report.password_request.clone()
-            && let Some(retry_action) = retry_action
-            && self.present_archive_password_prompt(password_error, retry_action)
-        {
-            self.is_source_loading = false;
-            return;
-        }
-        if self.apply_load_report(report) {
-            self.reset_assistant_after_log_reload(cx);
-        }
-    }
-
-    /// 应用懒加载子级报告，并挂回指定父节点。
-    #[cfg(test)]
-    pub(super) fn apply_child_load_report(
-        &mut self,
-        parent_id: SourceId,
-        load_generation: usize,
-        report: LoadReport,
-    ) {
-        self.apply_child_load_report_internal(parent_id, load_generation, report);
-    }
-
-    /// 在 UI 回调中应用子级加载报告，并在压缩包目录加载完毕后自动续做分析动作。
-    pub(crate) fn apply_child_load_report_with_context(
-        &mut self,
-        parent_id: SourceId,
-        load_generation: usize,
-        report: LoadReport,
-        cx: &mut Context<Self>,
-    ) {
-        let node_count_before = self.source_registry.tree_order_source_ids().len();
-        let children_loaded_before = self
-            .source_registry
-            .node(parent_id)
-            .is_some_and(|node| node.metadata.children_loaded);
-        if self.apply_child_load_report_internal(parent_id, load_generation, report) {
-            let node_count_after = self.source_registry.tree_order_source_ids().len();
-            let children_loaded_after = self
-                .source_registry
-                .node(parent_id)
-                .is_some_and(|node| node.metadata.children_loaded);
-            if node_count_before != node_count_after
-                || children_loaded_before != children_loaded_after
-            {
-                self.mark_source_content_changed(cx);
-            }
-            self.resume_pending_source_analysis(parent_id, cx);
-        }
-    }
-
-    /// 应用懒加载子级报告的共享实现，返回是否处理了当前有效 generation。
-    pub(super) fn apply_child_load_report_internal(
-        &mut self,
-        parent_id: SourceId,
-        load_generation: usize,
-        report: LoadReport,
-    ) -> bool {
-        if self.source_child_load_generations.get(&parent_id).copied() != Some(load_generation) {
-            return false;
-        }
-
-        if let Some(password_error) = report.password_request.clone()
-            && self.present_archive_password_prompt(
-                password_error,
-                crate::app::ArchivePasswordRetryAction::LoadChildren {
-                    source_id: parent_id,
-                },
-            )
-        {
-            self.source_child_load_generations.remove(&parent_id);
-            if let Some(parent) = self.source_registry.node_mut(parent_id) {
-                parent.metadata.is_loading = false;
-                parent.metadata.message = Some("等待输入压缩包密码".to_string());
-            }
-            self.rebuild_filtered_source_ids();
-            return true;
-        }
-        self.source_child_load_generations.remove(&parent_id);
-
-        if report.registry.is_empty() && !report.errors.is_empty() {
-            let message = report.errors.join("；");
-            self.source_registry
-                .mark_children_load_failed(parent_id, message.clone());
-            self.rebuild_filtered_source_ids();
-            self.placeholder_notice = format!("子级加载失败：{message}");
-            return true;
-        }
-
-        let should_keep_expanded = self
-            .source_registry
-            .node(parent_id)
-            .map(|node| node.expanded)
-            .unwrap_or(false);
-        let added_count = self.source_registry.append_children_registry(
-            parent_id,
-            report.registry,
-            should_keep_expanded,
-        );
-
-        if let Some(parent) = self.source_registry.node_mut(parent_id) {
-            if report.errors.is_empty() {
-                parent.metadata.message = None;
-            } else {
-                parent.metadata.message = Some(report.errors.join("；"));
-            }
-        }
-        self.rebuild_filtered_source_ids();
-        let child_ids = self.source_registry.child_ids(parent_id).to_vec();
-        self.enqueue_source_archive_probe_ids(&child_ids, false);
-
-        self.placeholder_notice = if report.errors.is_empty() {
-            format!("已加载 {added_count} 个子节点")
-        } else if added_count == 0 {
-            format!("子级加载失败：{}", report.errors.join("；"))
-        } else {
-            format!(
-                "已加载 {added_count} 个子节点，{} 项失败：{}",
-                report.errors.len(),
-                report.errors.join("；")
-            )
-        };
-        true
-    }
-
-    /// 子级加载成功返回后续做被挂起的分析动作，避免用户二次右键。
-    pub(super) fn resume_pending_source_analysis(
-        &mut self,
-        parent_id: SourceId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(action) = self.pending_source_analysis_after_load else {
-            return;
-        };
-        if action.source_id() != parent_id {
-            return;
-        }
-
-        self.pending_source_analysis_after_load = None;
-        if !self
-            .source_registry
-            .node(parent_id)
-            .is_some_and(|node| node.metadata.children_loaded)
-        {
-            return;
-        }
-
-        match action {
-            PendingSourceAnalysisAction::Jstack { source_id } => {
-                self.open_jstack_analysis_tab(source_id, cx);
-            }
-            PendingSourceAnalysisAction::Runtime { source_id } => {
-                self.open_runtime_analysis_tab(source_id, cx);
-            }
-        }
-    }
-
-    /// 清理来源树压缩包探测队列；来源树整体替换时调用。
-    pub(super) fn clear_source_archive_probe_state(&mut self) {
-        self.source_archive_probe_queue.clear();
-        self.source_archive_probe_queued_ids.clear();
-        self.source_archive_probe_inflight_ids.clear();
-        self.source_archive_probe_direct_inflight_ids.clear();
-        self.source_archive_probe_completed_ids.clear();
-        self.source_archive_probe_click_intents.clear();
-        self.source_archive_probe_generation = self.source_archive_probe_generation.wrapping_add(1);
-        self.pending_source_analysis_after_load = None;
-    }
-
-    /// 将可见来源节点提升到压缩包探测队列前端。
-    pub(crate) fn prioritize_visible_source_archive_probes(
-        &mut self,
-        source_ids: &[SourceId],
-        cx: &mut Context<Self>,
-    ) {
-        self.enqueue_source_archive_probes(source_ids, true, cx);
-    }
-
-    /// 入队来源树压缩包探测任务，支持普通追加和高优先级前插。
-    pub(super) fn enqueue_source_archive_probes(
-        &mut self,
-        source_ids: &[SourceId],
-        priority: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.enqueue_source_archive_probe_ids(source_ids, priority) {
-            return;
-        }
-
-        self.pump_source_archive_probe_queue(cx);
-    }
-
-    /// 只把来源压缩包节点放入后台探测队列，不立即启动后台任务。
-    pub(super) fn enqueue_source_archive_probe_ids(
-        &mut self,
-        source_ids: &[SourceId],
-        priority: bool,
-    ) -> bool {
-        let mut accepted_ids = Vec::new();
-        for source_id in source_ids.iter().copied() {
-            if !self.should_probe_source_archive(source_id) {
-                continue;
-            }
-            accepted_ids.push(source_id);
-        }
-
-        if accepted_ids.is_empty() {
-            return false;
-        }
-
-        if priority {
-            for source_id in accepted_ids.into_iter().rev() {
-                if self.source_archive_probe_queued_ids.contains(&source_id) {
-                    self.source_archive_probe_queue
-                        .retain(|queued_id| *queued_id != source_id);
-                } else {
-                    self.source_archive_probe_queued_ids.insert(source_id);
-                }
-                self.source_archive_probe_queue.push_front(source_id);
-            }
-        } else {
-            for source_id in accepted_ids {
-                if self.source_archive_probe_queued_ids.insert(source_id) {
-                    self.source_archive_probe_queue.push_back(source_id);
+        match result {
+            Ok(scan_result) => {
+                if self.apply_load_report(scan_result) {
+                    self.reset_assistant_after_log_reload(cx);
                 }
             }
-        }
-        true
-    }
-
-    /// 判断来源节点是否需要后台单文件压缩包探测。
-    pub(super) fn should_probe_source_archive(&self, source_id: SourceId) -> bool {
-        if self.source_archive_probe_completed_ids.contains(&source_id)
-            || self.source_archive_probe_inflight_ids.contains(&source_id)
-            || self
-                .source_archive_probe_direct_inflight_ids
-                .contains(&source_id)
-        {
-            return false;
-        }
-
-        self.source_registry.node(source_id).is_some_and(|node| {
-            matches!(node.kind, SourceKind::Archive(_)) && !node.metadata.children_loaded
-        })
-    }
-
-    /// 用户直接点击未探测压缩包时，绕过批量队列立即启动单节点探测。
-    pub(super) fn start_direct_source_archive_probe(
-        &mut self,
-        source_id: SourceId,
-        node: SourceTreeNode,
-        cx: &mut Context<Self>,
-    ) {
-        self.source_archive_probe_click_intents.insert(source_id);
-        if self.source_archive_probe_queued_ids.remove(&source_id) {
-            self.source_archive_probe_queue
-                .retain(|queued_id| *queued_id != source_id);
-        }
-
-        if self
-            .source_archive_probe_direct_inflight_ids
-            .contains(&source_id)
-            || self.source_archive_probe_inflight_ids.contains(&source_id)
-        {
-            return;
-        }
-
-        self.source_archive_probe_direct_inflight_ids
-            .insert(source_id);
-        let loader_config = self.config.loader.clone();
-        let archive_passwords = self.archive_passwords.clone();
-        let generation = self.source_archive_probe_generation;
-        let request = SourceArchiveProbeRequest { source_id, node };
-
-        cx.spawn(async move |view, cx| {
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    LogSourceLoader::new(loader_config)
-                        .with_archive_passwords(archive_passwords)
-                        .probe_archive_nodes(vec![request])
-                })
-                .await;
-
-            view.update(cx, |app, cx| {
-                app.apply_source_archive_probe_results(generation, results, cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// 按批次启动后台压缩包探测；每批完成后会再次调用自身处理后续队列。
-    pub(super) fn pump_source_archive_probe_queue(&mut self, cx: &mut Context<Self>) {
-        if !self.source_archive_probe_inflight_ids.is_empty() {
-            return;
-        }
-
-        let batch_size = self
-            .config
-            .loader
-            .archive_probe_concurrency
-            .clamp(1, 16)
-            .saturating_mul(SOURCE_ARCHIVE_PROBE_BATCH_FACTOR)
-            .max(1);
-        let mut batch_ids = Vec::new();
-        while batch_ids.len() < batch_size {
-            let Some(source_id) = self.source_archive_probe_queue.pop_front() else {
-                break;
-            };
-            self.source_archive_probe_queued_ids.remove(&source_id);
-            if !self.should_probe_source_archive(source_id) {
-                continue;
-            }
-            self.source_archive_probe_inflight_ids.insert(source_id);
-            batch_ids.push(source_id);
-        }
-
-        if batch_ids.is_empty() {
-            return;
-        }
-
-        let requests = batch_ids
-            .iter()
-            .filter_map(|source_id| {
-                self.source_registry.node(*source_id).cloned().map(|node| {
-                    SourceArchiveProbeRequest {
-                        source_id: *source_id,
-                        node,
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-
-        if requests.is_empty() {
-            for source_id in batch_ids {
-                self.source_archive_probe_inflight_ids.remove(&source_id);
-            }
-            return;
-        }
-
-        let loader_config = self.config.loader.clone();
-        let archive_passwords = self.archive_passwords.clone();
-        let generation = self.source_archive_probe_generation;
-        cx.spawn(async move |view, cx| {
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    LogSourceLoader::new(loader_config)
-                        .with_archive_passwords(archive_passwords)
-                        .probe_archive_nodes(requests)
-                })
-                .await;
-
-            view.update(cx, |app, cx| {
-                app.apply_source_archive_probe_results(generation, results, cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// 批量应用后台单文件压缩包探测结果。
-    pub(super) fn apply_source_archive_probe_results(
-        &mut self,
-        generation: usize,
-        results: Vec<SourceArchiveProbeResult>,
-        cx: &mut Context<Self>,
-    ) {
-        if generation != self.source_archive_probe_generation {
-            return;
-        }
-
-        let mut changed_count = 0;
-        let mut fallback_expand_ids = Vec::new();
-        let mut open_log_ids = Vec::new();
-
-        for result in results {
-            let was_completed = self
-                .source_archive_probe_completed_ids
-                .contains(&result.source_id);
-            self.source_archive_probe_inflight_ids
-                .remove(&result.source_id);
-            self.source_archive_probe_direct_inflight_ids
-                .remove(&result.source_id);
-            self.source_archive_probe_completed_ids
-                .insert(result.source_id);
-            let had_click_intent = self
-                .source_archive_probe_click_intents
-                .remove(&result.source_id);
-
-            if was_completed && !had_click_intent {
-                continue;
-            }
-
-            if let Some(patch) = result.patch {
-                let replaced = self.source_registry.replace_node_payload(
-                    result.source_id,
-                    patch.kind,
-                    patch.location,
-                    patch.metadata,
-                );
-                if replaced {
-                    changed_count += 1;
-                    if had_click_intent {
-                        open_log_ids.push(result.source_id);
-                    }
-                }
-            } else if had_click_intent {
-                fallback_expand_ids.push(result.source_id);
+            Err(error) => {
+                self.is_source_loading = false;
+                self.placeholder_notice = format!("来源加载失败：{error}");
             }
         }
-
-        if changed_count > 0 {
-            self.source_registry.rebuild_all_indices();
-            self.rebuild_filtered_source_ids();
-            self.mark_source_content_changed(cx);
-        }
-
-        for source_id in open_log_ids {
-            self.select_source(source_id);
-            self.request_open_log_content(source_id, cx);
-            self.scroll_source_into_view(source_id);
-        }
-
-        for source_id in fallback_expand_ids {
-            if let Some(node) = self.source_registry.node(source_id).cloned() {
-                self.start_source_child_load(source_id, node, cx);
-            }
-        }
-
-        self.pump_source_archive_probe_queue(cx);
-    }
-
-    /// 为指定来源节点生成下一次子级懒加载 generation。
-    pub(super) fn next_source_child_load_generation(&mut self, source_id: SourceId) -> usize {
-        let generation = self
-            .source_child_load_generations
-            .entry(source_id)
-            .or_insert(0);
-        *generation = generation.wrapping_add(1);
-        *generation
     }
 }

@@ -5,7 +5,10 @@
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
 use super::*;
-use crate::config::paths::isolated_test_dir;
+use std::path::Path;
+use std::path::PathBuf;
+
+use crate::config::paths::{isolated_test_dir, temporary_test_dir};
 
 /// 构造隔离真实用户目录的配置管理器。
 fn isolated_config_manager() -> ConfigManager {
@@ -167,6 +170,7 @@ fn app_with_loaded_archive_directory() -> (ArgusApp, SourceId, SourceId, SourceI
             children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: true,
@@ -192,6 +196,7 @@ fn app_with_loaded_archive_directory() -> (ArgusApp, SourceId, SourceId, SourceI
             children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -217,6 +222,7 @@ fn app_with_loaded_archive_directory() -> (ArgusApp, SourceId, SourceId, SourceI
             children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -642,9 +648,9 @@ fn sftp_file_actions_are_disabled_while_busy() {
     assert!(!app.can_delete_remote_file_selection(1));
 }
 
-/// 验证单文件探测未完成的压缩包已被选中时，也能立即打开 Jstack 分析右键菜单。
+/// 验证待密码解锁的压缩包降级节点不展示分析右键菜单，也不参与搜索多选。
 #[test]
-fn source_tree_context_menu_shows_jstack_action_for_pending_archive_probe() {
+fn source_tree_context_menu_rejects_password_required_archive() {
     let mut app = test_app();
     let mut registry = SourceRegistry::new();
     let archive_id = registry.allocate_id();
@@ -652,32 +658,27 @@ fn source_tree_context_menu_shows_jstack_action_for_pending_archive_probe() {
         id: archive_id,
         parent_id: None,
         depth: 0,
-        label: "thread.zip".to_string(),
+        label: "secret.zip".to_string(),
         kind: SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
-        location: SourceLocation::LocalPath(PathBuf::from("thread.zip")),
+        location: SourceLocation::LocalPath(PathBuf::from("secret.zip")),
         metadata: SourceMetadata {
             size: Some(1024),
             children_loaded: false,
-            is_loading: true,
-            message: None,
+            is_loading: false,
+            message: Some("需要密码访问".to_string()),
+            archive_password_required: true,
         },
         selected: false,
         expanded: false,
     });
     registry.rebuild_all_indices();
     app.source_registry = registry;
-    app.selected_search_source_ids.insert(archive_id);
 
+    assert!(!app.is_source_selectable_for_search_selection(archive_id));
     app.open_source_tree_context_menu(archive_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
 
-    assert!(matches!(
-        app.active_menu.as_ref().map(|menu| &menu.kind),
-        Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == archive_id
-    ));
-    assert!(matches!(
-        app.active_menu_entries()[0].action,
-        MenuAction::OpenJstackAnalysis { source_id } if source_id == archive_id
-    ));
+    assert!(app.active_menu.is_none());
+    assert!(app.placeholder_notice.contains("不是可分析的日志候选"));
 }
 
 /// 验证压缩包内目录也能显示 Jstack 与 Runtime 分析入口。
@@ -1528,9 +1529,9 @@ fn jstack_detail_occurrences_keep_one_stack_per_visible_snapshot() {
     assert_eq!(occurrences[1].occurrence_index, 1);
 }
 
-/// 验证单文件探测未完成的压缩包不会打断来源树 Shift 范围多选。
+/// 验证 Shift 范围多选只纳入日志候选节点，普通压缩包节点不再打断也不进入选择集合。
 #[test]
-fn shift_range_selection_includes_pending_single_file_archive_probe() {
+fn shift_range_selection_skips_non_log_candidates() {
     let mut app = test_app();
     let mut registry = SourceRegistry::new();
     let root_id = registry.allocate_id();
@@ -1546,6 +1547,7 @@ fn shift_range_selection_includes_pending_single_file_archive_probe() {
             children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: true,
@@ -1563,13 +1565,14 @@ fn shift_range_selection_includes_pending_single_file_archive_probe() {
             children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: false,
     });
-    let pending_archive_id = registry.allocate_id();
+    let archive_id = registry.allocate_id();
     registry.insert_node(SourceTreeNode {
-        id: pending_archive_id,
+        id: archive_id,
         parent_id: Some(root_id),
         depth: 1,
         label: "002.zip".to_string(),
@@ -1577,9 +1580,10 @@ fn shift_range_selection_includes_pending_single_file_archive_probe() {
         location: SourceLocation::LocalPath(PathBuf::from("logs/002.zip")),
         metadata: SourceMetadata {
             size: Some(20),
-            children_loaded: false,
+            children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -1597,6 +1601,7 @@ fn shift_range_selection_includes_pending_single_file_archive_probe() {
             children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -1610,13 +1615,13 @@ fn shift_range_selection_includes_pending_single_file_archive_probe() {
 
     assert_eq!(
         app.selected_search_source_ids,
-        BTreeSet::from([first_id, pending_archive_id, last_id])
+        BTreeSet::from([first_id, last_id])
     );
 }
 
-/// 验证来源树过滤态下，未完成单文件探测的压缩包仍参与 Shift 范围多选。
+/// 验证来源树过滤态下，Shift 范围多选只纳入命中的日志候选节点。
 #[test]
-fn source_tree_filter_keeps_pending_archive_for_shift_range_selection() {
+fn source_tree_filter_shift_range_selection_keeps_only_log_candidates() {
     let mut app = test_app();
     let mut registry = SourceRegistry::new();
     let root_id = registry.allocate_id();
@@ -1636,16 +1641,15 @@ fn source_tree_filter_keeps_pending_archive_for_shift_range_selection() {
     });
 
     let source_specs = [
-        ("thread001.log", SourceKind::LogFile, true),
+        ("thread001.log", SourceKind::LogFile),
         (
             "thread002.zip",
             SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
-            false,
         ),
-        ("thread003.log", SourceKind::LogFile, true),
+        ("thread003.log", SourceKind::LogFile),
     ];
     let mut ids = Vec::new();
-    for (label, kind, children_loaded) in source_specs {
+    for (label, kind) in source_specs {
         let source_id = registry.allocate_id();
         registry.insert_node(SourceTreeNode {
             id: source_id,
@@ -1656,9 +1660,10 @@ fn source_tree_filter_keeps_pending_archive_for_shift_range_selection() {
             location: SourceLocation::LocalPath(PathBuf::from(format!("logs/{label}"))),
             metadata: SourceMetadata {
                 size: Some(10),
-                children_loaded,
-                is_loading: !children_loaded,
+                children_loaded: true,
+                is_loading: false,
                 message: None,
+                archive_password_required: false,
             },
             selected: false,
             expanded: false,
@@ -1675,69 +1680,9 @@ fn source_tree_filter_keeps_pending_archive_for_shift_range_selection() {
 
     app.select_source_tree_range_for_search(ids[2]);
 
-    assert_eq!(app.selected_search_source_ids, BTreeSet::from_iter(ids));
-}
-
-/// 验证探测期间可见列表短暂缺少中间节点时，Shift 范围选择会用稳定树序补齐。
-#[test]
-fn shift_range_selection_fills_pending_archives_from_tree_order_during_probe() {
-    let mut app = test_app();
-    let mut registry = SourceRegistry::new();
-    let root_id = registry.allocate_id();
-    registry.insert_node(SourceTreeNode {
-        id: root_id,
-        parent_id: None,
-        depth: 0,
-        label: "logs".to_string(),
-        kind: SourceKind::Directory,
-        location: SourceLocation::LocalPath(PathBuf::from("logs")),
-        metadata: SourceMetadata {
-            children_loaded: true,
-            ..SourceMetadata::default()
-        },
-        selected: false,
-        expanded: true,
-    });
-
-    let mut source_ids = Vec::new();
-    for index in 0..5 {
-        let source_id = registry.allocate_id();
-        registry.insert_node(SourceTreeNode {
-            id: source_id,
-            parent_id: Some(root_id),
-            depth: 1,
-            label: format!("thread{index:03}.zip"),
-            kind: SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
-            location: SourceLocation::LocalPath(PathBuf::from(format!(
-                "logs/thread{index:03}.zip"
-            ))),
-            metadata: SourceMetadata {
-                size: Some(1024),
-                children_loaded: false,
-                is_loading: true,
-                message: None,
-            },
-            selected: false,
-            expanded: false,
-        });
-        source_ids.push(source_id);
-    }
-    registry.rebuild_all_indices();
-    app.source_registry = registry;
-    app.is_source_tree_search_open = true;
-    app.source_tree_search_input.value = "thread".to_string();
-    app.filtered_source_ids = vec![root_id, source_ids[0], source_ids[4]];
-    app.source_archive_probe_queue
-        .extend(source_ids.iter().copied());
-    app.source_archive_probe_queued_ids
-        .extend(source_ids.iter().copied());
-    assert!(app.select_pending_archive_probe_for_search_anchor(source_ids[0]));
-
-    app.select_source_tree_range_for_search(source_ids[4]);
-
     assert_eq!(
         app.selected_search_source_ids,
-        BTreeSet::from_iter(source_ids)
+        BTreeSet::from_iter([ids[0], ids[2]])
     );
 }
 
@@ -2125,7 +2070,6 @@ fn settings_changes_are_persisted_to_config_file() {
     app.select_theme("dark.toml".to_string());
     app.adjust_log_content_font_size(2.0);
     app.adjust_max_archive_depth(1);
-    app.adjust_archive_probe_concurrency(2);
     app.toggle_follow_symlinks();
     app.update_settings_quick_keywords("ERROR,WARN,timeout".to_string());
     app.update_settings_jstack_thread_name_filter("Attach Listener".to_string());
@@ -2136,7 +2080,6 @@ fn settings_changes_are_persisted_to_config_file() {
     assert_eq!(saved.appearance.theme_mode, "dark.toml");
     assert_eq!(saved.appearance.log_content_font_size, 14.0);
     assert_eq!(saved.loader.max_archive_depth, 3);
-    assert_eq!(saved.loader.archive_probe_concurrency, 6);
     assert!(saved.loader.follow_symlinks);
     assert_eq!(saved.log_search.quick_keywords, "ERROR,WARN,timeout");
     assert_eq!(
@@ -2181,18 +2124,16 @@ fn applying_new_load_report_replaces_old_log_workspace() {
             children_loaded: true,
             is_loading: false,
             message: None,
+            archive_password_required: false,
         },
         selected: false,
         expanded: false,
     });
     registry.rebuild_all_indices();
 
-    app.apply_load_report(LoadReport {
+    app.apply_load_report(crate::loader::SourceTreeScanResult {
         registry,
-        added_count: 1,
-        skipped_count: 0,
-        errors: Vec::new(),
-        password_request: None,
+        warnings: Vec::new(),
     });
 
     assert_eq!(visible_labels(&app), vec!["new.log"]);
@@ -2235,12 +2176,9 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
     app.active_tab_id = 5;
     app.next_tab_id = 10;
 
-    app.apply_load_report(LoadReport {
+    app.apply_load_report(crate::loader::SourceTreeScanResult {
         registry: placeholder_source_registry(),
-        added_count: 1,
-        skipped_count: 0,
-        errors: Vec::new(),
-        password_request: None,
+        warnings: Vec::new(),
     });
 
     assert_eq!(app.tabs.len(), 3);
@@ -2525,75 +2463,226 @@ fn log_range_merge_expands_word_and_line_selection() {
     );
 }
 
-/// 构造只有一个未加载目录的应用状态，用于验证懒加载状态机。
-fn app_with_loading_directory() -> (ArgusApp, SourceId) {
-    let mut app = test_app();
-    let mut registry = SourceRegistry::new();
-    let id = registry.allocate_id();
-    registry.insert_node(SourceTreeNode {
-        id,
-        parent_id: None,
-        depth: 0,
-        label: "logs".to_string(),
-        kind: SourceKind::Directory,
-        location: SourceLocation::LocalPath(PathBuf::from("logs")),
-        metadata: SourceMetadata {
-            size: None,
-            children_loaded: false,
-            is_loading: true,
-            message: None,
-        },
-        selected: false,
-        expanded: true,
-    });
-    registry.rebuild_all_indices();
-    app.source_registry = registry;
-    app.source_child_load_generations.insert(id, 1);
-    (app, id)
+/// 构造 AES 加密测试压缩包；与 zip 适配器读取路径保持同一加密特性。
+fn write_encrypted_zip(path: &Path, password: &str, entries: &[(&str, &[u8])]) {
+    let mut writer =
+        zip::ZipWriter::new(std::fs::File::create(path).expect("应创建加密测试压缩包"));
+    for (name, content) in entries {
+        writer
+            .start_file(
+                *name,
+                zip::write::SimpleFileOptions::default()
+                    .with_aes_encryption(zip::AesMode::Aes256, password),
+            )
+            .expect("应创建加密条目");
+        std::io::Write::write_all(&mut writer, content).expect("应写入加密条目");
+    }
+    writer.finish().expect("应完成加密压缩包");
 }
 
-/// 验证子级加载失败后不会标记为已加载，用户后续点击仍可重试。
-#[test]
-fn child_load_failure_keeps_node_retryable() {
-    let (mut app, source_id) = app_with_loading_directory();
-    let report = LoadReport {
-        registry: SourceRegistry::new(),
-        added_count: 0,
-        skipped_count: 1,
-        errors: vec!["权限不足".to_string()],
-        password_request: None,
-    };
-
-    app.apply_child_load_report(source_id, 1, report);
-
-    let node = app.source_registry.node(source_id).unwrap();
+/// 完整加载指定压缩包路径，返回加密降级节点的来源 ID。
+fn load_encrypted_archive_node(app: &mut ArgusApp, archive_path: &Path) -> SourceId {
+    let scan_result = SourceTreeScanner::scan_paths(
+        vec![archive_path.to_path_buf()],
+        app.config.loader.clone(),
+        app.archive_passwords.clone(),
+        tokio_util::sync::CancellationToken::new(),
+        None,
+    )
+    .expect("完整加载应成功");
+    assert!(app.apply_load_report(scan_result));
+    let archive_id = app
+        .source_registry
+        .tree_order_source_ids()
+        .iter()
+        .copied()
+        .find(|source_id| {
+            app.source_registry
+                .node(*source_id)
+                .is_some_and(|node| node.label == "secret.zip")
+        })
+        .expect("应存在加密压缩包节点");
+    let node = app.source_registry.node(archive_id).unwrap();
+    assert!(node.metadata.archive_password_required);
     assert!(!node.metadata.children_loaded);
-    assert!(!node.metadata.is_loading);
-    assert!(!node.expanded);
-    assert_eq!(node.metadata.message.as_deref(), Some("权限不足"));
-    assert!(!app.source_child_load_generations.contains_key(&source_id));
+    archive_id
 }
 
-/// 验证过期的后台懒加载结果不会覆盖当前节点状态。
-#[test]
-fn stale_child_load_report_is_ignored() {
-    let (mut app, source_id) = app_with_loading_directory();
-    app.source_child_load_generations.insert(source_id, 2);
-    let report = LoadReport {
-        registry: SourceRegistry::new(),
-        added_count: 0,
-        skipped_count: 1,
-        errors: vec!["旧结果".to_string()],
-        password_request: None,
-    };
+/// 验证新加载请求会取消在途完整加载任务，而不是被拒绝。
+#[gpui::test]
+fn new_source_load_cancels_in_flight_task(cx: &mut gpui::TestAppContext) {
+    let directory = temporary_test_dir("source-load-cancel");
+    std::fs::write(directory.path().join("app.log"), "ready").expect("应写入测试日志");
+    let app = cx.new(|_| test_app());
 
-    app.apply_child_load_report(source_id, 1, report);
+    app.update(cx, |app, app_cx| {
+        assert!(app.load_sources_from_paths(
+            vec![directory.path().to_path_buf()],
+            ExternalSourceTrigger::SourcePicker,
+            app_cx,
+        ));
+    });
+    let first_token = app.read_with(cx, |app, _| {
+        assert!(app.is_source_loading);
+        app.source_load_cancellation
+            .clone()
+            .expect("首个加载任务应持有取消令牌")
+    });
 
-    let node = app.source_registry.node(source_id).unwrap();
-    assert!(node.metadata.is_loading);
-    assert!(node.expanded);
-    assert_eq!(
-        app.source_child_load_generations.get(&source_id).copied(),
-        Some(2)
+    app.update(cx, |app, app_cx| {
+        assert!(app.load_sources_from_paths(
+            vec![directory.path().to_path_buf()],
+            ExternalSourceTrigger::DragDrop,
+            app_cx,
+        ));
+    });
+
+    assert!(first_token.is_cancelled(), "在途任务必须被新加载请求取消");
+    app.read_with(cx, |app, _| {
+        assert!(app.is_source_loading, "新任务仍在进行，加载态应保持");
+        assert_eq!(app.source_load_generation, 2);
+        assert!(
+            app.source_load_cancellation
+                .as_ref()
+                .is_some_and(|token| !token.is_cancelled())
+        );
+    });
+}
+
+/// 验证已被新加载取代的任务结果会被丢弃，不影响在途任务状态。
+#[gpui::test]
+fn stale_source_load_result_is_discarded(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+
+    app.update(cx, |app, app_cx| {
+        app.is_source_loading = true;
+        app.source_load_generation = 2;
+        app.placeholder_notice = "正在完整加载".to_string();
+
+        app.apply_source_load_result(1, Err(anyhow::anyhow!("来源树完整扫描已取消")), app_cx);
+        assert!(app.is_source_loading, "过期取消结果不得归位加载态");
+        assert_eq!(app.placeholder_notice, "正在完整加载");
+
+        app.apply_source_load_result(2, Err(anyhow::anyhow!("磁盘读取失败")), app_cx);
+        assert!(!app.is_source_loading);
+        assert!(app.placeholder_notice.contains("磁盘读取失败"));
+        assert!(app.source_load_cancellation.is_none());
+    });
+}
+
+/// 验证点击待密码解锁的压缩包节点不展开，而是弹出密码输入框并记录子树重试动作。
+#[gpui::test]
+fn toggling_password_required_archive_opens_password_prompt(cx: &mut gpui::TestAppContext) {
+    let directory = temporary_test_dir("archive-prompt-on-click");
+    let secret_path = directory.path().join("secret.zip");
+    write_encrypted_zip(&secret_path, "s3cret", &[("hidden.log", b"hidden")]);
+    let app = cx.new(|_| test_app());
+    let archive_id = app.update(cx, |app, _| load_encrypted_archive_node(app, &secret_path));
+
+    app.update(cx, |app, app_cx| {
+        app.toggle_source_expanded(archive_id, app_cx);
+
+        assert!(!app.source_registry.node(archive_id).unwrap().expanded);
+        let prompt = app
+            .archive_password_prompt
+            .as_ref()
+            .expect("应弹出密码输入框");
+        assert_eq!(prompt.error.kind, ArchivePasswordErrorKind::Required);
+        assert_eq!(
+            prompt.error.key,
+            Some(ArchivePasswordKey::root(secret_path.clone()))
+        );
+        assert!(matches!(
+            prompt.retry_action,
+            ArchivePasswordRetryAction::ReloadArchiveNode { source_id } if source_id == archive_id
+        ));
+    });
+}
+
+/// 验证输入正确密码后仅重扫该压缩包子树，原子替换节点载荷并接挂子级。
+#[gpui::test]
+fn archive_node_password_retry_unlocks_subtree(cx: &mut gpui::TestAppContext) {
+    let directory = temporary_test_dir("archive-retry-unlock");
+    let secret_path = directory.path().join("secret.zip");
+    write_encrypted_zip(
+        &secret_path,
+        "s3cret",
+        &[("hidden/a.log", b"a"), ("hidden/b.log", b"b")],
     );
+    let app = cx.new(|_| test_app());
+    let archive_id = app.update(cx, |app, _| load_encrypted_archive_node(app, &secret_path));
+
+    app.update(cx, |app, app_cx| {
+        app.archive_passwords.insert(
+            ArchivePasswordKey::root(secret_path.clone()),
+            "s3cret".to_string(),
+        );
+        let node = app.source_registry.node(archive_id).unwrap().clone();
+        let result = SourceTreeScanner::scan_archive_subtree(
+            &node,
+            app.config.loader.clone(),
+            app.archive_passwords.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        app.apply_archive_node_retry_result(archive_id, result, app_cx);
+    });
+
+    app.read_with(cx, |app, _| {
+        let node = app.source_registry.node(archive_id).expect("节点应保留");
+        assert!(matches!(node.kind, SourceKind::Archive(_)));
+        assert!(node.metadata.children_loaded);
+        assert!(!node.metadata.is_loading);
+        assert!(!node.metadata.archive_password_required);
+        assert!(node.expanded);
+        let labels = app
+            .source_registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| app.source_registry.node(*source_id))
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["secret.zip", "hidden", "a.log", "b.log"]);
+        assert!(app.placeholder_notice.contains("已解锁并展开"));
+    });
+}
+
+/// 验证密码错误时会清除错误密码缓存并再次弹窗，节点保持可重试状态。
+#[gpui::test]
+fn archive_node_password_retry_invalid_password_reprompts(cx: &mut gpui::TestAppContext) {
+    let directory = temporary_test_dir("archive-retry-invalid");
+    let secret_path = directory.path().join("secret.zip");
+    write_encrypted_zip(&secret_path, "s3cret", &[("hidden.log", b"hidden")]);
+    let app = cx.new(|_| test_app());
+    let archive_id = app.update(cx, |app, _| load_encrypted_archive_node(app, &secret_path));
+
+    app.update(cx, |app, app_cx| {
+        let key = ArchivePasswordKey::root(secret_path.clone());
+        app.archive_passwords
+            .insert(key.clone(), "wrong".to_string());
+        let node = app.source_registry.node(archive_id).unwrap().clone();
+        let result = SourceTreeScanner::scan_archive_subtree(
+            &node,
+            app.config.loader.clone(),
+            app.archive_passwords.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        app.apply_archive_node_retry_result(archive_id, result, app_cx);
+
+        let node = app.source_registry.node(archive_id).expect("节点应保留");
+        assert!(!node.metadata.is_loading);
+        assert!(node.metadata.archive_password_required);
+        assert!(
+            app.archive_passwords.get(&key).is_none(),
+            "错误密码必须被清除，避免后续任务复用"
+        );
+        let prompt = app
+            .archive_password_prompt
+            .as_ref()
+            .expect("密码错误后应再次弹窗");
+        assert_eq!(prompt.error.kind, ArchivePasswordErrorKind::Invalid);
+        assert!(matches!(
+            prompt.retry_action,
+            ArchivePasswordRetryAction::ReloadArchiveNode { source_id } if source_id == archive_id
+        ));
+    });
 }

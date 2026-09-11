@@ -16,13 +16,13 @@ use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::{ArchiveFormat, ArchivePasswordKey, ArchivePasswordStore};
-use crate::loader::{SourceId, SourceLocation, SourceTreeNode};
+use crate::loader::{SourceId, SourceLocation};
 use crate::reader::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
 use crate::reader::stream_backend::ArchiveStreamBackend;
 use crate::utils::path::normalize_archive_entry_path;
 use zip::ZipArchive;
 
-use super::source_input::{collect_analysis_files, resolve_analysis_location};
+use super::source_input::collect_analysis_files;
 
 /// Runtime 请求日志慢 SQL 判断比例；SQL 累积耗时超过请求总耗时 90% 即认为该请求慢。
 const SLOW_SQL_REQUEST_PERCENT: u64 = 90;
@@ -47,8 +47,6 @@ pub(crate) struct RuntimeAnalysisTarget {
     pub source_id: SourceId,
     /// 来源位置，目录仅支持本地路径。
     pub location: SourceLocation,
-    /// 待探测单文件压缩包节点快照；存在时后台会先独立探测真实日志条目。
-    pub archive_probe_node: Option<SourceTreeNode>,
     /// UI 展示名称。
     pub label: String,
     /// 路径展示文本。
@@ -310,8 +308,7 @@ pub(crate) fn analyze_runtime_targets(
     }
 
     let total_files = file_targets.len();
-    let parsed_files =
-        read_runtime_requests_parallel(file_targets, &default_encoding, &loader_config);
+    let parsed_files = read_runtime_requests_parallel(file_targets, &default_encoding);
     let mut requests = Vec::new();
     for parsed_file in parsed_files {
         match parsed_file {
@@ -1120,7 +1117,6 @@ fn collect_runtime_log_files(
                 Some(RuntimeAnalysisTarget {
                     source_id,
                     location: SourceLocation::LocalPath(path.clone()),
-                    archive_probe_node: None,
                     label,
                     path: path.display().to_string(),
                     kind: RuntimeAnalysisTargetKind::File,
@@ -1165,7 +1161,6 @@ struct PreparedRuntimeTarget {
 fn read_runtime_requests_parallel(
     file_targets: Vec<RuntimeAnalysisTarget>,
     default_encoding: &str,
-    loader_config: &LoaderConfig,
 ) -> Vec<RuntimeParseOutcome> {
     let total_targets = file_targets.len();
     if total_targets == 0 {
@@ -1177,7 +1172,7 @@ fn read_runtime_requests_parallel(
         .collect::<Vec<Option<RuntimeParseOutcome>>>();
     let mut prepared_targets = Vec::new();
     for (order, target) in file_targets.into_iter().enumerate() {
-        match prepare_runtime_target(order, target, loader_config) {
+        match prepare_runtime_target(order, target) {
             Ok(prepared) => prepared_targets.push(prepared),
             Err(skipped_file) => outcomes[order] = Some(Err(skipped_file)),
         }
@@ -1222,7 +1217,6 @@ fn read_runtime_requests_parallel(
 fn prepare_runtime_target(
     order: usize,
     target: RuntimeAnalysisTarget,
-    loader_config: &LoaderConfig,
 ) -> std::result::Result<PreparedRuntimeTarget, RuntimeSkippedFile> {
     let source_id = target.source_id;
     let label = target.label.clone();
@@ -1231,13 +1225,6 @@ fn prepare_runtime_target(
         label: label.clone(),
         reason: error.to_string(),
     })?;
-    let location = resolve_runtime_target_location(&target, loader_config).map_err(|error| {
-        RuntimeSkippedFile {
-            source_id,
-            label: label.clone(),
-            reason: error.to_string(),
-        }
-    })?;
 
     Ok(PreparedRuntimeTarget {
         order,
@@ -1245,7 +1232,7 @@ fn prepare_runtime_target(
         label: target.label,
         path: target.path,
         metadata,
-        location,
+        location: target.location,
         archive_passwords: target.archive_passwords,
     })
 }
@@ -1678,20 +1665,6 @@ fn parse_runtime_sql_records_from_bytes(
         *encoding_hint = Some(decoded.encoding_label.clone());
     }
     parse_runtime_sql_records(&decoded.text)
-}
-
-/// 解析 Runtime 输入目标的真实读取位置；待探测压缩包会独立判断是否为单文件日志。
-fn resolve_runtime_target_location(
-    target: &RuntimeAnalysisTarget,
-    loader_config: &LoaderConfig,
-) -> Result<SourceLocation> {
-    resolve_analysis_location(
-        target.source_id,
-        &target.location,
-        target.archive_probe_node.as_ref(),
-        &target.archive_passwords,
-        loader_config,
-    )
 }
 
 /// 从文件名中解析请求元信息。
@@ -2256,7 +2229,6 @@ mod tests {
             vec![RuntimeAnalysisTarget {
                 source_id: SourceId(1),
                 location: SourceLocation::LocalPath(path.clone()),
-                archive_probe_node: None,
                 label: path.file_name().unwrap().to_string_lossy().to_string(),
                 path: path.display().to_string(),
                 kind: RuntimeAnalysisTargetKind::File,
@@ -2285,7 +2257,6 @@ mod tests {
                 RuntimeAnalysisTarget {
                     source_id: SourceId(1),
                     location: SourceLocation::LocalPath(second.clone()),
-                    archive_probe_node: None,
                     label: second.file_name().unwrap().to_string_lossy().to_string(),
                     path: second.display().to_string(),
                     kind: RuntimeAnalysisTargetKind::File,
@@ -2294,7 +2265,6 @@ mod tests {
                 RuntimeAnalysisTarget {
                     source_id: SourceId(2),
                     location: SourceLocation::LocalPath(first.clone()),
-                    archive_probe_node: None,
                     label: first.file_name().unwrap().to_string_lossy().to_string(),
                     path: first.display().to_string(),
                     kind: RuntimeAnalysisTargetKind::File,
@@ -2349,7 +2319,6 @@ mod tests {
                     format: ArchiveFormat::Zip,
                     archive_depth: 0,
                 },
-                archive_probe_node: None,
                 label: Path::new(entry_path)
                     .file_name()
                     .unwrap()
@@ -2409,7 +2378,6 @@ mod tests {
                     format: ArchiveFormat::Zip,
                     archive_depth: 0,
                 },
-                archive_probe_node: None,
                 label: Path::new(entry_path)
                     .file_name()
                     .unwrap()

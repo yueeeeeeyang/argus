@@ -75,8 +75,6 @@ pub(crate) const LOG_VIEWER_LINE_NUMBER_DIGIT_WIDTH: f32 = 7.0;
 pub(crate) const LOG_VIEWER_LINE_NUMBER_PADDING: f32 = 18.0;
 /// 日志正文中的制表符展示为空格时的固定宽度。
 pub(crate) const LOG_VIEWER_TAB_DISPLAY_SPACES: &str = "    ";
-/// 后台压缩包探测每批最多处理 `并发数 * 该系数` 个节点，避免频繁重绘。
-pub(crate) const SOURCE_ARCHIVE_PROBE_BATCH_FACTOR: usize = 16;
 /// Runtime 过滤输入防抖时长，避免每个字符都触发大结果集重新过滤。
 pub(crate) const RUNTIME_FILTER_DEBOUNCE_MS: u64 = 260;
 

@@ -38,8 +38,7 @@ pub(crate) use types::*;
 
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,12 +66,12 @@ use crate::infra::updater::{
 #[cfg(test)]
 use crate::loader::SourceMetadata;
 use crate::loader::archive::{
-    ArchivePasswordError, ArchivePasswordErrorKind, ArchivePasswordStore,
+    ArchivePasswordError, ArchivePasswordErrorKind, ArchivePasswordKey, ArchivePasswordStore,
     find_archive_password_error,
 };
 use crate::loader::{
-    LoadReport, LogSourceLoader, SourceArchiveProbeRequest, SourceArchiveProbeResult, SourceId,
-    SourceKind, SourceLocation, SourceRegistry, SourceTreeNode,
+    SourceId, SourceKind, SourceLocation, SourceRegistry, SourceTreeNode, SourceTreeScanResult,
+    SourceTreeScanner,
 };
 use crate::platform::open_with_registration::RegistrationStatus;
 use crate::reader::log_file_reader::{
@@ -175,16 +174,9 @@ pub(crate) fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
 /// 压缩包密码提交后需要重试的用户动作。
 #[derive(Clone, Debug)]
 pub(crate) enum ArchivePasswordRetryAction {
-    /// 重试根来源加载。
-    LoadPaths {
-        /// 原始来源路径列表。
-        paths: Vec<PathBuf>,
-        /// 原始触发入口，用于沿用状态提示。
-        trigger: ExternalSourceTrigger,
-    },
-    /// 重试来源树子级展开。
-    LoadChildren {
-        /// 需要重新展开的来源节点 ID。
+    /// 输入密码后仅重新扫描该加密压缩包子树。
+    ReloadArchiveNode {
+        /// 需要重新扫描的压缩包来源节点 ID。
         source_id: SourceId,
     },
     /// 重试日志正文打开。
@@ -246,6 +238,10 @@ pub(crate) struct ArgusApp {
     pub has_loaded_real_sources: bool,
     /// 是否正在加载来源。
     pub is_source_loading: bool,
+    /// 当前来源完整加载的取消令牌；新加载请求到来时取消在途任务。
+    pub source_load_cancellation: Option<tokio_util::sync::CancellationToken>,
+    /// 来源完整加载 generation，用于丢弃被取消任务的过期结果和进度。
+    pub source_load_generation: usize,
     /// 来源树虚拟列表滚动句柄。
     pub source_tree_scroll: UniformListScrollHandle,
     /// 来源树自定义滚动条拖拽时鼠标在 thumb 内的相对位置。
@@ -272,24 +268,6 @@ pub(crate) struct ArgusApp {
     pub connection_directory_modal: Option<Entity<ConnectionDirectoryWindow>>,
     /// 新增或编辑链接模态框子视图。
     pub connection_link_modal: Option<Entity<ConnectionLinkWindow>>,
-    /// 来源树子级懒加载 generation，用于丢弃过期后台结果。
-    pub source_child_load_generations: HashMap<SourceId, usize>,
-    /// 等待后台探测的压缩包节点队列。
-    pub source_archive_probe_queue: VecDeque<SourceId>,
-    /// 已在探测队列中的压缩包节点，避免重复入队。
-    pub source_archive_probe_queued_ids: BTreeSet<SourceId>,
-    /// 正在后台探测的压缩包节点，避免重复调度。
-    pub source_archive_probe_inflight_ids: BTreeSet<SourceId>,
-    /// 用户点击后独立触发的压缩包探测节点；不受批量队列阻塞。
-    pub source_archive_probe_direct_inflight_ids: BTreeSet<SourceId>,
-    /// 已经完成探测的压缩包节点，避免滚动时反复提交。
-    pub source_archive_probe_completed_ids: BTreeSet<SourceId>,
-    /// 用户点击后等待探测结果自动继续打开或展开的压缩包节点。
-    pub source_archive_probe_click_intents: BTreeSet<SourceId>,
-    /// 压缩包探测批次 generation，用于丢弃旧来源树返回的过期结果。
-    pub source_archive_probe_generation: usize,
-    /// 压缩包内目录子级加载完成后需要自动继续的分析动作。
-    pub pending_source_analysis_after_load: Option<PendingSourceAnalysisAction>,
     /// 当前进程内已输入的压缩包密码；只保存在内存，不写入配置文件。
     pub archive_passwords: ArchivePasswordStore,
     /// 压缩包密码输入弹窗状态；为空表示当前不需要用户输入密码。
@@ -497,6 +475,8 @@ impl ArgusApp {
             source_registry: SourceRegistry::new(),
             has_loaded_real_sources: false,
             is_source_loading: false,
+            source_load_cancellation: None,
+            source_load_generation: 0,
             source_tree_scroll: UniformListScrollHandle::new(),
             source_scrollbar_drag_position: None,
             is_source_tree_search_open: false,
@@ -510,15 +490,6 @@ impl ArgusApp {
             connection_dialog: None,
             connection_directory_modal: None,
             connection_link_modal: None,
-            source_child_load_generations: HashMap::new(),
-            source_archive_probe_queue: VecDeque::new(),
-            source_archive_probe_queued_ids: BTreeSet::new(),
-            source_archive_probe_inflight_ids: BTreeSet::new(),
-            source_archive_probe_direct_inflight_ids: BTreeSet::new(),
-            source_archive_probe_completed_ids: BTreeSet::new(),
-            source_archive_probe_click_intents: BTreeSet::new(),
-            source_archive_probe_generation: 0,
-            pending_source_analysis_after_load: None,
             archive_passwords: ArchivePasswordStore::default(),
             archive_password_prompt: None,
             source_picker: SourcePickerState::default(),
@@ -1028,20 +999,15 @@ impl ArgusApp {
         self.retry_archive_password_action(prompt.retry_action, cx);
     }
 
-    /// 按弹窗记录的用户动作重新执行来源加载、目录展开或日志打开。
+    /// 按弹窗记录的用户动作重新执行压缩包子树重扫或日志打开。
     fn retry_archive_password_action(
         &mut self,
         retry_action: ArchivePasswordRetryAction,
         cx: &mut Context<Self>,
     ) {
         match retry_action {
-            ArchivePasswordRetryAction::LoadPaths { paths, trigger } => {
-                self.load_sources_from_paths(paths, trigger, cx);
-            }
-            ArchivePasswordRetryAction::LoadChildren { source_id } => {
-                if let Some(node) = self.source_registry.node(source_id).cloned() {
-                    self.start_source_child_load(source_id, node, cx);
-                }
+            ArchivePasswordRetryAction::ReloadArchiveNode { source_id } => {
+                self.start_archive_node_password_retry(source_id, cx);
             }
             ArchivePasswordRetryAction::OpenLog { source_id } => {
                 self.request_open_log_content(source_id, cx);
@@ -1861,21 +1827,6 @@ impl ArgusApp {
         self.placeholder_notice = format!(
             "嵌套压缩包深度已调整为 {} 层",
             self.config.loader.max_archive_depth
-        );
-        self.persist_config_or_report();
-    }
-
-    /// 调整当前目录层单文件压缩包探测并发数，设置会影响后续来源加载任务。
-    pub(crate) fn adjust_archive_probe_concurrency(&mut self, delta: isize) {
-        self.config.loader.archive_probe_concurrency = self
-            .config
-            .loader
-            .archive_probe_concurrency
-            .saturating_add_signed(delta)
-            .clamp(1, 16);
-        self.placeholder_notice = format!(
-            "单文件压缩包探测并发已调整为 {}",
-            self.config.loader.archive_probe_concurrency
         );
         self.persist_config_or_report();
     }

@@ -5,7 +5,6 @@
 //! 主要功能：把多个线程栈日志快照聚合为线程频率矩阵，供主内容区分析页签渲染。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -15,11 +14,11 @@ use std::sync::{
 use anyhow::{Result, bail};
 
 use crate::config::LoaderConfig;
-use crate::loader::archive::{ArchivePasswordStore, detect_archive_format};
-use crate::loader::{SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
+use crate::loader::archive::ArchivePasswordStore;
+use crate::loader::{SourceId, SourceLocation};
 use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
 
-use super::source_input::{collect_analysis_files, resolve_analysis_location};
+use super::source_input::collect_analysis_files;
 
 /// Jstack 本地目录递归时识别的普通文本日志扩展名。
 const JSTACK_TEXT_EXTENSIONS: &[&str] = &["log", "txt", "out", "dump"];
@@ -146,8 +145,6 @@ pub(crate) struct JstackAnalysisTarget {
     pub source_id: SourceId,
     /// 来源位置，可能是本地文件或压缩包内条目。
     pub location: SourceLocation,
-    /// 待探测单文件压缩包节点快照；存在时分析后台会先独立探测真实日志条目。
-    pub archive_probe_node: Option<SourceTreeNode>,
     /// UI 展示名称。
     pub label: String,
     /// 路径展示文本。
@@ -409,12 +406,7 @@ pub(crate) fn analyze_jstack_targets_with_cancel(
         if cancel_flag.load(Ordering::Relaxed) {
             break;
         }
-        match read_jstack_snapshot(
-            target.clone(),
-            &default_encoding,
-            &loader_config,
-            cancel_flag.clone(),
-        ) {
+        match read_jstack_snapshot(target.clone(), &default_encoding, cancel_flag.clone()) {
             Ok((snapshot, byte_len)) if snapshot.samples.is_empty() => {
                 scanned_bytes = scanned_bytes.saturating_add(byte_len);
                 skipped_snapshots.push(JstackSkippedSnapshot {
@@ -440,7 +432,7 @@ pub(crate) fn analyze_jstack_targets_with_cancel(
     result
 }
 
-/// 展开 Jstack 分析目标；本地目录会递归转换为可读取的日志或单文件压缩包快照。
+/// 展开 Jstack 分析目标；本地目录会递归转换为可读取的纯文本日志列表。
 fn expand_jstack_target(
     target: JstackAnalysisTarget,
     loader_config: &LoaderConfig,
@@ -461,7 +453,7 @@ fn expand_jstack_target(
     })
 }
 
-/// 递归收集本地目录中的 Jstack 文本日志和可独立探测的压缩包文件。
+/// 递归收集本地目录中的 Jstack 纯文本日志；压缩包条目已由完整初始化的来源树展开，目录递归不再重复解析。
 fn collect_jstack_log_files(
     source_id: SourceId,
     root: &Path,
@@ -478,11 +470,10 @@ fn collect_jstack_log_files(
 }
 
 /// 判断本地文件是否值得作为 Jstack 快照尝试解析。
+///
+/// 压缩包不再进入目录递归候选：来源树加载时已把可展开压缩包枚举为内部条目，
+/// 目录递归若再把压缩包当普通文件读取会得到二进制噪声。
 fn is_jstack_candidate_file(path: &Path) -> bool {
-    if detect_archive_format(path).is_some() {
-        return true;
-    }
-
     path.extension()
         .and_then(|extension| extension.to_str())
         .map(|extension| {
@@ -492,33 +483,16 @@ fn is_jstack_candidate_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 把本地文件路径转换为 Jstack 分析目标；压缩包会附带单文件探测快照。
+/// 把本地文件路径转换为 Jstack 分析目标。
 fn jstack_target_for_local_file(
     source_id: SourceId,
     path: PathBuf,
 ) -> Option<JstackAnalysisTarget> {
     let label = path.file_name()?.to_string_lossy().to_string();
-    let archive_probe_node = detect_archive_format(&path).map(|format| SourceTreeNode {
-        id: source_id,
-        parent_id: None,
-        depth: 0,
-        label: label.clone(),
-        kind: SourceKind::Archive(format),
-        location: SourceLocation::LocalPath(path.clone()),
-        metadata: SourceMetadata {
-            size: fs::metadata(&path).ok().map(|metadata| metadata.len()),
-            children_loaded: false,
-            is_loading: false,
-            message: None,
-        },
-        selected: false,
-        expanded: false,
-    });
 
     Some(JstackAnalysisTarget {
         source_id,
         location: SourceLocation::LocalPath(path.clone()),
-        archive_probe_node,
         label,
         path: path.display().to_string(),
         archive_passwords: ArchivePasswordStore::default(),
@@ -649,13 +623,11 @@ pub(crate) fn build_analysis_result(
 fn read_jstack_snapshot(
     target: JstackAnalysisTarget,
     default_encoding: &str,
-    loader_config: &LoaderConfig,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<(JstackSnapshot, u64)> {
-    let location = resolve_jstack_target_location(&target, loader_config)?;
     let handle = LogFileReader::open_with_cancel_flag(
         OpenLogRequest {
-            location,
+            location: target.location.clone(),
             label: target.label.clone(),
             default_encoding: default_encoding.to_string(),
             archive_passwords: target.archive_passwords.clone(),
@@ -673,20 +645,6 @@ fn read_jstack_snapshot(
         },
         byte_len,
     ))
-}
-
-/// 解析 Jstack 输入目标的真实读取位置；待探测压缩包会在后台独立判断是否为单文件日志。
-fn resolve_jstack_target_location(
-    target: &JstackAnalysisTarget,
-    loader_config: &LoaderConfig,
-) -> Result<SourceLocation> {
-    resolve_analysis_location(
-        target.source_id,
-        &target.location,
-        target.archive_probe_node.as_ref(),
-        &target.archive_passwords,
-        loader_config,
-    )
 }
 
 /// 按批次读取日志文档并增量解析 Jstack，避免把完整日志拼成一个大字符串。
@@ -987,16 +945,11 @@ fn wildcard_pattern_matches(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Write;
-    use std::path::PathBuf;
 
     use crate::config::paths::{isolated_test_dir, isolated_test_file_path};
-    use crate::loader::archive::ArchiveFormat;
-    use crate::loader::{SourceKind, SourceLocation, SourceMetadata};
+    use crate::loader::SourceLocation;
 
     use super::*;
-    use zip::ZipWriter;
-    use zip::write::SimpleFileOptions;
 
     /// 返回标准 Jstack 文本片段。
     fn sample_jstack_text() -> &'static str {
@@ -1344,7 +1297,6 @@ mod tests {
                 JstackAnalysisTarget {
                     source_id: SourceId(1),
                     location: SourceLocation::LocalPath(path.clone()),
-                    archive_probe_node: None,
                     label: "ok.log".to_string(),
                     path: path.display().to_string(),
                     archive_passwords: ArchivePasswordStore::default(),
@@ -1352,7 +1304,6 @@ mod tests {
                 JstackAnalysisTarget {
                     source_id: SourceId(2),
                     location: SourceLocation::LocalPath(missing_path),
-                    archive_probe_node: None,
                     label: "missing.log".to_string(),
                     path: "missing.log".to_string(),
                     archive_passwords: ArchivePasswordStore::default(),
@@ -1385,7 +1336,6 @@ mod tests {
             vec![JstackAnalysisTarget {
                 source_id: SourceId(9),
                 location: SourceLocation::LocalPath(dir.clone()),
-                archive_probe_node: None,
                 label: "thread-dir".to_string(),
                 path: dir.display().to_string(),
                 archive_passwords: ArchivePasswordStore::default(),
@@ -1419,7 +1369,6 @@ mod tests {
             vec![JstackAnalysisTarget {
                 source_id: SourceId(10),
                 location: SourceLocation::LocalPath(dir.clone()),
-                archive_probe_node: None,
                 label: "thread-dir".to_string(),
                 path: dir.display().to_string(),
                 archive_passwords: ArchivePasswordStore::default(),
@@ -1435,45 +1384,20 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// 验证 Jstack 分析能独立探测待识别的单文件压缩包，不依赖来源树先完成节点替换。
+    /// 验证目录递归不再把压缩包当作候选文件；压缩包条目由完整初始化的来源树承接。
     #[test]
-    fn analyzes_pending_single_file_archive_without_registry_replacement() {
-        let zip_path = isolated_test_file_path("jstack-archive", "thread.zip");
-        let file = fs::File::create(&zip_path).expect("应能创建 Jstack ZIP 测试文件");
-        let mut writer = ZipWriter::new(file);
-        writer
-            .start_file("thread.log", SimpleFileOptions::default())
-            .expect("应能写入 ZIP 条目");
-        writer
-            .write_all(sample_jstack_text().as_bytes())
-            .expect("应能写入 Jstack 文本");
-        writer.finish().expect("应能完成 ZIP 写入");
-
-        let source_id = SourceId(7);
-        let archive_node = SourceTreeNode {
-            id: source_id,
-            parent_id: None,
-            depth: 0,
-            label: "thread.zip".to_string(),
-            kind: SourceKind::Archive(ArchiveFormat::Zip),
-            location: SourceLocation::LocalPath(zip_path.clone()),
-            metadata: SourceMetadata {
-                size: fs::metadata(&zip_path).ok().map(|metadata| metadata.len()),
-                children_loaded: false,
-                is_loading: true,
-                message: None,
-            },
-            selected: false,
-            expanded: false,
-        };
+    fn jstack_directory_recursion_skips_archive_files() {
+        let dir = isolated_test_dir("jstack-archive-skip");
+        fs::create_dir_all(&dir).expect("应能创建 Jstack 目录测试路径");
+        fs::write(dir.join("thread-a.log"), sample_jstack_text()).expect("应能写入 Jstack 日志");
+        fs::write(dir.join("bundle.zip"), b"PK\x03\x04fake").expect("应能写入压缩包占位文件");
 
         let result = analyze_jstack_targets(
             vec![JstackAnalysisTarget {
-                source_id,
-                location: SourceLocation::LocalPath(PathBuf::from(&zip_path)),
-                archive_probe_node: Some(archive_node),
-                label: "thread.zip".to_string(),
-                path: zip_path.display().to_string(),
+                source_id: SourceId(7),
+                location: SourceLocation::LocalPath(dir.clone()),
+                label: "thread-dir".to_string(),
+                path: dir.display().to_string(),
                 archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
@@ -1485,6 +1409,6 @@ mod tests {
         assert_eq!(result.skipped_count(), 0);
         assert_eq!(result.thread_count(), 3);
 
-        let _ = fs::remove_file(zip_path);
+        let _ = fs::remove_dir_all(dir);
     }
 }

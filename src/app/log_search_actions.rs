@@ -29,7 +29,7 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, slice_character_range,
 };
-use crate::loader::{LoadReport, LogSourceLoader, SourceId, SourceKind, SourceRegistry};
+use crate::loader::{SourceId, SourceKind, SourceRegistry};
 use crate::search::search_engine::{
     CurrentLogMatchCount, CurrentLogMatchDirection, CurrentLogMatchNavigation,
     CurrentLogMatchPosition, SearchEngine, SearchProgress, SearchQuery, SearchRequest,
@@ -104,7 +104,7 @@ fn centered_paged_scroll_top(line_number: usize, line_count: usize, viewport_hei
 
 /// 后台搜索线程向 UI 线程回传的事件。
 enum SearchWorkerEvent {
-    /// 目录搜索目标发现进度；可能携带补齐后的来源树快照。
+    /// 目录搜索目标发现进度。
     Prepared(Box<SearchPreparedEvent>),
     /// 搜索进度更新。
     Progress(SearchProgress),
@@ -116,23 +116,17 @@ enum SearchWorkerEvent {
     Finished(SearchTaskSummary),
 }
 
-/// 搜索准备阶段回传给 UI 的状态；目录搜索会携带补齐后的来源树。
+/// 搜索准备阶段回传给 UI 的状态。
 struct SearchPreparedEvent {
-    /// 补齐懒加载节点后的来源树；只在目录搜索发现新节点时更新。
-    registry: Option<SourceRegistry>,
     /// 当前已经发现的搜索目标文件数量。
     total_files: usize,
 }
 
-/// 后台目录搜索准备结果；仅用于回归测试旧的完整补齐逻辑。
+/// 后台目录搜索准备结果；目录树已完整初始化，仅用于回归测试目标收集。
 #[cfg(test)]
 struct DirectorySearchPreparation {
-    /// 补齐懒加载节点后的来源树快照。
-    registry: SourceRegistry,
     /// 目录下可搜索的日志目标。
     targets: Vec<SearchTarget>,
-    /// 补齐子级过程中遇到的非致命错误。
-    errors: Vec<String>,
 }
 
 /// 当前日志快速查找缓存命中后的导航方向。
@@ -337,11 +331,7 @@ impl ArgusApp {
                     return;
                 }
             };
-            Some((
-                directory_id,
-                self.source_registry.clone(),
-                self.config.loader.clone(),
-            ))
+            Some((directory_id, self.source_registry.clone()))
         } else {
             None
         };
@@ -394,18 +384,11 @@ impl ArgusApp {
         let archive_passwords = self.archive_passwords.clone();
         let (sender, receiver) = mpsc::channel::<SearchWorkerEvent>();
 
-        if let Some((directory_id, registry, loader_config)) = directory_prepare {
+        if let Some((directory_id, registry)) = directory_prepare {
             self.log_search.progress.current_path = Some("正在发现目录搜索目标".to_string());
             let request = SearchRequest::with_queries(queries, Vec::new(), default_encoding)
                 .with_archive_passwords(archive_passwords);
-            spawn_directory_search_worker(
-                directory_id,
-                registry,
-                loader_config,
-                request,
-                cancel_token,
-                sender,
-            );
+            spawn_directory_search_worker(directory_id, registry, request, cancel_token, sender);
         } else {
             let request = SearchRequest::with_queries(queries, targets, default_encoding)
                 .with_archive_passwords(archive_passwords);
@@ -453,11 +436,8 @@ impl ArgusApp {
 
                 for _ in 0..LOG_SEARCH_MAX_EVENTS_PER_TICK {
                     match receiver.try_recv() {
-                        Ok(SearchWorkerEvent::Prepared(mut event)) => {
+                        Ok(SearchWorkerEvent::Prepared(event)) => {
                             if let Some(existing) = &mut prepared_event {
-                                if event.registry.is_some() {
-                                    existing.registry = event.registry.take();
-                                }
                                 existing.total_files = event.total_files;
                             } else {
                                 prepared_event = Some(*event);
@@ -1059,13 +1039,6 @@ impl ArgusApp {
             return;
         }
 
-        if self.select_pending_archive_probe_for_search_anchor(source_id) {
-            self.start_direct_source_archive_probe(source_id, source.clone(), cx);
-            self.scroll_source_into_view(source_id);
-            self.placeholder_notice = format!("已选择 {}，正在识别单文件日志", source.label);
-            return;
-        }
-
         if !source.kind.is_log_candidate() {
             return;
         }
@@ -1081,27 +1054,6 @@ impl ArgusApp {
     /// 返回来源节点是否属于搜索多选集合，用于来源树绘制选中态。
     pub(crate) fn is_source_selected_for_search(&self, source_id: SourceId) -> bool {
         self.selected_search_source_ids.contains(&source_id)
-    }
-
-    /// 将未完成单文件探测的压缩包设置为 Shift 范围选择锚点。
-    ///
-    /// 参数说明：
-    /// - `source_id`：来源树中用户普通点击的压缩包节点。
-    ///
-    /// 返回值：节点确认为待探测压缩包时返回 `true`，调用方可继续触发后台识别。
-    pub(crate) fn select_pending_archive_probe_for_search_anchor(
-        &mut self,
-        source_id: SourceId,
-    ) -> bool {
-        if !self.is_pending_archive_probe_candidate(source_id) {
-            return false;
-        }
-
-        self.selected_search_source_ids.clear();
-        self.selected_search_source_ids.insert(source_id);
-        self.last_source_selection_anchor = Some(source_id);
-        self.select_source(source_id);
-        true
     }
 
     /// 返回输入框当前选区范围。
@@ -1369,7 +1321,7 @@ impl ArgusApp {
         &mut self,
         generation: usize,
         event: SearchWorkerEvent,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         if self.log_search.generation != generation {
             return;
@@ -1377,12 +1329,6 @@ impl ArgusApp {
 
         match event {
             SearchWorkerEvent::Prepared(event) => {
-                if let Some(registry) = event.registry {
-                    self.source_registry = registry;
-                    self.sync_source_tree_selection_from_active_tab();
-                    self.rebuild_filtered_source_ids();
-                    self.mark_source_content_changed(cx);
-                }
                 self.log_search.progress.total_files = event.total_files;
                 self.log_search.message =
                     Some(format!("已发现 {} 个搜索目标，正在搜索", event.total_files));
@@ -1872,7 +1818,7 @@ impl ArgusApp {
             return;
         };
         let visible_ids = self.visible_source_ids().to_vec();
-        let Some(mut selected) =
+        let Some(selected) =
             self.source_tree_range_selection_from_order(&visible_ids, anchor_id, target_id, None)
         else {
             // 原锚点已经不在当前可见树中时，用本次目标重建锚点，避免后续范围基于失效节点。
@@ -1881,26 +1827,6 @@ impl ArgusApp {
             self.last_source_selection_anchor = Some(target_id);
             return;
         };
-
-        if self.is_source_archive_probe_running_for_selection() {
-            let mut stable_order_allowed_ids = visible_ids.iter().copied().collect::<BTreeSet<_>>();
-            stable_order_allowed_ids.extend(
-                self.source_registry
-                    .tree_order_source_ids()
-                    .iter()
-                    .copied()
-                    .filter(|source_id| self.is_pending_archive_probe_candidate(*source_id)),
-            );
-            if let Some(stable_order_selected) = self.source_tree_range_selection_from_order(
-                self.source_registry.tree_order_source_ids(),
-                anchor_id,
-                target_id,
-                Some(&stable_order_allowed_ids),
-            ) && stable_order_selected.len() > selected.len()
-            {
-                selected = stable_order_selected;
-            }
-        }
 
         if !selected.is_empty() {
             self.selected_search_source_ids = selected;
@@ -1947,29 +1873,11 @@ impl ArgusApp {
 
     /// 判断来源节点是否可参与来源树多选。
     ///
-    /// 说明：单文件压缩包探测未完成前仍是 `Archive`，但用户已经能在树中看到它；
-    /// 允许其临时进入多选集合，探测完成后如果变成 `SingleFileArchive` 会自然成为日志候选。
+    /// 说明：完整初始化后只有日志候选节点可选择；待密码解锁的归档节点不可展开也不参与多选。
     pub(crate) fn is_source_selectable_for_search_selection(&self, source_id: SourceId) -> bool {
-        self.source_registry.node(source_id).is_some_and(|node| {
-            node.kind.is_log_candidate() || self.is_pending_archive_probe_candidate(source_id)
-        })
-    }
-
-    /// 判断来源节点是否是单文件压缩包探测完成前的临时可选节点。
-    fn is_pending_archive_probe_candidate(&self, source_id: SourceId) -> bool {
-        self.source_registry.node(source_id).is_some_and(|node| {
-            matches!(node.kind, SourceKind::Archive(_))
-                && !node.metadata.children_loaded
-                && !self.source_archive_probe_completed_ids.contains(&source_id)
-        })
-    }
-
-    /// 返回来源树单文件压缩包探测是否仍有排队或执行中的任务。
-    fn is_source_archive_probe_running_for_selection(&self) -> bool {
-        !self.source_archive_probe_queue.is_empty()
-            || !self.source_archive_probe_queued_ids.is_empty()
-            || !self.source_archive_probe_inflight_ids.is_empty()
-            || !self.source_archive_probe_direct_inflight_ids.is_empty()
+        self.source_registry
+            .node(source_id)
+            .is_some_and(|node| node.kind.is_log_candidate())
     }
 
     /// 写入搜索结果高亮状态。
@@ -2302,11 +2210,10 @@ fn spawn_search_worker(
     });
 }
 
-/// 启动目录搜索后台线程；目录补齐、目标收集和正文扫描全部离开 UI 线程。
+/// 启动目录搜索后台线程；目标收集和正文扫描全部离开 UI 线程。
 fn spawn_directory_search_worker(
     directory_id: SourceId,
-    mut registry: SourceRegistry,
-    loader_config: crate::config::LoaderConfig,
+    registry: SourceRegistry,
     request: SearchRequest,
     cancel_token: Arc<AtomicBool>,
     sender: mpsc::Sender<SearchWorkerEvent>,
@@ -2319,17 +2226,13 @@ fn spawn_directory_search_worker(
             return;
         }
 
-        let loader = LogSourceLoader::new(loader_config)
-            .with_archive_passwords(request.archive_passwords.clone())
-            .with_deferred_archive_probe();
+        // 来源树在加载时已完整初始化，这里只遍历既有子级收集搜索目标。
         let mut pending_ids = vec![directory_id];
         let mut visited_ids = BTreeSet::new();
         let mut target_batch = Vec::with_capacity(DIRECTORY_SEARCH_TARGET_BATCH_SIZE);
         let mut summary = SearchTaskSummary::default();
-        let mut errors = Vec::new();
         let mut discovered_total = 0usize;
         let mut last_prepared_total = 0usize;
-        let mut registry_dirty = false;
 
         while let Some(source_id) = pending_ids.pop() {
             if cancel_token.load(Ordering::Relaxed) {
@@ -2338,19 +2241,6 @@ fn spawn_directory_search_worker(
             }
             if !visited_ids.insert(source_id) {
                 continue;
-            }
-
-            let Some(node) = registry.node(source_id).cloned() else {
-                continue;
-            };
-
-            if node.kind.can_expand() && !node.metadata.children_loaded && !node.metadata.is_loading
-            {
-                registry.set_loading(source_id, true);
-                let report = loader.load_children(&node);
-                errors.extend(report.errors.iter().cloned());
-                apply_search_directory_child_report_to_registry(&mut registry, source_id, report);
-                registry_dirty = true;
             }
 
             let child_ids = registry.child_ids(source_id).to_vec();
@@ -2365,12 +2255,7 @@ fn spawn_directory_search_worker(
                     discovered_total += 1;
 
                     if target_batch.len() >= DIRECTORY_SEARCH_TARGET_BATCH_SIZE {
-                        send_directory_search_prepared(
-                            &sender,
-                            registry_dirty.then(|| registry.clone()),
-                            discovered_total,
-                        );
-                        registry_dirty = false;
+                        send_directory_search_prepared(&sender, discovered_total);
                         last_prepared_total = discovered_total;
 
                         let batch_summary = search_discovered_target_batch(
@@ -2404,12 +2289,7 @@ fn spawn_directory_search_worker(
         }
 
         if !summary.was_cancelled && !target_batch.is_empty() {
-            send_directory_search_prepared(
-                &sender,
-                registry_dirty.then(|| registry.clone()),
-                discovered_total,
-            );
-            registry_dirty = false;
+            send_directory_search_prepared(&sender, discovered_total);
             last_prepared_total = discovered_total;
 
             let batch_summary = search_discovered_target_batch(
@@ -2422,8 +2302,6 @@ fn spawn_directory_search_worker(
             );
             merge_search_summary(&mut summary, batch_summary);
         }
-
-        summary.errors.extend(errors);
 
         if summary.was_cancelled {
             let _ = sender.send(SearchWorkerEvent::Finished(summary));
@@ -2440,26 +2318,17 @@ fn spawn_directory_search_worker(
             return;
         }
 
-        if registry_dirty || last_prepared_total != discovered_total {
-            send_directory_search_prepared(
-                &sender,
-                registry_dirty.then_some(registry),
-                discovered_total,
-            );
+        if last_prepared_total != discovered_total {
+            send_directory_search_prepared(&sender, discovered_total);
         }
 
         let _ = sender.send(SearchWorkerEvent::Finished(summary));
     });
 }
 
-/// 向 UI 线程报告目录搜索已经发现的目标数量和可选来源树快照。
-fn send_directory_search_prepared(
-    sender: &mpsc::Sender<SearchWorkerEvent>,
-    registry: Option<SourceRegistry>,
-    total_files: usize,
-) {
+/// 向 UI 线程报告目录搜索已经发现的目标数量。
+fn send_directory_search_prepared(sender: &mpsc::Sender<SearchWorkerEvent>, total_files: usize) {
     let _ = sender.send(SearchWorkerEvent::Prepared(Box::new(SearchPreparedEvent {
-        registry,
         total_files,
     })));
 }
@@ -2502,83 +2371,18 @@ fn merge_search_summary(total: &mut SearchTaskSummary, batch: SearchTaskSummary)
     total.errors.extend(batch.errors);
 }
 
-/// 在后台补齐目录搜索所需的来源树，并收集可搜索日志目标。
+/// 从来源树快照收集目录搜索目标；树已在加载时完整初始化，不再补齐子级。
 #[cfg(test)]
 fn prepare_directory_search_targets(
-    mut registry: SourceRegistry,
+    registry: SourceRegistry,
     directory_id: SourceId,
-    loader_config: crate::config::LoaderConfig,
 ) -> Result<DirectorySearchPreparation, String> {
     if registry.node(directory_id).is_none() {
         return Err("未在来源树中找到该目录".to_string());
     }
 
-    let loader = LogSourceLoader::new(loader_config);
-    let mut pending_ids = vec![directory_id];
-    let mut visited_ids = BTreeSet::new();
-    let mut errors = Vec::new();
-
-    while let Some(source_id) = pending_ids.pop() {
-        if !visited_ids.insert(source_id) {
-            continue;
-        }
-
-        let Some(node) = registry.node(source_id).cloned() else {
-            continue;
-        };
-
-        if node.kind.can_expand() && !node.metadata.children_loaded && !node.metadata.is_loading {
-            registry.set_loading(source_id, true);
-            let report = loader.load_children(&node);
-            errors.extend(report.errors.iter().cloned());
-            apply_search_directory_child_report_to_registry(&mut registry, source_id, report);
-        }
-
-        let child_ids = registry.child_ids(source_id).to_vec();
-        for child_id in child_ids.into_iter().rev() {
-            pending_ids.push(child_id);
-        }
-    }
-
     let targets = collect_loaded_log_targets_under_registry(&registry, directory_id);
-    Ok(DirectorySearchPreparation {
-        registry,
-        targets,
-        errors,
-    })
-}
-
-/// 将后台目录补齐得到的子级注册表挂回来源树快照。
-fn apply_search_directory_child_report_to_registry(
-    registry: &mut SourceRegistry,
-    parent_id: SourceId,
-    report: LoadReport,
-) {
-    if report.registry.is_empty() {
-        if let Some(parent) = registry.node_mut(parent_id) {
-            parent.metadata.is_loading = false;
-            parent.metadata.children_loaded = report.errors.is_empty();
-            parent.metadata.message = if report.errors.is_empty() {
-                Some("没有可显示的子节点".to_string())
-            } else {
-                Some(report.errors.join("；"))
-            };
-        }
-        registry.rebuild_all_indices();
-        return;
-    }
-
-    let should_keep_expanded = registry
-        .node(parent_id)
-        .map(|node| node.expanded)
-        .unwrap_or(false);
-    registry.append_children_registry(parent_id, report.registry, should_keep_expanded);
-
-    if let Some(parent) = registry.node_mut(parent_id)
-        && !report.errors.is_empty()
-    {
-        parent.metadata.message = Some(report.errors.join("；"));
-    }
+    Ok(DirectorySearchPreparation { targets })
 }
 
 /// 从指定来源树快照目录下递归收集日志候选。
@@ -2687,7 +2491,8 @@ mod tests {
     use crate::config::{ConfigManager, LoaderConfig, SEARCH_RECENT_KEYWORDS_MAX};
     use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{
-        LogSourceLoader, SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode,
+        SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode,
+        SourceTreeScanner,
     };
     use crate::reader::log_file_reader::{LogFileReader, LogOpenState, OpenLogRequest};
 
@@ -2829,51 +2634,45 @@ mod tests {
         );
     }
 
-    /// 验证目录搜索准备会在后台来源树快照中补齐未展开子目录，避免漏搜懒加载节点。
+    /// 验证目录搜索准备直接从完整初始化的来源树收集全部日志目标，不再需要补齐子级。
     #[test]
-    fn directory_search_preparation_loads_unloaded_children_before_collecting_targets() {
-        let root = isolated_test_dir("log-search-lazy-directory");
+    fn directory_search_preparation_collects_targets_from_fully_loaded_tree() {
+        let root = isolated_test_dir("log-search-full-directory");
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("lazy.log"), "INFO lazy child").unwrap();
+        std::fs::write(nested.join("deep.log"), "INFO deep child").unwrap();
 
-        let report = LogSourceLoader::new(LoaderConfig::default()).load_paths(vec![root.clone()]);
-        assert!(report.errors.is_empty());
+        let scan_result = SourceTreeScanner::scan_paths(
+            vec![root.clone()],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("完整加载应成功");
         let mut app = test_app();
-        app.source_registry = report.registry;
+        app.source_registry = scan_result.registry;
         app.log_search.directory_input.value = root.display().to_string();
 
         let directory_id = app.resolve_search_directory_source_id().unwrap();
-        let preparation = prepare_directory_search_targets(
-            app.source_registry.clone(),
-            directory_id,
-            app.config.loader.clone(),
-        )
-        .unwrap();
+        let preparation =
+            prepare_directory_search_targets(app.source_registry.clone(), directory_id).unwrap();
 
-        assert!(preparation.errors.is_empty());
         assert!(
             preparation
                 .targets
                 .iter()
-                .any(|target| target.label == "lazy.log")
+                .any(|target| target.label == "deep.log")
         );
-        let lazy_parent_loaded = preparation
-            .registry
-            .tree_order_source_ids()
-            .iter()
-            .filter_map(|source_id| preparation.registry.node(*source_id))
-            .find(|node| node.label == "nested")
-            .is_some_and(|node| node.metadata.children_loaded);
-        assert!(lazy_parent_loaded);
-        let original_lazy_parent_loaded = app
+        // 完整初始化语义：嵌套目录在加载时就已携带全部子级。
+        let nested_loaded = app
             .source_registry
             .tree_order_source_ids()
             .iter()
             .filter_map(|source_id| app.source_registry.node(*source_id))
             .find(|node| node.label == "nested")
             .is_some_and(|node| node.metadata.children_loaded);
-        assert!(!original_lazy_parent_loaded);
+        assert!(nested_loaded);
 
         let _ = std::fs::remove_dir_all(root);
     }

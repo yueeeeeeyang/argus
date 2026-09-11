@@ -49,11 +49,6 @@ pub(crate) struct ArchivePasswordStore {
 }
 
 impl ArchivePasswordStore {
-    /// 返回缓存中是否没有任何密码。
-    pub(crate) fn is_empty(&self) -> bool {
-        self.passwords.is_empty()
-    }
-
     /// 保存或替换某个压缩包容器的密码。
     pub(crate) fn insert(&mut self, key: ArchivePasswordKey, password: String) {
         self.passwords.insert(key, password);
