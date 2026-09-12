@@ -312,6 +312,10 @@ pub(crate) struct ArgusApp {
     pub ai_settings_editor_modal: Option<Entity<AiSettingsEditor>>,
     /// 日志读取状态，以来源 ID 为键复用已打开的 reader。
     pub log_read_states: HashMap<SourceId, LogOpenState>,
+    /// 当前已物化的日志工作目录根；随来源替换而失效，由加载流程负责删除。
+    pub source_workspace_root: Option<std::path::PathBuf>,
+    /// 主窗口关闭时删除工作目录的钩子是否已注册，避免每帧重复注册。
+    pub has_registered_workspace_close_guard: bool,
     /// 日志读取 generation，用于丢弃后台任务返回的过期结果。
     pub log_reader_generations: HashMap<SourceId, usize>,
     /// 每个日志 tab 的滚动、选区和焦点状态。
@@ -518,6 +522,8 @@ impl ArgusApp {
             source_content_revision: 0,
             ai_settings_editor_modal: None,
             log_read_states: HashMap::new(),
+            source_workspace_root: None,
+            has_registered_workspace_close_guard: false,
             log_reader_generations: HashMap::new(),
             log_tab_view_states: HashMap::new(),
             log_scrollbar_drag: None,

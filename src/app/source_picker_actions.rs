@@ -392,6 +392,10 @@ impl ArgusApp {
         // 而不是继续展示即将被替换的过期来源树和日志内容。
         self.source_registry = SourceRegistry::new();
         self.has_loaded_real_sources = false;
+        // 旧物化工作目录随来源替换立即失效，后台尽力删除；句柄占用导致的失败由启动清扫兜底。
+        if let Some(old_workspace) = self.source_workspace_root.take() {
+            crate::loader::workspace::delete_workspace_best_effort(old_workspace);
+        }
         self.reset_log_workspace_after_source_replace();
         self.reset_assistant_after_log_reload(cx);
         self.placeholder_notice = format!(
@@ -408,13 +412,28 @@ impl ArgusApp {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    SourceTreeScanner::scan_paths(
+                    // 先把来源物化到独立工作目录，再做来源树扫描（本阶段扫描仍消费原始路径）。
+                    let workspace = crate::loader::workspace::materialize_sources(
+                        &paths,
+                        &loader_config,
+                        &archive_passwords,
+                        &cancellation,
+                        Some(&progress_sender),
+                    )?;
+                    match SourceTreeScanner::scan_paths(
                         paths,
                         loader_config,
                         archive_passwords,
                         cancellation,
                         Some(progress_sender),
-                    )
+                    ) {
+                        Ok(scan_result) => Ok((workspace, scan_result)),
+                        Err(error) => {
+                            // 扫描失败时新建工作目录已无消费者，后台回滚删除。
+                            crate::loader::workspace::delete_workspace_best_effort(workspace.root);
+                            Err(error)
+                        }
+                    }
                 })
                 .await;
 

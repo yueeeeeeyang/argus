@@ -35,10 +35,22 @@ pub(crate) struct SourceTreeScanResult {
     pub warnings: Vec<String>,
 }
 
+/// 日志加载所处的阶段；物化阶段在扫描阶段之前执行。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum SourceLoadPhase {
+    /// 正在把来源复制/解压到工作目录。
+    Materializing,
+    /// 正在扫描来源树（默认，兼容只关心扫描进度的旧调用方）。
+    #[default]
+    Scanning,
+}
+
 /// 来源树扫描进度；`current` 描述正在处理的目录或压缩包，供界面展示当前处理位置。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SourceTreeScanProgress {
-    /// 已生成的来源节点数，单调不减。
+    /// 当前所处加载阶段。
+    pub phase: SourceLoadPhase,
+    /// 已生成的来源节点数或已物化文件数，单调不减。
     pub scanned: usize,
     /// 正在处理的目录、压缩包或来源根展示文本；扫描准备阶段为空。
     pub current: String,
@@ -1277,6 +1289,7 @@ impl<'a> SourceTreeScanner<'a> {
     fn report_progress(&self) {
         if let Some(progress) = &self.progress {
             let _ = progress.send(SourceTreeScanProgress {
+                phase: SourceLoadPhase::Scanning,
                 scanned: self.ordered_nodes.len(),
                 current: self.current_item.clone(),
             });

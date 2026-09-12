@@ -2622,6 +2622,7 @@ fn applying_source_load_result_clears_progress(cx: &mut gpui::TestAppContext) {
         app.is_source_loading = true;
         app.source_load_generation = 1;
         app.source_load_progress = Some(crate::loader::SourceTreeScanProgress {
+            phase: crate::loader::SourceLoadPhase::Scanning,
             scanned: 3,
             current: "logs".to_string(),
         });
@@ -2632,15 +2633,23 @@ fn applying_source_load_result_clears_progress(cx: &mut gpui::TestAppContext) {
         app.is_source_loading = true;
         app.source_load_generation = 2;
         app.source_load_progress = Some(crate::loader::SourceTreeScanProgress {
+            phase: crate::loader::SourceLoadPhase::Scanning,
             scanned: 5,
             current: "logs/app.log".to_string(),
         });
         app.apply_source_load_result(
             2,
-            Ok(crate::loader::SourceTreeScanResult {
-                registry: placeholder_source_registry(),
-                warnings: Vec::new(),
-            }),
+            Ok((
+                crate::loader::MaterializedWorkspace {
+                    root: std::path::PathBuf::from("/tmp/argus-test-workspace"),
+                    warnings: Vec::new(),
+                    materialized_files: 0,
+                },
+                crate::loader::SourceTreeScanResult {
+                    registry: placeholder_source_registry(),
+                    warnings: Vec::new(),
+                },
+            )),
             app_cx,
         );
         assert!(!app.is_source_loading);

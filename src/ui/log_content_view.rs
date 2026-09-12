@@ -215,14 +215,29 @@ fn render_source_load_progress(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
     let detail_font_size = app.log_content_font_size;
     let title_font_size = detail_font_size + 4.0;
     let progress = app.source_load_progress.clone().unwrap_or_default();
-    let detail = if progress.current.is_empty() {
-        format!("正在准备扫描…已扫描 {} 项", progress.scanned)
-    } else {
-        format!(
-            "已扫描 {} 项，当前：{}",
-            progress.scanned,
-            truncate_source_load_current(&progress.current)
-        )
+    let detail = match progress.phase {
+        crate::loader::SourceLoadPhase::Materializing => {
+            if progress.current.is_empty() {
+                format!("正在物化日志到工作目录…已处理 {} 项", progress.scanned)
+            } else {
+                format!(
+                    "正在物化日志到工作目录（已处理 {} 项），当前：{}",
+                    progress.scanned,
+                    truncate_source_load_current(&progress.current)
+                )
+            }
+        }
+        crate::loader::SourceLoadPhase::Scanning => {
+            if progress.current.is_empty() {
+                format!("正在准备扫描…已扫描 {} 项", progress.scanned)
+            } else {
+                format!(
+                    "已扫描 {} 项，当前：{}",
+                    progress.scanned,
+                    truncate_source_load_current(&progress.current)
+                )
+            }
+        }
     };
 
     div()

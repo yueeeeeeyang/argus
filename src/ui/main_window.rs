@@ -33,6 +33,17 @@ pub(crate) fn render(
 ) -> impl IntoElement {
     let _span = PerfSpan::new("main_window_render");
     app.sync_window_appearance_theme(window);
+    if !app.has_registered_workspace_close_guard {
+        // 主窗口关闭时删除当前物化工作目录；崩溃或强杀的场景由下次启动清扫兜底。
+        let entity = cx.entity();
+        window.on_window_should_close(cx, move |_, app_cx| {
+            if let Some(root) = entity.read(app_cx).source_workspace_root.clone() {
+                crate::loader::workspace::delete_workspace_best_effort(root);
+            }
+            true
+        });
+        app.has_registered_workspace_close_guard = true;
+    }
     let input_focus_handles = app.ensure_input_focus_handles(cx);
     let root_focus_for_track = input_focus_handles.root.clone();
     let root_focus_for_click = input_focus_handles.root.clone();

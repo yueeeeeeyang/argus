@@ -64,6 +64,17 @@ pub(crate) fn run() {
     });
 
     application.run(move |cx: &mut App| {
+        // 启动时后台清扫历史残留工作目录与压缩分页缓存（崩溃或强杀后的兜底）。
+        std::thread::Builder::new()
+            .name("argus-workspace-sweep".to_string())
+            .spawn(|| {
+                crate::loader::workspace::sweep_stale_workspaces();
+            })
+            .map(|_| ())
+            .unwrap_or_else(|error| {
+                eprintln!("无法启动残留日志工作目录清扫线程：{error}");
+            });
+
         if let Err(error) = register_argus_fonts(cx) {
             eprintln!("Argus 内置字体注册失败：{error}");
         }

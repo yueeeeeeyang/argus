@@ -370,19 +370,33 @@ impl ArgusApp {
     pub(crate) fn apply_source_load_result(
         &mut self,
         load_generation: usize,
-        result: anyhow::Result<SourceTreeScanResult>,
+        result: anyhow::Result<(crate::loader::MaterializedWorkspace, SourceTreeScanResult)>,
         cx: &mut Context<Self>,
     ) {
         if self.source_load_generation != load_generation {
+            // 过期加载结果直接丢弃，附带的新工作目录一并回滚删除。
+            if let Ok((workspace, _)) = result {
+                crate::loader::workspace::delete_workspace_best_effort(workspace.root);
+            }
             return;
         }
         self.source_load_cancellation = None;
         self.source_load_progress = None;
         self.clear_jstack_cell_hover_preview();
         match result {
-            Ok(scan_result) => {
+            Ok((mut workspace, mut scan_result)) => {
+                // 物化警告并入加载报告，让用户在完成提示中看到跳过和降级项。
+                scan_result.warnings.append(&mut workspace.warnings);
                 if self.apply_load_report(scan_result) {
+                    self.placeholder_notice = format!(
+                        "{}，已物化 {} 个文件到工作目录",
+                        self.placeholder_notice, workspace.materialized_files
+                    );
+                    self.source_workspace_root = Some(workspace.root);
                     self.reset_assistant_after_log_reload(cx);
+                } else {
+                    // 未加载到有效来源时新建工作目录没有消费者，后台回滚删除。
+                    crate::loader::workspace::delete_workspace_best_effort(workspace.root);
                 }
             }
             Err(error) => {
