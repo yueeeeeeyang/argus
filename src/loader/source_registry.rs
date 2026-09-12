@@ -566,7 +566,6 @@ mod tests {
                 children_loaded: true,
                 is_loading: false,
                 message: None,
-                archive_password_required: false,
             },
             selected: false,
             expanded,

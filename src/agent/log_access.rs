@@ -574,7 +574,6 @@ fn open_agent_log_document(
             location: source.location.clone(),
             label: source.file_name.clone(),
             default_encoding: scope.default_encoding.clone(),
-            archive_passwords: scope.archive_passwords.clone(),
         },
         cancel_flag,
     )?;
@@ -674,7 +673,6 @@ mod tests {
     use crate::config::paths::temporary_test_dir;
     use crate::loader::SourceId;
     use crate::loader::SourceLocation;
-    use crate::loader::archive::ArchivePasswordStore;
     use crate::log_io::log_file_reader::LARGE_LOG_THRESHOLD_BYTES;
 
     /// 用指定来源构造最小不可变范围，确保测试配置和临时文件不会访问生产目录。
@@ -685,7 +683,6 @@ mod tests {
             sources: Arc::new(sources),
             profiles: Arc::new(HashMap::new()),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
             allow_raw_log_content: true,
         })
     }

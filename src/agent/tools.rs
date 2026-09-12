@@ -1899,11 +1899,9 @@ fn detect_log_type(file_name: &str, sample: Option<&[u8]>) -> LogTypeDetection {
     }
 }
 
-/// 对普通本地文件读取最多 64 KiB 识别样本；归档条目留给流式读取扩展，避免为识别完整物化。
+/// 对普通本地文件读取最多 64 KiB 识别样本。
 fn read_local_detection_sample(location: &crate::loader::SourceLocation) -> Option<Vec<u8>> {
-    let crate::loader::SourceLocation::LocalPath(path) = location else {
-        return None;
-    };
+    let crate::loader::SourceLocation::LocalPath(path) = location;
     let file = std::fs::File::open(path).ok()?;
     let mut sample = Vec::with_capacity(64 * 1024);
     file.take(64 * 1024).read_to_end(&mut sample).ok()?;

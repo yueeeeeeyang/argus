@@ -21,7 +21,6 @@ use crate::agent::log_access::AgentLogAccess;
 
 use crate::agent::report::{DiagnosticReport, EvidenceDisplayExcerpt};
 use crate::config::{AiConfig, LogNameMatcher, LogTypeProfile};
-use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::{SourceId, SourceLocation, SourceRegistry};
 
 /// Agent 会话的产品运行模式；工具层据此决定是否开放报告与阶段展示能力。
@@ -480,8 +479,6 @@ pub(crate) struct SourceScopeSnapshot {
     pub profiles: Arc<HashMap<String, LogProfileSnapshot>>,
     /// 当前默认日志编码。
     pub default_encoding: String,
-    /// 当前进程内压缩包密码快照，只供底层读取器使用。
-    pub archive_passwords: ArchivePasswordStore,
     /// 是否允许把工具返回的必要日志原文发送给模型。
     pub allow_raw_log_content: bool,
 }
@@ -493,7 +490,6 @@ impl SourceScopeSnapshot {
         selection: AgentScopeSelection,
         config: &AiConfig,
         default_encoding: String,
-        archive_passwords: ArchivePasswordStore,
     ) -> Result<Self, String> {
         let root_ids = resolve_scope_root_ids(registry, selection)?;
         let root_labels = root_ids
@@ -563,7 +559,6 @@ impl SourceScopeSnapshot {
             sources: Arc::new(sources),
             profiles: Arc::new(profile_snapshots),
             default_encoding,
-            archive_passwords,
             allow_raw_log_content: config.allow_raw_log_content,
         })
     }
@@ -1504,7 +1499,6 @@ mod tests {
             AgentScopeSelection::SelectedRoot(None),
             &config,
             "UTF-8".to_string(),
-            ArchivePasswordStore::default(),
         )
         .expect("应创建来源快照");
         assert_eq!(snapshot.sources.len(), 1);

@@ -165,12 +165,8 @@ impl ArgusApp {
             return Vec::new();
         };
 
-        if self.source_is_local_directory(source_id) {
+        if self.source_is_analysis_directory(source_id) {
             return self.runtime_targets_from_source_ids(&[source_id]);
-        }
-        if self.source_is_archive_directory(source_id) {
-            let source_ids = self.loaded_descendant_analysis_source_ids(source_id);
-            return self.runtime_targets_from_source_ids(&source_ids);
         }
 
         if !node.kind.is_log_candidate()
@@ -242,7 +238,6 @@ impl ArgusApp {
                     label: node.label.clone(),
                     path: node.location.display_path(),
                     kind,
-                    archive_passwords: self.archive_passwords.clone(),
                 })
             })
             .collect()

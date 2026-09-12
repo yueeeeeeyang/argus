@@ -10,7 +10,6 @@ use crate::agent::session::{AgentScopeSelection, SourceScopeSnapshot};
 use crate::config::{
     AiConfig, LoaderConfig, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
 };
-use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::source_scanner::SourceTreeScanner;
 use crate::loader::{SourceId, SourceRegistry};
 
@@ -68,8 +67,7 @@ pub(crate) struct AgentLogRuleMatchSummary {
 /// - `selected_id`：当前选中节点，用于解析所属顶层来源根；
 /// - `config`：已经规范化和校验的 AI 配置，包含日志类型名称匹配规则；
 /// - `default_encoding`：日志工具默认使用的字符编码；
-/// - `loader_config`：目录、符号链接和归档深度边界；
-/// - `archive_passwords`：当前进程已经获得授权的归档密码快照。
+/// - `loader_config`：目录、符号链接和归档深度边界。
 ///
 /// 返回值：扫描成功且至少发现一个日志候选时返回完整注册表和范围快照。
 pub(crate) fn prepare_agent_source_scope(
@@ -78,7 +76,6 @@ pub(crate) fn prepare_agent_source_scope(
     config: AiConfig,
     default_encoding: String,
     loader_config: LoaderConfig,
-    archive_passwords: ArchivePasswordStore,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentSourcePreparation, String> {
     prepare_agent_source_scope_for_selection(
@@ -87,32 +84,24 @@ pub(crate) fn prepare_agent_source_scope(
         config,
         default_encoding,
         loader_config,
-        archive_passwords,
         cancellation,
     )
 }
 
 /// 按显式单根或全部根范围完整扫描来源树并生成不可变会话快照。
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_agent_source_scope_for_selection(
     registry: SourceRegistry,
     selection: AgentScopeSelection,
     config: AiConfig,
     default_encoding: String,
     loader_config: LoaderConfig,
-    archive_passwords: ArchivePasswordStore,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentSourcePreparation, String> {
     let source_scan_started_at = Instant::now();
     let root_ids = resolve_scope_roots(&registry, selection)?;
-    let scan_result = SourceTreeScanner::new(
-        &registry,
-        loader_config,
-        archive_passwords.clone(),
-        cancellation,
-    )
-    .scan(&root_ids)
-    .map_err(|error| error.to_string())?;
+    let scan_result = SourceTreeScanner::new(&registry, loader_config, cancellation)
+        .scan(&root_ids)
+        .map_err(|error| error.to_string())?;
     let registry = scan_result.registry;
 
     let source_scan_elapsed_seconds = source_scan_started_at.elapsed().as_secs();
@@ -123,7 +112,6 @@ pub(crate) fn prepare_agent_source_scope_for_selection(
         selection,
         &config,
         default_encoding,
-        archive_passwords,
     )
     .map_err(|error| {
         if warnings.is_empty() {
@@ -229,11 +217,8 @@ fn resolve_scope_roots(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Write;
 
     use uuid::Uuid;
-    use zip::ZipWriter;
-    use zip::write::SimpleFileOptions;
 
     use super::*;
     use crate::config::paths::temporary_test_dir;
@@ -284,7 +269,6 @@ mod tests {
             config,
             "UTF-8".to_string(),
             LoaderConfig::default(),
-            ArchivePasswordStore::default(),
             tokio_util::sync::CancellationToken::new(),
         )
         .expect("折叠目录应被完整扫描");
@@ -379,7 +363,6 @@ mod tests {
             config,
             "UTF-8".to_string(),
             LoaderConfig::default(),
-            ArchivePasswordStore::default(),
             tokio_util::sync::CancellationToken::new(),
         )
         .expect("来源扫描应成功");
@@ -445,7 +428,6 @@ mod tests {
             config,
             "UTF-8".to_string(),
             LoaderConfig::default(),
-            ArchivePasswordStore::default(),
             tokio_util::sync::CancellationToken::new(),
         )
         .expect("助手应完整扫描全部根来源");
@@ -471,58 +453,6 @@ mod tests {
                 .node(*root_id)
                 .is_some_and(|root| root.metadata.children_loaded)
         }));
-    }
-
-    /// 验证助手完整扫描会递归补齐尚未展开的归档目录和其中日志条目。
-    #[test]
-    fn assistant_source_scan_expands_unloaded_archive_tree() {
-        let directory = temporary_test_dir("assistant-source-scan-archive");
-        let archive_path = directory.path().join("logs.zip");
-        let mut writer = ZipWriter::new(fs::File::create(&archive_path).expect("应创建测试归档"));
-        writer
-            .start_file("application.log", SimpleFileOptions::default())
-            .expect("应创建首个日志条目");
-        writer.write_all(b"INFO ready").expect("应写入首个日志");
-        writer
-            .start_file("nested/error.log", SimpleFileOptions::default())
-            .expect("应创建嵌套日志条目");
-        writer.write_all(b"ERROR failed").expect("应写入嵌套日志");
-        writer.finish().expect("应完成测试归档");
-
-        let mut registry = SourceRegistry::new();
-        let root_id = registry.allocate_id();
-        registry.insert_node(SourceTreeNode {
-            id: root_id,
-            parent_id: None,
-            depth: 0,
-            label: "logs.zip".to_string(),
-            kind: SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
-            location: SourceLocation::LocalPath(archive_path),
-            metadata: SourceMetadata::default(),
-            selected: false,
-            expanded: false,
-        });
-        registry.rebuild_all_indices();
-        let preparation = prepare_agent_source_scope_for_selection(
-            registry,
-            AgentScopeSelection::AllLoadedRoots,
-            AiConfig::default(),
-            "UTF-8".to_string(),
-            LoaderConfig::default(),
-            ArchivePasswordStore::default(),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .expect("助手应递归补齐归档来源");
-
-        let file_names = preparation
-            .scope
-            .sources
-            .iter()
-            .map(|source| source.file_name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(preparation.scope.sources.len(), 2);
-        assert!(file_names.contains(&"application.log"));
-        assert!(file_names.contains(&"error.log"));
     }
 
     /// 验证启动对话框关闭后，已取消的来源扫描不会继续构建或回填会话范围。
@@ -553,7 +483,6 @@ mod tests {
             AiConfig::default(),
             "UTF-8".to_string(),
             LoaderConfig::default(),
-            ArchivePasswordStore::default(),
             cancellation,
         )
         .expect_err("取消后的扫描必须停止");

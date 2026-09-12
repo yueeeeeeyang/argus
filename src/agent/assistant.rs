@@ -697,7 +697,6 @@ async fn fail_assistant(sender: &async_channel::Sender<AgentEvent>, message: Str
 mod tests {
     use super::*;
     use crate::agent::report::{EvidenceDisplayExcerpt, EvidenceDisplayLine};
-    use crate::loader::archive::ArchivePasswordStore;
 
     /// 构造不包含真实文件位置的最小助手来源范围。
     fn test_scope() -> SourceScopeSnapshot {
@@ -707,7 +706,6 @@ mod tests {
             sources: Arc::new(Vec::new()),
             profiles: Arc::new(HashMap::new()),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
             allow_raw_log_content: true,
         }
     }

@@ -174,14 +174,9 @@ pub(crate) fn log_viewer_display_text(text: &str) -> Cow<'_, str> {
 /// 压缩包密码提交后需要重试的用户动作。
 #[derive(Clone, Debug)]
 pub(crate) enum ArchivePasswordRetryAction {
-    /// 输入密码后仅重新扫描该加密压缩包子树。
+    /// 输入密码后向当前工作目录追加物化该加密压缩包并重扫其顶层目录。
     ReloadArchiveNode {
-        /// 需要重新扫描的压缩包来源节点 ID。
-        source_id: SourceId,
-    },
-    /// 重试日志正文打开。
-    OpenLog {
-        /// 需要重新打开的日志来源节点 ID。
+        /// 需要解锁的加密压缩包占位节点 ID。
         source_id: SourceId,
     },
 }
@@ -875,7 +870,6 @@ impl ArgusApp {
             location: source_node.location.clone(),
             label: source_node.label.clone(),
             default_encoding: self.selected_encoding.clone(),
-            archive_passwords: self.archive_passwords.clone(),
         };
         let generation = self.next_log_reader_generation(source_id);
         self.log_read_states.insert(
@@ -922,13 +916,6 @@ impl ArgusApp {
                 self.finish_pending_search_activation(source_id);
             }
             Err(error) => {
-                if self.request_archive_password_from_error(
-                    &error,
-                    ArchivePasswordRetryAction::OpenLog { source_id },
-                ) {
-                    self.log_read_states.insert(source_id, LogOpenState::Idle);
-                    return;
-                }
                 self.log_read_states.insert(
                     source_id,
                     LogOpenState::Failed {
@@ -938,18 +925,6 @@ impl ArgusApp {
                 self.placeholder_notice = format!("日志读取失败：{error}");
             }
         }
-    }
-
-    /// 根据错误链展示压缩包密码弹窗；返回值表示错误是否已被密码流程接管。
-    fn request_archive_password_from_error(
-        &mut self,
-        error: &anyhow::Error,
-        retry_action: ArchivePasswordRetryAction,
-    ) -> bool {
-        let Some(password_error) = find_archive_password_error(error) else {
-            return false;
-        };
-        self.present_archive_password_prompt(password_error, retry_action)
     }
 
     /// 展示压缩包密码弹窗，缺少具体容器键或不支持加密算法时退化为普通错误提示。
@@ -1014,7 +989,7 @@ impl ArgusApp {
         self.retry_archive_password_action(prompt.retry_action, cx);
     }
 
-    /// 按弹窗记录的用户动作重新执行压缩包子树重扫或日志打开。
+    /// 按弹窗记录的用户动作重新执行压缩包解锁追加物化。
     fn retry_archive_password_action(
         &mut self,
         retry_action: ArchivePasswordRetryAction,
@@ -1023,9 +998,6 @@ impl ArgusApp {
         match retry_action {
             ArchivePasswordRetryAction::ReloadArchiveNode { source_id } => {
                 self.start_archive_node_password_retry(source_id, cx);
-            }
-            ArchivePasswordRetryAction::OpenLog { source_id } => {
-                self.request_open_log_content(source_id, cx);
             }
         }
     }

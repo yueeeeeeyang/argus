@@ -1,10 +1,9 @@
 //! 文件职责：实现压缩 TAR 归档条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-17
+//! 修改日期：2026-09-12
 //! 作者：Argus 开发团队
-//! 主要功能：处理 tar.gz、tar.bz2、tar.xz 外层解压，并复用 TAR 条目枚举与单遍批量访问逻辑。
+//! 主要功能：处理 tar.gz、tar.bz2、tar.xz 外层解压，并复用 TAR 条目枚举与读取逻辑。
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -15,12 +14,11 @@ use flate2::read::GzDecoder;
 use xz2::read::XzDecoder;
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
-    ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::tar_adapter::{
-    list_tar_entries, read_tar_entry_bytes, stream_tar_entry, visit_tar_entries,
+    list_tar_entries, read_tar_entry_bytes, stream_tar_entry,
 };
 
 /// tar.gz 可识别扩展名。
@@ -89,17 +87,6 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         }
     }
 
-    /// 从内存压缩 TAR 数据源枚举条目。
-    fn list_entries_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        source_label: &str,
-        _password: Option<&str>,
-    ) -> Result<Vec<ArchiveEntryInfo>> {
-        list_compressed_tar_entries(reader, self.format, source_label)
-    }
-
     /// 从本地压缩 TAR 读取指定条目字节。
     fn read_entry_bytes(
         &self,
@@ -110,18 +97,6 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         let file = File::open(path)
             .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
         read_compressed_tar_entry_bytes(file, self.format, entry_path, &path.display().to_string())
-    }
-
-    /// 从内存压缩 TAR 读取指定条目字节。
-    fn read_entry_bytes_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        entry_path: &str,
-        source_label: &str,
-        _password: Option<&str>,
-    ) -> Result<Vec<u8>> {
-        read_compressed_tar_entry_bytes(reader, self.format, entry_path, source_label)
     }
 
     /// 从本地压缩 TAR 流式读取指定条目内容。
@@ -141,100 +116,6 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
             &path.display().to_string(),
             consumer,
         )
-    }
-
-    /// 从内存压缩 TAR 流式读取指定条目内容。
-    fn stream_entry_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        entry_path: &str,
-        source_label: &str,
-        _password: Option<&str>,
-        consumer: &mut ArchiveEntryConsumer<'_>,
-    ) -> Result<()> {
-        stream_compressed_tar_entry(reader, self.format, entry_path, source_label, consumer)
-    }
-
-    /// 只解压一次外层压缩流，并顺序遍历其中所有目标 TAR 条目。
-    fn visit_entries(
-        &self,
-        path: &Path,
-        entry_paths: &HashSet<String>,
-        _password: Option<&str>,
-        consumer: &mut ArchiveEntriesConsumer<'_>,
-    ) -> Result<()> {
-        let file = File::open(path)
-            .with_context(|| format!("无法打开压缩 TAR 归档：{}", path.display()))?;
-        visit_compressed_tar_entries(
-            file,
-            self.format,
-            entry_paths,
-            &path.display().to_string(),
-            consumer,
-        )
-    }
-
-    /// 只解压一次内存压缩流，并顺序遍历其中所有目标 TAR 条目。
-    fn visit_entries_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        entry_paths: &HashSet<String>,
-        source_label: &str,
-        _password: Option<&str>,
-        consumer: &mut ArchiveEntriesConsumer<'_>,
-    ) -> Result<()> {
-        visit_compressed_tar_entries(reader, self.format, entry_paths, source_label, consumer)
-    }
-}
-
-/// 解码一次压缩 TAR 外层，并把目标集合交给 TAR 单遍访问器。
-pub(crate) fn visit_compressed_tar_entries<R>(
-    reader: R,
-    format: ArchiveFormat,
-    entry_paths: &HashSet<String>,
-    source_label: &str,
-    consumer: &mut ArchiveEntriesConsumer<'_>,
-) -> Result<()>
-where
-    R: Read,
-{
-    match format {
-        ArchiveFormat::TarGz => {
-            visit_tar_entries(GzDecoder::new(reader), entry_paths, source_label, consumer)
-        }
-        ArchiveFormat::TarBz2 => {
-            visit_tar_entries(BzDecoder::new(reader), entry_paths, source_label, consumer)
-        }
-        ArchiveFormat::TarXz => {
-            visit_tar_entries(XzDecoder::new(reader), entry_paths, source_label, consumer)
-        }
-        _ => bail!("{} 不是压缩 TAR 格式", format.label()),
-    }
-}
-
-/// 从任意读取器中枚举压缩 TAR 条目。
-///
-/// 参数说明：
-/// - `reader`：压缩 TAR 数据来源。
-/// - `format`：压缩 TAR 外层编码格式。
-/// - `source_label`：错误提示中的来源名称。
-///
-/// 返回值：解压外层后的 TAR 条目列表。
-pub(crate) fn list_compressed_tar_entries<R>(
-    reader: R,
-    format: ArchiveFormat,
-    source_label: &str,
-) -> Result<Vec<ArchiveEntryInfo>>
-where
-    R: Read,
-{
-    match format {
-        ArchiveFormat::TarGz => list_tar_entries(GzDecoder::new(reader), source_label),
-        ArchiveFormat::TarBz2 => list_tar_entries(BzDecoder::new(reader), source_label),
-        ArchiveFormat::TarXz => list_tar_entries(XzDecoder::new(reader), source_label),
-        _ => bail!("{} 不是压缩 TAR 格式", format.label()),
     }
 }
 

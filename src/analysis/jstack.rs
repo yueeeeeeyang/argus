@@ -14,7 +14,6 @@ use std::sync::{
 use anyhow::{Result, bail};
 
 use crate::config::LoaderConfig;
-use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::{SourceId, SourceLocation};
 use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
 
@@ -143,14 +142,12 @@ pub(crate) struct JstackSnapshot {
 pub(crate) struct JstackAnalysisTarget {
     /// 来源树节点 ID。
     pub source_id: SourceId,
-    /// 来源位置，可能是本地文件或压缩包内条目。
+    /// 来源位置；工作目录物化后统一为普通文件路径。
     pub location: SourceLocation,
     /// UI 展示名称。
     pub label: String,
     /// 路径展示文本。
     pub path: String,
-    /// 当前会话中已输入的压缩包密码快照。
-    pub archive_passwords: ArchivePasswordStore,
 }
 
 /// 频率矩阵中单个线程在单个快照中的聚合格子。
@@ -437,9 +434,7 @@ fn expand_jstack_target(
     target: JstackAnalysisTarget,
     loader_config: &LoaderConfig,
 ) -> std::result::Result<Vec<JstackAnalysisTarget>, (SourceId, String, String)> {
-    let SourceLocation::LocalPath(path) = &target.location else {
-        return Ok(vec![target]);
-    };
+    let SourceLocation::LocalPath(path) = &target.location;
     if !path.is_dir() {
         return Ok(vec![target]);
     }
@@ -495,7 +490,6 @@ fn jstack_target_for_local_file(
         location: SourceLocation::LocalPath(path.clone()),
         label,
         path: path.display().to_string(),
-        archive_passwords: ArchivePasswordStore::default(),
     })
 }
 
@@ -630,7 +624,6 @@ fn read_jstack_snapshot(
             location: target.location.clone(),
             label: target.label.clone(),
             default_encoding: default_encoding.to_string(),
-            archive_passwords: target.archive_passwords.clone(),
         },
         cancel_flag.clone(),
     )?;
@@ -1299,14 +1292,12 @@ mod tests {
                     location: SourceLocation::LocalPath(path.clone()),
                     label: "ok.log".to_string(),
                     path: path.display().to_string(),
-                    archive_passwords: ArchivePasswordStore::default(),
                 },
                 JstackAnalysisTarget {
                     source_id: SourceId(2),
                     location: SourceLocation::LocalPath(missing_path),
                     label: "missing.log".to_string(),
                     path: "missing.log".to_string(),
-                    archive_passwords: ArchivePasswordStore::default(),
                 },
             ],
             "UTF-8".to_string(),
@@ -1338,7 +1329,6 @@ mod tests {
                 location: SourceLocation::LocalPath(dir.clone()),
                 label: "thread-dir".to_string(),
                 path: dir.display().to_string(),
-                archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),
@@ -1371,7 +1361,6 @@ mod tests {
                 location: SourceLocation::LocalPath(dir.clone()),
                 label: "thread-dir".to_string(),
                 path: dir.display().to_string(),
-                archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
             config,
@@ -1398,7 +1387,6 @@ mod tests {
                 location: SourceLocation::LocalPath(dir.clone()),
                 label: "thread-dir".to_string(),
                 path: dir.display().to_string(),
-                archive_passwords: ArchivePasswordStore::default(),
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),

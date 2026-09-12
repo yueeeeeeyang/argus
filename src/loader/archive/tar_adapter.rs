@@ -1,10 +1,9 @@
 //! 文件职责：实现 TAR 归档条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-17
+//! 修改日期：2026-09-12
 //! 作者：Argus 开发团队
-//! 主要功能：打开普通 TAR、枚举条目元信息，并通过一次顺序遍历批量访问目标条目。
+//! 主要功能：打开普通 TAR、枚举条目元信息，并按条目读取或流式输出日志内容。
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -12,8 +11,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntriesConsumer, ArchiveEntryConsumer,
-    ArchiveEntryInfo, ArchiveReadSeek,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::utils::path::normalize_archive_entry_path;
@@ -48,17 +46,6 @@ impl ArchiveAdapter for TarArchiveAdapter {
         list_tar_entries(file, &path.display().to_string())
     }
 
-    /// 从内存 TAR 数据源枚举条目。
-    fn list_entries_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        source_label: &str,
-        _password: Option<&str>,
-    ) -> Result<Vec<ArchiveEntryInfo>> {
-        list_tar_entries(reader, source_label)
-    }
-
     /// 从本地 TAR 读取指定条目字节。
     fn read_entry_bytes(
         &self,
@@ -69,18 +56,6 @@ impl ArchiveAdapter for TarArchiveAdapter {
         let file =
             File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
         read_tar_entry_bytes(file, entry_path, &path.display().to_string())
-    }
-
-    /// 从内存 TAR 读取指定条目字节。
-    fn read_entry_bytes_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        entry_path: &str,
-        source_label: &str,
-        _password: Option<&str>,
-    ) -> Result<Vec<u8>> {
-        read_tar_entry_bytes(reader, entry_path, source_label)
     }
 
     /// 从本地 TAR 流式读取指定条目内容。
@@ -95,81 +70,6 @@ impl ArchiveAdapter for TarArchiveAdapter {
             File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
         stream_tar_entry(file, entry_path, &path.display().to_string(), consumer)
     }
-
-    /// 从内存 TAR 流式读取指定条目内容。
-    fn stream_entry_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        entry_path: &str,
-        source_label: &str,
-        _password: Option<&str>,
-        consumer: &mut ArchiveEntryConsumer<'_>,
-    ) -> Result<()> {
-        stream_tar_entry(reader, entry_path, source_label, consumer)
-    }
-
-    /// 单次顺序遍历本地 TAR，并消费全部目标日志。
-    fn visit_entries(
-        &self,
-        path: &Path,
-        entry_paths: &HashSet<String>,
-        _password: Option<&str>,
-        consumer: &mut ArchiveEntriesConsumer<'_>,
-    ) -> Result<()> {
-        let file =
-            File::open(path).with_context(|| format!("无法打开 TAR 归档：{}", path.display()))?;
-        visit_tar_entries(file, entry_paths, &path.display().to_string(), consumer)
-    }
-
-    /// 单次顺序遍历内存 TAR，并消费全部目标日志。
-    fn visit_entries_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        entry_paths: &HashSet<String>,
-        source_label: &str,
-        _password: Option<&str>,
-        consumer: &mut ArchiveEntriesConsumer<'_>,
-    ) -> Result<()> {
-        visit_tar_entries(reader, entry_paths, source_label, consumer)
-    }
-}
-
-/// 顺序遍历一个 TAR 数据流，并只把目标条目的读取器交给调用方。
-pub(crate) fn visit_tar_entries<R>(
-    reader: R,
-    entry_paths: &HashSet<String>,
-    source_label: &str,
-    consumer: &mut ArchiveEntriesConsumer<'_>,
-) -> Result<()>
-where
-    R: Read,
-{
-    let targets = entry_paths
-        .iter()
-        .map(|path| normalize_archive_entry_path(path))
-        .collect::<HashSet<_>>();
-    let mut archive = tar::Archive::new(reader);
-    let mut visited = HashSet::with_capacity(targets.len());
-    for entry in archive
-        .entries()
-        .with_context(|| format!("无法读取 TAR 条目：{source_label}"))?
-    {
-        let mut entry = entry.with_context(|| format!("无法解析 TAR 条目：{source_label}"))?;
-        let entry_path = normalize_archive_entry_path(&entry.path()?.to_string_lossy());
-        if entry.header().entry_type().is_dir()
-            || !targets.contains(&entry_path)
-            || !visited.insert(entry_path.clone())
-        {
-            continue;
-        }
-        consumer(&entry_path, &mut entry)?;
-        if visited.len() == targets.len() {
-            break;
-        }
-    }
-    Ok(())
 }
 
 /// 从任意读取器中枚举 TAR 条目，供普通 TAR 和压缩 TAR 复用。

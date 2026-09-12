@@ -144,33 +144,23 @@ fn source_id_by_label(app: &ArgusApp, label: &str) -> SourceId {
         .expect("测试样例来源应存在")
 }
 
-/// 构造一个已加载的压缩包内目录，模拟用户在压缩包树上直接右键目录。
+/// 构造一个已加载的目录，模拟用户直接右键目录。
 fn app_with_loaded_archive_directory() -> (ArgusApp, SourceId, SourceId, SourceId) {
     let mut app = test_app();
     let mut registry = SourceRegistry::new();
-    let archive_format = crate::loader::archive::ArchiveFormat::Zip;
-    let archive_path = PathBuf::from("runtime.zip");
     let dir_id = registry.allocate_id();
     registry.insert_node(SourceTreeNode {
         id: dir_id,
         parent_id: None,
         depth: 0,
         label: "runtime".to_string(),
-        kind: SourceKind::ArchiveDirectory,
-        location: SourceLocation::ArchiveEntry {
-            archive_path: archive_path.clone(),
-            root_format: archive_format,
-            container_entries: Vec::new(),
-            entry_path: "runtime".to_string(),
-            format: archive_format,
-            archive_depth: 0,
-        },
+        kind: SourceKind::Directory,
+        location: SourceLocation::LocalPath(PathBuf::from("runtime")),
         metadata: SourceMetadata {
             size: None,
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: true,
@@ -182,21 +172,13 @@ fn app_with_loaded_archive_directory() -> (ArgusApp, SourceId, SourceId, SourceI
         parent_id: Some(dir_id),
         depth: 1,
         label: "thread0100.log".to_string(),
-        kind: SourceKind::ArchiveFile,
-        location: SourceLocation::ArchiveEntry {
-            archive_path: archive_path.clone(),
-            root_format: archive_format,
-            container_entries: Vec::new(),
-            entry_path: "runtime/thread0100.log".to_string(),
-            format: archive_format,
-            archive_depth: 0,
-        },
+        kind: SourceKind::LogFile,
+        location: SourceLocation::LocalPath(PathBuf::from("runtime/thread0100.log")),
         metadata: SourceMetadata {
             size: Some(128),
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -208,21 +190,13 @@ fn app_with_loaded_archive_directory() -> (ArgusApp, SourceId, SourceId, SourceI
         parent_id: Some(dir_id),
         depth: 1,
         label: "thread0200.log".to_string(),
-        kind: SourceKind::ArchiveFile,
-        location: SourceLocation::ArchiveEntry {
-            archive_path,
-            root_format: archive_format,
-            container_entries: Vec::new(),
-            entry_path: "runtime/thread0200.log".to_string(),
-            format: archive_format,
-            archive_depth: 0,
-        },
+        kind: SourceKind::LogFile,
+        location: SourceLocation::LocalPath(PathBuf::from("runtime/thread0200.log")),
         metadata: SourceMetadata {
             size: Some(256),
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -648,7 +622,7 @@ fn sftp_file_actions_are_disabled_while_busy() {
     assert!(!app.can_delete_remote_file_selection(1));
 }
 
-/// 验证待密码解锁的压缩包降级节点不展示分析右键菜单，也不参与搜索多选。
+/// 验证密码占位的加密压缩包节点不展示分析右键菜单，也不参与搜索多选。
 #[test]
 fn source_tree_context_menu_rejects_password_required_archive() {
     let mut app = test_app();
@@ -659,14 +633,13 @@ fn source_tree_context_menu_rejects_password_required_archive() {
         parent_id: None,
         depth: 0,
         label: "secret.zip".to_string(),
-        kind: SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
+        kind: SourceKind::ArchivePasswordRequired,
         location: SourceLocation::LocalPath(PathBuf::from("secret.zip")),
         metadata: SourceMetadata {
             size: Some(1024),
             children_loaded: false,
             is_loading: false,
-            message: Some("需要密码访问".to_string()),
-            archive_password_required: true,
+            message: Some("压缩包已加密，选择后输入密码展开".to_string()),
         },
         selected: false,
         expanded: false,
@@ -681,7 +654,7 @@ fn source_tree_context_menu_rejects_password_required_archive() {
     assert!(app.placeholder_notice.contains("不是可分析的日志候选"));
 }
 
-/// 验证压缩包内目录也能显示 Jstack 与 Runtime 分析入口。
+/// 验证目录节点也能显示 Jstack 与 Runtime 分析入口。
 #[test]
 fn source_tree_context_menu_shows_analysis_actions_for_archive_directory() {
     let (mut app, archive_dir_id, _, _) = app_with_loaded_archive_directory();
@@ -736,22 +709,18 @@ fn jstack_context_accepts_local_directory_target() {
     assert_eq!(targets[0].label, "logs");
 }
 
-/// 验证 Jstack 右键压缩包内目录时，会按来源树顺序收集已加载的后代日志文件。
+/// 验证 Jstack 右键目录时，目录本身作为独立目标交给后台递归展开。
 #[test]
 fn jstack_context_archive_directory_collects_loaded_descendants() {
-    let (mut app, archive_dir_id, first_log_id, second_log_id) =
-        app_with_loaded_archive_directory();
+    let (mut app, archive_dir_id, _, _) = app_with_loaded_archive_directory();
 
     let source_ids = app.jstack_source_ids_for_context(archive_dir_id);
     let targets = app.jstack_targets_from_source_ids(&source_ids);
 
-    assert_eq!(source_ids, vec![first_log_id, second_log_id]);
-    assert_eq!(targets.len(), 2);
-    assert!(
-        targets
-            .iter()
-            .all(|target| matches!(target.location, SourceLocation::ArchiveEntry { .. }))
-    );
+    assert_eq!(source_ids, vec![archive_dir_id]);
+    assert_eq!(targets.len(), 1);
+    assert!(matches!(targets[0].location, SourceLocation::LocalPath(_)));
+    assert_eq!(targets[0].label, "runtime");
 }
 
 /// 验证右键已在多选集合中时，会按来源树可见顺序保留多选输入。
@@ -864,22 +833,19 @@ fn runtime_context_accepts_local_directory_target() {
     assert_eq!(targets[0].kind, RuntimeAnalysisTargetKind::Directory);
 }
 
-/// 验证 Runtime 右键压缩包内目录时，会把已加载的后代日志条目作为文件目标解析。
+/// 验证 Runtime 右键目录时，目录本身作为递归展开的分析目标。
 #[test]
 fn runtime_context_archive_directory_collects_loaded_descendant_files() {
-    let (mut app, archive_dir_id, first_log_id, second_log_id) =
-        app_with_loaded_archive_directory();
+    let (mut app, archive_dir_id, _, _) = app_with_loaded_archive_directory();
 
     let targets = app.runtime_targets_for_context(archive_dir_id);
 
-    assert_eq!(targets.len(), 2);
-    assert_eq!(targets[0].source_id, first_log_id);
-    assert_eq!(targets[1].source_id, second_log_id);
-    assert!(
-        targets
-            .iter()
-            .all(|target| target.kind == RuntimeAnalysisTargetKind::File)
-    );
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].source_id, archive_dir_id);
+    assert!(matches!(
+        targets[0].kind,
+        RuntimeAnalysisTargetKind::Directory
+    ));
 }
 
 /// 验证创建 Runtime 分析 tab 会复用空 tab 并写入加载状态。
@@ -1547,7 +1513,6 @@ fn shift_range_selection_skips_non_log_candidates() {
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: true,
@@ -1565,7 +1530,6 @@ fn shift_range_selection_skips_non_log_candidates() {
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -1576,14 +1540,13 @@ fn shift_range_selection_skips_non_log_candidates() {
         parent_id: Some(root_id),
         depth: 1,
         label: "002.zip".to_string(),
-        kind: SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
+        kind: SourceKind::Unsupported("ZIP".to_string()),
         location: SourceLocation::LocalPath(PathBuf::from("logs/002.zip")),
         metadata: SourceMetadata {
             size: Some(20),
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -1601,7 +1564,6 @@ fn shift_range_selection_skips_non_log_candidates() {
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -1642,10 +1604,7 @@ fn source_tree_filter_shift_range_selection_keeps_only_log_candidates() {
 
     let source_specs = [
         ("thread001.log", SourceKind::LogFile),
-        (
-            "thread002.zip",
-            SourceKind::Archive(crate::loader::archive::ArchiveFormat::Zip),
-        ),
+        ("thread002.zip", SourceKind::Unsupported("ZIP".to_string())),
         ("thread003.log", SourceKind::LogFile),
     ];
     let mut ids = Vec::new();
@@ -1663,7 +1622,6 @@ fn source_tree_filter_shift_range_selection_keeps_only_log_candidates() {
                 children_loaded: true,
                 is_loading: false,
                 message: None,
-                archive_password_required: false,
             },
             selected: false,
             expanded: false,
@@ -2124,7 +2082,6 @@ fn applying_new_load_report_replaces_old_log_workspace() {
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -2480,17 +2437,41 @@ fn write_encrypted_zip(path: &Path, password: &str, entries: &[(&str, &[u8])]) {
     writer.finish().expect("应完成加密压缩包");
 }
 
-/// 完整加载指定压缩包路径，返回加密降级节点的来源 ID。
+/// 完整加载指定加密压缩包路径，返回密码占位节点的来源 ID。
+///
+/// 复刻真实加载流程的同步版：物化（加密包转密码占位）→ 占位节点入树 → 工作目录入状态。
 fn load_encrypted_archive_node(app: &mut ArgusApp, archive_path: &Path) -> SourceId {
-    let scan_result = SourceTreeScanner::scan_paths(
-        vec![archive_path.to_path_buf()],
-        app.config.loader.clone(),
-        app.archive_passwords.clone(),
-        tokio_util::sync::CancellationToken::new(),
+    let workspace = crate::loader::workspace::materialize_sources(
+        &[archive_path.to_path_buf()],
+        &app.config.loader,
+        &app.archive_passwords,
+        &tokio_util::sync::CancellationToken::new(),
         None,
     )
-    .expect("完整加载应成功");
-    assert!(app.apply_load_report(scan_result));
+    .expect("加密压缩包物化应转为密码占位");
+    assert_eq!(workspace.password_pending.len(), 1);
+    let mut registry = SourceRegistry::new();
+    for archive in &workspace.password_pending {
+        let id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id,
+            parent_id: None,
+            depth: 0,
+            label: archive.label.clone(),
+            kind: SourceKind::ArchivePasswordRequired,
+            location: SourceLocation::LocalPath(archive.archive_path.clone()),
+            metadata: SourceMetadata {
+                children_loaded: true,
+                message: Some("压缩包已加密，选择后输入密码展开".to_string()),
+                ..SourceMetadata::default()
+            },
+            selected: false,
+            expanded: false,
+        });
+    }
+    registry.rebuild_all_indices();
+    app.source_registry = registry;
+    app.source_workspace_root = Some(workspace.root);
     let archive_id = app
         .source_registry
         .tree_order_source_ids()
@@ -2499,12 +2480,11 @@ fn load_encrypted_archive_node(app: &mut ArgusApp, archive_path: &Path) -> Sourc
         .find(|source_id| {
             app.source_registry
                 .node(*source_id)
-                .is_some_and(|node| node.label == "secret.zip")
+                .is_some_and(|node| node.label == "secret")
         })
-        .expect("应存在加密压缩包节点");
+        .expect("应存在加密压缩包占位节点");
     let node = app.source_registry.node(archive_id).unwrap();
-    assert!(node.metadata.archive_password_required);
-    assert!(!node.metadata.children_loaded);
+    assert!(matches!(node.kind, SourceKind::ArchivePasswordRequired));
     archive_id
 }
 
@@ -2642,6 +2622,8 @@ fn applying_source_load_result_clears_progress(cx: &mut gpui::TestAppContext) {
             Ok((
                 crate::loader::MaterializedWorkspace {
                     root: std::path::PathBuf::from("/tmp/argus-test-workspace"),
+                    roots: Vec::new(),
+                    password_pending: Vec::new(),
                     warnings: Vec::new(),
                     materialized_files: 0,
                 },
@@ -2686,7 +2668,7 @@ fn toggling_password_required_archive_opens_password_prompt(cx: &mut gpui::TestA
     });
 }
 
-/// 验证输入正确密码后仅重扫该压缩包子树，原子替换节点载荷并接挂子级。
+/// 验证输入正确密码后向工作目录追加物化，原子替换占位节点为解压后的目录子树。
 #[gpui::test]
 fn archive_node_password_retry_unlocks_subtree(cx: &mut gpui::TestAppContext) {
     let directory = temporary_test_dir("archive-retry-unlock");
@@ -2704,22 +2686,32 @@ fn archive_node_password_retry_unlocks_subtree(cx: &mut gpui::TestAppContext) {
             ArchivePasswordKey::root(secret_path.clone()),
             "s3cret".to_string(),
         );
+        let workspace_root = app.source_workspace_root.clone().expect("工作目录应存在");
         let node = app.source_registry.node(archive_id).unwrap().clone();
-        let result = SourceTreeScanner::scan_archive_subtree(
-            &node,
-            app.config.loader.clone(),
-            app.archive_passwords.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
+        let result = crate::loader::workspace::append_materialize_archive(
+            &workspace_root,
+            &node.label,
+            &secret_path,
+            &app.config.loader,
+            &app.archive_passwords,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .and_then(|root_info| {
+            SourceTreeScanner::scan_paths(
+                vec![root_info.path],
+                app.config.loader.clone(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+        });
         app.apply_archive_node_retry_result(archive_id, result, app_cx);
     });
 
     app.read_with(cx, |app, _| {
         let node = app.source_registry.node(archive_id).expect("节点应保留");
-        assert!(matches!(node.kind, SourceKind::Archive(_)));
+        assert!(matches!(node.kind, SourceKind::Directory));
         assert!(node.metadata.children_loaded);
         assert!(!node.metadata.is_loading);
-        assert!(!node.metadata.archive_password_required);
         assert!(node.expanded);
         let labels = app
             .source_registry
@@ -2728,7 +2720,7 @@ fn archive_node_password_retry_unlocks_subtree(cx: &mut gpui::TestAppContext) {
             .filter_map(|source_id| app.source_registry.node(*source_id))
             .map(|node| node.label.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels, vec!["secret.zip", "hidden", "a.log", "b.log"]);
+        assert_eq!(labels, vec!["secret", "hidden", "a.log", "b.log"]);
         assert!(app.placeholder_notice.contains("已解锁并展开"));
     });
 }
@@ -2746,18 +2738,29 @@ fn archive_node_password_retry_invalid_password_reprompts(cx: &mut gpui::TestApp
         let key = ArchivePasswordKey::root(secret_path.clone());
         app.archive_passwords
             .insert(key.clone(), "wrong".to_string());
+        let workspace_root = app.source_workspace_root.clone().expect("工作目录应存在");
         let node = app.source_registry.node(archive_id).unwrap().clone();
-        let result = SourceTreeScanner::scan_archive_subtree(
-            &node,
-            app.config.loader.clone(),
-            app.archive_passwords.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
+        let result = crate::loader::workspace::append_materialize_archive(
+            &workspace_root,
+            &node.label,
+            &secret_path,
+            &app.config.loader,
+            &app.archive_passwords,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .and_then(|root_info| {
+            SourceTreeScanner::scan_paths(
+                vec![root_info.path],
+                app.config.loader.clone(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+        });
         app.apply_archive_node_retry_result(archive_id, result, app_cx);
 
         let node = app.source_registry.node(archive_id).expect("节点应保留");
         assert!(!node.metadata.is_loading);
-        assert!(node.metadata.archive_password_required);
+        assert!(matches!(node.kind, SourceKind::ArchivePasswordRequired));
         assert!(
             app.archive_passwords.get(&key).is_none(),
             "错误密码必须被清除，避免后续任务复用"

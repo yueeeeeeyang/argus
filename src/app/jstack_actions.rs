@@ -479,11 +479,8 @@ impl ArgusApp {
         if self.source_registry.node(source_id).is_none() {
             return Vec::new();
         }
-        if self.source_is_local_directory(source_id) {
+        if self.source_is_analysis_directory(source_id) {
             return vec![source_id];
-        }
-        if self.source_is_archive_directory(source_id) {
-            return self.loaded_descendant_analysis_source_ids(source_id);
         }
         if !self.source_supports_jstack_analysis(source_id) {
             return Vec::new();
@@ -515,39 +512,6 @@ impl ArgusApp {
         ordered_ids
     }
 
-    /// 收集已加载目录下所有可分析文件来源，保持来源树展示顺序。
-    pub(super) fn loaded_descendant_analysis_source_ids(
-        &self,
-        parent_id: SourceId,
-    ) -> Vec<SourceId> {
-        let mut source_ids = Vec::new();
-        self.collect_loaded_descendant_analysis_source_ids(parent_id, &mut source_ids);
-        source_ids
-    }
-
-    /// 递归收集后代文件；来源树已完整初始化，可展开目录的子级必然已加载。
-    pub(super) fn collect_loaded_descendant_analysis_source_ids(
-        &self,
-        parent_id: SourceId,
-        source_ids: &mut Vec<SourceId>,
-    ) {
-        for child_id in self.source_registry.child_ids(parent_id).iter().copied() {
-            let Some(child) = self.source_registry.node(child_id) else {
-                continue;
-            };
-
-            if child.kind.is_log_candidate()
-                || self.is_source_selectable_for_search_selection(child_id)
-            {
-                source_ids.push(child_id);
-            }
-
-            if child.kind.can_expand() {
-                self.collect_loaded_descendant_analysis_source_ids(child_id, source_ids);
-            }
-        }
-    }
-
     /// 将来源树节点转换为 Jstack 分析目标。
     pub(super) fn jstack_targets_from_source_ids(
         &self,
@@ -565,7 +529,6 @@ impl ArgusApp {
                     location: node.location.clone(),
                     label: node.label.clone(),
                     path: node.location.display_path(),
-                    archive_passwords: self.archive_passwords.clone(),
                 })
             })
             .collect()

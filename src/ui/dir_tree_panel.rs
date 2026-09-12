@@ -339,18 +339,16 @@ fn render_loading_icon(source_id: SourceId, theme: &AppTheme) -> AnyElement {
 /// 返回来源节点右侧元信息；目录显示子级数量，文件显示大小。
 fn source_meta_text(source: &SourceTreeNode, child_count: usize) -> String {
     match source.kind {
-        SourceKind::Directory | SourceKind::ArchiveDirectory => {
+        SourceKind::Directory => {
             if source.metadata.children_loaded {
                 format!("{child_count} 项")
             } else {
                 "…".to_string()
             }
         }
-        SourceKind::LogFile
-        | SourceKind::Archive(_)
-        | SourceKind::SingleFileArchive(_)
-        | SourceKind::ArchiveFile
-        | SourceKind::Unsupported(_) => source.metadata.size.map(format_bytes).unwrap_or_default(),
+        SourceKind::LogFile | SourceKind::ArchivePasswordRequired | SourceKind::Unsupported(_) => {
+            source.metadata.size.map(format_bytes).unwrap_or_default()
+        }
     }
 }
 /// 根据节点层级和兄弟关系渲染目录树连线，避免最后一个子节点下方残留无连接竖线。
@@ -502,10 +500,8 @@ fn icon_for_source(source: &SourceTreeNode) -> ArgusIcon {
     match &source.kind {
         SourceKind::Directory if source.expanded => ArgusIcon::FolderOpen,
         SourceKind::Directory => ArgusIcon::Folder,
-        SourceKind::Archive(_) | SourceKind::SingleFileArchive(_) => ArgusIcon::Archive,
-        SourceKind::ArchiveDirectory if source.expanded => ArgusIcon::FolderOpen,
-        SourceKind::ArchiveDirectory => ArgusIcon::Folder,
-        SourceKind::ArchiveFile | SourceKind::LogFile => ArgusIcon::FileText,
+        SourceKind::ArchivePasswordRequired => ArgusIcon::Archive,
+        SourceKind::LogFile => ArgusIcon::FileText,
         SourceKind::Unsupported(_) => ArgusIcon::File,
     }
 }

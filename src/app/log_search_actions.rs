@@ -1684,14 +1684,9 @@ impl ArgusApp {
             .into_iter()
             .rev()
             .find(|ancestor_id| {
-                self.source_registry.node(*ancestor_id).is_some_and(|node| {
-                    matches!(
-                        node.kind,
-                        SourceKind::Directory
-                            | SourceKind::Archive(_)
-                            | SourceKind::ArchiveDirectory
-                    )
-                })
+                self.source_registry
+                    .node(*ancestor_id)
+                    .is_some_and(|node| matches!(node.kind, SourceKind::Directory))
             })
     }
 
@@ -1746,10 +1741,8 @@ impl ArgusApp {
             .iter()
             .filter_map(|source_id| {
                 let node = self.source_registry.node(*source_id)?;
-                if matches!(
-                    node.kind,
-                    SourceKind::Directory | SourceKind::Archive(_) | SourceKind::ArchiveDirectory
-                ) && node.location.display_path() == directory_path
+                if matches!(node.kind, SourceKind::Directory)
+                    && node.location.display_path() == directory_path
                 {
                     Some(*source_id)
                 } else {
@@ -2489,7 +2482,6 @@ mod tests {
     use crate::app::{ArgusTab, LogTextPosition, LogTextSelection, SEARCH_RESULT_PANEL_HEIGHT_MAX};
     use crate::config::paths::{isolated_test_dir, isolated_test_file_path};
     use crate::config::{ConfigManager, LoaderConfig, SEARCH_RECENT_KEYWORDS_MAX};
-    use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{
         SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode,
         SourceTreeScanner,
@@ -2645,7 +2637,6 @@ mod tests {
         let scan_result = SourceTreeScanner::scan_paths(
             vec![root.clone()],
             LoaderConfig::default(),
-            ArchivePasswordStore::default(),
             tokio_util::sync::CancellationToken::new(),
             None,
         )
@@ -2807,7 +2798,6 @@ mod tests {
             location: SourceLocation::LocalPath(log_path.clone()),
             label: "app.log".to_string(),
             default_encoding: "utf-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 

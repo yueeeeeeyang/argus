@@ -2169,7 +2169,6 @@ mod tests {
     };
     use crate::config::paths::temporary_test_dir;
     use crate::config::{LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget};
-    use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
 
     /// 构造只授权一个临时日志来源的工具运行上下文。
@@ -2209,7 +2208,6 @@ mod tests {
             }]),
             profiles: Arc::new(HashMap::new()),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
             allow_raw_log_content,
         };
         let scope = Arc::new(scope);

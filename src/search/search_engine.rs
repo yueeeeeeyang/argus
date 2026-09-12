@@ -462,7 +462,6 @@ impl SearchEngine {
                     location: target.location.clone(),
                     label: target.label.clone(),
                     default_encoding: request.default_encoding.clone(),
-                    archive_passwords: request.archive_passwords.clone(),
                 },
                 cancel_token.clone(),
             ) {
@@ -1642,7 +1641,6 @@ mod tests {
         SearchRequest, SearchTarget, find_match_ranges,
     };
     use crate::config::paths::{isolated_test_dir, isolated_test_file_path};
-    use crate::loader::archive::ArchivePasswordStore;
     use crate::loader::{SourceId, SourceLocation};
     use crate::reader::log_file_reader::{LogFileReader, OpenLogRequest};
 
@@ -1748,7 +1746,6 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "count.log".to_string(),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1780,7 +1777,6 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "count-only.log".to_string(),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1810,7 +1806,6 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "next.log".to_string(),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1856,7 +1851,6 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "inline.log".to_string(),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 
@@ -1900,7 +1894,6 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "prev.log".to_string(),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .unwrap();
 

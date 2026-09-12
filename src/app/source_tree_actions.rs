@@ -15,27 +15,9 @@ impl ArgusApp {
 
     /// 判断来源节点是否是分析功能可以展开收集的目录。
     pub(super) fn source_is_analysis_directory(&self, source_id: SourceId) -> bool {
-        self.source_registry.node(source_id).is_some_and(|node| {
-            matches!(
-                node.kind,
-                SourceKind::Directory | SourceKind::ArchiveDirectory
-            )
-        })
-    }
-
-    /// 判断来源节点是否是本地真实目录；本地目录可以直接交给后台递归文件系统。
-    pub(super) fn source_is_local_directory(&self, source_id: SourceId) -> bool {
-        self.source_registry.node(source_id).is_some_and(|node| {
-            matches!(node.kind, SourceKind::Directory)
-                && matches!(node.location, SourceLocation::LocalPath(_))
-        })
-    }
-
-    /// 判断来源节点是否是压缩包内目录；分析时直接收集已加载后代文件。
-    pub(super) fn source_is_archive_directory(&self, source_id: SourceId) -> bool {
         self.source_registry
             .node(source_id)
-            .is_some_and(|node| matches!(node.kind, SourceKind::ArchiveDirectory))
+            .is_some_and(|node| matches!(node.kind, SourceKind::Directory))
     }
 
     /// 判断来源节点是否支持 Jstack 线程日志分析入口。
@@ -74,14 +56,14 @@ impl ArgusApp {
             return;
         };
 
-        if !node.kind.can_expand() {
-            self.placeholder_notice = format!("{} 没有可展开的子级", node.label);
+        // 加密压缩包占位节点没有可展开内容，点击时引导输入密码后追加物化。
+        if matches!(node.kind, SourceKind::ArchivePasswordRequired) {
+            self.present_archive_password_prompt_for_source_node(&node);
             return;
         }
 
-        // 完整初始化后子级始终就绪；只有枚举时被密码拦截的归档节点需要在点击时引导输入密码。
-        if matches!(node.kind, SourceKind::Archive(_)) && node.metadata.archive_password_required {
-            self.present_archive_password_prompt_for_source_node(&node);
+        if !node.kind.can_expand() {
+            self.placeholder_notice = format!("{} 没有可展开的子级", node.label);
             return;
         }
 
@@ -115,28 +97,16 @@ impl ArgusApp {
         };
     }
 
-    /// 为加密压缩包降级节点构造缺少密码错误并弹出密码输入框。
+    /// 为加密压缩包占位节点构造缺少密码错误并弹出密码输入框。
     ///
-    /// 密码键必须与扫描器读取该节点时使用的容器键一致：本地归档用根键，
-    /// 嵌套归档用外层路径加完整容器条目链路，否则输入的密码无法在重扫时命中。
+    /// 占位节点只来自最外层加密压缩包，密码键固定为根键，保证输入的密码在追加物化时命中。
     pub(super) fn present_archive_password_prompt_for_source_node(
         &mut self,
         node: &SourceTreeNode,
     ) {
         let source_label = node.location.display_path();
-        let key = match &node.location {
-            SourceLocation::LocalPath(path) => ArchivePasswordKey::root(path.clone()),
-            SourceLocation::ArchiveEntry {
-                archive_path,
-                container_entries,
-                entry_path,
-                ..
-            } => {
-                let mut container_chain = container_entries.clone();
-                container_chain.push(entry_path.clone());
-                ArchivePasswordKey::new(archive_path.clone(), &container_chain)
-            }
-        };
+        let SourceLocation::LocalPath(path) = &node.location;
+        let key = ArchivePasswordKey::root(path.clone());
         let error =
             ArchivePasswordError::required(source_label.clone()).with_context(key, source_label);
         self.present_archive_password_prompt(
@@ -145,7 +115,7 @@ impl ArgusApp {
         );
     }
 
-    /// 密码提交后在后台仅重扫目标压缩包子树；节点保持转圈直到结果回填。
+    /// 密码提交后在后台向当前工作目录追加物化目标压缩包并重扫其顶层目录；节点保持转圈直到结果回填。
     pub(super) fn start_archive_node_password_retry(
         &mut self,
         source_id: SourceId,
@@ -155,23 +125,37 @@ impl ArgusApp {
             self.placeholder_notice = "未找到需要密码的压缩包节点".to_string();
             return;
         };
+        let SourceLocation::LocalPath(archive_path) = node.location.clone();
+        let Some(workspace_root) = self.source_workspace_root.clone() else {
+            self.placeholder_notice = "日志工作目录已失效，请重新加载来源后重试".to_string();
+            return;
+        };
 
         self.source_registry.set_loading(source_id, true);
         self.source_registry.rebuild_visible_index();
         self.rebuild_filtered_source_ids();
-        self.placeholder_notice = format!("正在按密码重新扫描 {}", node.label);
+        self.placeholder_notice = format!("正在按密码解压 {}到工作目录", node.label);
 
         let loader_config = self.config.loader.clone();
         let archive_passwords = self.archive_passwords.clone();
+        let label = node.label.clone();
         cx.spawn(async move |view, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    SourceTreeScanner::scan_archive_subtree(
-                        &node,
+                    let root_info = crate::loader::workspace::append_materialize_archive(
+                        &workspace_root,
+                        &label,
+                        &archive_path,
+                        &loader_config,
+                        &archive_passwords,
+                        &tokio_util::sync::CancellationToken::new(),
+                    )?;
+                    SourceTreeScanner::scan_paths(
+                        vec![root_info.path],
                         loader_config,
-                        archive_passwords,
                         tokio_util::sync::CancellationToken::new(),
+                        None,
                     )
                 })
                 .await;

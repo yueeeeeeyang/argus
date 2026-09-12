@@ -514,7 +514,7 @@ impl AssistantPanel {
         }
         let mut config = self.app.read(cx).config.ai.clone();
         config.normalize();
-        let (registry, default_encoding, loader_config, archive_passwords, base_revision) = {
+        let (registry, default_encoding, loader_config, base_revision) = {
             let app = self.app.read(cx);
             if app.source_registry.root_ids().is_empty() {
                 self.error = Some("尚未加载日志来源".to_string());
@@ -524,7 +524,6 @@ impl AssistantPanel {
                 app.source_registry.clone(),
                 app.selected_encoding.clone(),
                 app.config.loader.clone(),
-                app.archive_passwords.clone(),
                 app.source_content_revision,
             )
         };
@@ -549,7 +548,6 @@ impl AssistantPanel {
                         config,
                         default_encoding,
                         loader_config,
-                        archive_passwords,
                         cancellation,
                     )
                 })

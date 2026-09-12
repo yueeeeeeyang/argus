@@ -5,8 +5,8 @@
 //! 主要功能：根据日志大小选择内存行文档或分页文档，避免超大日志被整体解码成单个字符串。
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context as _, Result, bail};
 
 use crate::loader::SourceLocation;
-use crate::loader::archive::ArchivePasswordStore;
 use crate::log_io::encoding_detector::{
     DecodedText, decode_log_bytes, decode_log_bytes_with_known_encoding,
 };
@@ -23,8 +22,6 @@ use crate::log_io::line_index::{
     LineIndex, LineIndexEntry, build_line_index_with_encoding_and_cancel, checked_line_span,
 };
 use crate::log_io::mmap_backend::MmapBackend;
-use crate::log_io::spooled_backend::{SpoolCleanup, create_spool_file};
-use crate::log_io::stream_backend::ArchiveStreamBackend;
 
 /// 超大日志分页阈值；超过该大小后不再整体解码到内存。
 pub(crate) const LARGE_LOG_THRESHOLD_BYTES: u64 = 30 * 1024 * 1024;
@@ -38,14 +35,12 @@ const ENCODING_SAMPLE_BYTES: usize = 4 * 1024 * 1024;
 /// 打开日志的请求模型，隔离 UI 状态和底层读取实现。
 #[derive(Clone, Debug)]
 pub(crate) struct OpenLogRequest {
-    /// 来源位置，可能是本地文件，也可能是压缩包内部条目。
+    /// 来源位置；工作目录物化后统一为普通文件路径。
     pub location: SourceLocation,
     /// UI 展示名称。
     pub label: String,
     /// 用户设置的默认编码名称。
     pub default_encoding: String,
-    /// 当前会话中已输入的压缩包密码快照；仅用于本次后台读取，不持久化。
-    pub archive_passwords: ArchivePasswordStore,
 }
 
 /// 日志读取生命周期状态，存入应用状态供内容区和状态栏展示。
@@ -304,7 +299,7 @@ pub(crate) struct DisplayedLogLine {
 /// 大日志分页文档。
 #[derive(Clone, Debug)]
 pub(crate) struct PagedLogDocument {
-    /// 可 seek 的本地文件路径；可能是真实日志，也可能是压缩流物化文件。
+    /// 可 seek 的本地文件路径；工作目录物化后统一为普通日志文件。
     path: PathBuf,
     /// 实际采用的编码标签。
     encoding: String,
@@ -318,38 +313,25 @@ pub(crate) struct PagedLogDocument {
     cache: Arc<Mutex<PagedLineCache>>,
     /// 共享文件句柄，避免滚动过程中反复打开文件。
     file_handle: Arc<Mutex<Option<File>>>,
-    /// 压缩日志临时分页文件清理器；本地文件为 `None`。
-    _spool_cleanup: Option<Arc<SpoolCleanup>>,
 }
 
 impl PagedLogDocument {
     /// 从可 seek 本地路径创建分页文档。
     ///
     /// 参数说明：
-    /// - `path`：真实日志或已物化临时日志路径。
+    /// - `path`：本地普通日志文件路径。
     /// - `preferred_encoding`：用户配置的兜底编码。
-    /// - `spool_cleanup`：压缩日志临时文件清理器，本地文件传 `None`。
     ///
     /// 返回值：可按行分页读取的文档。
     #[cfg(test)]
-    pub(crate) fn open(
-        path: PathBuf,
-        preferred_encoding: String,
-        spool_cleanup: Option<Arc<SpoolCleanup>>,
-    ) -> Result<Self> {
-        Self::open_with_cancel_flag(
-            path,
-            preferred_encoding,
-            spool_cleanup,
-            &AtomicBool::new(false),
-        )
+    pub(crate) fn open(path: PathBuf, preferred_encoding: String) -> Result<Self> {
+        Self::open_with_cancel_flag(path, preferred_encoding, &AtomicBool::new(false))
     }
 
-    /// 从可 seek 路径创建分页文档，并允许后台 Agent 在行索引扫描块边界取消。
+    /// 从可 seek 路径创建分页文档，并允许后台任务在行索引扫描块边界取消。
     pub(crate) fn open_with_cancel_flag(
         path: PathBuf,
         preferred_encoding: String,
-        spool_cleanup: Option<Arc<SpoolCleanup>>,
         cancel_flag: &AtomicBool,
     ) -> Result<Self> {
         let encoding = detect_encoding_from_file_sample(&path, &preferred_encoding)?;
@@ -365,7 +347,6 @@ impl PagedLogDocument {
                 PAGED_DECODE_CACHE_LIMIT_BYTES,
             ))),
             file_handle: Arc::new(Mutex::new(None)),
-            _spool_cleanup: spool_cleanup,
         })
     }
 
@@ -897,7 +878,6 @@ impl LogFileReader {
         }
         match &request.location {
             SourceLocation::LocalPath(path) => open_local_log(request.clone(), path, &cancel_flag),
-            SourceLocation::ArchiveEntry { .. } => open_archive_log(request, &cancel_flag),
         }
     }
 }
@@ -917,77 +897,13 @@ fn open_local_log(
         bail!("日志读取已取消");
     }
     if metadata.len() > LARGE_LOG_THRESHOLD_BYTES {
-        return build_paged_handle(
-            request,
-            path.to_path_buf(),
-            None,
-            metadata.len(),
-            cancel_flag,
-        );
+        return build_paged_handle(request, path.to_path_buf(), metadata.len(), cancel_flag);
     }
 
     let bytes = MmapBackend::read_to_bytes(path)?;
     if cancel_flag.load(Ordering::Relaxed) {
         bail!("日志读取已取消");
     }
-    build_memory_handle(request, bytes)
-}
-
-/// 打开压缩包内部日志；小日志保存在内存，超阈值日志物化后分页。
-fn open_archive_log(request: OpenLogRequest, cancel_flag: &AtomicBool) -> Result<LogReaderHandle> {
-    let mut bytes = Vec::new();
-    let mut spooled_file: Option<File> = None;
-    let mut spooled_path: Option<PathBuf> = None;
-    let mut total_bytes = 0_u64;
-    let label = request.label.clone();
-
-    let stream_result = ArchiveStreamBackend::stream_to_consumer(
-        &request.location,
-        &request.archive_passwords,
-        &mut |chunk| {
-            if cancel_flag.load(Ordering::Relaxed) {
-                bail!("日志读取已取消");
-            }
-            total_bytes = total_bytes.saturating_add(chunk.len() as u64);
-            if spooled_file.is_none() && total_bytes > LARGE_LOG_THRESHOLD_BYTES {
-                let (mut file, path) = create_spool_file(&label)?;
-                file.write_all(&bytes)
-                    .with_context(|| format!("无法写入日志分页缓存：{}", path.display()))?;
-                bytes.clear();
-                spooled_file = Some(file);
-                spooled_path = Some(path);
-            }
-
-            if let Some(file) = spooled_file.as_mut() {
-                file.write_all(chunk).context("无法写入压缩日志分页缓存")?;
-            } else {
-                bytes.extend_from_slice(chunk);
-            }
-
-            Ok(())
-        },
-    );
-
-    if let Err(error) = stream_result {
-        drop(spooled_file.take());
-        if let Some(path) = spooled_path.take() {
-            let _ = fs::remove_file(path);
-        }
-        return Err(error);
-    }
-
-    if let Some(mut file) = spooled_file {
-        let path = spooled_path.ok_or_else(|| anyhow::anyhow!("压缩日志分页缓存路径缺失"))?;
-        let cleanup = SpoolCleanup::new(path.clone());
-        if let Err(error) = file.flush().context("无法刷新压缩日志分页缓存") {
-            drop(file);
-            drop(cleanup);
-            return Err(error);
-        }
-        drop(file);
-        return build_paged_handle(request, path, Some(cleanup), total_bytes, cancel_flag);
-    }
-
     build_memory_handle(request, bytes)
 }
 
@@ -1018,14 +934,12 @@ fn build_memory_handle(request: OpenLogRequest, bytes: Vec<u8>) -> Result<LogRea
 fn build_paged_handle(
     request: OpenLogRequest,
     path: PathBuf,
-    cleanup: Option<Arc<SpoolCleanup>>,
     total_bytes: u64,
     cancel_flag: &AtomicBool,
 ) -> Result<LogReaderHandle> {
     let document = LogDocument::Paged(PagedLogDocument::open_with_cancel_flag(
         path,
         request.default_encoding.clone(),
-        cleanup,
         cancel_flag,
     )?);
 
@@ -1109,12 +1023,9 @@ mod tests {
     };
     use crate::config::paths::isolated_test_file_path;
     use crate::loader::SourceLocation;
-    use crate::loader::archive::{ArchiveFormat, ArchivePasswordStore};
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
-    use zip::ZipWriter;
-    use zip::write::SimpleFileOptions;
 
     /// 构造隔离的临时日志路径，避免单元测试依赖真实用户目录。
     fn temp_log_path(name: &str) -> PathBuf {
@@ -1141,7 +1052,6 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "empty.log".to_string(),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .expect("空日志文件应能打开");
 
@@ -1166,7 +1076,6 @@ mod tests {
             location: SourceLocation::LocalPath(path.clone()),
             label: "large.log".to_string(),
             default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
         })
         .expect("大日志应能以分页模式打开");
 
@@ -1186,8 +1095,8 @@ mod tests {
         }
         fs::write(&path, bytes).expect("应能写入 UTF-16LE 日志");
 
-        let document = PagedLogDocument::open(path.clone(), "UTF-8".to_string(), None)
-            .expect("应能打开分页文档");
+        let document =
+            PagedLogDocument::open(path.clone(), "UTF-8".to_string()).expect("应能打开分页文档");
         let lines = document
             .read_visible_lines(0, 3)
             .expect("应能读取 UTF-16LE 分页行");
@@ -1204,7 +1113,7 @@ mod tests {
     fn paged_document_iterates_search_ranges_with_early_stop() {
         let path = temp_log_path("paged-search-range.log");
         fs::write(&path, "alpha\nbeta\nerror\nomega\n").expect("应能写入分页遍历测试日志");
-        let document = PagedLogDocument::open(path.clone(), "UTF-8".to_string(), None)
+        let document = PagedLogDocument::open(path.clone(), "UTF-8".to_string())
             .expect("应能打开分页遍历测试日志");
         let mut forward = Vec::new();
 
@@ -1234,41 +1143,6 @@ mod tests {
             backward,
             vec![(2, "error".to_string()), (1, "beta".to_string())]
         );
-
-        let _ = fs::remove_file(path);
-    }
-
-    /// 验证压缩包内小日志通过压缩适配器流式入口打开，不需要先解包到临时文件。
-    #[test]
-    fn opens_zip_log_entry_with_archive_streaming_mode() {
-        let path = temp_log_path("archive.zip");
-        let file = fs::File::create(&path).expect("应能创建 ZIP 测试文件");
-        let mut writer = ZipWriter::new(file);
-        writer
-            .start_file("logs/app.log", SimpleFileOptions::default())
-            .expect("应能创建 ZIP 内日志条目");
-        writer
-            .write_all(b"[INFO] started\n[ERROR] failed")
-            .expect("应能写入 ZIP 内日志内容");
-        writer.finish().expect("应能完成 ZIP 写入");
-
-        let handle = LogFileReader::open(OpenLogRequest {
-            location: SourceLocation::ArchiveEntry {
-                archive_path: path.clone(),
-                root_format: ArchiveFormat::Zip,
-                container_entries: Vec::new(),
-                entry_path: "logs/app.log".to_string(),
-                format: ArchiveFormat::Zip,
-                archive_depth: 0,
-            },
-            label: "app.log".to_string(),
-            default_encoding: "UTF-8".to_string(),
-            archive_passwords: ArchivePasswordStore::default(),
-        })
-        .expect("ZIP 内日志应能直接读取");
-
-        assert_eq!(handle.line_count(), 2);
-        assert_eq!(handle.lines(0, 2).unwrap()[1].text, "[ERROR] failed");
 
         let _ = fs::remove_file(path);
     }

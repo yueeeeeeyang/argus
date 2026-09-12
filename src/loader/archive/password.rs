@@ -167,15 +167,3 @@ pub(crate) fn find_archive_password_error(error: &anyhow::Error) -> Option<Archi
         .chain()
         .find_map(|cause| cause.downcast_ref::<ArchivePasswordError>().cloned())
 }
-
-/// 若错误链中包含密码错误，则补充当前容器上下文；否则保留原错误。
-pub(crate) fn annotate_archive_password_error(
-    error: anyhow::Error,
-    key: ArchivePasswordKey,
-    source_label: impl Into<String>,
-) -> anyhow::Error {
-    match find_archive_password_error(&error) {
-        Some(password_error) => password_error.with_context(key, source_label).into(),
-        None => error,
-    }
-}

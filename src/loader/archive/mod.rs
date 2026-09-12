@@ -15,7 +15,6 @@ pub(crate) mod sevenz_adapter;
 pub(crate) mod tar_adapter;
 pub(crate) mod zip_adapter;
 
-pub(crate) use adapter::{ArchiveEntryConsumer, stream_archive_entry_with_passwords};
 pub(crate) use detector::ArchiveFormat;
 pub(crate) use password::{
     ArchivePasswordError, ArchivePasswordErrorKind, ArchivePasswordKey, ArchivePasswordStore,

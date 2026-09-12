@@ -136,10 +136,8 @@ impl ArgusApp {
         let selected_id = self.source_registry.selected_id();
         let default_encoding = self.selected_encoding.clone();
         let loader_config = self.config.loader.clone();
-        let archive_passwords = self.archive_passwords.clone();
         let scan_config = config.clone();
         let scan_loader_config = loader_config.clone();
-        let scan_archive_passwords = archive_passwords.clone();
         self.placeholder_notice = "正在完整扫描来源树并匹配日志类型".to_string();
 
         cx.spawn(async move |view, cx| {
@@ -152,7 +150,6 @@ impl ArgusApp {
                         scan_config,
                         default_encoding,
                         scan_loader_config,
-                        scan_archive_passwords,
                         scan_cancellation,
                     )
                 })

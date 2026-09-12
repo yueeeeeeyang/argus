@@ -17,7 +17,8 @@ use crate::infra::text_selection::{
     remove_character_range, word_range_at,
 };
 use crate::loader::{
-    BrowseEntry, BrowseLocation, BrowseResult, PathBrowser, SourceRegistry, SourceTreeScanProgress,
+    BrowseEntry, BrowseLocation, BrowseResult, PathBrowser, SourceKind, SourceLocation,
+    SourceMetadata, SourceRegistry, SourceTreeNode, SourceTreeScanProgress, SourceTreeScanResult,
     SourceTreeScanner,
 };
 use crate::ui::source_picker::SourcePickerWindow;
@@ -412,7 +413,8 @@ impl ArgusApp {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    // 先把来源物化到独立工作目录，再做来源树扫描（本阶段扫描仍消费原始路径）。
+                    // 先把来源物化到独立工作目录，再对工作目录做来源树扫描：
+                    // 目录树直接反映工作目录的真实结构，不再枚举压缩包。
                     let workspace = crate::loader::workspace::materialize_sources(
                         &paths,
                         &loader_config,
@@ -420,20 +422,38 @@ impl ArgusApp {
                         &cancellation,
                         Some(&progress_sender),
                     )?;
-                    match SourceTreeScanner::scan_paths(
-                        paths,
-                        loader_config,
-                        archive_passwords,
-                        cancellation,
-                        Some(progress_sender),
-                    ) {
-                        Ok(scan_result) => Ok((workspace, scan_result)),
-                        Err(error) => {
-                            // 扫描失败时新建工作目录已无消费者，后台回滚删除。
-                            crate::loader::workspace::delete_workspace_best_effort(workspace.root);
-                            Err(error)
+                    let mut scan_result = if workspace.roots.is_empty() {
+                        SourceTreeScanResult {
+                            registry: SourceRegistry::new(),
+                            warnings: Vec::new(),
                         }
-                    }
+                    } else {
+                        let scan_roots = workspace
+                            .roots
+                            .iter()
+                            .map(|root| root.path.clone())
+                            .collect::<Vec<_>>();
+                        match SourceTreeScanner::scan_paths(
+                            scan_roots,
+                            loader_config,
+                            cancellation,
+                            Some(progress_sender),
+                        ) {
+                            Ok(scan_result) => scan_result,
+                            Err(error) => {
+                                // 扫描失败时新建工作目录已无消费者，后台回滚删除。
+                                crate::loader::workspace::delete_workspace_best_effort(
+                                    workspace.root,
+                                );
+                                return Err(error);
+                            }
+                        }
+                    };
+                    Self::append_password_pending_nodes(
+                        &mut scan_result.registry,
+                        &workspace.password_pending,
+                    );
+                    Ok((workspace, scan_result))
                 })
                 .await;
 
@@ -448,6 +468,37 @@ impl ArgusApp {
         Self::poll_source_load_progress(load_generation, trigger, progress_receiver, cx);
 
         true
+    }
+
+    /// 把因密码未授权跳过的压缩包追加为密码占位根节点。
+    ///
+    /// 占位节点指向原始压缩包路径，用户点击后引导输入密码，解锁成功再向工作目录追加物化。
+    fn append_password_pending_nodes(
+        registry: &mut SourceRegistry,
+        pending: &[crate::loader::workspace::PasswordPendingArchive],
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        for archive in pending {
+            let id = registry.allocate_id();
+            registry.insert_node(SourceTreeNode {
+                id,
+                parent_id: None,
+                depth: 0,
+                label: archive.label.clone(),
+                kind: SourceKind::ArchivePasswordRequired,
+                location: SourceLocation::LocalPath(archive.archive_path.clone()),
+                metadata: SourceMetadata {
+                    children_loaded: true,
+                    message: Some("压缩包已加密，选择后输入密码展开".to_string()),
+                    ..SourceMetadata::default()
+                },
+                selected: false,
+                expanded: false,
+            });
+        }
+        registry.rebuild_all_indices();
     }
 
     /// 前台定时轮询完整加载进度并更新状态提示；后台任务结束通道断开后轮询自然退出。

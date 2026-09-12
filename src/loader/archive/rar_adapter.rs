@@ -13,9 +13,7 @@ use std::rc::Rc;
 use anyhow::{Context as _, Result, anyhow, bail};
 use memmap2::{Mmap, MmapOptions};
 
-use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo, ArchiveReadSeek,
-};
+use crate::loader::archive::adapter::{ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo};
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::password::{ArchivePasswordError, ArchivePasswordErrorKind};
 use crate::utils::path::normalize_archive_entry_path;
@@ -93,21 +91,6 @@ impl ArchiveAdapter for RarArchiveAdapter {
         list_rar_entries_from_bytes(&bytes, &path.display().to_string(), password)
     }
 
-    /// 从内存 RAR 数据源枚举条目。
-    fn list_entries_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        source_label: &str,
-        password: Option<&str>,
-    ) -> Result<Vec<ArchiveEntryInfo>> {
-        let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("无法读取 RAR 内存压缩包：{source_label}"))?;
-        list_rar_entries_from_bytes(&bytes, source_label, password)
-    }
-
     /// 从本地 RAR 读取指定条目字节。
     fn read_entry_bytes(
         &self,
@@ -116,22 +99,6 @@ impl ArchiveAdapter for RarArchiveAdapter {
         password: Option<&str>,
     ) -> Result<Vec<u8>> {
         read_rar_entry_bytes(path, entry_path, password)
-    }
-
-    /// 从内存 RAR 读取指定条目字节。
-    fn read_entry_bytes_from_reader(
-        &self,
-        reader: &mut dyn ArchiveReadSeek,
-        _reader_len: u64,
-        entry_path: &str,
-        source_label: &str,
-        password: Option<&str>,
-    ) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("无法读取 RAR 内存压缩包：{source_label}"))?;
-        read_rar_entry_bytes_from_bytes(&bytes, entry_path, source_label, password)
     }
 }
 

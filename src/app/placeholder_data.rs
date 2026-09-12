@@ -8,7 +8,6 @@
 
 use std::path::PathBuf;
 
-use crate::loader::archive::ArchiveFormat;
 use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode};
 
 /// 构造测试样例来源树，便于验证过滤和展开状态，不参与正式启动界面。
@@ -27,7 +26,6 @@ pub(super) fn placeholder_source_registry() -> SourceRegistry {
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: true,
@@ -46,7 +44,6 @@ pub(super) fn placeholder_source_registry() -> SourceRegistry {
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: true,
         expanded: false,
@@ -65,7 +62,6 @@ pub(super) fn placeholder_source_registry() -> SourceRegistry {
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
@@ -76,15 +72,14 @@ pub(super) fn placeholder_source_registry() -> SourceRegistry {
         id: archive_id,
         parent_id: None,
         depth: 0,
-        label: "archive.zip".into(),
-        kind: SourceKind::Archive(ArchiveFormat::Zip),
-        location: SourceLocation::LocalPath(PathBuf::from("archive.zip")),
+        label: "archive".into(),
+        kind: SourceKind::Directory,
+        location: SourceLocation::LocalPath(PathBuf::from("archive")),
         metadata: SourceMetadata {
-            size: Some(4096),
+            size: None,
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: true,
@@ -96,21 +91,13 @@ pub(super) fn placeholder_source_registry() -> SourceRegistry {
         parent_id: Some(archive_id),
         depth: 1,
         label: "nested.log".into(),
-        kind: SourceKind::ArchiveFile,
-        location: SourceLocation::ArchiveEntry {
-            archive_path: PathBuf::from("archive.zip"),
-            root_format: ArchiveFormat::Zip,
-            container_entries: Vec::new(),
-            entry_path: "nested.log".into(),
-            format: ArchiveFormat::Zip,
-            archive_depth: 0,
-        },
+        kind: SourceKind::LogFile,
+        location: SourceLocation::LocalPath(PathBuf::from("archive/nested.log")),
         metadata: SourceMetadata {
             size: Some(1024),
             children_loaded: true,
             is_loading: false,
             message: None,
-            archive_password_required: false,
         },
         selected: false,
         expanded: false,
