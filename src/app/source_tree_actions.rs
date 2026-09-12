@@ -336,6 +336,7 @@ impl ArgusApp {
     /// 每次成功加载真实来源都会替换旧来源，避免不同批次日志结构混在同一棵树中。
     pub(crate) fn apply_load_report(&mut self, result: SourceTreeScanResult) -> bool {
         self.is_source_loading = false;
+        self.source_load_progress = None;
         let SourceTreeScanResult { registry, warnings } = result;
 
         if registry.is_empty() {
@@ -376,6 +377,7 @@ impl ArgusApp {
             return;
         }
         self.source_load_cancellation = None;
+        self.source_load_progress = None;
         self.clear_jstack_cell_hover_preview();
         match result {
             Ok(scan_result) => {

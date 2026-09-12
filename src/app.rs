@@ -238,6 +238,8 @@ pub(crate) struct ArgusApp {
     pub has_loaded_real_sources: bool,
     /// 是否正在加载来源。
     pub is_source_loading: bool,
+    /// 当前来源完整加载的最新进度快照，用于内容区展示正在处理的位置；加载结束后清空。
+    pub source_load_progress: Option<crate::loader::SourceTreeScanProgress>,
     /// 当前来源完整加载的取消令牌；新加载请求到来时取消在途任务。
     pub source_load_cancellation: Option<tokio_util::sync::CancellationToken>,
     /// 来源完整加载 generation，用于丢弃被取消任务的过期结果和进度。
@@ -316,6 +318,10 @@ pub(crate) struct ArgusApp {
     pub log_tab_view_states: HashMap<usize, LogTabViewState>,
     /// 日志正文滚动条拖拽状态。
     pub log_scrollbar_drag: Option<LogScrollbarDrag>,
+    /// 日志文本拖拽选择的自动滚动状态。
+    pub log_selection_autoscroll: Option<LogSelectionAutoscroll>,
+    /// 拖拽选择自动滚动逐帧循环是否已注册，避免重复注册。
+    pub log_selection_autoscroll_loop_active: bool,
     /// 独立日志搜索窗口、搜索任务和结果面板状态。
     pub log_search: LogSearchState,
     /// Jstack 线程日志分析页签状态表。
@@ -475,6 +481,7 @@ impl ArgusApp {
             source_registry: SourceRegistry::new(),
             has_loaded_real_sources: false,
             is_source_loading: false,
+            source_load_progress: None,
             source_load_cancellation: None,
             source_load_generation: 0,
             source_tree_scroll: UniformListScrollHandle::new(),
@@ -514,6 +521,8 @@ impl ArgusApp {
             log_reader_generations: HashMap::new(),
             log_tab_view_states: HashMap::new(),
             log_scrollbar_drag: None,
+            log_selection_autoscroll: None,
+            log_selection_autoscroll_loop_active: false,
             log_search: LogSearchState::default(),
             jstack_analyses: HashMap::new(),
             next_jstack_analysis_id: 1,

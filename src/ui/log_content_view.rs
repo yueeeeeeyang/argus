@@ -32,10 +32,12 @@ use crate::ui::remote_file_manager_view;
 use crate::ui::runtime_analysis_view;
 use crate::ui::terminal_view;
 use gpui::{
-    AnyElement, Context, HighlightStyle, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, SharedString,
-    StyledText, Window, canvas, div, point, prelude::*, px, rgb, uniform_list,
+    Animation, AnimationExt, AnyElement, Context, HighlightStyle, IntoElement, KeyDownEvent,
+    ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ScrollWheelEvent, SharedString, StyledText, Window, canvas, div, point, prelude::*, px, rgb,
+    uniform_list,
 };
+use std::time::Duration;
 
 /// 日志正文固定行高；虚拟列表和分页窗口都依赖该值稳定换算。
 const LOG_VIEWER_ROW_HEIGHT: f32 = 20.0;
@@ -197,6 +199,121 @@ fn render_loading_state(
     )
 }
 
+/// 来源完整加载进度条轨道宽度；进度条为不定态动画，宽度只决定视觉效果。
+const SOURCE_LOAD_PROGRESS_TRACK_WIDTH: f32 = 320.0;
+/// 来源完整加载进度条滑动段宽度。
+const SOURCE_LOAD_PROGRESS_SEGMENT_WIDTH: f32 = 120.0;
+/// 来源完整加载进度条滑动段单次滑出时长。
+const SOURCE_LOAD_PROGRESS_DURATION_MS: u64 = 1200;
+/// 当前处理位置展示的最大字符数；超长路径保留尾部，文件名比前缀更有辨识度。
+const SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS: usize = 120;
+
+/// 渲染来源完整加载进度界面：旋转图标、不定态进度条、已扫描节点数和正在处理的位置。
+///
+/// 加载期间旧日志工作区已被卸载，内容区以此界面明确反馈后台扫描进展。
+fn render_source_load_progress(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
+    let detail_font_size = app.log_content_font_size;
+    let title_font_size = detail_font_size + 4.0;
+    let progress = app.source_load_progress.clone().unwrap_or_default();
+    let detail = if progress.current.is_empty() {
+        format!("正在准备扫描…已扫描 {} 项", progress.scanned)
+    } else {
+        format!(
+            "已扫描 {} 项，当前：{}",
+            progress.scanned,
+            truncate_source_load_current(&progress.current)
+        )
+    };
+
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .bg(rgb(theme.content))
+        .child(
+            div()
+                .w(px(520.0))
+                .max_w_full()
+                .px_6()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .text_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .text_size(px(title_font_size))
+                        .text_color(rgb(theme.foreground))
+                        .child(render_loading_spinner(
+                            ("source-load-spinner", app.source_load_generation),
+                            theme.foreground_muted,
+                            16.0,
+                        ))
+                        .child("正在加载日志来源".to_string()),
+                )
+                .child(
+                    div()
+                        .w(px(SOURCE_LOAD_PROGRESS_TRACK_WIDTH))
+                        .h(px(4.0))
+                        .rounded_full()
+                        .bg(rgb(theme.border))
+                        .relative()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .h_full()
+                                .w(px(SOURCE_LOAD_PROGRESS_SEGMENT_WIDTH))
+                                .rounded_full()
+                                .bg(rgb(theme.info))
+                                .with_animation(
+                                    ("source-load-progress", app.source_load_generation),
+                                    Animation::new(Duration::from_millis(
+                                        SOURCE_LOAD_PROGRESS_DURATION_MS,
+                                    ))
+                                    .repeat(),
+                                    move |segment, progress| {
+                                        segment.left(px(-SOURCE_LOAD_PROGRESS_SEGMENT_WIDTH
+                                            + progress
+                                                * (SOURCE_LOAD_PROGRESS_TRACK_WIDTH
+                                                    + SOURCE_LOAD_PROGRESS_SEGMENT_WIDTH)))
+                                    },
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(detail_font_size))
+                        .text_color(rgb(theme.foreground_muted))
+                        .child(detail),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 截断超长当前处理路径；保留尾部并补省略号前缀，避免单行文本撑出内容区。
+fn truncate_source_load_current(current: &str) -> String {
+    let char_count = current.chars().count();
+    if char_count <= SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS {
+        return current.to_string();
+    }
+    let tail = current
+        .chars()
+        .skip(char_count - SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS)
+        .collect::<String>();
+    format!("…{tail}")
+}
+
 /// 渲染内容区居中提示，可选在标题前追加一个状态图标。
 fn render_empty_state_with_leading(
     title: &str,
@@ -304,5 +421,20 @@ mod tests {
 
         assert_eq!(visible.text, "    cd");
         assert_eq!(visible.char_range, 2..8);
+    }
+
+    /// 验证超长当前处理路径截断时保留尾部文件名并补省略号前缀。
+    #[test]
+    fn source_load_current_truncation_keeps_tail() {
+        let long_path = format!("{}/target.log", "a".repeat(200));
+        let truncated = truncate_source_load_current(&long_path);
+
+        assert!(truncated.starts_with('…'));
+        assert!(truncated.ends_with("target.log"));
+        assert_eq!(
+            truncated.chars().count(),
+            SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS + 1
+        );
+        assert_eq!(truncate_source_load_current("logs/app.log"), "logs/app.log");
     }
 }

@@ -23,6 +23,11 @@ pub(crate) fn render_content_body(
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();
             render_log_source_content(app, theme, tab_id, source_id, &path, cx)
         }
+        TabKind::Empty
+            if app.is_source_loading && app.workspace == crate::app::Workspace::LogAnalysis =>
+        {
+            render_source_load_progress(app, theme)
+        }
         TabKind::Empty if app.workspace == crate::app::Workspace::Connections => {
             render_empty_state(
                 "请选择 SSH 链接",
@@ -167,7 +172,46 @@ pub(crate) fn render_in_memory_log(
             theme,
             cx,
         ))
+        .child(render_log_selection_autoscroll_sensor(tab_id, cx))
         .into_any_element()
+}
+
+/// 渲染拖拽选择自动滚动传感器。
+///
+/// 说明：GPUI 按命中测试分发鼠标事件，行元素的 `on_mouse_move` 在指针拖出可见行后
+/// 不再触发，选区随之冻结。这里通过 canvas 在绘制期注册窗口级监听（与自绘滚动条同一
+/// 范式），让拖拽选择越过视口顶/底边缘时仍能持续记录指针位置并驱动自动滚动。
+/// canvas 不注册元素级交互、不参与命中测试，不影响行元素的鼠标事件。
+fn render_log_selection_autoscroll_sensor(tab_id: usize, cx: &mut Context<ArgusApp>) -> AnyElement {
+    let entity = cx.entity();
+    canvas(
+        |_, _, _| (),
+        move |_, _, window: &mut Window, _| {
+            window.on_mouse_event({
+                let entity = entity.clone();
+                move |event: &MouseMoveEvent, phase, window, cx| {
+                    if !phase.bubble() || !event.dragging() {
+                        return;
+                    }
+                    let entity_id = entity.entity_id();
+                    let started = entity.update(cx, |app, app_cx| {
+                        app.track_log_selection_autoscroll_pointer(
+                            tab_id,
+                            event.position,
+                            window,
+                            app_cx,
+                        )
+                    });
+                    if started {
+                        cx.notify(entity_id);
+                    }
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 /// 渲染分页大日志；只读取当前视口附近的真实行。
@@ -310,6 +354,7 @@ pub(crate) fn render_paged_log(
                 })
                 .unwrap_or_default(),
         )
+        .child(render_log_selection_autoscroll_sensor(tab_id, cx))
         .into_any_element()
 }
 

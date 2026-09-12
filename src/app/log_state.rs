@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use gpui::{Pixels, ScrollHandle, UniformListScrollHandle};
+use gpui::{Pixels, Point, ScrollHandle, UniformListScrollHandle};
 
 use crate::highlight::{HighlightCache, HighlightLanguage};
 use crate::infra::text_selection::TextSelectionGranularity;
@@ -53,6 +53,15 @@ pub(crate) struct LogTextSelectionDrag {
     pub anchor_range: LogTextSelection,
     /// 当前拖拽粒度，决定后续移动时如何扩展选区。
     pub granularity: TextSelectionGranularity,
+}
+
+/// 日志文本拖拽选择的自动滚动状态，记录拖拽中的标签页和最近的指针位置。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LogSelectionAutoscroll {
+    /// 正在拖拽选择的标签页 ID。
+    pub tab_id: usize,
+    /// 最近一次拖拽指针位置（窗口坐标）。
+    pub pointer: Point<Pixels>,
 }
 
 /// 日志正文中当前被搜索结果激活的命中位置。

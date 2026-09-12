@@ -2570,6 +2570,84 @@ fn stale_source_load_result_is_discarded(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// 验证已有日志时启动新加载会立即卸载旧日志工作区并进入加载状态，而不是继续展示过期内容。
+#[gpui::test]
+fn new_source_load_unloads_previous_workspace_immediately(cx: &mut gpui::TestAppContext) {
+    let directory = temporary_test_dir("source-load-unload");
+    std::fs::write(directory.path().join("new.log"), "ready").expect("应写入测试日志");
+    let app = cx.new(|_| test_app());
+
+    app.update(cx, |app, _| {
+        app.source_registry = placeholder_source_registry();
+        app.has_loaded_real_sources = true;
+        app.tabs.push(ArgusTab {
+            id: 2,
+            title: "app.log".to_string(),
+            kind: TabKind::LogSource {
+                source_id: SourceId(2),
+                path: "logs/app.log".to_string(),
+            },
+        });
+        app.active_tab_id = 2;
+        app.next_tab_id = 3;
+    });
+
+    app.update(cx, |app, app_cx| {
+        assert!(app.load_sources_from_paths(
+            vec![directory.path().to_path_buf()],
+            ExternalSourceTrigger::SourcePicker,
+            app_cx,
+        ));
+    });
+
+    app.read_with(cx, |app, _| {
+        assert!(app.is_source_loading);
+        assert!(app.source_registry.is_empty(), "旧来源树应立即卸载");
+        assert!(!app.has_loaded_real_sources);
+        assert!(
+            app.source_load_progress.is_some(),
+            "应进入带进度展示的加载状态"
+        );
+        assert_eq!(app.tabs.len(), 1, "旧日志标签应立即关闭");
+        assert!(matches!(app.active_tab_kind(), TabKind::Empty));
+    });
+}
+
+/// 验证加载结果无论成功失败，回填后都清理进度快照，内容区不再展示过期进度。
+#[gpui::test]
+fn applying_source_load_result_clears_progress(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+
+    app.update(cx, |app, app_cx| {
+        app.is_source_loading = true;
+        app.source_load_generation = 1;
+        app.source_load_progress = Some(crate::loader::SourceTreeScanProgress {
+            scanned: 3,
+            current: "logs".to_string(),
+        });
+        app.apply_source_load_result(1, Err(anyhow::anyhow!("磁盘读取失败")), app_cx);
+        assert!(!app.is_source_loading);
+        assert!(app.source_load_progress.is_none(), "失败回填应清理进度");
+
+        app.is_source_loading = true;
+        app.source_load_generation = 2;
+        app.source_load_progress = Some(crate::loader::SourceTreeScanProgress {
+            scanned: 5,
+            current: "logs/app.log".to_string(),
+        });
+        app.apply_source_load_result(
+            2,
+            Ok(crate::loader::SourceTreeScanResult {
+                registry: placeholder_source_registry(),
+                warnings: Vec::new(),
+            }),
+            app_cx,
+        );
+        assert!(!app.is_source_loading);
+        assert!(app.source_load_progress.is_none(), "成功回填应清理进度");
+    });
+}
+
 /// 验证点击待密码解锁的压缩包节点不展开，而是弹出密码输入框并记录子树重试动作。
 #[gpui::test]
 fn toggling_password_required_archive_opens_password_prompt(cx: &mut gpui::TestAppContext) {

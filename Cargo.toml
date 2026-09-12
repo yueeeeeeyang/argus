@@ -121,3 +121,6 @@ rars-crypto = { path = "third_party/rars-crypto" }
 zip = { path = "third_party/zip" }
 # svn 仍保持 0.1.13 API；本地补丁仅升级其纯 Rust russh 传输依赖，统一稳定加密栈。
 svn = { path = "third_party/svn" }
+# block 0.1.6 已停止维护，其空枚举占位类型触发的 uninhabited static 将在未来 Rust 版本成为硬错误；
+# 本地补丁保持 0.1.6 API 不变，仅将占位类型改为零大小结构体。
+block = { path = "third_party/block" }

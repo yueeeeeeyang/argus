@@ -15,4 +15,4 @@ pub(crate) use path_browser::{
     BrowseEntry, BrowseEntryKind, BrowseLocation, BrowseResult, PathBrowser,
 };
 pub(crate) use source_registry::SourceRegistry;
-pub(crate) use source_scanner::{SourceTreeScanResult, SourceTreeScanner};
+pub(crate) use source_scanner::{SourceTreeScanProgress, SourceTreeScanResult, SourceTreeScanner};

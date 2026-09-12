@@ -2,11 +2,11 @@
 //! 创建日期：2026-07-17
 //! 修改日期：2026-09-07
 //! 作者：Argus 开发团队
-//! 主要功能：一次遍历本地目录、一次枚举每个归档容器、递归展开嵌套归档，并在结束时批量构建来源注册表。
+//! 主要功能：一次遍历本地目录、一次枚举每个归档容器、按组单遍批量展开嵌套归档，并在结束时批量构建来源注册表。
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -24,7 +24,7 @@ use crate::loader::archive::{
 use crate::loader::{
     SourceId, SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode,
 };
-use crate::utils::path::{display_name, normalize_archive_entry_path};
+use crate::utils::path::{display_name, display_path, normalize_archive_entry_path};
 
 /// 来源树扫描结果；注册表已经完成一次性索引构建，可直接生成会话快照或回填主窗口。
 #[derive(Debug)]
@@ -33,6 +33,15 @@ pub(crate) struct SourceTreeScanResult {
     pub registry: SourceRegistry,
     /// 可容忍的目录、归档和符号链接读取警告。
     pub warnings: Vec<String>,
+}
+
+/// 来源树扫描进度；`current` 描述正在处理的目录或压缩包，供界面展示当前处理位置。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SourceTreeScanProgress {
+    /// 已生成的来源节点数，单调不减。
+    pub scanned: usize,
+    /// 正在处理的目录、压缩包或来源根展示文本；扫描准备阶段为空。
+    pub current: String,
 }
 
 /// 来源树全量扫描器，一次构建完整来源树，不调用 UI 展开或渐进探测逻辑。
@@ -45,8 +54,10 @@ pub(crate) struct SourceTreeScanner<'a> {
     archive_passwords: ArchivePasswordStore,
     /// 用户主动停止时由所有目录和归档边界检查的取消令牌。
     cancellation: tokio_util::sync::CancellationToken,
-    /// 可选的进度上报通道；目录和归档边界发送已处理节点数，仅完整加载入口使用。
-    progress: Option<std::sync::mpsc::Sender<usize>>,
+    /// 可选的进度上报通道；开始处理目录、归档前后发送进度快照，仅完整加载入口使用。
+    progress: Option<std::sync::mpsc::Sender<SourceTreeScanProgress>>,
+    /// 正在处理的目录、压缩包或来源根展示文本，随进度快照一起发送。
+    current_item: String,
     /// 已有来源身份到稳定 ID 的映射和新增 ID 分配状态。
     stable_ids: StableSourceIds,
     /// 已访问真实目录，跟随符号链接时用于阻止循环。
@@ -71,6 +82,7 @@ impl<'a> SourceTreeScanner<'a> {
             archive_passwords,
             cancellation,
             progress: None,
+            current_item: String::new(),
             stable_ids: StableSourceIds::from_registry(original_registry),
             visited_directories: HashSet::new(),
             warnings: BTreeSet::new(),
@@ -85,7 +97,7 @@ impl<'a> SourceTreeScanner<'a> {
     /// - `config`：目录、符号链接和嵌套归档深度配置。
     /// - `archive_passwords`：当前进程已授权的归档密码快照。
     /// - `cancellation`：新加载请求到来时用于中断本次扫描的取消令牌。
-    /// - `progress`：可选进度通道，在目录和归档处理边界发送已生成节点数。
+    /// - `progress`：可选进度通道，在开始处理每个目录、压缩包前后发送进度快照。
     ///
     /// 说明：整树替换场景没有既有注册表，内部以空注册表创建扫描器，稳定 ID 自然从 1 开始分配；
     /// 目录递归与每个压缩包的内容枚举（含嵌套，深度上限沿用 `config.max_archive_depth`）在一次调用内完成。
@@ -94,7 +106,7 @@ impl<'a> SourceTreeScanner<'a> {
         config: LoaderConfig,
         archive_passwords: ArchivePasswordStore,
         cancellation: tokio_util::sync::CancellationToken,
-        progress: Option<std::sync::mpsc::Sender<usize>>,
+        progress: Option<std::sync::mpsc::Sender<SourceTreeScanProgress>>,
     ) -> Result<SourceTreeScanResult> {
         let original_registry = SourceRegistry::new();
         let mut scanner =
@@ -165,6 +177,7 @@ impl<'a> SourceTreeScanner<'a> {
         for path in paths {
             self.ensure_not_cancelled()?;
             let label = display_name(&path);
+            self.begin_progress_item(display_path(&path));
             self.scan_local_path(None, 0, label, path, None)?;
             self.report_progress();
         }
@@ -218,8 +231,8 @@ impl<'a> SourceTreeScanner<'a> {
                 let source_label = nested_container_entries.join("!/");
                 let password_key =
                     ArchivePasswordKey::new(archive_path.clone(), &nested_container_entries);
-                let mut reader = Cursor::new(bytes);
-                let reader_len = reader.get_ref().len() as u64;
+                let reader_len = bytes.len() as u64;
+                let mut reader = Cursor::new(bytes.as_slice());
                 let entries = archive_registry().list_entries_from_reader_with_password_context(
                     nested_format,
                     &mut reader,
@@ -246,6 +259,7 @@ impl<'a> SourceTreeScanner<'a> {
                     node.location.clone(),
                     &context,
                     entries,
+                    &bytes,
                 )
             }
         }
@@ -423,6 +437,7 @@ impl<'a> SourceTreeScanner<'a> {
         depth: usize,
     ) -> Result<()> {
         self.ensure_not_cancelled()?;
+        self.begin_progress_item(display_path(path));
         let read_dir = match fs::read_dir(path) {
             Ok(read_dir) => read_dir,
             Err(error) => {
@@ -590,6 +605,7 @@ impl<'a> SourceTreeScanner<'a> {
         preferred_id: Option<SourceId>,
     ) -> Result<()> {
         self.ensure_not_cancelled()?;
+        self.begin_progress_item(display_path(&archive_path));
         let compressed_location = SourceLocation::LocalPath(archive_path.clone());
         let entries = match self.list_local_archive(&archive_path, format) {
             Ok(entries) => entries,
@@ -692,130 +708,329 @@ impl<'a> SourceTreeScanner<'a> {
             format,
             archive_depth: 0,
         };
-        self.emit_archive_children(archive_id, depth.saturating_add(1), &tree, &context)
+        self.emit_archive_children(
+            archive_id,
+            depth.saturating_add(1),
+            &tree,
+            &context,
+            &ContainerRef::Local {
+                path: &context.archive_path,
+            },
+        )
     }
 
     /// 把已经枚举的归档树递归转换为来源节点；普通虚拟目录不会重新打开归档。
+    ///
+    /// 嵌套压缩包按组单遍批量读取（分组预算见 `NESTED_GROUP_MAX_*`），避免同一容器内
+    /// 每个嵌套包都重新解析物理容器；节点发射顺序保持 `sorted_children` 不变。
     fn emit_archive_children(
         &mut self,
         parent_id: SourceId,
         depth: usize,
         tree: &ArchiveTreeNode,
         context: &ArchiveContainerContext,
+        container: &ContainerRef<'_>,
     ) -> Result<()> {
+        // 第一遍只分类不发射：嵌套候选按展示顺序收集，供第二遍分组批量读取。
+        let mut candidates: Vec<NestedCandidate> = Vec::new();
+        let mut plans = Vec::new();
         for child in tree.sorted_children() {
-            self.ensure_not_cancelled()?;
-            let location = SourceLocation::ArchiveEntry {
-                archive_path: context.archive_path.clone(),
-                root_format: context.root_format,
-                container_entries: context.container_entries.clone(),
-                entry_path: child.full_path.clone(),
-                format: context.format,
-                archive_depth: context.archive_depth,
-            };
             if child.is_directory() {
-                let directory_id = self.push_node(
-                    Some(parent_id),
-                    depth,
-                    child.name.clone(),
-                    SourceKind::ArchiveDirectory,
-                    location,
-                    SourceMetadata {
-                        children_loaded: true,
-                        ..SourceMetadata::default()
-                    },
-                    None,
-                    &[],
-                );
-                self.emit_archive_children(directory_id, depth.saturating_add(1), child, context)?;
+                plans.push(ChildPlan::Directory(child));
                 continue;
             }
-
             let Some(nested_format) = detect_archive_format_by_name(&child.name) else {
-                self.push_node(
-                    Some(parent_id),
-                    depth,
-                    child.name.clone(),
-                    SourceKind::ArchiveFile,
-                    location,
-                    SourceMetadata {
-                        size: child.size,
-                        children_loaded: true,
-                        ..SourceMetadata::default()
-                    },
-                    None,
-                    &[],
-                );
+                plans.push(ChildPlan::PlainFile(child));
                 continue;
             };
             if !nested_format.is_supported() {
-                self.push_node(
-                    Some(parent_id),
-                    depth,
-                    child.name.clone(),
-                    SourceKind::Unsupported(nested_format.label().to_string()),
-                    location,
-                    SourceMetadata {
-                        size: child.size,
-                        children_loaded: true,
-                        message: Some("该嵌套压缩格式当前不可展开".to_string()),
-                        ..SourceMetadata::default()
-                    },
-                    None,
-                    &[],
-                );
+                plans.push(ChildPlan::UnsupportedNested(child, nested_format));
                 continue;
             }
-            let nested_depth = context.archive_depth.saturating_add(1);
-            if nested_depth > self.config.max_archive_depth {
-                self.push_node(
-                    Some(parent_id),
-                    depth,
-                    child.name.clone(),
-                    SourceKind::Unsupported(format!("{} 超出深度", nested_format.label())),
-                    location,
-                    SourceMetadata {
-                        size: child.size,
-                        children_loaded: true,
-                        message: Some(format!(
-                            "嵌套压缩包深度超过 {}，暂不展开",
-                            self.config.max_archive_depth
-                        )),
-                        ..SourceMetadata::default()
-                    },
-                    None,
-                    &[],
-                );
+            if context.archive_depth.saturating_add(1) > self.config.max_archive_depth {
+                plans.push(ChildPlan::DepthExceeded(child, nested_format));
                 continue;
             }
-            self.scan_nested_archive(parent_id, depth, child, context, nested_format, location)?;
+            candidates.push(NestedCandidate {
+                name: child.name.clone(),
+                full_path: child.full_path.clone(),
+                size: child.size,
+                format: nested_format,
+            });
+            plans.push(ChildPlan::Nested(candidates.len() - 1));
+        }
+
+        // 第二遍按计划顺序发射；遇到尚未读取的嵌套候选时，以它为起点批量读取下一组。
+        let mut buffered: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut degraded: HashMap<String, (SourceMetadata, String)> = HashMap::new();
+        for plan in plans {
+            self.ensure_not_cancelled()?;
+            match plan {
+                ChildPlan::Directory(child) => {
+                    let directory_id = self.push_node(
+                        Some(parent_id),
+                        depth,
+                        child.name.clone(),
+                        SourceKind::ArchiveDirectory,
+                        archive_entry_location(context, &child.full_path),
+                        SourceMetadata {
+                            children_loaded: true,
+                            ..SourceMetadata::default()
+                        },
+                        None,
+                        &[],
+                    );
+                    self.emit_archive_children(
+                        directory_id,
+                        depth.saturating_add(1),
+                        child,
+                        context,
+                        container,
+                    )?;
+                }
+                ChildPlan::PlainFile(child) => {
+                    self.push_node(
+                        Some(parent_id),
+                        depth,
+                        child.name.clone(),
+                        SourceKind::ArchiveFile,
+                        archive_entry_location(context, &child.full_path),
+                        SourceMetadata {
+                            size: child.size,
+                            children_loaded: true,
+                            ..SourceMetadata::default()
+                        },
+                        None,
+                        &[],
+                    );
+                }
+                ChildPlan::UnsupportedNested(child, nested_format) => {
+                    self.push_node(
+                        Some(parent_id),
+                        depth,
+                        child.name.clone(),
+                        SourceKind::Unsupported(nested_format.label().to_string()),
+                        archive_entry_location(context, &child.full_path),
+                        SourceMetadata {
+                            size: child.size,
+                            children_loaded: true,
+                            message: Some("该嵌套压缩格式当前不可展开".to_string()),
+                            ..SourceMetadata::default()
+                        },
+                        None,
+                        &[],
+                    );
+                }
+                ChildPlan::DepthExceeded(child, nested_format) => {
+                    self.push_node(
+                        Some(parent_id),
+                        depth,
+                        child.name.clone(),
+                        SourceKind::Unsupported(format!("{} 超出深度", nested_format.label())),
+                        archive_entry_location(context, &child.full_path),
+                        SourceMetadata {
+                            size: child.size,
+                            children_loaded: true,
+                            message: Some(format!(
+                                "嵌套压缩包深度超过 {}，暂不展开",
+                                self.config.max_archive_depth
+                            )),
+                            ..SourceMetadata::default()
+                        },
+                        None,
+                        &[],
+                    );
+                }
+                ChildPlan::Nested(index) => {
+                    if !buffered.contains_key(&candidates[index].full_path)
+                        && !degraded.contains_key(&candidates[index].full_path)
+                    {
+                        self.fetch_nested_group(
+                            &candidates,
+                            index,
+                            context,
+                            container,
+                            &mut buffered,
+                            &mut degraded,
+                        )?;
+                    }
+                    let candidate = &candidates[index];
+                    let location = archive_entry_location(context, &candidate.full_path);
+                    if let Some((metadata, reason)) = degraded.remove(&candidate.full_path) {
+                        self.warnings
+                            .insert(format!("无法读取嵌套归档“{}”：{reason}", candidate.name));
+                        self.push_node(
+                            Some(parent_id),
+                            depth,
+                            candidate.name.clone(),
+                            SourceKind::Archive(candidate.format),
+                            location,
+                            metadata,
+                            None,
+                            &[],
+                        );
+                        self.report_progress();
+                        continue;
+                    }
+                    let bytes = buffered.remove(&candidate.full_path).ok_or_else(|| {
+                        anyhow!("嵌套归档批量读取结果缺失：{}", candidate.full_path)
+                    })?;
+                    self.expand_nested_archive(
+                        parent_id, depth, candidate, context, location, bytes,
+                    )?;
+                }
+            }
         }
         Ok(())
     }
 
-    /// 读取一个嵌套归档条目一次、枚举一次，并立即丢弃压缩字节缓冲区。
-    fn scan_nested_archive(
+    /// 在当前容器上单遍批量读取一组嵌套归档字节；未被批量访问覆盖的成员回退为逐条目链路重读。
+    ///
+    /// 分组预算限制同时驻留内存的嵌套包字节；批量访问因单个加密或损坏条目中止时，
+    /// 未读取成功的成员逐个回退，保持逐条目降级语义不变。
+    fn fetch_nested_group(
         &mut self,
-        parent_id: SourceId,
-        depth: usize,
-        child: &ArchiveTreeNode,
+        candidates: &[NestedCandidate],
+        start: usize,
         context: &ArchiveContainerContext,
-        nested_format: ArchiveFormat,
-        compressed_location: SourceLocation,
+        container: &ContainerRef<'_>,
+        buffered: &mut HashMap<String, Vec<u8>>,
+        degraded: &mut HashMap<String, (SourceMetadata, String)>,
     ) -> Result<()> {
+        let mut group_end = start.saturating_add(1);
+        let mut group_bytes = candidates[start].size.unwrap_or(0);
+        while group_end < candidates.len() {
+            if group_end - start >= NESTED_GROUP_MAX_ENTRIES
+                || group_bytes >= NESTED_GROUP_MAX_UNCOMPRESSED_BYTES
+            {
+                break;
+            }
+            group_bytes = group_bytes.saturating_add(candidates[group_end].size.unwrap_or(0));
+            group_end = group_end.saturating_add(1);
+        }
+        let group = &candidates[start..group_end];
+        // 批量读取是全组最耗时的操作之一，先上报首成员的完整容器链路再开始读取。
+        self.begin_progress_item(nested_chain_display(context, &group[0].full_path));
+
+        let visit_result = self.visit_nested_candidates(group, context, container, buffered);
+        if visit_result.is_err() && self.cancellation.is_cancelled() {
+            bail!("来源树完整扫描已取消");
+        }
+        // 单遍访问未覆盖的成员（条目缺失或组访问中止）逐条回退到链路重读。
+        for member in group {
+            if buffered.contains_key(&member.full_path) {
+                continue;
+            }
+            self.ensure_not_cancelled()?;
+            match self.read_nested_bytes_via_chain(context, member) {
+                Ok(bytes) => {
+                    buffered.insert(member.full_path.clone(), bytes);
+                }
+                Err(error) => {
+                    if self.cancellation.is_cancelled() {
+                        bail!("来源树完整扫描已取消");
+                    }
+                    degraded.insert(
+                        member.full_path.clone(),
+                        archive_scan_failure(&error, member.size),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 在当前容器上执行一次单遍批量访问，把组内嵌套归档字节写入缓冲。
+    ///
+    /// 嵌套容器的 `source_label` 与枚举时保持一致（GZIP 虚拟条目名由标签末段推导）；
+    /// 闭包内只缓冲字节不递归展开，保证外层容器句柄释放后再深入下一层。
+    fn visit_nested_candidates(
+        &self,
+        group: &[NestedCandidate],
+        context: &ArchiveContainerContext,
+        container: &ContainerRef<'_>,
+        buffered: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        let Some(adapter) = archive_registry().adapter_for(context.format) else {
+            bail!("未注册压缩格式适配器：{:?}", context.format);
+        };
+        let targets: HashSet<String> = group
+            .iter()
+            .map(|candidate| candidate.full_path.clone())
+            .collect();
+        let cancellation = self.cancellation.clone();
+        let mut consumer = |entry_path: &str, reader: &mut dyn Read| -> Result<()> {
+            let capacity = group
+                .iter()
+                .find(|candidate| candidate.full_path == entry_path)
+                .and_then(|candidate| candidate.size)
+                .and_then(|size| usize::try_from(size).ok())
+                .unwrap_or_default();
+            let mut bytes = Vec::with_capacity(capacity);
+            let mut chunk = [0_u8; 64 * 1024];
+            loop {
+                if cancellation.is_cancelled() {
+                    bail!("来源树完整扫描已取消");
+                }
+                let read_count = reader.read(&mut chunk)?;
+                if read_count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..read_count]);
+            }
+            buffered.insert(normalize_archive_entry_path(entry_path), bytes);
+            Ok(())
+        };
+        match container {
+            ContainerRef::Local { path } => {
+                let key = ArchivePasswordKey::root(context.archive_path.clone());
+                adapter.visit_entries(
+                    path,
+                    &targets,
+                    self.archive_passwords.get(&key),
+                    &mut consumer,
+                )
+            }
+            ContainerRef::InMemory { bytes } => {
+                let key = ArchivePasswordKey::new(
+                    context.archive_path.clone(),
+                    &context.container_entries,
+                );
+                let source_label = context.container_entries.join("!/");
+                let mut reader = Cursor::new(*bytes);
+                adapter.visit_entries_from_reader(
+                    &mut reader,
+                    bytes.len() as u64,
+                    &targets,
+                    &source_label,
+                    self.archive_passwords.get(&key),
+                    &mut consumer,
+                )
+            }
+        }
+    }
+
+    /// 沿容器链路重读一个嵌套归档的字节；仅在容器批量读取失败后逐条目回退时使用，
+    /// 保证单个加密或损坏的嵌套包不影响同组其它条目。
+    fn read_nested_bytes_via_chain(
+        &mut self,
+        context: &ArchiveContainerContext,
+        candidate: &NestedCandidate,
+    ) -> Result<Vec<u8>> {
         self.ensure_not_cancelled()?;
+        self.begin_progress_item(nested_chain_display(context, &candidate.full_path));
         let mut bytes = Vec::with_capacity(
-            child
+            candidate
                 .size
                 .and_then(|size| usize::try_from(size).ok())
                 .unwrap_or_default(),
         );
         let cancellation = self.cancellation.clone();
-        let read_result = stream_archive_entry_with_passwords(
+        stream_archive_entry_with_passwords(
             &context.archive_path,
             context.root_format,
             &context.container_entries,
-            &child.full_path,
+            &candidate.full_path,
             &self.archive_passwords,
             &mut |chunk| {
                 if cancellation.is_cancelled() {
@@ -824,41 +1039,30 @@ impl<'a> SourceTreeScanner<'a> {
                 bytes.extend_from_slice(chunk);
                 Ok(())
             },
-        );
-        match read_result {
-            Ok(()) => {}
-            Err(error) => {
-                if self.cancellation.is_cancelled() {
-                    bail!("来源树完整扫描已取消");
-                }
-                let (metadata, reason) = archive_scan_failure(&error, child.size);
-                self.warnings
-                    .insert(format!("无法读取嵌套归档“{}”：{reason}", child.name));
-                self.push_node(
-                    Some(parent_id),
-                    depth,
-                    child.name.clone(),
-                    SourceKind::Archive(nested_format),
-                    compressed_location,
-                    metadata,
-                    None,
-                    &[],
-                );
-                self.report_progress();
-                return Ok(());
-            }
-        }
+        )?;
+        Ok(bytes)
+    }
+
+    /// 枚举已物化的嵌套归档字节并生成其子树；枚举失败时发射降级节点，不影响兄弟条目。
+    fn expand_nested_archive(
+        &mut self,
+        parent_id: SourceId,
+        depth: usize,
+        candidate: &NestedCandidate,
+        context: &ArchiveContainerContext,
+        compressed_location: SourceLocation,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
         self.ensure_not_cancelled()?;
         let mut nested_container_entries = context.container_entries.clone();
-        nested_container_entries.push(child.full_path.clone());
-        let nested_label = child.name.clone();
+        nested_container_entries.push(candidate.full_path.clone());
         let source_label = nested_container_entries.join("!/");
         let password_key =
             ArchivePasswordKey::new(context.archive_path.clone(), &nested_container_entries);
-        let mut reader = Cursor::new(bytes);
-        let reader_len = reader.get_ref().len() as u64;
+        let reader_len = bytes.len() as u64;
+        let mut reader = Cursor::new(bytes.as_slice());
         let entries = match archive_registry().list_entries_from_reader_with_password_context(
-            nested_format,
+            candidate.format,
             &mut reader,
             reader_len,
             &source_label,
@@ -867,14 +1071,14 @@ impl<'a> SourceTreeScanner<'a> {
         ) {
             Ok(entries) => entries,
             Err(error) => {
-                let (metadata, reason) = archive_scan_failure(&error, child.size);
+                let (metadata, reason) = archive_scan_failure(&error, candidate.size);
                 self.warnings
-                    .insert(format!("无法枚举嵌套归档“{nested_label}”：{reason}"));
+                    .insert(format!("无法枚举嵌套归档“{}”：{reason}", candidate.name));
                 self.push_node(
                     Some(parent_id),
                     depth,
-                    nested_label,
-                    SourceKind::Archive(nested_format),
+                    candidate.name.clone(),
+                    SourceKind::Archive(candidate.format),
                     compressed_location,
                     metadata,
                     None,
@@ -888,19 +1092,23 @@ impl<'a> SourceTreeScanner<'a> {
         let result = self.emit_nested_archive_tree(
             Some(parent_id),
             depth,
-            nested_label,
-            &child.full_path,
-            child.size,
-            nested_format,
+            candidate.name.clone(),
+            &candidate.full_path,
+            candidate.size,
+            candidate.format,
             compressed_location,
             context,
             entries,
+            &bytes,
         );
         self.report_progress();
         result
     }
 
     /// 嵌套归档枚举成功后生成其子树；恰好一个普通文件时折叠为单文件叶子。
+    ///
+    /// `container_bytes` 在子树展开期间保持存活，供其子级嵌套包直接从内存批量读取，
+    /// 避免每深入一层都回根包重走整条容器链路。
     #[allow(clippy::too_many_arguments)]
     fn emit_nested_archive_tree(
         &mut self,
@@ -913,6 +1121,7 @@ impl<'a> SourceTreeScanner<'a> {
         compressed_location: SourceLocation,
         context: &ArchiveContainerContext,
         entries: Vec<ArchiveEntryInfo>,
+        container_bytes: &[u8],
     ) -> Result<()> {
         let tree = ArchiveTreeNode::from_entries(entries);
         let mut nested_container_entries = context.container_entries.clone();
@@ -965,7 +1174,15 @@ impl<'a> SourceTreeScanner<'a> {
             format: nested_format,
             archive_depth: nested_depth,
         };
-        self.emit_archive_children(archive_id, depth.saturating_add(1), &tree, &nested_context)
+        self.emit_archive_children(
+            archive_id,
+            depth.saturating_add(1),
+            &tree,
+            &nested_context,
+            &ContainerRef::InMemory {
+                bytes: container_bytes,
+            },
+        )
     }
 
     /// 使用低层归档适配器枚举本地容器，不执行单文件预探测。
@@ -1049,10 +1266,20 @@ impl<'a> SourceTreeScanner<'a> {
         Ok(())
     }
 
-    /// 在目录或归档处理边界上报已生成节点数；接收端随加载任务结束释放后，发送失败可安全忽略。
+    /// 在开始处理目录、压缩包或来源根前更新当前处理项并立即上报，
+    /// 保证大目录读取、归档枚举等长耗时操作期间界面能看到正在处理的位置。
+    fn begin_progress_item(&mut self, current: String) {
+        self.current_item = current;
+        self.report_progress();
+    }
+
+    /// 上报当前进度快照；接收端随加载任务结束释放后，发送失败可安全忽略。
     fn report_progress(&self) {
         if let Some(progress) = &self.progress {
-            let _ = progress.send(self.ordered_nodes.len());
+            let _ = progress.send(SourceTreeScanProgress {
+                scanned: self.ordered_nodes.len(),
+                current: self.current_item.clone(),
+            });
         }
     }
 }
@@ -1083,6 +1310,66 @@ struct ArchiveContainerContext {
     format: ArchiveFormat,
     /// 当前容器嵌套深度。
     archive_depth: usize,
+}
+
+/// 单组批量读取的嵌套压缩包数量上限，控制组内字节在内存中的驻留规模。
+const NESTED_GROUP_MAX_ENTRIES: usize = 64;
+/// 单组批量读取的未压缩字节预算，防止上千个大嵌套包同时驻留内存。
+const NESTED_GROUP_MAX_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 当前归档容器的数据来源；根容器按本地路径读取，嵌套容器复用已物化字节，避免回链重读。
+enum ContainerRef<'a> {
+    /// 根容器：本地归档路径，批量访问时按需打开文件。
+    Local { path: &'a Path },
+    /// 嵌套容器：展开父容器时已物化的字节，子树展开期间保持存活。
+    InMemory { bytes: &'a [u8] },
+}
+
+/// 等待批量读取的嵌套压缩包候选，按 `sorted_children` 顺序收集。
+struct NestedCandidate {
+    /// 末级显示名称。
+    name: String,
+    /// 当前容器内的完整规范化路径。
+    full_path: String,
+    /// 条目未压缩大小，供分组预算和缓冲预分配使用。
+    size: Option<u64>,
+    /// 嵌套压缩包格式。
+    format: ArchiveFormat,
+}
+
+/// `emit_archive_children` 第一遍生成的子项处理计划，保证第二遍发射顺序与排序一致。
+enum ChildPlan<'a> {
+    /// 虚拟目录：发射后递归。
+    Directory(&'a ArchiveTreeNode),
+    /// 普通归档文件叶子。
+    PlainFile(&'a ArchiveTreeNode),
+    /// 不支持展开的嵌套压缩格式。
+    UnsupportedNested(&'a ArchiveTreeNode, ArchiveFormat),
+    /// 超出配置深度的嵌套压缩包。
+    DepthExceeded(&'a ArchiveTreeNode, ArchiveFormat),
+    /// 可展开嵌套压缩包在候选列表中的下标。
+    Nested(usize),
+}
+
+/// 生成归档内条目的来源位置；容器链路信息全部来自当前容器上下文。
+fn archive_entry_location(context: &ArchiveContainerContext, entry_path: &str) -> SourceLocation {
+    SourceLocation::ArchiveEntry {
+        archive_path: context.archive_path.clone(),
+        root_format: context.root_format,
+        container_entries: context.container_entries.clone(),
+        entry_path: entry_path.to_string(),
+        format: context.format,
+        archive_depth: context.archive_depth,
+    }
+}
+
+/// 拼接嵌套归档的完整容器链路展示文本，供进度展示定位当前读取位置。
+fn nested_chain_display(context: &ArchiveContainerContext, entry_path: &str) -> String {
+    std::iter::once(display_path(&context.archive_path))
+        .chain(context.container_entries.iter().cloned())
+        .chain(std::iter::once(entry_path.to_string()))
+        .collect::<Vec<_>>()
+        .join("!/")
 }
 
 /// 从单次归档枚举结果构建的内存目录树节点。
@@ -2104,7 +2391,7 @@ mod tests {
         assert!(error.to_string().contains("已取消"));
     }
 
-    /// 验证完整加载在目录和归档边界通过进度通道单调上报已处理节点数，最终计数等于节点总数。
+    /// 验证完整加载在目录和归档边界通过进度通道单调上报已处理节点数，并携带当前处理位置。
     #[test]
     fn scan_paths_reports_progress_at_directory_and_archive_boundaries() {
         let directory = temporary_test_dir("scan-paths-progress");
@@ -2124,12 +2411,287 @@ mod tests {
 
         let total = result.registry.tree_order_source_ids().len();
         // 扫描器随结果返回后释放发送端，通道自然断开，可一次性收取全部进度。
-        let counts = progress_receiver.try_iter().collect::<Vec<_>>();
-        assert!(!counts.is_empty());
+        let snapshots = progress_receiver.try_iter().collect::<Vec<_>>();
+        assert!(!snapshots.is_empty());
         assert!(
-            counts.windows(2).all(|pair| pair[0] <= pair[1]),
-            "进度计数必须单调不减：{counts:?}"
+            snapshots
+                .windows(2)
+                .all(|pair| pair[0].scanned <= pair[1].scanned),
+            "进度计数必须单调不减：{snapshots:?}"
         );
-        assert_eq!(counts.last().copied(), Some(total));
+        assert_eq!(
+            snapshots.last().map(|snapshot| snapshot.scanned),
+            Some(total)
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| !snapshot.current.is_empty()),
+            "每次进度上报都必须携带当前处理位置：{snapshots:?}"
+        );
+        assert!(
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.current.contains("subdir")),
+            "进度应展示正在处理的子目录：{snapshots:?}"
+        );
+    }
+
+    /// 在内存中构造一个普通 ZIP 的字节，供嵌套归档夹具使用。
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = ZipWriter::new(&mut cursor);
+            for (name, content) in entries {
+                writer
+                    .start_file(*name, SimpleFileOptions::default())
+                    .expect("应创建测试条目");
+                writer.write_all(content).expect("应写入测试条目");
+            }
+            writer.finish().expect("应完成测试归档");
+        }
+        cursor.into_inner()
+    }
+
+    /// 验证嵌套压缩包批量展开后节点仍按排序位置发射，单文件嵌套包折叠行为不变。
+    #[test]
+    fn scan_paths_keeps_sorted_positions_for_batch_expanded_nested_archives() {
+        let directory = temporary_test_dir("scan-paths-nested-order");
+        let outer_path = directory.path().join("outer.zip");
+        {
+            let mut writer =
+                ZipWriter::new(fs::File::create(&outer_path).expect("应创建外层测试归档"));
+            for (name, content) in [
+                ("a.log", b"a".to_vec()),
+                (
+                    "b.zip",
+                    zip_bytes(&[("b1.log", &b"b1"[..]), ("b2.log", &b"b2"[..])]),
+                ),
+                ("c.log", b"c".to_vec()),
+                ("d.zip", zip_bytes(&[("d-only.log", &b"d"[..])])),
+            ] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("应创建外层测试条目");
+                writer.write_all(&content).expect("应写入外层测试条目");
+            }
+            writer.finish().expect("应完成外层测试归档");
+        }
+
+        let result = SourceTreeScanner::scan_paths(
+            vec![outer_path.clone()],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("批量展开嵌套归档的扫描应成功");
+
+        // b.zip/d.zip 与平铺日志交错时仍按名称排序位置出现，d.zip 折叠为单文件叶子。
+        assert_eq!(
+            tree_order_labels(&result.registry),
+            vec![
+                "outer.zip",
+                "a.log",
+                "b.zip",
+                "b1.log",
+                "b2.log",
+                "c.log",
+                "d.zip"
+            ]
+        );
+        let b1_node = result
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| result.registry.node(*source_id))
+            .find(|node| node.label == "b1.log")
+            .expect("嵌套子条目应存在");
+        assert!(matches!(
+            &b1_node.location,
+            SourceLocation::ArchiveEntry {
+                archive_path,
+                container_entries,
+                entry_path,
+                archive_depth: 1,
+                ..
+            } if archive_path == &outer_path
+                && container_entries == &["b.zip".to_string()]
+                && entry_path == "b1.log"
+        ));
+        let d_node = result
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| result.registry.node(*source_id))
+            .find(|node| node.label == "d.zip")
+            .expect("单文件嵌套归档节点应存在");
+        assert!(matches!(
+            d_node.kind,
+            SourceKind::SingleFileArchive(ArchiveFormat::Zip)
+        ));
+    }
+
+    /// 验证批量访问因单个条目密码不一致中止后逐条回退：该条目降级为需要密码节点，其余兄弟正常展开。
+    #[test]
+    fn scan_paths_falls_back_to_chain_reads_when_group_visit_aborts() {
+        let directory = temporary_test_dir("scan-paths-nested-fallback");
+        let outer_path = directory.path().join("outer.zip");
+        {
+            let mut writer =
+                ZipWriter::new(fs::File::create(&outer_path).expect("应创建外层测试归档"));
+            // e1.zip 用根密码加密（枚举校验通过），e2.zip 用不同密码加密（批量访问在此中止）。
+            writer
+                .start_file(
+                    "e1.zip",
+                    SimpleFileOptions::default().with_aes_encryption(zip::AesMode::Aes256, "p1"),
+                )
+                .expect("应创建 e1 测试条目");
+            writer
+                .write_all(&zip_bytes(&[
+                    ("e1.log", &b"e1"[..]),
+                    ("e1b.log", &b"e1b"[..]),
+                ]))
+                .expect("应写入 e1 嵌套归档");
+            writer
+                .start_file(
+                    "e2.zip",
+                    SimpleFileOptions::default().with_aes_encryption(zip::AesMode::Aes256, "p2"),
+                )
+                .expect("应创建 e2 测试条目");
+            writer
+                .write_all(&zip_bytes(&[("e2.log", &b"e2"[..])]))
+                .expect("应写入 e2 嵌套归档");
+            writer
+                .start_file("plain.zip", SimpleFileOptions::default())
+                .expect("应创建 plain 测试条目");
+            writer
+                .write_all(&zip_bytes(&[
+                    ("plain.log", &b"plain"[..]),
+                    ("plain2.log", &b"plain2"[..]),
+                ]))
+                .expect("应写入 plain 嵌套归档");
+            writer.finish().expect("应完成外层测试归档");
+        }
+
+        let mut passwords = ArchivePasswordStore::default();
+        passwords.insert(
+            ArchivePasswordKey::root(outer_path.clone()),
+            "p1".to_string(),
+        );
+        let result = SourceTreeScanner::scan_paths(
+            vec![outer_path.clone()],
+            LoaderConfig::default(),
+            passwords,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("单个嵌套包密码不一致不应中断整体扫描");
+
+        // e1 正常展开，e2 回退后仍失败并降级为需要密码节点，plain 正常展开。
+        assert_eq!(
+            tree_order_labels(&result.registry),
+            vec![
+                "outer.zip",
+                "e1.zip",
+                "e1.log",
+                "e1b.log",
+                "e2.zip",
+                "plain.zip",
+                "plain.log",
+                "plain2.log"
+            ]
+        );
+        let e2_node = result
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| result.registry.node(*source_id))
+            .find(|node| node.label == "e2.zip")
+            .expect("e2 节点应存在");
+        assert!(matches!(
+            e2_node.kind,
+            SourceKind::Archive(ArchiveFormat::Zip)
+        ));
+        assert!(!e2_node.metadata.children_loaded);
+        assert!(e2_node.metadata.archive_password_required);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("e2.zip"))
+        );
+    }
+
+    /// 验证压缩 TAR 根容器单遍批量展开多个嵌套压缩包，子条目携带完整容器链路。
+    #[test]
+    fn scan_paths_batch_expands_nested_archives_inside_compressed_tar() {
+        let directory = temporary_test_dir("scan-paths-targz-nested");
+        let tar_path = directory.path().join("bundle.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            fs::File::create(&tar_path).expect("应创建压缩 TAR 测试文件"),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        for (name, data) in [
+            (
+                "a.zip",
+                zip_bytes(&[("a1.log", &b"a1"[..]), ("a2.log", &b"a2"[..])]),
+            ),
+            ("b.zip", zip_bytes(&[("b-only.log", &b"b"[..])])),
+            ("plain.log", b"plain".to_vec()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, data.as_slice())
+                .expect("应写入 TAR 测试条目");
+        }
+        let encoder = builder.into_inner().expect("应完成 TAR 写入");
+        encoder.finish().expect("应完成 gzip 压缩");
+
+        let result = SourceTreeScanner::scan_paths(
+            vec![tar_path.clone()],
+            LoaderConfig::default(),
+            ArchivePasswordStore::default(),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .expect("压缩 TAR 批量展开嵌套归档的扫描应成功");
+
+        // a.zip 展开两个子条目，b.zip 折叠为单文件叶子，plain.log 平铺。
+        assert_eq!(
+            tree_order_labels(&result.registry),
+            vec![
+                "bundle.tar.gz",
+                "a.zip",
+                "a1.log",
+                "a2.log",
+                "b.zip",
+                "plain.log"
+            ]
+        );
+        let a1_node = result
+            .registry
+            .tree_order_source_ids()
+            .iter()
+            .filter_map(|source_id| result.registry.node(*source_id))
+            .find(|node| node.label == "a1.log")
+            .expect("压缩 TAR 内嵌套子条目应存在");
+        assert!(matches!(
+            &a1_node.location,
+            SourceLocation::ArchiveEntry {
+                archive_path,
+                container_entries,
+                entry_path,
+                archive_depth: 1,
+                ..
+            } if archive_path == &tar_path
+                && container_entries == &["a.zip".to_string()]
+                && entry_path == "a1.log"
+        ));
     }
 }

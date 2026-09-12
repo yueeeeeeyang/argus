@@ -375,7 +375,8 @@ features = ["union"]
 version = "2.0"
 
 [dependencies.stacksafe]
-version = "0.1"
+# 1.0.2 起宏实现不再依赖触发未来硬错误的 proc-macro-error2；钉住 1.0.2 避免 1.0.3 引入 syn 3。
+version = "=1.0.2"
 
 [dependencies.strum]
 version = "0.27.2"

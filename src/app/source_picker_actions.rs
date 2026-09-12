@@ -16,7 +16,10 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, word_range_at,
 };
-use crate::loader::{BrowseEntry, BrowseLocation, BrowseResult, PathBrowser, SourceTreeScanner};
+use crate::loader::{
+    BrowseEntry, BrowseLocation, BrowseResult, PathBrowser, SourceRegistry, SourceTreeScanProgress,
+    SourceTreeScanner,
+};
 use crate::ui::source_picker::SourcePickerWindow;
 use crate::utils::path::display_path;
 
@@ -384,6 +387,13 @@ impl ArgusApp {
         self.source_picker.error_message = None;
         self.source_picker.selected_paths.clear();
         self.is_source_loading = true;
+        self.source_load_progress = Some(SourceTreeScanProgress::default());
+        // 立即卸载旧日志工作区：新来源加载期间界面进入加载状态，
+        // 而不是继续展示即将被替换的过期来源树和日志内容。
+        self.source_registry = SourceRegistry::new();
+        self.has_loaded_real_sources = false;
+        self.reset_log_workspace_after_source_replace();
+        self.reset_assistant_after_log_reload(cx);
         self.placeholder_notice = format!(
             "正在完整加载 {} 个{}…",
             paths.len(),
@@ -391,7 +401,8 @@ impl ArgusApp {
         );
         let loader_config = self.config.loader.clone();
         let archive_passwords = self.archive_passwords.clone();
-        let (progress_sender, progress_receiver) = std::sync::mpsc::channel::<usize>();
+        let (progress_sender, progress_receiver) =
+            std::sync::mpsc::channel::<SourceTreeScanProgress>();
 
         cx.spawn(async move |view, cx| {
             let result = cx
@@ -424,16 +435,16 @@ impl ArgusApp {
     fn poll_source_load_progress(
         load_generation: usize,
         trigger: ExternalSourceTrigger,
-        progress_receiver: std::sync::mpsc::Receiver<usize>,
+        progress_receiver: std::sync::mpsc::Receiver<SourceTreeScanProgress>,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |view, cx| {
             loop {
-                // 合并一轮内的全部进度，只展示最新已扫描节点数。
-                let mut latest_scanned = None;
+                // 合并一轮内的全部进度，只展示最新快照。
+                let mut latest_progress = None;
                 loop {
                     match progress_receiver.try_recv() {
-                        Ok(scanned) => latest_scanned = Some(scanned),
+                        Ok(progress) => latest_progress = Some(progress),
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
                     }
@@ -444,11 +455,13 @@ impl ArgusApp {
                         if app.source_load_generation != load_generation || !app.is_source_loading {
                             return false;
                         }
-                        if let Some(scanned) = latest_scanned {
+                        if let Some(progress) = latest_progress {
                             app.placeholder_notice = format!(
-                                "正在完整加载{}…已扫描 {scanned} 项",
-                                trigger.loading_label()
+                                "正在完整加载{}…已扫描 {} 项",
+                                trigger.loading_label(),
+                                progress.scanned
                             );
+                            app.source_load_progress = Some(progress);
                             cx.notify();
                         }
                         true
