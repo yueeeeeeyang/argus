@@ -14,19 +14,24 @@ use crate::loader::SourceRegistry;
 use crate::ui::assistant_panel::AssistantPanel;
 
 impl ArgusApp {
+    /// 创建全新的助手会话实体。
+    ///
+    /// 面板创建发生在 ArgusApp 更新事务内，所需状态必须按值注入，禁止构造器回读父实体。
+    fn create_assistant_panel(&mut self, cx: &mut Context<Self>) {
+        let app = cx.entity();
+        let theme = self.theme.clone();
+        let ai_config = self.config.ai.clone();
+        let has_loaded_sources = !self.source_registry.root_ids().is_empty();
+        self.assistant_panel = Some(
+            cx.new(move |cx| AssistantPanel::new(app, theme, ai_config, has_loaded_sources, cx)),
+        );
+    }
+
     /// 切换右侧 Agent 助手面板；首次展开时才创建会话实体。
     pub(crate) fn toggle_assistant_panel(&mut self, cx: &mut Context<Self>) {
         let was_collapsed = self.is_assistant_panel_collapsed;
         if was_collapsed && self.assistant_panel.is_none() {
-            let app = cx.entity();
-            let theme = self.theme.clone();
-            let ai_config = self.config.ai.clone();
-            let has_loaded_sources = !self.source_registry.root_ids().is_empty();
-            // 面板创建发生在 ArgusApp 更新事务内，所需状态必须按值注入，禁止构造器回读父实体。
-            self.assistant_panel =
-                Some(cx.new(move |cx| {
-                    AssistantPanel::new(app, theme, ai_config, has_loaded_sources, cx)
-                }));
+            self.create_assistant_panel(cx);
         }
         self.is_assistant_panel_collapsed = !self.is_assistant_panel_collapsed;
         self.is_assistant_panel_resizing = false;
@@ -141,16 +146,15 @@ impl ArgusApp {
         }
     }
 
-    /// 根日志来源被完整替换后清空助手上下文，并延迟自动扫描新的全部来源。
+    /// 根日志来源被完整替换后销毁旧助手会话；面板展开时立即按当前来源状态创建全新会话。
+    ///
+    /// 助手会话与加载的日志同生命周期：旧实体直接销毁，`Drop` 会取消全部后台任务和
+    /// 流式请求；面板收起时不提前创建，等下次展开再按最新来源状态创建。
     pub(crate) fn reset_assistant_after_log_reload(&mut self, cx: &mut Context<Self>) {
         self.source_content_revision = self.source_content_revision.wrapping_add(1);
-        if let Some(panel) = self.assistant_panel.clone() {
-            let revision = self.source_content_revision;
-            let has_loaded_sources = !self.source_registry.root_ids().is_empty();
-            panel.update(cx, |panel, panel_cx| {
-                panel.reset_for_log_reload(revision, has_loaded_sources, panel_cx);
-                panel_cx.notify();
-            });
+        self.assistant_panel = None;
+        if !self.is_assistant_panel_collapsed {
+            self.create_assistant_panel(cx);
         }
     }
 
@@ -198,6 +202,41 @@ mod tests {
         });
         assert!(!is_collapsed);
         assert!(has_panel);
+    }
+
+    /// 验证日志重新加载会销毁旧助手会话实体：面板展开时立即创建全新会话，收起时延迟到下次展开。
+    #[gpui::test]
+    fn log_reload_recreates_assistant_session(cx: &mut TestAppContext) {
+        let directory = isolated_test_dir("assistant-session-recreate");
+        let manager = ConfigManager::new(directory.join("settings.toml"));
+        let app = cx.new(|_| ArgusApp::new_with_config_manager(manager));
+
+        let first_panel_id = app.update(cx, |app, app_cx| {
+            app.toggle_assistant_panel(app_cx);
+            let panel_id = app.assistant_panel.as_ref().map(|panel| panel.entity_id());
+            app.reset_assistant_after_log_reload(app_cx);
+            panel_id
+        });
+        let second_panel_id = app.read_with(cx, |app, _| {
+            app.assistant_panel.as_ref().map(|panel| panel.entity_id())
+        });
+        assert!(first_panel_id.is_some());
+        assert!(second_panel_id.is_some());
+        assert_ne!(
+            first_panel_id, second_panel_id,
+            "重新加载日志后应销毁旧会话并创建全新的助手会话实体"
+        );
+
+        // 面板收起时只销毁不重建，下次展开再按最新来源状态创建。
+        app.update(cx, |app, app_cx| {
+            app.is_assistant_panel_collapsed = true;
+            app.reset_assistant_after_log_reload(app_cx);
+        });
+        let has_panel = app.read_with(cx, |app, _| app.assistant_panel.is_some());
+        assert!(
+            !has_panel,
+            "面板收起时重新加载只销毁旧会话，不提前创建新会话"
+        );
     }
 
     /// 验证助手默认收起且宽度调整始终为主内容保留空间。

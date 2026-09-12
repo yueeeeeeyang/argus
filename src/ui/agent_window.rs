@@ -1241,7 +1241,6 @@ impl Render for AgentWindow {
                                                             }),
                                                             trailing_accessory_position: TextareaAccessoryPosition::BottomRight,
                                                             trailing_accessory_always_visible: true,
-                                                            reserve_secondary_accessory: true,
                                                             trailing_accessory_selected: can_send_message,
                                                             native_input: Some(native_input),
                                                         },

@@ -32,9 +32,7 @@ use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::infra::text_selection::{character_count, replace_character_range};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
-use crate::ui::components::icon_button::{
-    IconButtonSize, render_icon_button, render_round_icon_button,
-};
+use crate::ui::components::icon_button::{IconButtonSize, render_round_icon_button};
 use crate::ui::components::input::{
     InputAccessory, InputPointerAction, InputPointerEvent, NativeInput, Textarea,
     TextareaAccessoryPosition, TextareaScrollState, TextareaStyle, render_textarea,
@@ -299,24 +297,6 @@ impl AssistantPanel {
         panel
     }
 
-    /// 完整重新加载日志后清空旧上下文，并在父应用更新结束后自动扫描新的全部来源。
-    pub(crate) fn reset_for_log_reload(
-        &mut self,
-        revision: u64,
-        has_loaded_sources: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.has_loaded_sources = has_loaded_sources;
-        self.reset_for_scope_change(
-            revision,
-            "日志已重新加载",
-            "旧上下文已经清空，正在重新扫描完整日志来源",
-        );
-        if has_loaded_sources {
-            self.schedule_source_scan(cx);
-        }
-    }
-
     /// 接受来源注册表的非替换式补齐，保留当前上下文和可信不可变快照。
     ///
     /// 若补齐发生在扫描期间，则取消旧扫描并自动重试，避免旧结果覆盖较新的来源树。
@@ -373,23 +353,6 @@ impl AssistantPanel {
         if self.has_loaded_sources {
             self.schedule_source_scan(cx);
         }
-    }
-
-    /// 统一取消后台工作并清空依赖旧来源范围的对话、引用和工具缓存。
-    fn reset_for_scope_change(&mut self, revision: u64, title: &'static str, reason: &'static str) {
-        self.cancel_background_work();
-        self.scope = None;
-        self.clear_source_mention_state();
-        self.scope_revision = Some(revision);
-        self.history.clear();
-        self.error = None;
-        self.status = AssistantPanelStatus::Idle;
-        self.budget = AgentBudgetSnapshot::default();
-        self.replace_messages(vec![AssistantPanelMessage::Trace(AgentTraceEntry::new(
-            AgentTraceKind::Warning,
-            title,
-            reason,
-        ))]);
     }
 
     /// 延迟到当前 GPUI 更新事务结束后启动来源扫描，避免子实体回读正在更新的父实体。
@@ -454,10 +417,9 @@ impl AssistantPanel {
     }
 
     /// 返回当前不可发送的产品原因；运行态仍允许发送补充消息。
+    ///
+    /// 未加载日志的空态在渲染入口已直接拦截，这里只需覆盖模型和凭据问题。
     fn unavailable_reason(&self) -> Option<String> {
-        if !self.has_loaded_sources {
-            return Some("尚未加载日志来源，请先在主窗口添加日志。".to_string());
-        }
         if self.selected_model().is_none() {
             return Some("尚未配置已启用模型，请先完成模型配置。".to_string());
         }
@@ -972,7 +934,8 @@ impl AssistantPanel {
         self.message_list.splice(old_len..old_len, 1);
     }
 
-    /// 替换整段会话消息，用于新会话和来源变化重置。
+    /// 替换整段会话消息，用于测试直接构造消息边界场景。
+    #[cfg(test)]
     fn replace_messages(&mut self, messages: Vec<AssistantPanelMessage>) {
         self.messages = Arc::new(messages);
         self.message_list.reset(self.messages.len());
@@ -1099,24 +1062,7 @@ impl AssistantPanel {
         }
     }
 
-    /// 新建空白会话；根据方案下一条消息会重新完整扫描来源。
-    fn new_conversation(&mut self) {
-        self.cancel_background_work();
-        self.scope = None;
-        self.clear_source_mention_state();
-        self.scope_revision = None;
-        self.history.clear();
-        self.status = AssistantPanelStatus::Idle;
-        self.error = None;
-        self.budget = AgentBudgetSnapshot::default();
-        self.replace_messages(vec![AssistantPanelMessage::Trace(AgentTraceEntry::new(
-            AgentTraceKind::Status,
-            "新会话",
-            "下一条问题将重新扫描全部已加载日志来源。",
-        ))]);
-    }
-
-    /// 取消全部后台 generation，供新会话、来源重置和实体销毁复用。
+    /// 取消全部后台 generation，供分析配置更新和实体销毁复用。
     fn cancel_background_work(&mut self) {
         if let Some(cancellation) = self.scan_cancellation.take() {
             cancellation.cancel();
@@ -1389,13 +1335,45 @@ impl Drop for AssistantPanel {
 
 impl Render for AssistantPanel {
     /// 渲染助手头部、虚拟消息流、状态信息和底部悬浮输入框。
+    ///
+    /// 未加载日志时不渲染任何会话内容，只提示先加载日志；会话实体随日志加载自动
+    /// 销毁重建（见 `ArgusApp::reset_assistant_after_log_reload`）。
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.has_loaded_sources {
+            let theme = self.theme.clone();
+            return div()
+                .id("assistant-panel-root")
+                .size_full()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .overflow_hidden()
+                .bg(rgb(theme.side_bar))
+                .font_family(ARGUS_UI_FONT_FAMILY)
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("请先加载日志"),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.foreground_muted))
+                        .child("Agent 助手会话随日志加载自动创建，加载完成后即可提问。"),
+                );
+        }
         let entity = cx.entity();
         if !self.has_registered_scroll_handler {
-            let scroll_entity = entity.clone();
+            // 滚动监听闭包存放在面板自有的 ListState 内，必须持有弱引用；
+            // 否则形成强引用环，日志重载销毁面板实体时永远无法释放并执行 Drop 取消后台任务。
+            let scroll_entity = entity.downgrade();
             self.message_list
                 .set_scroll_handler(move |event, _, app_cx| {
-                    scroll_entity.update(app_cx, |panel, _| {
+                    let _ = scroll_entity.update(app_cx, |panel, _| {
                         panel.is_following_latest = !event.is_scrolled;
                     });
                 });
@@ -1419,10 +1397,6 @@ impl Render for AssistantPanel {
             .selected_model()
             .map(|model| model.name.clone())
             .unwrap_or_else(|| "未配置模型".to_string());
-        let model_detail = self
-            .selected_model()
-            .map(|model| format!("{} · {}", model.model, model.context_window_label()))
-            .unwrap_or_else(|| "请在设置中添加模型".to_string());
         let context_window = self
             .selected_model()
             .map(|model| model.context_window_tokens)
@@ -1437,7 +1411,6 @@ impl Render for AssistantPanel {
         let is_active = self.status == AssistantPanelStatus::Running;
         let last_index = messages.len().saturating_sub(1);
         let model_entity = entity.clone();
-        let new_entity = entity.clone();
         let key_entity = entity.clone();
         let click_entity = entity.clone();
         let pointer_entity = entity.clone();
@@ -1482,22 +1455,7 @@ impl Render for AssistantPanel {
                                     .text_color(rgb(theme.foreground_muted))
                                     .child(self.status.label()),
                             ),
-                    )
-                    .child(render_icon_button(
-                        "assistant-new-conversation",
-                        ArgusIcon::Plus,
-                        "新建会话",
-                        false,
-                        IconButtonSize::Tiny,
-                        &theme,
-                        move |_, _, app_cx| {
-                            app_cx.stop_propagation();
-                            new_entity.update(app_cx, |panel, panel_cx| {
-                                panel.new_conversation();
-                                panel_cx.notify();
-                            });
-                        },
-                    )),
+                    ),
             )
             .when_some(unavailable_reason.clone(), |this, reason| {
                 this.child(
@@ -1646,7 +1604,6 @@ impl Render for AssistantPanel {
                                     trailing_accessory_position:
                                         TextareaAccessoryPosition::BottomRight,
                                     trailing_accessory_always_visible: true,
-                                    reserve_secondary_accessory: false,
                                     trailing_accessory_selected: if is_busy {
                                         can_stop
                                     } else {
@@ -1741,13 +1698,6 @@ impl Render for AssistantPanel {
                                             .text_size(px(10.0))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(model_name),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(9.0))
-                                            .text_color(rgb(theme.foreground_muted))
-                                            .child(model_detail),
                                     ),
                             ),
                     ),
@@ -2522,9 +2472,9 @@ mod tests {
         );
     }
 
-    /// 验证普通来源补齐和分析配置更新保留对话，只有根日志重新加载会清空上下文。
+    /// 验证普通来源补齐和分析配置更新保留对话；全量重载的新建会话语义由 app 层实体重建覆盖。
     #[gpui::test]
-    fn only_full_log_reload_clears_assistant_context(cx: &mut TestAppContext) {
+    fn incremental_source_updates_preserve_assistant_context(cx: &mut TestAppContext) {
         let directory = isolated_test_dir("assistant-context-lifecycle");
         let manager = ConfigManager::new(directory.join("settings.toml"));
         let app = cx.new(|_| ArgusApp::new_with_config_manager(manager));
@@ -2545,10 +2495,6 @@ mod tests {
 
             panel.invalidate_scope_for_analysis_configuration_change(1, "日志说明已更新", panel_cx);
             assert!(panel.messages.len() > original_message_count);
-
-            panel.reset_for_log_reload(2, false, panel_cx);
-            assert_eq!(panel.messages.len(), 1);
-            assert!(panel.history.is_empty());
         });
     }
 

@@ -29,8 +29,8 @@ const INPUT_HORIZONTAL_SCROLL_MARGIN: f32 = 8.0;
 const TEXTAREA_VERTICAL_SCROLL_MARGIN: f32 = 4.0;
 /// 多行文本域显式滚动条占用宽度。
 const TEXTAREA_SCROLLBAR_WIDTH: f32 = 6.0;
-/// 多行文本域滚动条和边缘之间的留白。
-const TEXTAREA_SCROLLBAR_PADDING: f32 = 1.0;
+/// 滚动条与文本域边框的间隔；原间隔为容器内边距 8px 加轨道间距 1px 共 9px，按需求缩减到三分之一。
+const TEXTAREA_SCROLLBAR_BORDER_GAP: f32 = 3.0;
 /// 多行文本域滚动条滑块最小长度，避免长文本时滑块小到不可见。
 const TEXTAREA_SCROLLBAR_MIN_THUMB: f32 = 18.0;
 /// 多行文本域滚动条滑块厚度。
@@ -178,12 +178,10 @@ pub(crate) struct Textarea {
     pub style: TextareaStyle,
     /// 后置可点击图标附件。
     pub trailing_accessory: Option<InputAccessory>,
-    /// 后置图标在文本域中的悬浮位置。
+    /// 后置图标在文本域中的悬浮位置；仅对普通样式生效，对话样式固定使用底部按钮栏。
     pub trailing_accessory_position: TextareaAccessoryPosition,
     /// 是否在文本域失焦时仍显示后置图标。
     pub trailing_accessory_always_visible: bool,
-    /// 是否为后置按钮左侧的第二个悬浮操作预留空间。
-    pub reserve_secondary_accessory: bool,
     /// 后置图标是否使用选中态背景，用于主要发送操作。
     pub trailing_accessory_selected: bool,
     /// 系统文本输入桥接配置；为空时退回按键事件输入。
@@ -397,7 +395,7 @@ pub(crate) fn render_input(
         })
 }
 
-/// 渲染通用多行文本域，并将键盘输入、鼠标选择和清空按钮事件交给调用方处理。
+/// 渲染通用多行文本域，并将键盘输入、鼠标选择和后置按钮事件交给调用方处理。
 ///
 /// 参数说明：
 /// - `textarea`：文本域视觉和展示值配置。
@@ -427,16 +425,14 @@ pub(crate) fn render_textarea(
     let visible_trailing_accessory = textarea.trailing_accessory.filter(|_| {
         !textarea.is_disabled && (textarea.trailing_accessory_always_visible || textarea.is_focused)
     });
-    let right_padding = if visible_trailing_accessory.is_some() {
-        if textarea.style == TextareaStyle::Composer && textarea.reserve_secondary_accessory {
-            // 对话编辑器在发送按钮左侧预留一个同尺寸操作位，供调用方放置停止等会话动作。
-            trailing_button_size * 2.0 + horizontal_padding + 4.0
-        } else {
+    // 对话编辑器的发送按钮收进独立底栏，文本区不再为按钮预留整列横向空间；
+    // 普通样式的辅助按钮仍悬浮在文本区角落，文本区按按钮宽度让位。
+    let right_padding =
+        if textarea.style == TextareaStyle::Default && visible_trailing_accessory.is_some() {
             trailing_button_size + horizontal_padding
-        }
-    } else {
-        horizontal_padding
-    };
+        } else {
+            horizontal_padding
+        };
     let has_user_content = !textarea.value.is_empty();
     let display_text = if !has_user_content {
         textarea.placeholder.to_string()
@@ -481,8 +477,7 @@ pub(crate) fn render_textarea(
     } else {
         content_lines
             .iter()
-            // 这里使用偏保守的字符宽度估算，确保中文、英文标点和长线程段都有足够横向滚动空间。
-            .map(|line| character_count(&line.text) as f32 * font_size + 8.0)
+            .map(|line| estimated_textarea_line_width(&line.text, font_size))
             .fold(0.0_f32, f32::max)
     };
     let scroll_handle = textarea.scroll_handle.clone();
@@ -500,6 +495,12 @@ pub(crate) fn render_textarea(
     let scroll_state_for_sync = scroll_state.clone();
     let scroll_state_for_bars = scroll_state.clone();
 
+    let on_trailing_click = Rc::new(on_trailing_click);
+    let composer_accessory =
+        visible_trailing_accessory.filter(|_| textarea.style == TextareaStyle::Composer);
+    let default_accessory =
+        visible_trailing_accessory.filter(|_| textarea.style == TextareaStyle::Default);
+
     div()
         .id(textarea.id)
         .w_full()
@@ -509,7 +510,9 @@ pub(crate) fn render_textarea(
             this.rounded_sm().border_1().border_color(rgb(theme.border))
         })
         .when(textarea.style == TextareaStyle::Composer, |this| {
-            this.rounded_lg()
+            this.flex()
+                .flex_col()
+                .rounded_lg()
                 .border_1()
                 .border_color(rgb(if textarea.is_focused {
                     theme.info
@@ -523,7 +526,11 @@ pub(crate) fn render_textarea(
         .text_size(px(font_size))
         .text_color(rgb(text_color))
         .when(textarea.fill_height, |this| this.flex_1().min_h(px(0.0)))
-        .when(!textarea.fill_height, |this| this.h(px(height)))
+        // 普通样式由根节点定高、文本区绝对铺满；对话样式高度由文本区和底部按钮栏自然撑开。
+        .when(
+            !textarea.fill_height && textarea.style == TextareaStyle::Default,
+            |this| this.h(px(height)),
+        )
         .when(!textarea.is_disabled, |this| {
             let element = this
                 .focusable()
@@ -556,98 +563,137 @@ pub(crate) fn render_textarea(
         .when(textarea.is_disabled, |this| this.opacity(0.55))
         .child(
             div()
-                .absolute()
-                .left(px(horizontal_padding))
-                .right(px(right_padding))
-                .top(px(vertical_padding))
-                .bottom(px(vertical_padding))
+                .when(textarea.style == TextareaStyle::Default, |this| {
+                    this.absolute().left_0().top_0().right_0().bottom_0()
+                })
+                .when(textarea.style == TextareaStyle::Composer, |this| {
+                    let this = this.relative().w_full();
+                    if textarea.fill_height {
+                        this.flex_1().min_h(px(0.0))
+                    } else {
+                        this.h(px(height))
+                    }
+                })
                 .child(
                     div()
-                        .relative()
-                        .size_full()
+                        .absolute()
+                        .left(px(horizontal_padding))
+                        .right(px(right_padding))
+                        .top(px(vertical_padding))
+                        .bottom(px(vertical_padding))
                         .child(
                             div()
-                                .id((textarea.id, 14usize))
+                                .relative()
                                 .size_full()
-                                .overflow_scroll()
-                                // GPUI 的滚动条宽度会永久预留轨道；置零后只使用下方按真实溢出量绘制的浮层滑块。
-                                .scrollbar_width(px(0.0))
-                                .track_scroll(&scroll_handle_for_viewport)
-                                .on_scroll_wheel(move |event, window, cx| {
-                                    if !has_user_content {
-                                        // 空文本域不消费滚轮，外层可滚动对话框应继续响应。
-                                        return;
-                                    }
-                                    let current_offset = scroll_handle_for_wheel.offset();
-                                    let next_offset = textarea_scroll_offset_for_wheel(
-                                        current_offset,
-                                        scroll_handle_for_wheel.max_offset(),
-                                        event.delta.pixel_delta(window.line_height()),
-                                    );
-                                    if next_offset != current_offset {
-                                        // 文本域尚可继续滚动时由自身消费；到达边界后不阻断事件，让外层页面接管。
-                                        scroll_handle_for_wheel.set_offset(next_offset);
-                                        window.refresh();
-                                        cx.stop_propagation();
-                                    }
-                                })
                                 .child(
                                     div()
-                                        .relative()
-                                        .h(px(content_height))
-                                        .w_full()
-                                        .min_w(px(content_width))
-                                        .child(render_textarea_scroll_sync(
-                                            textarea.id,
-                                            textarea.value.clone(),
-                                            font_size,
-                                            line_height,
-                                            cursor_index,
-                                            textarea.is_focused,
-                                            runtime_focus_handle_for_scroll_sync,
-                                            scroll_handle,
-                                            scroll_state_for_sync,
-                                        ))
-                                        .child(render_textarea_text(
-                                            textarea.id,
-                                            &textarea.value,
-                                            &display_text,
-                                            font_size,
-                                            line_height,
-                                            cursor_index,
-                                            selection_range,
-                                            marked_range,
-                                            textarea.is_focused,
-                                            runtime_focus_handle_for_text,
-                                            text_color,
-                                            theme.selection,
-                                            theme.foreground,
-                                        )),
-                                ),
-                        )
-                        .child(render_textarea_pointer_layer(
-                            textarea.id,
-                            pointer_value,
-                            font_size,
-                            line_height,
-                            cursor_index,
-                            textarea.selection_range.clone(),
-                            textarea.marked_range.clone(),
-                            textarea.is_pointer_selecting,
-                            on_pointer_select,
-                            native_input_for_pointer,
-                            scroll_handle_for_pointer,
-                        ))
-                        .children(render_textarea_scrollbars(
-                            textarea.id,
-                            scroll_handle_for_bars,
-                            scroll_state_for_bars,
-                            theme.foreground_muted,
-                            has_user_content,
-                        )),
+                                        .id((textarea.id, 14usize))
+                                        .size_full()
+                                        .overflow_scroll()
+                                        // GPUI 的滚动条宽度会永久预留轨道；置零后只使用下方按真实溢出量绘制的浮层滑块。
+                                        .scrollbar_width(px(0.0))
+                                        .track_scroll(&scroll_handle_for_viewport)
+                                        .on_scroll_wheel(move |event, window, cx| {
+                                            if !has_user_content {
+                                                // 空文本域不消费滚轮，外层可滚动对话框应继续响应。
+                                                return;
+                                            }
+                                            let current_offset = scroll_handle_for_wheel.offset();
+                                            let next_offset = textarea_scroll_offset_for_wheel(
+                                                current_offset,
+                                                scroll_handle_for_wheel.max_offset(),
+                                                event.delta.pixel_delta(window.line_height()),
+                                            );
+                                            if next_offset != current_offset {
+                                                // 文本域尚可继续滚动时由自身消费；到达边界后不阻断事件，让外层页面接管。
+                                                scroll_handle_for_wheel.set_offset(next_offset);
+                                                window.refresh();
+                                                cx.stop_propagation();
+                                            }
+                                        })
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .h(px(content_height))
+                                                .w_full()
+                                                .min_w(px(content_width))
+                                                .child(render_textarea_scroll_sync(
+                                                    textarea.id,
+                                                    textarea.value.clone(),
+                                                    font_size,
+                                                    line_height,
+                                                    cursor_index,
+                                                    textarea.is_focused,
+                                                    runtime_focus_handle_for_scroll_sync,
+                                                    scroll_handle,
+                                                    scroll_state_for_sync,
+                                                ))
+                                                .child(render_textarea_text(
+                                                    textarea.id,
+                                                    &textarea.value,
+                                                    &display_text,
+                                                    font_size,
+                                                    line_height,
+                                                    cursor_index,
+                                                    selection_range,
+                                                    marked_range,
+                                                    textarea.is_focused,
+                                                    runtime_focus_handle_for_text,
+                                                    text_color,
+                                                    theme.selection,
+                                                    theme.foreground,
+                                                )),
+                                        ),
+                                )
+                                .child(render_textarea_pointer_layer(
+                                    textarea.id,
+                                    pointer_value,
+                                    font_size,
+                                    line_height,
+                                    cursor_index,
+                                    textarea.selection_range.clone(),
+                                    textarea.marked_range.clone(),
+                                    textarea.is_pointer_selecting,
+                                    on_pointer_select,
+                                    native_input_for_pointer,
+                                    scroll_handle_for_pointer,
+                                ))
+                                .children(render_textarea_scrollbars(
+                                    textarea.id,
+                                    scroll_handle_for_bars,
+                                    scroll_state_for_bars,
+                                    theme.foreground_muted,
+                                    has_user_content,
+                                    horizontal_padding,
+                                    vertical_padding,
+                                )),
+                        ),
                 ),
         )
-        .when_some(visible_trailing_accessory, |this, accessory| {
+        // 对话编辑器的发送按钮收进独立底栏，彻底退出文本输入区域。
+        .when_some(composer_accessory, |this, accessory| {
+            let on_trailing_click = on_trailing_click.clone();
+            this.child(
+                div()
+                    .flex_none()
+                    .px(px(4.0))
+                    .pb(px(4.0))
+                    .flex()
+                    .justify_end()
+                    .child(render_icon_button(
+                        accessory.id,
+                        accessory.icon,
+                        accessory.tooltip,
+                        textarea.trailing_accessory_selected,
+                        IconButtonSize::Tiny,
+                        theme,
+                        move |event, window, cx| (on_trailing_click)(event, window, cx),
+                    )),
+            )
+        })
+        // 普通样式的辅助按钮继续悬浮在文本区角落。
+        .when_some(default_accessory, |this, accessory| {
+            let on_trailing_click = on_trailing_click.clone();
             this.child(
                 div()
                     .absolute()
@@ -668,7 +714,7 @@ pub(crate) fn render_textarea(
                         textarea.trailing_accessory_selected,
                         IconButtonSize::Tiny,
                         theme,
-                        on_trailing_click,
+                        move |event, window, cx| (on_trailing_click)(event, window, cx),
                     )),
             )
         })
@@ -1279,12 +1325,17 @@ struct TextareaScrollbarDrag {
 }
 
 /// 渲染文本域显式滚动条；只在对应方向内容溢出时显示。
+///
+/// 滚动条贴近文本域边框绘制：轨道沿滚动方向向容器内边距区域延伸、滑块近侧边越过
+/// 内边距贴合边框，使滑块与边框的间隔保持为 `TEXTAREA_SCROLLBAR_BORDER_GAP`。
 fn render_textarea_scrollbars(
     textarea_id: &'static str,
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
     color: u32,
     has_user_content: bool,
+    horizontal_inset: f32,
+    vertical_inset: f32,
 ) -> Vec<AnyElement> {
     let bounds = scroll_handle.bounds();
     let max_offset = scroll_handle.max_offset();
@@ -1306,8 +1357,11 @@ fn render_textarea_scrollbars(
         } else {
             px(0.0)
         };
+        let track_extension = px(vertical_inset - TEXTAREA_SCROLLBAR_BORDER_GAP);
         if let Some(metrics) = textarea_scrollbar_metrics(
-            bounds.size.height - reserved_corner,
+            -track_extension,
+            bounds.size.height + track_extension * 2.0 - reserved_corner,
+            bounds.size.height,
             max_offset.height,
             -offset.y,
         ) {
@@ -1315,6 +1369,7 @@ fn render_textarea_scrollbars(
                 textarea_id,
                 TextareaScrollbarAxis::Vertical,
                 metrics,
+                px(TEXTAREA_SCROLLBAR_BORDER_GAP - horizontal_inset),
                 bounds,
                 scroll_handle.clone(),
                 scroll_state.clone(),
@@ -1329,8 +1384,11 @@ fn render_textarea_scrollbars(
         } else {
             px(0.0)
         };
+        let track_extension = px(horizontal_inset - TEXTAREA_SCROLLBAR_BORDER_GAP);
         if let Some(metrics) = textarea_scrollbar_metrics(
-            bounds.size.width - reserved_corner,
+            -track_extension,
+            bounds.size.width + track_extension * 2.0 - reserved_corner,
+            bounds.size.width,
             max_offset.width,
             -offset.x,
         ) {
@@ -1338,6 +1396,7 @@ fn render_textarea_scrollbars(
                 textarea_id,
                 TextareaScrollbarAxis::Horizontal,
                 metrics,
+                px(TEXTAREA_SCROLLBAR_BORDER_GAP - vertical_inset),
                 bounds,
                 scroll_handle.clone(),
                 scroll_state.clone(),
@@ -1365,10 +1424,14 @@ fn textarea_scrollbar_visibility(
 }
 
 /// 渲染可拖拽的文本域滚动条滑块。
+///
+/// `edge_offset` 为滑块近侧边相对滚动视口的偏移；贴边绘制时为负值，表示越过容器
+/// 内边距贴合文本域边框，负偏移不影响命中测试和拖拽换算（均按实际布局边界计算）。
 fn render_textarea_scrollbar_thumb(
     textarea_id: &'static str,
     axis: TextareaScrollbarAxis,
     metrics: TextareaScrollbarMetrics,
+    edge_offset: Pixels,
     viewport_bounds: Bounds<Pixels>,
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
@@ -1391,12 +1454,12 @@ fn render_textarea_scrollbar_thumb(
     thumb = if is_horizontal {
         thumb
             .left(metrics.thumb_start)
-            .bottom(px(TEXTAREA_SCROLLBAR_PADDING))
+            .bottom(edge_offset)
             .w(metrics.thumb_length)
             .h(px(TEXTAREA_SCROLLBAR_THUMB_SIZE))
     } else {
         thumb
-            .right(px(TEXTAREA_SCROLLBAR_PADDING))
+            .right(edge_offset)
             .top(metrics.thumb_start)
             .w(px(TEXTAREA_SCROLLBAR_THUMB_SIZE))
             .h(metrics.thumb_length)
@@ -1496,18 +1559,26 @@ fn render_textarea_scrollbar_thumb(
         .into_any_element()
 }
 
-/// 根据视口长度和最大滚动距离计算滚动条滑块位置。
+/// 根据轨道范围、视口长度和最大滚动距离计算滚动条滑块位置。
+///
+/// 参数说明：
+/// - `track_start`：轨道起点，使用滚动视口内部局部坐标；贴边绘制时为负值。
+/// - `track_length`：轨道长度，已扣除对向滚动条占据的角落。
+/// - `viewport_length`：滚动视口长度，用于计算滑块与内容的比例。
+/// - `max_scroll`：最大滚动距离。
+/// - `current_scroll`：当前滚动距离。
 fn textarea_scrollbar_metrics(
+    track_start: Pixels,
+    track_length: Pixels,
     viewport_length: Pixels,
     max_scroll: Pixels,
     current_scroll: Pixels,
 ) -> Option<TextareaScrollbarMetrics> {
-    if viewport_length <= px(0.0) || max_scroll <= px(0.0) {
+    if track_length <= px(0.0) || viewport_length <= px(0.0) || max_scroll <= px(0.0) {
         return None;
     }
 
-    let track_padding = px(TEXTAREA_SCROLLBAR_PADDING);
-    let track_length = (viewport_length - track_padding * 2.0).max(px(1.0));
+    let track_length = track_length.max(px(1.0));
     let content_length = viewport_length + max_scroll;
     let thumb_length = ((viewport_length / content_length) * track_length)
         .clamp(px(TEXTAREA_SCROLLBAR_MIN_THUMB), track_length);
@@ -1515,9 +1586,9 @@ fn textarea_scrollbar_metrics(
     let ratio = (current_scroll / max_scroll).clamp(0.0, 1.0);
 
     Some(TextareaScrollbarMetrics {
-        thumb_start: track_padding + movable_length * ratio,
+        thumb_start: track_start + movable_length * ratio,
         thumb_length,
-        track_start: track_padding,
+        track_start,
         track_length,
         max_scroll,
     })
@@ -2523,6 +2594,22 @@ fn textarea_scroll_offset_for_wheel(
     )
 }
 
+/// 估算文本域单行内容宽度。
+///
+/// 说明：文本域使用等宽字体，ASCII 字符按 0.62 倍字号、其它字符按 1 倍字号估算，
+/// 与真实字形宽度基本吻合。此前统一按 1 倍字号高估，ASCII 居多的内容横向滚动范围
+/// 接近虚增一倍，导致横向滚动条常驻且大量滚动空间落空。
+fn estimated_textarea_line_width(text: &str, font_size: f32) -> f32 {
+    text.chars().fold(4.0_f32, |width, character| {
+        width
+            + if character.is_ascii() {
+                font_size * 0.62
+            } else {
+                font_size
+            }
+    })
+}
+
 /// 根据鼠标位置和 GPUI 字形布局计算文本域内的字符位置。
 fn textarea_character_index_from_pointer(
     value: &str,
@@ -2651,6 +2738,45 @@ mod tests {
         assert_eq!(textarea_local_range(&stale_line, Some(0..12), "abc"), None);
     }
 
+    /// 验证文本域宽度估算按字符类型区分：ASCII 按 0.62 倍字号，宽字符按 1 倍字号。
+    #[test]
+    fn textarea_width_estimate_separates_ascii_and_wide_chars() {
+        let font_size = 13.0_f32;
+
+        let ascii_width = estimated_textarea_line_width("abcde", font_size);
+        assert!((ascii_width - (4.0 + 5.0 * font_size * 0.62)).abs() < 0.01);
+
+        let wide_width = estimated_textarea_line_width("日志分析", font_size);
+        assert!((wide_width - (4.0 + 4.0 * font_size)).abs() < 0.01);
+
+        let mixed_width = estimated_textarea_line_width("a日", font_size);
+        assert!((mixed_width - (4.0 + font_size * 0.62 + font_size)).abs() < 0.01);
+    }
+
+    /// 验证 ASCII 居多的长行估算宽度明显低于按全宽高估的旧算法，横向滚动条不再常驻虚高。
+    #[test]
+    fn textarea_width_estimate_avoids_ascii_phantom_scroll_range() {
+        let font_size = 13.0_f32;
+        let line = "a".repeat(100);
+
+        let estimated = estimated_textarea_line_width(&line, font_size);
+        let overestimated = 100.0 * font_size + 8.0;
+
+        assert!(estimated < overestimated * 0.7);
+    }
+
+    /// 验证纯中文行按全宽估算，不会因低估导致行尾文字滚不到可视区。
+    #[test]
+    fn textarea_width_estimate_keeps_wide_chars_fully_reachable() {
+        let font_size = 13.0_f32;
+        let line = "中".repeat(20);
+
+        assert_eq!(
+            estimated_textarea_line_width(&line, font_size),
+            4.0 + 20.0 * font_size
+        );
+    }
+
     /// 文本域光标越过右侧可视区时，应自动横向滚动并保留右侧边距。
     #[test]
     fn textarea_scroll_follows_caret_past_right_edge() {
@@ -2747,7 +2873,7 @@ mod tests {
     #[test]
     fn textarea_scrollbar_metrics_hidden_without_overflow() {
         assert_eq!(
-            textarea_scrollbar_metrics(px(120.0), px(0.0), px(0.0)),
+            textarea_scrollbar_metrics(px(1.0), px(118.0), px(120.0), px(0.0), px(0.0)),
             None
         );
     }
@@ -2768,11 +2894,34 @@ mod tests {
     /// 文本域内容溢出后，应根据当前滚动位置计算可见滑块。
     #[test]
     fn textarea_scrollbar_metrics_tracks_scroll_position() {
-        let metrics = textarea_scrollbar_metrics(px(100.0), px(300.0), px(150.0))
-            .expect("内容溢出时应显示滚动条");
+        let metrics =
+            textarea_scrollbar_metrics(px(1.0), px(98.0), px(100.0), px(300.0), px(150.0))
+                .expect("内容溢出时应显示滚动条");
 
         assert_eq!(metrics.thumb_length, px(24.5));
         assert!((pixels_to_f32(metrics.thumb_start) - 37.75).abs() < 0.01);
+    }
+
+    /// 验证贴边滚动条轨道向容器内边距区域延伸，滑块与边框的间隔缩减为目标值。
+    #[test]
+    fn textarea_scrollbar_track_extends_toward_border() {
+        let container_inset = 8.0_f32;
+        let extension = px(container_inset - TEXTAREA_SCROLLBAR_BORDER_GAP);
+        let viewport_length = px(60.0);
+        let metrics = textarea_scrollbar_metrics(
+            -extension,
+            viewport_length + extension * 2.0,
+            viewport_length,
+            px(120.0),
+            px(0.0),
+        )
+        .expect("内容溢出时应显示滚动条");
+
+        // 轨道两端各延伸 5px：未滚动时滑块起点位于视口坐标 -5，距边框 8 - 5 = 3px。
+        assert_eq!(metrics.track_start, px(-5.0));
+        assert_eq!(metrics.track_length, px(70.0));
+        assert_eq!(metrics.thumb_start, px(-5.0));
+        assert!((pixels_to_f32(metrics.thumb_length) - 70.0 / 3.0).abs() < 0.01);
     }
 
     /// 拖拽文本域滚动条滑块时，应按轨道位置换算为目标滚动距离。
