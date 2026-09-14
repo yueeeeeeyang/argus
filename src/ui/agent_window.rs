@@ -918,6 +918,9 @@ impl Render for AgentWindow {
                     .relative()
                     .flex_1()
                     .min_h(px(0.0))
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
                     .overflow_hidden()
                     .child(render_budget_bar(
                         self.budget,
