@@ -745,7 +745,73 @@ impl WorkspaceMaterializer<'_> {
         };
         let result = self.extract_archive(&nested_container, &nested_dir, nested_chain, depth + 1);
         let _ = fs::remove_file(&scratch_file);
+        // 嵌套包只解出一个普通文件时提升到父级，去掉以压缩包名命名的包装目录。
+        if result.is_ok() {
+            Self::promote_single_file_out_of_dir(&nested_dir);
+        }
         result
+    }
+
+    /// 把包装目录中唯一的一个普通文件提升到父级；目标名与包装目录同名时经暂存名中转，
+    /// 重名按扩展名前序号消歧。任何失败都保持原布局，不阻断加载。
+    fn promote_single_file_out_of_dir(wrapper_dir: &Path) {
+        let Ok(entries) = fs::read_dir(wrapper_dir) else {
+            return;
+        };
+        let mut single_file: Option<PathBuf> = None;
+        let mut entry_count = 0_usize;
+        for entry in entries.flatten() {
+            entry_count += 1;
+            if entry_count > 1 {
+                break;
+            }
+            let path = entry.path();
+            single_file = path.is_file().then_some(path);
+        }
+        if entry_count != 1 {
+            return;
+        }
+        let Some(file_path) = single_file else {
+            return;
+        };
+        let Some(parent) = wrapper_dir.parent() else {
+            return;
+        };
+        let Some(file_name) = file_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let (stem, extension) = Self::split_file_name_extension(&file_name);
+        let mut candidate = file_name.clone();
+        let mut suffix = 1_usize;
+        // 包装目录自身占用的名称即将释放，视为可用。
+        while parent.join(&candidate).exists() && parent.join(&candidate) != wrapper_dir {
+            suffix += 1;
+            candidate = format!("{stem} ({suffix}){extension}");
+        }
+        let target = parent.join(&candidate);
+        if target == wrapper_dir {
+            // 目标名正被包装目录占用：先经暂存名移出，删除目录后落位。
+            let staging = parent.join(format!(".argus-promote-{file_name}"));
+            if fs::rename(&file_path, &staging).is_err()
+                || fs::remove_dir(wrapper_dir).is_err()
+                || fs::rename(&staging, &target).is_err()
+            {
+                let _ = fs::rename(&staging, &file_path);
+            }
+        } else if fs::rename(&file_path, &target).is_ok() {
+            let _ = fs::remove_dir(wrapper_dir);
+        }
+    }
+
+    /// 把文件名拆为词干与含点的扩展名；无扩展名时扩展名为空。
+    fn split_file_name_extension(file_name: &str) -> (&str, &str) {
+        match file_name.rfind('.') {
+            Some(position) if position > 0 => file_name.split_at(position),
+            _ => (file_name, ""),
+        }
     }
 
     /// 流式解压单个条目到文件；单条目超限跳过该条目，总预算耗尽降级当前根。
@@ -999,10 +1065,7 @@ impl WorkspaceMaterializer<'_> {
     ///
     /// `removing_dir` 是即将删除的标签目录，其占用的名称视为可用。
     fn unique_top_file_name(&mut self, file_name: &str, removing_dir: &Path) -> String {
-        let (stem, extension) = match file_name.rfind('.') {
-            Some(position) if position > 0 => file_name.split_at(position),
-            _ => (file_name, ""),
-        };
+        let (stem, extension) = Self::split_file_name_extension(file_name);
         let mut candidate = file_name.to_string();
         let mut suffix = 1_usize;
         while {
@@ -1378,10 +1441,97 @@ mod tests {
         .expect("嵌套 zip 物化应成功");
 
         assert_eq!(
-            fs::read(workspace.root.join("outer/nested/inner/inner.log"))
-                .expect("应读取嵌套解压条目"),
+            fs::read(workspace.root.join("outer/nested/inner.log")).expect("应读取嵌套解压条目"),
             b"inner"
         );
+        assert!(
+            !workspace.root.join("outer/nested/inner").exists(),
+            "单文件嵌套包的包装目录应被移除"
+        );
+    }
+
+    /// 验证嵌套单文件包与父目录既有文件同名时按序号消歧。
+    #[test]
+    fn nested_single_file_archive_collision_appends_suffix() {
+        let dir = isolated_test_dir("workspace-nested-collision");
+        let mut inner_cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut inner_writer = ZipWriter::new(&mut inner_cursor);
+            inner_writer
+                .start_file("app.log", SimpleFileOptions::default())
+                .expect("应写入内层条目");
+            inner_writer.write_all(b"nested").expect("应写入内层内容");
+            inner_writer.finish().expect("应完成内层 zip");
+        }
+        let inner_bytes = inner_cursor.into_inner();
+        let archive = write_test_zip(
+            &dir.join("outer.zip"),
+            &[
+                ("monitorThread/app.log", b"plain".as_slice()),
+                ("monitorThread/inner.zip", inner_bytes.as_slice()),
+            ],
+        );
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("嵌套同名冲突物化应成功");
+
+        // 兄弟文件先落盘，嵌套包同名文件在扩展名前追加序号。
+        assert_eq!(
+            fs::read(workspace.root.join("outer/monitorThread/app.log")).expect("应读取既有文件"),
+            b"plain"
+        );
+        assert_eq!(
+            fs::read(workspace.root.join("outer/monitorThread/app (2).log"))
+                .expect("应读取提升后的嵌套文件"),
+            b"nested"
+        );
+        assert!(
+            !workspace.root.join("outer/monitorThread/inner").exists(),
+            "包装目录应被移除"
+        );
+    }
+
+    /// 验证嵌套包内含目录时保留包装目录布局。
+    #[test]
+    fn nested_archive_with_directory_keeps_wrapper() {
+        let dir = isolated_test_dir("workspace-nested-dir");
+        let mut inner_cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut inner_writer = ZipWriter::new(&mut inner_cursor);
+            inner_writer
+                .start_file("logs/a.log", SimpleFileOptions::default())
+                .expect("应写入内层条目");
+            inner_writer.write_all(b"a").expect("应写入内层内容");
+            inner_writer.finish().expect("应完成内层 zip");
+        }
+        let inner_bytes = inner_cursor.into_inner();
+        let archive = write_test_zip(
+            &dir.join("outer.zip"),
+            &[("monitorThread/inner.zip", inner_bytes.as_slice())],
+        );
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("含目录嵌套包物化应成功");
+
+        assert!(
+            workspace
+                .root
+                .join("outer/monitorThread/inner/logs/a.log")
+                .is_file()
+        );
+        assert!(workspace.root.join("outer/monitorThread/inner").is_dir());
     }
 
     /// 验证顶层 gzip 单文件包解压为去 `.gz` 的普通文件并直接提升为顶层文件根。
