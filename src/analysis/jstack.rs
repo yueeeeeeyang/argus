@@ -6,12 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::config::LoaderConfig;
 use crate::loader::{SourceId, SourceLocation};
@@ -214,8 +211,6 @@ pub(crate) struct JstackAnalysisResult {
     pub total_files: usize,
     /// 解析到的线程样本总数。
     pub total_samples: usize,
-    /// Agent 可取消入口实际读取或解压的日志字节数；常规 UI 入口不依赖该字段。
-    pub scanned_bytes: u64,
 }
 
 /// Jstack 线程过滤器，按线程名关键字和完整线程段片段隐藏分析结果。
@@ -364,30 +359,11 @@ pub(crate) fn analyze_jstack_targets(
     default_encoding: String,
     loader_config: LoaderConfig,
 ) -> JstackAnalysisResult {
-    analyze_jstack_targets_with_cancel(
-        targets,
-        default_encoding,
-        loader_config,
-        Arc::new(AtomicBool::new(false)),
-    )
-}
-
-/// 从多个来源读取 Jstack，并在来源、归档数据块和解析批次边界响应取消。
-pub(crate) fn analyze_jstack_targets_with_cancel(
-    targets: Vec<JstackAnalysisTarget>,
-    default_encoding: String,
-    loader_config: LoaderConfig,
-    cancel_flag: Arc<AtomicBool>,
-) -> JstackAnalysisResult {
     let mut snapshot_targets = Vec::new();
     let mut snapshots = Vec::new();
     let mut skipped_snapshots = Vec::new();
-    let mut scanned_bytes = 0_u64;
 
     for target in targets {
-        if cancel_flag.load(Ordering::Relaxed) {
-            break;
-        }
         match expand_jstack_target(target, &loader_config) {
             Ok(mut expanded) => snapshot_targets.append(&mut expanded),
             Err((source_id, label, reason)) => skipped_snapshots.push(JstackSkippedSnapshot {
@@ -400,22 +376,15 @@ pub(crate) fn analyze_jstack_targets_with_cancel(
 
     let total_files = snapshot_targets.len();
     for target in snapshot_targets {
-        if cancel_flag.load(Ordering::Relaxed) {
-            break;
-        }
-        match read_jstack_snapshot(target.clone(), &default_encoding, cancel_flag.clone()) {
-            Ok((snapshot, byte_len)) if snapshot.samples.is_empty() => {
-                scanned_bytes = scanned_bytes.saturating_add(byte_len);
+        match read_jstack_snapshot(target.clone(), &default_encoding) {
+            Ok(snapshot) if snapshot.samples.is_empty() => {
                 skipped_snapshots.push(JstackSkippedSnapshot {
                     source_id: target.source_id,
                     label: target.label,
                     reason: "未解析到 Jstack 线程".to_string(),
                 });
             }
-            Ok((snapshot, byte_len)) => {
-                scanned_bytes = scanned_bytes.saturating_add(byte_len);
-                snapshots.push(snapshot);
-            }
+            Ok(snapshot) => snapshots.push(snapshot),
             Err(error) => skipped_snapshots.push(JstackSkippedSnapshot {
                 source_id: target.source_id,
                 label: target.label,
@@ -424,9 +393,7 @@ pub(crate) fn analyze_jstack_targets_with_cancel(
         }
     }
 
-    let mut result = build_analysis_result(snapshots, skipped_snapshots, total_files);
-    result.scanned_bytes = scanned_bytes;
-    result
+    build_analysis_result(snapshots, skipped_snapshots, total_files)
 }
 
 /// 展开 Jstack 分析目标；本地目录会递归转换为可读取的纯文本日志列表。
@@ -609,7 +576,6 @@ pub(crate) fn build_analysis_result(
         skipped_snapshots,
         total_files,
         total_samples,
-        scanned_bytes: 0,
     }
 }
 
@@ -617,43 +583,29 @@ pub(crate) fn build_analysis_result(
 fn read_jstack_snapshot(
     target: JstackAnalysisTarget,
     default_encoding: &str,
-    cancel_flag: Arc<AtomicBool>,
-) -> Result<(JstackSnapshot, u64)> {
-    let handle = LogFileReader::open_with_cancel_flag(
-        OpenLogRequest {
-            location: target.location.clone(),
-            label: target.label.clone(),
-            default_encoding: default_encoding.to_string(),
-        },
-        cancel_flag.clone(),
-    )?;
-    let byte_len = handle.byte_len();
-    let samples = parse_jstack_document(handle.document(), &cancel_flag)?;
-    Ok((
-        JstackSnapshot {
-            source_id: target.source_id,
-            label: target.label,
-            path: target.path,
-            samples,
-        },
-        byte_len,
-    ))
+) -> Result<JstackSnapshot> {
+    let handle = LogFileReader::open(OpenLogRequest {
+        location: target.location.clone(),
+        label: target.label.clone(),
+        default_encoding: default_encoding.to_string(),
+    })?;
+    let samples = parse_jstack_document(handle.document())?;
+    Ok(JstackSnapshot {
+        source_id: target.source_id,
+        label: target.label,
+        path: target.path,
+        samples,
+    })
 }
 
 /// 按批次读取日志文档并增量解析 Jstack，避免把完整日志拼成一个大字符串。
-fn parse_jstack_document(
-    document: &LogDocument,
-    cancel_flag: &AtomicBool,
-) -> Result<Vec<JstackThreadSample>> {
+fn parse_jstack_document(document: &LogDocument) -> Result<Vec<JstackThreadSample>> {
     let mut parser = JstackSnapshotParser::default();
     let line_count = document.line_count();
     let mut start_line = 0_usize;
     const READ_BATCH_LINES: usize = 4096;
 
     while start_line < line_count {
-        if cancel_flag.load(Ordering::Relaxed) {
-            bail!("Jstack 分析已取消");
-        }
         let lines = document.lines(start_line, READ_BATCH_LINES)?;
         if lines.is_empty() {
             break;

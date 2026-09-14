@@ -199,8 +199,6 @@ pub(crate) struct RuntimeAnalysisResult {
     pub total_files: usize,
     /// SQL 明细总数。
     pub total_sql_records: usize,
-    /// Agent 可取消入口实际读取或解压的日志字节数；常规 UI 入口不依赖该字段。
-    pub scanned_bytes: u64,
 }
 
 /// Runtime 分析过滤输入快照，保存用户在过滤栏中输入的原始文本。
@@ -413,7 +411,6 @@ pub(crate) fn build_runtime_analysis_result(
         skipped_files,
         total_files,
         total_sql_records,
-        scanned_bytes: 0,
     }
 }
 
