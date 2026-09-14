@@ -288,7 +288,10 @@ pub(crate) fn append_materialize_archive(
     let result = materializer.extract_archive(&container, &label_dir, Vec::new(), 0);
     let _ = fs::remove_dir_all(workspace_root.join(".argus-scratch"));
     match result {
-        Ok(()) => Ok(MaterializedRootInfo { path: label_dir }),
+        Ok(()) => {
+            let root_path = materializer.promote_single_file_root(&label, &label_dir);
+            Ok(MaterializedRootInfo { path: root_path })
+        }
         Err(MaterializeRootError::PasswordPending) => {
             let _ = fs::remove_dir_all(&label_dir);
             // 追加物化前用户刚输入过密码，仍失败即密码错误；保留密码错误类型供界面再次弹窗。
@@ -397,13 +400,23 @@ impl WorkspaceMaterializer<'_> {
     }
 
     /// 物化单个来源根为一个顶层目录；失败回滚该根的半成品，密码未授权转为密码占位。
+    ///
+    /// 可展开压缩包若只包含一个文件，产物直接提升为工作目录顶层的文件根，
+    /// 不再套一层标签目录。
     fn materialize_root(&mut self, path: &Path) -> Result<(), MaterializeRootError> {
         let base_label = display_label_for_path(path);
         let label = self.unique_top_label(&base_label);
         let label_dir = self.root.join(&label);
+        let is_extractable_archive =
+            detect_archive_format(path).is_some_and(|format| format.is_supported());
         match self.materialize_root_into(path, &label_dir) {
             Ok(()) => {
-                self.roots.push(MaterializedRootInfo { path: label_dir });
+                let root_path = if is_extractable_archive {
+                    self.promote_single_file_root(&label, &label_dir)
+                } else {
+                    label_dir
+                };
+                self.roots.push(MaterializedRootInfo { path: root_path });
                 Ok(())
             }
             Err(MaterializeRootError::PasswordPending) => {
@@ -924,6 +937,85 @@ impl WorkspaceMaterializer<'_> {
         }
     }
 
+    /// 解压产物若恰好只有一个普通文件，把它提升为工作目录顶层的文件根。
+    ///
+    /// 提升后标签目录删除、标签名从占用集合释放；重名时在扩展名前追加序号。
+    /// 任何异常都退回原标签目录布局，不阻断加载。
+    fn promote_single_file_root(&mut self, label: &str, label_dir: &Path) -> PathBuf {
+        let fallback = |materializer: &mut Self| {
+            materializer.used_labels.insert(label.to_lowercase());
+            label_dir.to_path_buf()
+        };
+        let entries = match fs::read_dir(label_dir) {
+            Ok(entries) => entries,
+            Err(_) => return fallback(self),
+        };
+        let mut single_file: Option<PathBuf> = None;
+        let mut entry_count = 0_usize;
+        for entry in entries.flatten() {
+            entry_count += 1;
+            if entry_count > 1 {
+                break;
+            }
+            let path = entry.path();
+            single_file = path.is_file().then_some(path);
+        }
+        if entry_count != 1 {
+            return fallback(self);
+        }
+        let Some(file_path) = single_file else {
+            return fallback(self);
+        };
+        let Some(file_name) = file_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return fallback(self);
+        };
+        // 先释放标签占用：目标文件名与标签同名时（如 gzip 派生的 access.log）才会被放行。
+        let label_key = label.to_lowercase();
+        self.used_labels.remove(&label_key);
+        let unique_name = self.unique_top_file_name(&file_name, label_dir);
+        let target = self.root.join(&unique_name);
+        if target == label_dir {
+            // 目标名正被标签目录占用：先经临时名移出文件，删除目录后落位。
+            let staging = self.root.join(format!(".argus-promote-{file_name}"));
+            if fs::rename(&file_path, &staging).is_err()
+                || fs::remove_dir(label_dir).is_err()
+                || fs::rename(&staging, &target).is_err()
+            {
+                let _ = fs::rename(&staging, &file_path);
+                return fallback(self);
+            }
+        } else if fs::rename(&file_path, &target).is_err() {
+            return fallback(self);
+        } else {
+            let _ = fs::remove_dir(label_dir);
+        }
+        target
+    }
+
+    /// 生成工作目录顶层不冲突的文件名；序号插在扩展名之前（`app.log` → `app (2).log`）。
+    ///
+    /// `removing_dir` 是即将删除的标签目录，其占用的名称视为可用。
+    fn unique_top_file_name(&mut self, file_name: &str, removing_dir: &Path) -> String {
+        let (stem, extension) = match file_name.rfind('.') {
+            Some(position) if position > 0 => file_name.split_at(position),
+            _ => (file_name, ""),
+        };
+        let mut candidate = file_name.to_string();
+        let mut suffix = 1_usize;
+        while {
+            let candidate_path = self.root.join(&candidate);
+            (candidate_path.exists() && candidate_path != removing_dir)
+                || !self.used_labels.insert(candidate.to_lowercase())
+        } {
+            suffix += 1;
+            candidate = format!("{stem} ({suffix}){extension}");
+        }
+        candidate
+    }
+
     /// 生成不冲突的顶层目录名。
     fn unique_top_label(&mut self, base: &str) -> String {
         let sanitized = sanitize_label(base);
@@ -1292,7 +1384,7 @@ mod tests {
         );
     }
 
-    /// 验证顶层 gzip 单文件包解压为去 `.gz` 的普通文件。
+    /// 验证顶层 gzip 单文件包解压为去 `.gz` 的普通文件并直接提升为顶层文件根。
     #[test]
     fn materialize_gzip_extracts_single_file() {
         let dir = isolated_test_dir("workspace-gzip");
@@ -1313,9 +1405,12 @@ mod tests {
         .expect("gzip 物化应成功");
 
         assert_eq!(
-            fs::read(workspace.root.join("access.log/access.log")).expect("应读取 gzip 解压文件"),
+            fs::read(workspace.root.join("access.log")).expect("应读取 gzip 解压文件"),
             b"gz-line"
         );
+        assert!(!workspace.root.join("access.log").is_dir());
+        assert_eq!(workspace.roots.len(), 1);
+        assert_eq!(workspace.roots[0].path, workspace.root.join("access.log"));
     }
 
     /// 验证解压总预算耗尽时该根回滚半成品、按原文件保留并记录警告。
@@ -1340,15 +1435,116 @@ mod tests {
         )
         .expect("预算耗尽应按根降级而不是失败整个加载");
 
-        // 半成品解压内容已回滚，原始压缩包按原文件保留（来源树标记未展开）。
+        // 半成品解压内容已回滚，原始压缩包按原文件保留并提升为顶层文件
+        // （来源树标记未展开）。
         assert!(!workspace.root.join("big/big.log").exists());
-        assert!(workspace.root.join("big/big.zip").exists());
+        assert!(workspace.root.join("big.zip").is_file());
         assert!(
             workspace
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("预算"))
         );
+    }
+
+    /// 验证只含单个文件的 zip 提升为顶层文件根，不再套标签目录。
+    #[test]
+    fn single_file_archive_promotes_to_workspace_root() {
+        let dir = isolated_test_dir("workspace-promote");
+        let archive = write_test_zip(&dir.join("app.zip"), &[("server.log", b"hello".as_slice())]);
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("单文件 zip 物化应成功");
+
+        assert!(workspace.root.join("server.log").is_file());
+        assert!(!workspace.root.join("app").exists(), "标签目录应被移除");
+        assert_eq!(workspace.roots.len(), 1);
+        assert_eq!(workspace.roots[0].path, workspace.root.join("server.log"));
+        assert_eq!(
+            fs::read(workspace.root.join("server.log")).expect("应读取解压文件"),
+            b"hello"
+        );
+    }
+
+    /// 验证两个单文件 zip 的内部文件同名时，后者在扩展名前追加序号。
+    #[test]
+    fn single_file_archive_collision_appends_suffix_before_extension() {
+        let dir = isolated_test_dir("workspace-promote-collision");
+        let first = write_test_zip(&dir.join("one.zip"), &[("app.log", b"one".as_slice())]);
+        let second = write_test_zip(&dir.join("two.zip"), &[("app.log", b"two".as_slice())]);
+
+        let workspace = materialize_sources(
+            &[first, second],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("同名单文件 zip 物化应成功");
+
+        assert_eq!(
+            fs::read(workspace.root.join("app.log")).expect("应读取第一个文件"),
+            b"one"
+        );
+        assert_eq!(
+            fs::read(workspace.root.join("app (2).log")).expect("应读取去重后的第二个文件"),
+            b"two"
+        );
+    }
+
+    /// 验证压缩包内含目录或多个文件时保持标签目录布局。
+    #[test]
+    fn multi_entry_archive_keeps_label_directory() {
+        let dir = isolated_test_dir("workspace-promote-multi");
+        let archive = write_test_zip(
+            &dir.join("bundle.zip"),
+            &[("a.log", b"a".as_slice()), ("b.log", b"b".as_slice())],
+        );
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("多文件 zip 物化应成功");
+
+        assert!(workspace.root.join("bundle/a.log").is_file());
+        assert_eq!(workspace.roots[0].path, workspace.root.join("bundle"));
+    }
+
+    /// 验证密码解锁追加物化同样对单文件压缩包做顶层提升。
+    #[test]
+    fn append_materialize_promotes_single_file_archive() {
+        let dir = isolated_test_dir("workspace-promote-append");
+        fs::create_dir_all(&dir).expect("应创建测试目录");
+        let workspace_root = dir.join("workdir");
+        fs::create_dir_all(&workspace_root).expect("应创建工作目录");
+        let archive = write_test_zip(
+            &dir.join("locked.zip"),
+            &[("unlocked.log", b"data".as_slice())],
+        );
+
+        let root_info = append_materialize_archive(
+            &workspace_root,
+            "locked",
+            &archive,
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+        )
+        .expect("追加物化应成功");
+
+        assert!(workspace_root.join("unlocked.log").is_file());
+        assert!(!workspace_root.join("locked").exists());
+        assert_eq!(root_info.path, workspace_root.join("unlocked.log"));
     }
 
     /// 验证取消令牌触发时整个物化失败且不留工作目录。
