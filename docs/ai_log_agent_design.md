@@ -112,16 +112,16 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 ## 五、Skill 系统（`agent/skills.rs`）
 
-- 格式：`<skill-dir>/SKILL.md`，`---` frontmatter（`name`/`description`，手写极简解析）
-  + Markdown 正文 ≤32 KiB；名称限 `[A-Za-z0-9._-]` 且 ≤64 字节。
+- 格式：`<skill-dir>/SKILL.md`，`---` frontmatter（`name`/`description`，手写极简解析）；
+  正文与附加文件不限大小；名称 ≤64 字节（支持 Unicode，拒空白、引号、尖括号、`&`
+  与路径分隔符）。
 - 不提供内置 Skill；方法论与领域知识全部由用户导入，未导入时不注入 `<SKILLS>` 区块。
 - 注入：安全骨架 → `<CONFIGURED_SYSTEM_PROMPT>` → `<SKILLS>`（按名称排序，
   `<SKILL name>` 边界）；区块总量 ≤24 KiB，截断以用户可见轨迹记录 WARN。
 - 导入（设置页"Skill 管理"）：系统路径对话框选目录或 `.zip`；目录递归收集（拒符号
   链接），zip 条目 zip slip 清洗并定位唯一含 SKILL.md 的顶层目录；`__MACOSX/`、
-  `.DS_Store`、`._*` 等打包器元数据统一跳过；名称支持 Unicode（拒空白、引号、
-  尖括号、`&` 与路径分隔符，保证目录名与 `<SKILL name>` 边界安全）；统一预算
-  ≤64 文件、≤2 MiB；解析失败或与既有导入同名冲突拒绝且不留残留；产物复制到
+  `.DS_Store`、`._*` 等打包器元数据统一跳过；导入内容不设文件数与字节上限；
+  解析失败或与既有导入同名冲突拒绝且不留残留；产物复制到
   `config_root/ai/skills/<name>/`，导入结果在设置分区内即时展示。
 - 持久化：`AiConfig.disabled_skills`（默认空=全启用），保存后下一轮会话生效。
 

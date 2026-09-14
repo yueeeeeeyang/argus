@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 
 use crate::config::AiConfig;
 
-/// Skill 正文上限；导入和解析统一按该上限拒绝。
-pub(crate) const SKILL_BODY_MAX_BYTES: usize = 32 * 1024;
 /// 注入系统提示词的 Skill 区块总预算；超出部分丢弃并记录警告。
 pub(crate) const SKILLS_SECTION_MAX_BYTES: usize = 24 * 1024;
 /// frontmatter 单行与总行数上限，防止畸形文件拖垮解析。
@@ -83,9 +81,6 @@ pub(crate) fn parse_skill_markdown(content: &str) -> Result<AgentSkill, String> 
         return Err("frontmatter 的 description 不能为空".to_string());
     }
     let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    if body.len() > SKILL_BODY_MAX_BYTES {
-        return Err(format!("正文超过 {} 字节上限", SKILL_BODY_MAX_BYTES));
-    }
     Ok(AgentSkill {
         name,
         description,
@@ -173,10 +168,6 @@ pub(crate) fn render_skills_section(skills: &[AgentSkill]) -> (String, bool) {
     (section, truncated)
 }
 
-/// 导入 Skill 的单文件数量与总字节上限。
-pub(crate) const SKILL_IMPORT_MAX_FILES: usize = 64;
-pub(crate) const SKILL_IMPORT_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024;
-
 /// 待落盘的一个导入文件。
 struct ImportFile {
     /// 相对 Skill 根的路径（已清洗）。
@@ -260,10 +251,9 @@ pub(crate) fn remove_imported_skill(name: &str, config_root: &Path) -> Result<bo
     Ok(true)
 }
 
-/// 递归收集目录内的 Skill 文件；拒绝符号链接并应用数量与字节预算。
+/// 递归收集目录内的 Skill 文件；拒绝符号链接并跳过打包器元数据。
 fn collect_directory_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
     let mut files = Vec::new();
-    let mut total_bytes = 0_u64;
     let mut stack = vec![(source.to_path_buf(), PathBuf::new())];
     while let Some((absolute, relative)) = stack.pop() {
         let entries =
@@ -282,23 +272,11 @@ fn collect_directory_skill_files(source: &Path) -> Result<Vec<ImportFile>, Strin
                 stack.push((entry.path(), entry_relative));
                 continue;
             }
-            total_bytes = total_bytes
-                .checked_add(metadata.len())
-                .ok_or("导入内容字节数溢出")?;
-            if total_bytes > SKILL_IMPORT_MAX_TOTAL_BYTES {
-                return Err(format!(
-                    "导入内容超过 {} 字节上限",
-                    SKILL_IMPORT_MAX_TOTAL_BYTES
-                ));
-            }
             files.push(ImportFile {
                 relative_path: entry_relative,
                 bytes: std::fs::read(entry.path())
                     .map_err(|error| format!("读取文件失败：{error}"))?,
             });
-            if files.len() > SKILL_IMPORT_MAX_FILES {
-                return Err(format!("导入文件数超过 {} 上限", SKILL_IMPORT_MAX_FILES));
-            }
         }
     }
     relocate_skill_root(files)
@@ -310,7 +288,6 @@ fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
         .map_err(|error| format!("读取 ZIP 结构失败：{error}"))?;
     let mut files = Vec::new();
-    let mut total_bytes = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -321,19 +298,10 @@ fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
         if entry.name().starts_with('/') || entry.name().contains("..") {
             return Err(format!("ZIP 条目路径不安全：{}", entry.name()));
         }
-        if is_packaging_metadata(&PathBuf::from(entry.name().replace('\\', "/"))) {
+        let relative = PathBuf::from(entry.name().replace('\\', "/"));
+        if is_packaging_metadata(&relative) {
             continue;
         }
-        total_bytes = total_bytes
-            .checked_add(entry.size())
-            .ok_or("导入内容字节数溢出")?;
-        if total_bytes > SKILL_IMPORT_MAX_TOTAL_BYTES {
-            return Err(format!(
-                "导入内容超过 {} 字节上限",
-                SKILL_IMPORT_MAX_TOTAL_BYTES
-            ));
-        }
-        let relative = PathBuf::from(entry.name().replace('\\', "/"));
         let mut bytes = Vec::with_capacity(entry.size() as usize);
         std::io::Read::read_to_end(&mut entry, &mut bytes)
             .map_err(|error| format!("解压条目失败：{error}"))?;
@@ -341,9 +309,6 @@ fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
             relative_path: relative,
             bytes,
         });
-        if files.len() > SKILL_IMPORT_MAX_FILES {
-            return Err(format!("导入文件数超过 {} 上限", SKILL_IMPORT_MAX_FILES));
-        }
     }
     relocate_skill_root(files)
 }
@@ -413,12 +378,13 @@ mod tests {
         assert!(parse_skill_markdown("---\ndescription: d\n---\nbody").is_err());
     }
 
-    /// 验证超限正文被拒绝。
+    /// 验证超大正文可以解析；注入预算只影响提示词区块，不阻断导入。
     #[test]
-    fn rejects_oversized_body() {
-        let body = "x".repeat(SKILL_BODY_MAX_BYTES + 1);
+    fn parses_oversized_body() {
+        let body = "x".repeat(64 * 1024);
         let content = format!("---\nname: big\ndescription: d\n---\n{body}");
-        assert!(parse_skill_markdown(&content).is_err());
+        let skill = parse_skill_markdown(&content).expect("大正文 Skill 应解析成功");
+        assert_eq!(skill.body.len(), 64 * 1024);
     }
 
     /// 验证无导入时筛选结果为空；导入后按禁用列表过滤。
