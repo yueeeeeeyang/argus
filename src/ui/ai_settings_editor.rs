@@ -248,7 +248,6 @@ impl AiSettingsDraft {
             model_profiles: self.models.iter().map(ModelDraft::to_profile).collect(),
             allow_raw_log_content: self.allow_raw_log_content,
             consent_version: self.consent_version.clone(),
-            budget_profile: crate::config::ai_config::AiBudgetProfile::Balanced,
             request_timeout_seconds: self.request_timeout_seconds,
             system_prompt: self.system_prompt.value.clone(),
             log_profiles: self.profiles.iter().map(ProfileDraft::to_profile).collect(),

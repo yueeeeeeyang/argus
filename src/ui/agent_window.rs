@@ -1,6 +1,6 @@
-//! 文件职责：渲染 AI 日志分析的独立轨迹与报告窗口。
+//! 文件职责：渲染 AI 日志分析的独立对话窗口。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-17
+//! 修改日期：2026-09-12
 //! 作者：Argus 开发团队
 //! 主要功能：流式展示模型思考、正文、工具轨迹与 Token 用量，并在底部悬浮文本域中接收会话追加提示。
 
@@ -18,14 +18,13 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::agent::{
-    AgentAnalysisStageEvent, AgentAnalysisStageStatus, AgentBudgetSnapshot, AgentEvent,
-    AgentLogProfileMatchSummary, AgentSessionStatus, AgentStreamKind, AgentTraceEntry,
-    AgentTraceKind, AgentUserMessage, AgentUserMessageStatus, DiagnosticFinding, DiagnosticReport,
+    AgentBudgetSnapshot, AgentEvent, AgentLogProfileMatchSummary, AgentSessionStatus,
+    AgentStreamKind, AgentTraceEntry, AgentTraceKind, AgentUserMessage, AgentUserMessageStatus,
     SourceScopeSnapshot,
 };
 use crate::app::{ArgusApp, TextInputState, observe_app_theme};
 use crate::config::{LogNameMatcherMode, LogNameMatcherTarget};
-use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
+use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{
@@ -52,12 +51,6 @@ const AGENT_MESSAGE_TOTAL_MAX_BYTES: usize = 32 * 1024;
 const AGENT_TRACE_MAX_COUNT: usize = 1000;
 /// 消息瀑布流和底部输入区的最大阅读宽度。
 const AGENT_STREAM_MAX_WIDTH: f32 = 860.0;
-/// 分析窗口右侧悬浮时间线卡片宽度。
-const AGENT_STAGE_CARD_WIDTH: f32 = 300.0;
-/// 悬浮时间线与窗口右边缘及主消息区之间的留白。
-const AGENT_STAGE_CARD_GAP: f32 = 16.0;
-/// 时间线从用量栏下方开始悬浮，避免遮挡顶部状态信息。
-const AGENT_STAGE_CARD_TOP: f32 = 64.0;
 /// 消息虚拟列表在可见区域上下额外渲染的高度，避免快速滚动时边缘内容闪烁。
 const AGENT_STREAM_OVERDRAW: f32 = 360.0;
 /// 消息瀑布流纵向滚动条滑块宽度；不绘制轨道背景。
@@ -66,14 +59,8 @@ const AGENT_STREAM_SCROLLBAR_THUMB_WIDTH: f32 = 4.0;
 const AGENT_STREAM_SCROLLBAR_PADDING: f32 = 4.0;
 /// 消息瀑布流滚动条最小滑块高度，保证长会话中仍可拖拽。
 const AGENT_STREAM_SCROLLBAR_MIN_THUMB: f32 = 28.0;
-/// 报告内容逐步呈现的刷新间隔。
-const REPORT_STREAM_INTERVAL: Duration = Duration::from_millis(32);
-/// 每次刷新最多新增的 Unicode 字符数，降低长报告流式布局频率。
-const REPORT_STREAM_CHARS_PER_TICK: usize = 192;
 /// 后台流式事件合并窗口，限制界面更新频率不超过一帧一次。
 const AGENT_EVENT_BATCH_INTERVAL: Duration = Duration::from_millis(16);
-/// 没有形成结构化发现时在“问题分析”部分显示的保守说明。
-const EMPTY_FINDINGS_MESSAGE: &str = "当前分析未形成经过证据确认的问题发现。";
 
 /// 虚拟消息列表中的稳定渲染单元。
 ///
@@ -109,118 +96,12 @@ enum AgentStreamItem {
         /// 是否显示正在执行动画。
         is_active: bool,
     },
-    /// 报告卡片顶部及问题描述。
-    ReportHeader {
-        /// 当前可见的问题描述字符数。
-        visible_chars: usize,
-        /// 报告流是否完成。
-        is_complete: bool,
-    },
-    /// 报告的问题分析分区标题；无发现时同时承载保守说明。
-    ReportAnalysisHeader {
-        /// 无发现说明当前可见的字符数。
-        visible_empty_message_chars: usize,
-        /// 是否已经流式推进到问题分析分区。
-        is_visible: bool,
-    },
-    /// 报告中的一条问题发现。
-    ReportFinding {
-        /// 发现索引。
-        finding_index: usize,
-        /// 当前发现范围内可见的字符数。
-        visible_chars: usize,
-    },
-    /// 报告结论、建议、限制及保存位置。
-    ReportFooter {
-        /// 当前结论范围内可见的字符数。
-        visible_chars: usize,
-        /// 报告流是否完成。
-        is_complete: bool,
-        /// 是否已经流式推进到结论分区。
-        is_visible: bool,
-    },
-    /// 报告生成前保留的末尾呼吸空间。
+    /// 消息流末尾保留的呼吸空间。
     Spacer,
-}
-
-/// 右侧悬浮时间线卡片中一个分析阶段的轻量视图状态。
-///
-/// 后台只发送结构化阶段、结果摘要与已耗时；界面不保存该阶段的思考或工具明细，避免卡片与
-/// 消息瀑布流重复。运行起点仅用于在终止事件到达时补齐最后一段阶段耗时。
-struct AgentStageViewState {
-    /// 会话内稳定的动态阶段标识。
-    stage_id: String,
-    /// 模型根据当前问题生成的阶段标题。
-    title: String,
-    /// 当前阶段结果。
-    status: AgentAnalysisStageStatus,
-    /// 后台最后确认的阶段耗时秒数。
-    elapsed_seconds: u64,
-    /// 阶段完成后的简短结果摘要。
-    result_summary: Option<String>,
-    /// 本地收到运行事件的时刻；阶段结束时用于补齐事件间隔。
-    running_since: Option<Instant>,
-}
-
-impl AgentStageViewState {
-    /// 从后台结构化事件创建一个动态阶段视图状态。
-    fn from_event(event: AgentAnalysisStageEvent) -> Self {
-        let running_since = (event.status == AgentAnalysisStageStatus::Running).then(Instant::now);
-        Self {
-            stage_id: event.stage_id,
-            title: event.title,
-            status: event.status,
-            elapsed_seconds: event.elapsed_seconds,
-            result_summary: event.result_summary,
-            running_since,
-        }
-    }
-
-    /// 应用后台阶段快照，同一运行阶段的重复快照不会重置本地计时起点。
-    fn apply(&mut self, event: AgentAnalysisStageEvent) {
-        if self.status != AgentAnalysisStageStatus::Running
-            || event.status != AgentAnalysisStageStatus::Running
-        {
-            self.running_since =
-                (event.status == AgentAnalysisStageStatus::Running).then(Instant::now);
-        }
-        self.title = event.title;
-        self.status = event.status;
-        self.elapsed_seconds = event.elapsed_seconds;
-        self.result_summary = event.result_summary;
-        if event.status != AgentAnalysisStageStatus::Running {
-            self.running_since = None;
-        }
-    }
-
-    /// 在会话终止时关闭仍在旋转的阶段，并保存截至终止时的耗时。
-    fn finish_running(&mut self, status: AgentAnalysisStageStatus) {
-        if self.status != AgentAnalysisStageStatus::Running {
-            return;
-        }
-        if let Some(started_at) = self.running_since.take() {
-            self.elapsed_seconds = self
-                .elapsed_seconds
-                .saturating_add(started_at.elapsed().as_secs());
-        }
-        self.status = status;
-        if self.result_summary.is_none() {
-            self.result_summary = Some(
-                match status {
-                    AgentAnalysisStageStatus::Failed => "阶段因不可恢复错误中止",
-                    AgentAnalysisStageStatus::Cancelled => "阶段已由用户主动取消",
-                    _ => "阶段已完成",
-                }
-                .to_string(),
-            );
-        }
-    }
 }
 
 /// Agent 独立窗口根视图。
 pub(crate) struct AgentWindow {
-    /// 主窗口应用实体，用于证据导航和主题同步。
-    app: Entity<ArgusApp>,
     /// 当前主题快照。
     theme: AppTheme,
     /// 会话随机 ID。
@@ -229,8 +110,6 @@ pub(crate) struct AgentWindow {
     question: String,
     /// 当前状态机状态。
     status: AgentSessionStatus,
-    /// 模型动态规划的右侧悬浮时间线状态，只保留标题、结果摘要与耗时。
-    analysis_stages: Vec<AgentStageViewState>,
     /// 用户提交问题并开始来源扫描的时刻，用于计算包含预处理在内的整体耗时。
     analysis_started_at: Instant,
     /// 进入终态时冻结的整体耗时；运行中保持为空并使用单调时钟实时计算。
@@ -253,18 +132,6 @@ pub(crate) struct AgentWindow {
     trace_scrollbar_drag_offset: Option<Pixels>,
     /// 最新资源预算快照。
     budget: AgentBudgetSnapshot,
-    /// 最终结构化报告。
-    report: Option<Arc<DiagnosticReport>>,
-    /// 当前已经允许渲染的报告 Unicode 字符数量，用于分块流式展示。
-    report_revealed_chars: usize,
-    /// 当前报告动态文本总字符数，收到报告时一次计算，避免每帧重复遍历全文。
-    report_stream_total_chars: usize,
-    /// 报告虚拟行字符数：问题、无发现说明、逐发现、结论各占一项。
-    report_stream_row_characters: Arc<Vec<usize>>,
-    /// 每次收到新报告时递增，用于终止旧报告仍在等待的流式刷新任务。
-    report_stream_generation: u64,
-    /// 报告持久化路径，仅供界面提示。
-    report_path: Option<String>,
     /// 底部追加提示输入状态。
     message_input: TextInputState,
     /// 提示输入框滚动句柄。
@@ -279,10 +146,8 @@ pub(crate) struct AgentWindow {
     cancellation: tokio_util::sync::CancellationToken,
     /// 与编排器共享的未消费提示计数器。
     pending_user_messages: Arc<AtomicUsize>,
-    /// 提示入队和报告阶段关闭入口共用的线性化门闩。
+    /// 提示入队和终止阶段关闭入口共用的线性化门闩。
     user_message_gate: Arc<std::sync::Mutex<bool>>,
-    /// 会话来源快照，用于把报告中的不透明引用安全解析为内部来源 ID。
-    scope: Arc<SourceScopeSnapshot>,
     /// 提示输入框焦点句柄。
     message_focus: FocusHandle,
     /// 是否已完成首次聚焦。
@@ -334,7 +199,7 @@ impl AgentWindow {
                 if view
                     .update(cx, |window, cx| {
                         for event in events {
-                            window.apply_event(event, cx);
+                            window.apply_event(event);
                         }
                         // 同一批 Token / 工具事件只做一次列表差异同步，避免在单帧内重复失效高度缓存。
                         window.sync_trace_items();
@@ -373,12 +238,10 @@ impl AgentWindow {
         };
         let source_scan_summary = format_source_scan_summary(&scope, &match_summaries);
         Self {
-            app,
             theme,
             session_id,
             question,
             status: AgentSessionStatus::Created,
-            analysis_stages: Vec::new(),
             analysis_started_at,
             analysis_finished_elapsed_seconds: None,
             context_window_tokens,
@@ -402,12 +265,6 @@ impl AgentWindow {
             has_registered_trace_scroll_handler: false,
             trace_scrollbar_drag_offset: None,
             budget: AgentBudgetSnapshot::default(),
-            report: None,
-            report_revealed_chars: 0,
-            report_stream_total_chars: 0,
-            report_stream_row_characters: Arc::new(Vec::new()),
-            report_stream_generation: 0,
-            report_path: None,
             message_input,
             message_scroll: ScrollHandle::new(),
             message_scroll_state: TextareaScrollState::new(),
@@ -416,7 +273,6 @@ impl AgentWindow {
             cancellation,
             pending_user_messages,
             user_message_gate,
-            scope,
             message_focus: cx.focus_handle(),
             has_focused: false,
             has_registered_close_guard: false,
@@ -427,24 +283,13 @@ impl AgentWindow {
     }
 
     /// 应用一个后台事件并维护有限内存轨迹。
-    fn apply_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
+    fn apply_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Status(status) => {
                 self.status = status;
-                let terminal_stage_status = match status {
-                    AgentSessionStatus::Completed => Some(AgentAnalysisStageStatus::Completed),
-                    AgentSessionStatus::Cancelled => Some(AgentAnalysisStageStatus::Cancelled),
-                    AgentSessionStatus::Failed => Some(AgentAnalysisStageStatus::Failed),
-                    _ => None,
-                };
-                if let Some(stage_status) = terminal_stage_status {
-                    if self.analysis_finished_elapsed_seconds.is_none() {
-                        self.analysis_finished_elapsed_seconds =
-                            Some(self.analysis_started_at.elapsed().as_secs());
-                    }
-                    for stage in &mut self.analysis_stages {
-                        stage.finish_running(stage_status);
-                    }
+                if status.is_terminal() && self.analysis_finished_elapsed_seconds.is_none() {
+                    self.analysis_finished_elapsed_seconds =
+                        Some(self.analysis_started_at.elapsed().as_secs());
                 }
                 self.push_trace(AgentTraceEntry::new(
                     AgentTraceKind::Status,
@@ -454,25 +299,6 @@ impl AgentWindow {
             }
             AgentEvent::Trace(trace) => self.push_trace(trace),
             AgentEvent::Budget(budget) => self.budget = budget,
-            AgentEvent::Stage(event) => {
-                if let Some(stage) = self
-                    .analysis_stages
-                    .iter_mut()
-                    .find(|stage| stage.stage_id == event.stage_id)
-                {
-                    stage.apply(event);
-                } else {
-                    // 新运行阶段意味着此前运行阶段已经结束；即使其完成事件因有界通道背压
-                    // 被丢弃，也在这里保守关闭加载动画，但不伪造模型结果摘要。
-                    if event.status == AgentAnalysisStageStatus::Running {
-                        for stage in &mut self.analysis_stages {
-                            stage.finish_running(AgentAnalysisStageStatus::Completed);
-                        }
-                    }
-                    self.analysis_stages
-                        .push(AgentStageViewState::from_event(event));
-                }
-            }
             AgentEvent::StreamDelta(kind, delta) => self.apply_stream_delta(kind, delta),
             AgentEvent::UserMessageConsumed(message_id) => {
                 if let Some(message) = self
@@ -502,14 +328,6 @@ impl AgentWindow {
                     reason,
                 ));
             }
-            AgentEvent::Report(report, report_path) => {
-                self.push_trace(AgentTraceEntry::new(
-                    AgentTraceKind::Report,
-                    "分析报告生成中",
-                    "正在整理问题描述、问题分析、结论及建议",
-                ));
-                self.start_report_stream(report, report_path, cx);
-            }
             // 交互助手使用独立右侧面板消费该事件，固定分析窗口不会收到它。
             AgentEvent::AssistantCompleted { .. } | AgentEvent::AssistantAttemptReset => {}
             AgentEvent::Failed(message) => {
@@ -521,55 +339,6 @@ impl AgentWindow {
                 ));
             }
         }
-    }
-
-    /// 启动结构化报告的分块流式展示任务。
-    fn start_report_stream(
-        &mut self,
-        report: DiagnosticReport,
-        report_path: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.report_stream_row_characters =
-            Arc::new(report_stream_row_character_counts(&self.question, &report));
-        self.report_stream_total_chars = self.report_stream_row_characters.iter().sum();
-        self.report = Some(Arc::new(report));
-        self.report_path = report_path;
-        self.report_revealed_chars = 0;
-        self.report_stream_generation = self.report_stream_generation.wrapping_add(1);
-        let generation = self.report_stream_generation;
-
-        cx.spawn(async move |view, cx| {
-            loop {
-                Timer::after(REPORT_STREAM_INTERVAL).await;
-                let update_result = view.update(cx, |window, cx| {
-                    if window.report_stream_generation != generation {
-                        return true;
-                    }
-                    let is_complete = window.advance_report_stream();
-                    window.sync_trace_items();
-                    cx.notify();
-                    is_complete
-                });
-                match update_result {
-                    Ok(true) | Err(_) => break,
-                    Ok(false) => {}
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// 推进一次报告流并返回内容是否已经完整显示。
-    fn advance_report_stream(&mut self) -> bool {
-        if self.report.is_none() {
-            return true;
-        }
-        self.report_revealed_chars = self
-            .report_revealed_chars
-            .saturating_add(REPORT_STREAM_CHARS_PER_TICK)
-            .min(self.report_stream_total_chars);
-        self.report_revealed_chars >= self.report_stream_total_chars
     }
 
     /// 合并相邻同类模型增量，让每轮思考和正文各自形成持续增长的一条瀑布流消息。
@@ -609,17 +378,10 @@ impl AgentWindow {
             .set_offset_from_scrollbar(point(px(0.0), -max_offset));
     }
 
-    /// 根据当前轨迹、报告流进度和展开状态更新虚拟列表条目，并只失效变化的连续区间。
+    /// 根据当前轨迹和展开状态更新虚拟列表条目，并只失效变化的连续区间。
     fn sync_trace_items(&mut self) {
-        let next_items = build_agent_stream_items(
-            &self.traces,
-            self.status,
-            self.report.as_deref(),
-            self.report_revealed_chars,
-            self.report_stream_total_chars,
-            &self.report_stream_row_characters,
-            &self.expanded_tool_groups,
-        );
+        let next_items =
+            build_agent_stream_items(&self.traces, self.status, &self.expanded_tool_groups);
         for (old_range, replacement_count) in
             changed_stream_item_ranges(&self.trace_items, &next_items)
         {
@@ -657,7 +419,7 @@ impl AgentWindow {
             return;
         }
         let message = AgentUserMessage::queued(content.clone());
-        // 校验入口状态和写入有界队列必须持有同一门闩，避免报告提交竞态静默遗漏消息。
+        // 校验入口状态和写入有界队列必须持有同一门闩，避免会话终止竞态静默遗漏消息。
         let send_result = self
             .user_message_gate
             .lock()
@@ -715,7 +477,7 @@ impl AgentWindow {
         self.sync_trace_items();
     }
 
-    /// 返回从用户提交问题开始计算的整体分析耗时，包含来源扫描、模型、工具、复核和报告阶段。
+    /// 返回从用户提交问题开始计算的整体分析耗时，包含来源扫描、模型和工具阶段。
     fn overall_elapsed_seconds(&self) -> u64 {
         self.analysis_finished_elapsed_seconds
             .unwrap_or_else(|| self.analysis_started_at.elapsed().as_secs())
@@ -739,17 +501,13 @@ impl AgentWindow {
     }
 }
 
-/// 构建当前消息流的轻量虚拟条目，不复制轨迹正文或报告内容。
+/// 构建当前消息流的轻量虚拟条目，不复制轨迹正文。
 fn build_agent_stream_items(
     traces: &[Arc<AgentTraceEntry>],
     status: AgentSessionStatus,
-    report: Option<&DiagnosticReport>,
-    report_revealed_chars: usize,
-    report_total_chars: usize,
-    report_row_characters: &[usize],
     expanded_tool_groups: &HashSet<i64>,
 ) -> Vec<AgentStreamItem> {
-    let mut items = Vec::with_capacity(traces.len().saturating_add(6));
+    let mut items = Vec::with_capacity(traces.len().saturating_add(2));
     items.push(AgentStreamItem::Question);
     let active_trace_index = if status.is_terminal() {
         None
@@ -768,11 +526,9 @@ fn build_agent_stream_items(
     let mut trace_index = 0;
     while trace_index < traces.len() {
         let trace = &traces[trace_index];
-        // 模型请求统计只在顶部信息栏展示；最终报告由拆分后的虚拟卡片行展示。
-        // 同时隐藏后台升级前残留的模型轨迹，确保重试或事件竞态不会让请求行重新出现。
-        if trace.kind == AgentTraceKind::Model
-            || (trace.kind == AgentTraceKind::Report && report.is_some())
-        {
+        // 模型请求统计只在顶部信息栏展示；同时隐藏后台升级前残留的模型轨迹，
+        // 确保重试或事件竞态不会让请求行重新出现。
+        if trace.kind == AgentTraceKind::Model {
             trace_index += 1;
             continue;
         }
@@ -807,87 +563,11 @@ fn build_agent_stream_items(
         });
     }
 
-    if let Some(report) = report {
-        append_report_stream_items(
-            &mut items,
-            report,
-            report_revealed_chars,
-            report_total_chars,
-            report_row_characters,
-        );
-    } else {
-        items.push(AgentStreamItem::Spacer);
-    }
+    items.push(AgentStreamItem::Spacer);
     items
 }
 
-/// 把报告拆成顶部、分析标题、逐发现和结论行，使长报告也只布局当前可见部分。
-fn append_report_stream_items(
-    items: &mut Vec<AgentStreamItem>,
-    report: &DiagnosticReport,
-    revealed_chars: usize,
-    total_chars: usize,
-    row_characters: &[usize],
-) {
-    let is_complete = revealed_chars >= total_chars;
-    let mut row_start = 0usize;
-    let question_length = row_characters.first().copied().unwrap_or_default();
-    items.push(AgentStreamItem::ReportHeader {
-        visible_chars: visible_chars_in_report_row(revealed_chars, row_start, question_length),
-        is_complete,
-    });
-    row_start = row_start.saturating_add(question_length);
-
-    let empty_message_length = row_characters.get(1).copied().unwrap_or_default();
-    items.push(AgentStreamItem::ReportAnalysisHeader {
-        visible_empty_message_chars: visible_chars_in_report_row(
-            revealed_chars,
-            row_start,
-            empty_message_length,
-        ),
-        is_visible: revealed_chars >= row_start,
-    });
-    row_start = row_start.saturating_add(empty_message_length);
-
-    for (finding_index, finding) in report.findings.iter().enumerate() {
-        let row_length = row_characters
-            .get(finding_index.saturating_add(2))
-            .copied()
-            .unwrap_or_else(|| finding_analysis_character_count(finding));
-        items.push(AgentStreamItem::ReportFinding {
-            finding_index,
-            visible_chars: visible_chars_in_report_row(revealed_chars, row_start, row_length),
-        });
-        row_start = row_start.saturating_add(row_length);
-    }
-
-    let footer_length = row_characters
-        .last()
-        .copied()
-        .unwrap_or_else(|| report_footer_character_count(report));
-    items.push(AgentStreamItem::ReportFooter {
-        visible_chars: visible_chars_in_report_row(revealed_chars, row_start, footer_length),
-        is_complete,
-        is_visible: revealed_chars > row_start || (footer_length == 0 && is_complete),
-    });
-    // 变量仅用于在调试构建中校验拆分计数保持一致，避免流式报告永远无法完成。
-    debug_assert_eq!(
-        row_start.saturating_add(footer_length),
-        total_chars,
-        "报告虚拟行字符计数与总字符数不一致"
-    );
-}
-
-/// 计算某个报告虚拟行在当前全局流式进度下可见的字符数。
-fn visible_chars_in_report_row(
-    revealed_chars: usize,
-    row_start: usize,
-    row_length: usize,
-) -> usize {
-    revealed_chars.saturating_sub(row_start).min(row_length)
-}
-
-/// 找出新旧虚拟条目的变化区间；等长更新按离散区间失效，避免报告完成态波及中间内容。
+/// 找出新旧虚拟条目的变化区间；等长更新按离散区间失效，避免完成态波及中间内容。
 fn changed_stream_item_ranges(
     previous: &[AgentStreamItem],
     next: &[AgentStreamItem],
@@ -1022,7 +702,7 @@ impl Drop for AgentWindow {
 }
 
 impl Render for AgentWindow {
-    /// 渲染轨迹、预算、报告和底部悬浮对话框。
+    /// 渲染轨迹、预算和底部悬浮对话框。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.has_registered_close_guard {
             let entity = cx.entity();
@@ -1115,202 +795,178 @@ impl Render for AgentWindow {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_hidden()
+                    .child(render_budget_bar(
+                        self.budget,
+                        self.context_window_tokens,
+                        self.overall_elapsed_seconds(),
+                        status,
+                        &theme,
+                    ))
                     .child(
                         div()
-                            .relative()
-                            .size_full()
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.0))
                             .overflow_hidden()
-                            .child(render_budget_bar(
-                                self.budget,
-                                self.context_window_tokens,
-                                self.overall_elapsed_seconds(),
-                                status,
+                            .child(render_message_stream(
+                                &self.question,
+                                self.traces.clone(),
+                                self.trace_items.clone(),
+                                self.trace_list.clone(),
+                                entity.clone(),
                                 &theme,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .mr(px(
-                                        AGENT_STAGE_CARD_WIDTH + AGENT_STAGE_CARD_GAP * 2.0,
-                                    ))
-                                    .overflow_hidden()
-                                    .child(render_message_stream(
-                                        &self.question,
-                                        self.traces.clone(),
-                                        self.trace_items.clone(),
-                                        self.report.clone(),
-                                        self.report_path.as_deref(),
-                                        self.app.clone(),
-                                        self.scope.clone(),
-                                        self.trace_list.clone(),
-                                        entity.clone(),
-                                        &theme,
-                                    )),
-                            )
-                            .child(div().h(px(128.0)).flex_none())
-                            .when(show_jump_to_latest, |this| {
-                                this.child(
+                            )),
+                    )
+                    .child(div().h(px(128.0)).flex_none())
+                    .when(show_jump_to_latest, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom(px(138.0))
+                                .px_5()
+                                .flex()
+                                .justify_center()
+                                .child(
                                     div()
-                                        .absolute()
-                                        .left_0()
-                                        .right(px(
-                                            AGENT_STAGE_CARD_WIDTH + AGENT_STAGE_CARD_GAP * 2.0,
-                                        ))
-                                        .bottom(px(138.0))
-                                        .px_5()
+                                        .w_full()
+                                        .max_w(px(AGENT_STREAM_MAX_WIDTH))
                                         .flex()
                                         .justify_center()
                                         .child(
                                             div()
-                                                .w_full()
-                                                .max_w(px(AGENT_STREAM_MAX_WIDTH))
-                                                .flex()
-                                                .justify_center()
-                                                .child(
+                                                .p_1()
+                                                .rounded_full()
+                                                .border_1()
+                                                .border_color(rgb(theme.border))
+                                                .bg(rgb(theme.content))
+                                                .shadow_lg()
+                                                .child(render_round_icon_button(
+                                                    "agent-jump-to-latest",
+                                                    ArgusIcon::ArrowDown,
+                                                    "跳转到最新消息",
+                                                    false,
+                                                    IconButtonSize::Small,
+                                                    &theme,
+                                                    move |_, _, app_cx| {
+                                                        app_cx.stop_propagation();
+                                                        jump_to_latest_entity.update(
+                                                            app_cx,
+                                                            |view, cx| {
+                                                                view.jump_trace_to_latest();
+                                                                cx.notify();
+                                                            },
+                                                        );
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom(px(18.0))
+                            .px_5()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(AGENT_STREAM_MAX_WIDTH))
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .child(render_textarea(
+                                                Textarea {
+                                                    id: "agent-window-message-input",
+                                                    placeholder: "在分析过程中补充线索或纠正方向（Cmd/Ctrl+Enter 发送）",
+                                                    value: self.message_input.value.clone(),
+                                                    is_disabled: status.is_terminal() || status == AgentSessionStatus::Cancelling,
+                                                    is_focused: self.message_input.is_focused,
+                                                    cursor_index: self.message_input.cursor,
+                                                    selection_range: self.message_input.selection_range(),
+                                                    marked_range: self.message_input.marked_range.clone(),
+                                                    is_pointer_selecting: self.message_input.selection_drag.is_some(),
+                                                    visible_lines: 4,
+                                                    fill_height: false,
+                                                    scroll_handle: self.message_scroll.clone(),
+                                                    scroll_state: self.message_scroll_state.clone(),
+                                                    style: TextareaStyle::Composer,
+                                                    trailing_accessory: Some(InputAccessory {
+                                                        id: "agent-message-send",
+                                                        icon: ArgusIcon::ArrowUp,
+                                                        tooltip: "发送提示",
+                                                    }),
+                                                    trailing_accessory_position: TextareaAccessoryPosition::BottomRight,
+                                                    trailing_accessory_always_visible: true,
+                                                    trailing_accessory_selected: can_send_message,
+                                                    native_input: Some(native_input),
+                                                },
+                                                &theme,
+                                                move |event, _, app_cx| {
+                                                    app_cx.stop_propagation();
+                                                    key_entity.update(app_cx, |view, cx| {
+                                                        view.handle_message_key(event, cx);
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                move |_, window, app_cx| {
+                                                    app_cx.stop_propagation();
+                                                    click_entity.update(app_cx, |view, cx| {
+                                                        view.message_input.is_focused = true;
+                                                        view.message_focus.focus(window);
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                move |event: &InputPointerEvent, _, app_cx| {
+                                                    pointer_entity.update(app_cx, |view, cx| {
+                                                        match event.action {
+                                                            InputPointerAction::Begin => view.message_input.begin_pointer_selection(event.character_index, event.granularity),
+                                                            InputPointerAction::Extend => view.message_input.update_pointer_selection(event.character_index),
+                                                            InputPointerAction::Finish => view.message_input.finish_pointer_selection(),
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                move |_, _, app_cx| {
+                                                    app_cx.stop_propagation();
+                                                    if can_send_message {
+                                                        send_entity.update(app_cx, |view, cx| {
+                                                            view.submit_message();
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                },
+                                            ))
+                                            .when(can_cancel_session, |this| {
+                                                this.child(
                                                     div()
-                                                        .p_1()
-                                                        .rounded_full()
-                                                        .border_1()
-                                                        .border_color(rgb(theme.border))
-                                                        .bg(rgb(theme.content))
-                                                        .shadow_lg()
-                                                        .child(render_round_icon_button(
-                                                            "agent-jump-to-latest",
-                                                            ArgusIcon::ArrowDown,
-                                                            "跳转到最新消息",
+                                                        .absolute()
+                                                        .right(px(32.0))
+                                                        .bottom(px(4.0))
+                                                        .child(render_icon_button(
+                                                            "agent-cancel",
+                                                            ArgusIcon::Stop,
+                                                            "取消分析",
                                                             false,
-                                                            IconButtonSize::Small,
+                                                            IconButtonSize::Tiny,
                                                             &theme,
                                                             move |_, _, app_cx| {
                                                                 app_cx.stop_propagation();
-                                                                jump_to_latest_entity.update(
-                                                                    app_cx,
-                                                                    |view, cx| {
-                                                                        view.jump_trace_to_latest();
-                                                                        cx.notify();
-                                                                    },
-                                                                );
-                                                            },
-                                                        )),
-                                                ),
-                                        ),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .right(px(
-                                        AGENT_STAGE_CARD_WIDTH + AGENT_STAGE_CARD_GAP * 2.0,
-                                    ))
-                                    .bottom(px(18.0))
-                                    .px_5()
-                                    .flex()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .max_w(px(AGENT_STREAM_MAX_WIDTH))
-                                            .child(
-                                                div()
-                                                    .relative()
-                                                    .child(render_textarea(
-                                                        Textarea {
-                                                            id: "agent-window-message-input",
-                                                            placeholder: "在分析过程中补充线索或纠正方向（Cmd/Ctrl+Enter 发送）",
-                                                            value: self.message_input.value.clone(),
-                                                            is_disabled: status.is_terminal() || status == AgentSessionStatus::Cancelling,
-                                                            is_focused: self.message_input.is_focused,
-                                                            cursor_index: self.message_input.cursor,
-                                                            selection_range: self.message_input.selection_range(),
-                                                            marked_range: self.message_input.marked_range.clone(),
-                                                            is_pointer_selecting: self.message_input.selection_drag.is_some(),
-                                                            visible_lines: 4,
-                                                            fill_height: false,
-                                                            scroll_handle: self.message_scroll.clone(),
-                                                            scroll_state: self.message_scroll_state.clone(),
-                                                            style: TextareaStyle::Composer,
-                                                            trailing_accessory: Some(InputAccessory {
-                                                                id: "agent-message-send",
-                                                                icon: ArgusIcon::ArrowUp,
-                                                                tooltip: "发送提示",
-                                                            }),
-                                                            trailing_accessory_position: TextareaAccessoryPosition::BottomRight,
-                                                            trailing_accessory_always_visible: true,
-                                                            trailing_accessory_selected: can_send_message,
-                                                            native_input: Some(native_input),
-                                                        },
-                                                        &theme,
-                                                        move |event, _, app_cx| {
-                                                            app_cx.stop_propagation();
-                                                            key_entity.update(app_cx, |view, cx| {
-                                                                view.handle_message_key(event, cx);
-                                                                cx.notify();
-                                                            });
-                                                        },
-                                                        move |_, window, app_cx| {
-                                                            app_cx.stop_propagation();
-                                                            click_entity.update(app_cx, |view, cx| {
-                                                                view.message_input.is_focused = true;
-                                                                view.message_focus.focus(window);
-                                                                cx.notify();
-                                                            });
-                                                        },
-                                                        move |event: &InputPointerEvent, _, app_cx| {
-                                                            pointer_entity.update(app_cx, |view, cx| {
-                                                                match event.action {
-                                                                    InputPointerAction::Begin => view.message_input.begin_pointer_selection(event.character_index, event.granularity),
-                                                                    InputPointerAction::Extend => view.message_input.update_pointer_selection(event.character_index),
-                                                                    InputPointerAction::Finish => view.message_input.finish_pointer_selection(),
-                                                                }
-                                                                cx.notify();
-                                                            });
-                                                        },
-                                                        move |_, _, app_cx| {
-                                                            app_cx.stop_propagation();
-                                                            if can_send_message {
-                                                                send_entity.update(app_cx, |view, cx| {
-                                                                    view.submit_message();
+                                                                cancel_entity.update(app_cx, |view, cx| {
+                                                                    view.cancel_session();
                                                                     cx.notify();
                                                                 });
-                                                            }
-                                                        },
-                                                    ))
-                                                    .when(can_cancel_session, |this| {
-                                                        this.child(
-                                                            div()
-                                                                .absolute()
-                                                                .right(px(32.0))
-                                                                .bottom(px(4.0))
-                                                                .child(render_icon_button(
-                                                                    "agent-cancel",
-                                                                    ArgusIcon::Stop,
-                                                                    "取消分析",
-                                                                    false,
-                                                                    IconButtonSize::Tiny,
-                                                                    &theme,
-                                                                    move |_, _, app_cx| {
-                                                                        app_cx.stop_propagation();
-                                                                        cancel_entity.update(app_cx, |view, cx| {
-                                                                            view.cancel_session();
-                                                                            cx.notify();
-                                                                        });
-                                                                    },
-                                                                )),
-                                                        )
-                                                    }),
-                                            ),
+                                                            },
+                                                        )),
+                                                )
+                                            }),
                                     ),
                             ),
-                    )
-                    .child(render_analysis_stage_timeline_card(
-                        &self.analysis_stages,
-                        &theme,
-                    )),
+                    ),
             )
             .when(self.show_close_confirmation, |this| {
                 this.child(
@@ -1354,227 +1010,7 @@ impl Render for AgentWindow {
     }
 }
 
-/// 渲染窗口右侧悬浮的动态分析阶段时间线卡片。
-///
-/// 卡片与窗口边缘保持间距，不参与主布局分栏；内容严格限制为阶段标题、结果摘要和耗时。
-/// 模型思考、工具参数及证据正文继续只在消息瀑布流展示。
-fn render_analysis_stage_timeline_card(
-    stages: &[AgentStageViewState],
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let completed_count = stages
-        .iter()
-        .filter(|stage| stage.status == AgentAnalysisStageStatus::Completed)
-        .count();
-    div()
-        .absolute()
-        .top(px(AGENT_STAGE_CARD_TOP))
-        .right(px(AGENT_STAGE_CARD_GAP))
-        .bottom(px(AGENT_STAGE_CARD_GAP))
-        .w(px(AGENT_STAGE_CARD_WIDTH))
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(theme.border))
-        .bg(rgb(theme.content))
-        .shadow_lg()
-        .child(
-            div()
-                .h(px(42.0))
-                .px_3()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_between()
-                .border_b_1()
-                .border_color(rgb(theme.border))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("分析进度"),
-                )
-                .child(
-                    div()
-                        .text_size(px(9.0))
-                        .text_color(rgb(theme.foreground_muted))
-                        .child(if stages.is_empty() {
-                            "模型规划中".to_string()
-                        } else {
-                            format!("{completed_count} / {} 已完成", stages.len())
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .id("agent-analysis-stage-scroll")
-                .flex_1()
-                .min_h(px(0.0))
-                .overflow_y_scroll()
-                .scrollbar_width(px(4.0))
-                .when(stages.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .px_3()
-                            .py_3()
-                            .text_size(px(10.0))
-                            .text_color(rgb(theme.foreground_muted))
-                            .child("模型会根据问题自行决定所需分析阶段"),
-                    )
-                })
-                .children(stages.iter().enumerate().map(|(index, stage)| {
-                    render_analysis_stage_timeline_item(index, stages.len(), stage, theme)
-                })),
-        )
-}
-
-/// 渲染单个紧凑时间线节点，完成节点同时展示阶段结果摘要与耗时。
-fn render_analysis_stage_timeline_item(
-    index: usize,
-    stage_count: usize,
-    stage: &AgentStageViewState,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let (summary, duration, color) = analysis_stage_display(stage, theme);
-    let summary_lines = summary.lines().map(ToString::to_string).collect::<Vec<_>>();
-    let node: AnyElement = match stage.status {
-        AgentAnalysisStageStatus::Running => {
-            render_loading_spinner(("agent-analysis-stage-loading", index), theme.info, 12.0)
-        }
-        _ => div()
-            .size(px(7.0))
-            .rounded_full()
-            .bg(rgb(color))
-            .into_any_element(),
-    };
-    let line_color = if stage.status == AgentAnalysisStageStatus::Completed {
-        theme.success
-    } else {
-        theme.border
-    };
-    div()
-        .min_h(px(40.0))
-        .px_3()
-        .py_1()
-        .flex_none()
-        .flex()
-        .gap_2()
-        .child(
-            div()
-                .relative()
-                .w(px(14.0))
-                .h_full()
-                .flex_none()
-                .when(index + 1 < stage_count, |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .left(px(6.0))
-                            .top(px(18.0))
-                            .bottom(px(-18.0))
-                            .w(px(1.0))
-                            .bg(rgb(line_color)),
-                    )
-                })
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(5.0))
-                        .left(px(0.5))
-                        .size(px(12.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(node),
-                ),
-        )
-        .child(
-            div()
-                .min_w(px(0.0))
-                .flex_1()
-                .pt(px(2.0))
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(10.5))
-                        .font_weight(if stage.status == AgentAnalysisStageStatus::Running {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(rgb(if stage.status == AgentAnalysisStageStatus::Running {
-                            theme.foreground
-                        } else {
-                            theme.foreground_muted
-                        }))
-                        .child(stage.title.clone()),
-                )
-                .child(
-                    div()
-                        .mt(px(1.0))
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .child(div().min_w(px(0.0)).flex_1().flex().flex_col().children(
-                            summary_lines.into_iter().map(|line| {
-                                div()
-                                    .whitespace_normal()
-                                    .line_height(px(12.0))
-                                    .text_size(px(9.0))
-                                    .text_color(rgb(color))
-                                    .child(line)
-                            }),
-                        ))
-                        .when_some(duration, |this, duration| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(8.5))
-                                    .text_color(rgb(theme.syntax.comment))
-                                    .child(duration),
-                            )
-                        }),
-                ),
-        )
-}
-
-/// 返回时间线节点的结果摘要、可选耗时与语义色。
-fn analysis_stage_display(
-    stage: &AgentStageViewState,
-    theme: &AppTheme,
-) -> (String, Option<String>, u32) {
-    match stage.status {
-        AgentAnalysisStageStatus::Running => ("正在执行".to_string(), None, theme.info),
-        AgentAnalysisStageStatus::Completed => (
-            stage
-                .result_summary
-                .clone()
-                .unwrap_or_else(|| "阶段已完成".to_string()),
-            Some(format_stage_duration(stage.elapsed_seconds)),
-            theme.success,
-        ),
-        AgentAnalysisStageStatus::Failed => (
-            stage
-                .result_summary
-                .clone()
-                .unwrap_or_else(|| "阶段因错误中止".to_string()),
-            Some(format_stage_duration(stage.elapsed_seconds)),
-            theme.error,
-        ),
-        AgentAnalysisStageStatus::Cancelled => (
-            stage
-                .result_summary
-                .clone()
-                .unwrap_or_else(|| "阶段已由用户取消".to_string()),
-            Some(format_stage_duration(stage.elapsed_seconds)),
-            theme.warning,
-        ),
-    }
-}
-
-/// 把阶段秒数压缩为适合悬浮时间线的易读耗时文本。
+/// 把秒数压缩为易读的耗时文本。
 fn format_stage_duration(seconds: u64) -> String {
     match seconds {
         0 => "< 1 秒".to_string(),
@@ -1689,32 +1125,22 @@ fn render_budget_divider(theme: &AppTheme) -> impl IntoElement + use<> {
     div().w(px(1.0)).h(px(30.0)).flex_none().bg(rgb(border))
 }
 
-/// 渲染单列消息瀑布流，并把最终报告作为同一消息流中的最后一条 Agent 消息。
-#[allow(clippy::too_many_arguments)]
+/// 渲染单列消息瀑布流。
 fn render_message_stream(
     question: &str,
     traces: Arc<Vec<Arc<AgentTraceEntry>>>,
     items: Vec<AgentStreamItem>,
-    report: Option<Arc<DiagnosticReport>>,
-    report_path: Option<&str>,
-    app: Entity<ArgusApp>,
-    scope: Arc<SourceScopeSnapshot>,
     list_state: ListState,
     agent_window: Entity<AgentWindow>,
     theme: &AppTheme,
 ) -> impl IntoElement {
     let question = Arc::<str>::from(question);
-    let report_path = report_path.map(Arc::<str>::from);
     let items = Arc::new(items);
     let render_items = items.clone();
     let render_traces = traces.clone();
-    let render_report = report.clone();
-    let render_app = app.clone();
-    let render_scope = scope.clone();
     let render_agent_window = agent_window.clone();
     let render_theme = theme.clone();
     let render_question = question.clone();
-    let render_report_path = report_path.clone();
 
     div()
         .id("agent-message-stream")
@@ -1731,10 +1157,6 @@ fn render_message_stream(
                     item,
                     &render_question,
                     &render_traces,
-                    render_report.as_deref(),
-                    render_report_path.as_deref(),
-                    render_app.clone(),
-                    render_scope.clone(),
                     render_agent_window.clone(),
                     &render_theme,
                 )
@@ -1749,15 +1171,10 @@ fn render_message_stream(
 }
 
 /// 仅为虚拟列表当前请求的索引构造消息元素，屏幕外内容不会进入本帧布局树。
-#[allow(clippy::too_many_arguments)]
 fn render_agent_stream_item(
     item: &AgentStreamItem,
     question: &str,
     traces: &[Arc<AgentTraceEntry>],
-    report: Option<&DiagnosticReport>,
-    report_path: Option<&str>,
-    app: Entity<ArgusApp>,
-    scope: Arc<SourceScopeSnapshot>,
     agent_window: Entity<AgentWindow>,
     theme: &AppTheme,
 ) -> AnyElement {
@@ -1788,45 +1205,6 @@ fn render_agent_stream_item(
                     is_expanded,
                     is_active,
                     agent_window,
-                    theme,
-                )
-                .into_any_element()
-            },
-        ),
-        AgentStreamItem::ReportHeader {
-            visible_chars,
-            is_complete,
-        } => render_report_header(question, visible_chars, is_complete, theme).into_any_element(),
-        AgentStreamItem::ReportAnalysisHeader {
-            visible_empty_message_chars,
-            is_visible,
-        } => render_report_analysis_header(visible_empty_message_chars, is_visible, theme)
-            .into_any_element(),
-        AgentStreamItem::ReportFinding {
-            finding_index,
-            visible_chars,
-        } => report
-            .and_then(|report| report.findings.get(finding_index))
-            .map_or_else(
-                || div().h(px(0.0)).into_any_element(),
-                |finding| {
-                    render_report_finding(finding, finding_index, visible_chars, app, scope, theme)
-                        .into_any_element()
-                },
-            ),
-        AgentStreamItem::ReportFooter {
-            visible_chars,
-            is_complete,
-            is_visible,
-        } => report.map_or_else(
-            || div().h(px(0.0)).into_any_element(),
-            |report| {
-                render_report_footer(
-                    report,
-                    report_path,
-                    visible_chars,
-                    is_complete,
-                    is_visible,
                     theme,
                 )
                 .into_any_element()
@@ -2205,10 +1583,7 @@ fn render_trace_message(
     };
     let detail = if matches!(
         trace.kind,
-        AgentTraceKind::Reasoning
-            | AgentTraceKind::Output
-            | AgentTraceKind::User
-            | AgentTraceKind::Report
+        AgentTraceKind::Reasoning | AgentTraceKind::Output | AgentTraceKind::User
     ) {
         render_markdown(
             &trace.detail,
@@ -2278,530 +1653,6 @@ fn render_trace_message(
     )
 }
 
-/// 报告流式文本游标；每次渲染按固定顺序消费可见字符预算。
-struct ReportStreamCursor {
-    /// 本次渲染尚可展示的 Unicode 字符数量。
-    remaining_chars: usize,
-}
-
-impl ReportStreamCursor {
-    /// 返回当前字段可见的字符前缀；前序字段未完成时返回 `None`。
-    fn take(&mut self, value: &str) -> Option<String> {
-        if value.is_empty() || self.remaining_chars == 0 {
-            return None;
-        }
-        let character_count = value.chars().count();
-        let visible_count = character_count.min(self.remaining_chars);
-        self.remaining_chars = self.remaining_chars.saturating_sub(visible_count);
-        Some(value.chars().take(visible_count).collect())
-    }
-}
-
-/// 一次计算报告各虚拟行的动态字符数，后续流式帧只做常数时间的区间换算。
-fn report_stream_row_character_counts(question: &str, report: &DiagnosticReport) -> Vec<usize> {
-    let mut row_characters = Vec::with_capacity(report.findings.len().saturating_add(3));
-    row_characters.push(question.chars().count());
-    row_characters.push(if report.findings.is_empty() {
-        EMPTY_FINDINGS_MESSAGE.chars().count()
-    } else {
-        0
-    });
-    for finding in &report.findings {
-        row_characters.push(finding_analysis_character_count(finding));
-    }
-    row_characters.push(report_footer_character_count(report));
-    row_characters
-}
-
-/// 计算一条问题发现中分析、影响和证据片段的流式字符数。
-fn finding_analysis_character_count(finding: &DiagnosticFinding) -> usize {
-    let mut count = finding
-        .title
-        .chars()
-        .count()
-        .saturating_add(finding.analysis.chars().count())
-        .saturating_add(finding.impact.chars().count());
-    for evidence in &finding.evidence {
-        count = count.saturating_add(evidence.rationale.chars().count());
-        if let Some(excerpt) = &evidence.display_excerpt {
-            for line in &excerpt.lines {
-                count = count.saturating_add(line.text.chars().count());
-            }
-        }
-    }
-    count
-}
-
-/// 计算结论、建议、验证步骤和限制说明的流式字符数。
-fn report_footer_character_count(report: &DiagnosticReport) -> usize {
-    let mut count = report.summary.chars().count();
-    for finding in &report.findings {
-        count = count.saturating_add(finding.recommendation.chars().count());
-        for step in &finding.verification_steps {
-            count = count.saturating_add(step.chars().count());
-        }
-    }
-    for limitation in &report.limitations {
-        count = count.saturating_add(limitation.chars().count());
-    }
-    count
-}
-
-/// 渲染报告内稳定的编号分区标题。
-fn render_report_section_header(
-    index: &'static str,
-    title: &'static str,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .size(px(20.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(rgb(theme.selection))
-                .text_size(px(10.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(index),
-        )
-        .child(
-            div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title),
-        )
-}
-
-/// 渲染报告卡片顶部和问题描述；后续虚拟行沿用相同边框与背景形成一张连续大卡片。
-fn render_report_header(
-    question: &str,
-    visible_chars: usize,
-    is_stream_complete: bool,
-    theme: &AppTheme,
-) -> impl IntoElement {
-    let mut cursor = ReportStreamCursor {
-        remaining_chars: visible_chars,
-    };
-    let visible_question = cursor.take(question);
-    let report_leading = if is_stream_complete {
-        render_icon(ArgusIcon::FileText, theme.info, 16.0).into_any_element()
-    } else {
-        render_loading_spinner(("agent-report-stream-loading", 0), theme.info, 16.0)
-    };
-
-    div().w_full().px_6().pt_3().flex().justify_center().child(
-        div()
-            .w_full()
-            .max_w(px(AGENT_STREAM_MAX_WIDTH))
-            .px_5()
-            .pt_5()
-            .border_t_1()
-            .border_l_1()
-            .border_r_1()
-            .border_color(rgb(theme.border))
-            .rounded_t(px(8.0))
-            .bg(rgb(theme.content))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pb_4()
-                    .border_b_1()
-                    .border_color(rgb(theme.border))
-                    .child(report_leading)
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("智能分析报告"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(theme.foreground_muted))
-                            .child(if is_stream_complete {
-                                "已完成"
-                            } else {
-                                "正在生成"
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .pt_4()
-                    .child(render_report_section_header("1", "问题描述", theme))
-                    .when_some(visible_question, |this, question| {
-                        this.child(
-                            div()
-                                .mt_3()
-                                .text_size(px(12.0))
-                                .line_height(px(20.0))
-                                .child(question),
-                        )
-                    }),
-            ),
-    )
-}
-
-/// 渲染问题分析分区标题；报告无发现时在同一虚拟行展示保守说明。
-fn render_report_analysis_header(
-    visible_empty_message_chars: usize,
-    is_visible: bool,
-    theme: &AppTheme,
-) -> impl IntoElement {
-    if !is_visible {
-        return div().h(px(0.0));
-    }
-    let visible_empty_message = if visible_empty_message_chars == 0 {
-        None
-    } else {
-        Some(
-            EMPTY_FINDINGS_MESSAGE
-                .chars()
-                .take(visible_empty_message_chars)
-                .collect::<String>(),
-        )
-    };
-    div().w_full().px_6().flex().justify_center().child(
-        div()
-            .w_full()
-            .max_w(px(AGENT_STREAM_MAX_WIDTH))
-            .px_5()
-            .pt_5()
-            .border_l_1()
-            .border_r_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.content))
-            .child(
-                div()
-                    .pt_5()
-                    .border_t_1()
-                    .border_color(rgb(theme.border))
-                    .child(render_report_section_header("2", "问题分析", theme))
-                    .when_some(visible_empty_message, |this, message| {
-                        this.child(
-                            div()
-                                .mt_3()
-                                .text_size(px(12.0))
-                                .line_height(px(20.0))
-                                .text_color(rgb(theme.foreground_muted))
-                                .child(message),
-                        )
-                    }),
-            ),
-    )
-}
-
-/// 渲染一条报告发现；尚未流式展示到该发现时返回零高度行。
-#[allow(clippy::too_many_arguments)]
-fn render_report_finding(
-    finding: &DiagnosticFinding,
-    finding_index: usize,
-    visible_chars: usize,
-    app: Entity<ArgusApp>,
-    scope: Arc<SourceScopeSnapshot>,
-    theme: &AppTheme,
-) -> impl IntoElement {
-    if visible_chars == 0 {
-        return div().h(px(0.0));
-    }
-    let mut cursor = ReportStreamCursor {
-        remaining_chars: visible_chars,
-    };
-    let visible_title = cursor.take(&finding.title);
-    let visible_analysis = cursor.take(&finding.analysis);
-    let visible_impact = cursor.take(&finding.impact);
-    let mut evidence_elements = Vec::<AnyElement>::new();
-    for (evidence_index, evidence) in finding.evidence.iter().enumerate() {
-        let visible_rationale = cursor.take(&evidence.rationale);
-        let mut excerpt_lines = Vec::<AnyElement>::new();
-        if let Some(excerpt) = &evidence.display_excerpt {
-            for line in &excerpt.lines {
-                if let Some(text) = cursor.take(&line.text) {
-                    excerpt_lines.push(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .w(px(42.0))
-                                    .flex_none()
-                                    .text_right()
-                                    .text_color(rgb(theme.syntax.comment))
-                                    .child(line.line_number.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .whitespace_normal()
-                                    .child(text),
-                            )
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
-        let Some(rationale) = visible_rationale else {
-            continue;
-        };
-        let source = scope.source(&evidence.source_ref);
-        let source_id = source.map(|source| source.source_id);
-        let label = source
-            .map(|source| source.relative_path.clone())
-            .unwrap_or_else(|| "来源已失效".to_string());
-        let start_line = evidence.start_line;
-        let navigate_app = app.clone();
-        let has_excerpt_lines = !excerpt_lines.is_empty();
-        let excerpt_is_truncated = evidence
-            .display_excerpt
-            .as_ref()
-            .is_some_and(|excerpt| excerpt.is_truncated);
-        evidence_elements.push(
-            div()
-                .id((
-                    "agent-report-evidence",
-                    finding_index * 1000 + evidence_index,
-                ))
-                .mt_3()
-                .child(
-                    div()
-                        .id((
-                            "agent-report-evidence-link",
-                            finding_index * 1000 + evidence_index,
-                        ))
-                        .text_size(px(10.0))
-                        .line_height(px(16.0))
-                        .text_color(rgb(if source_id.is_some() {
-                            theme.info
-                        } else {
-                            theme.foreground_muted
-                        }))
-                        .when(source_id.is_some(), |this| {
-                            this.cursor_pointer()
-                                .hover(|hover| hover.opacity(0.82))
-                                .on_click(move |_, _, app_cx| {
-                                    if let Some(source_id) = source_id {
-                                        navigate_app.update(app_cx, |main_app, cx| {
-                                            main_app.open_ai_evidence(source_id, start_line, cx);
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                        })
-                        .child(format!(
-                            "↳ {} · 第 {}-{} 行 · {}",
-                            label, evidence.start_line, evidence.end_line, rationale
-                        )),
-                )
-                .when(has_excerpt_lines, |this| {
-                    this.child(
-                        div()
-                            .mt_2()
-                            .py_2()
-                            .pr_3()
-                            .border_l_1()
-                            .border_color(rgb(theme.info))
-                            .bg(rgb(theme.current_line))
-                            .font_family(ARGUS_LOG_FONT_FAMILY)
-                            .text_size(px(10.0))
-                            .line_height(px(17.0))
-                            .children(excerpt_lines)
-                            .when(excerpt_is_truncated, |excerpt| {
-                                excerpt.child(
-                                    div()
-                                        .ml(px(54.0))
-                                        .text_color(rgb(theme.syntax.comment))
-                                        .child("… 片段已按展示边界截断"),
-                                )
-                            }),
-                    )
-                })
-                .into_any_element(),
-        );
-    }
-
-    div().w_full().px_6().flex().justify_center().child(
-        div()
-            .w_full()
-            .max_w(px(AGENT_STREAM_MAX_WIDTH))
-            .px_5()
-            .border_l_1()
-            .border_r_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.content))
-            .child(
-                div()
-                    .pt_4()
-                    .border_t_1()
-                    .border_color(rgb(theme.border))
-                    .when_some(visible_title, |this, title| {
-                        this.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(rgb(theme.foreground_muted))
-                                        .child(format!(
-                                            "{} · {} · 置信度 {:.0}%",
-                                            finding.severity,
-                                            finding.status.label(),
-                                            finding.confidence * 100.0
-                                        )),
-                                ),
-                        )
-                    })
-                    .when_some(visible_analysis, |this, analysis| {
-                        this.child(
-                            div()
-                                .mt_2()
-                                .text_size(px(12.0))
-                                .line_height(px(20.0))
-                                .child(analysis),
-                        )
-                    })
-                    .when_some(visible_impact, |this, impact| {
-                        this.child(
-                            div()
-                                .mt_2()
-                                .text_size(px(11.0))
-                                .line_height(px(18.0))
-                                .text_color(rgb(theme.foreground_muted))
-                                .child(format!("影响：{impact}")),
-                        )
-                    })
-                    .children(evidence_elements),
-            ),
-    )
-}
-
-/// 渲染报告结论、建议和限制，并以底部圆角结束连续卡片。
-fn render_report_footer(
-    report: &DiagnosticReport,
-    report_path: Option<&str>,
-    visible_chars: usize,
-    is_stream_complete: bool,
-    is_visible: bool,
-    theme: &AppTheme,
-) -> impl IntoElement {
-    if !is_visible {
-        return div().h(px(0.0));
-    }
-    let mut cursor = ReportStreamCursor {
-        remaining_chars: visible_chars,
-    };
-    let visible_summary = cursor.take(&report.summary);
-    let mut recommendation_elements = Vec::<AnyElement>::new();
-    for (index, finding) in report.findings.iter().enumerate() {
-        if let Some(recommendation) = cursor.take(&finding.recommendation) {
-            recommendation_elements.push(
-                div()
-                    .mt_2()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .text_size(px(11.0))
-                    .line_height(px(18.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme.info))
-                            .child(format!("建议 {}", index + 1)),
-                    )
-                    .child(div().flex_1().min_w(px(0.0)).child(recommendation))
-                    .into_any_element(),
-            );
-        }
-        for step in &finding.verification_steps {
-            if let Some(verification) = cursor.take(step) {
-                recommendation_elements.push(
-                    div()
-                        .mt_2()
-                        .ml_3()
-                        .text_size(px(10.0))
-                        .line_height(px(17.0))
-                        .text_color(rgb(theme.foreground_muted))
-                        .child(format!("待验证：{verification}"))
-                        .into_any_element(),
-                );
-            }
-        }
-    }
-    let mut limitation_elements = Vec::<AnyElement>::new();
-    for limitation in &report.limitations {
-        if let Some(text) = cursor.take(limitation) {
-            limitation_elements.push(
-                div()
-                    .mt_2()
-                    .text_size(px(10.0))
-                    .line_height(px(17.0))
-                    .text_color(rgb(theme.warning))
-                    .child(format!("限制：{text}"))
-                    .into_any_element(),
-            );
-        }
-    }
-    div().w_full().px_6().pb_8().flex().justify_center().child(
-        div()
-            .w_full()
-            .max_w(px(AGENT_STREAM_MAX_WIDTH))
-            .px_5()
-            .pb_5()
-            .border_l_1()
-            .border_r_1()
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .rounded_b(px(8.0))
-            .bg(rgb(theme.content))
-            .child(
-                div()
-                    .pt_5()
-                    .border_t_1()
-                    .border_color(rgb(theme.border))
-                    .child(render_report_section_header("3", "结论及建议", theme))
-                    .when_some(visible_summary, |this, summary| {
-                        this.child(
-                            div()
-                                .mt_3()
-                                .text_size(px(12.0))
-                                .line_height(px(20.0))
-                                .child(summary),
-                        )
-                    })
-                    .children(recommendation_elements)
-                    .children(limitation_elements)
-                    .when(is_stream_complete, |this| {
-                        this.when_some(report_path.map(str::to_string), |section, path| {
-                            section.child(
-                                div()
-                                    .mt_4()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(theme.syntax.comment))
-                                    .child(format!("报告已保存：{path}")),
-                            )
-                        })
-                    }),
-            ),
-    )
-}
-
 /// 渲染窗口小型操作按钮。
 fn action_button(
     id: &'static str,
@@ -2846,7 +1697,6 @@ fn trace_icon(kind: AgentTraceKind) -> ArgusIcon {
         AgentTraceKind::Tool => ArgusIcon::Settings,
         AgentTraceKind::User => ArgusIcon::ArrowRight,
         AgentTraceKind::Warning => ArgusIcon::Info,
-        AgentTraceKind::Report => ArgusIcon::FileText,
     }
 }
 
@@ -2854,7 +1704,7 @@ fn trace_icon(kind: AgentTraceKind) -> ArgusIcon {
 fn trace_color(kind: AgentTraceKind, theme: &AppTheme) -> u32 {
     match kind {
         AgentTraceKind::Warning => theme.warning,
-        AgentTraceKind::Reasoning | AgentTraceKind::Output | AgentTraceKind::Report => theme.info,
+        AgentTraceKind::Reasoning | AgentTraceKind::Output => theme.info,
         _ => theme.foreground_muted,
     }
 }
@@ -2863,10 +1713,7 @@ fn trace_color(kind: AgentTraceKind, theme: &AppTheme) -> u32 {
 fn trace_actor_label(kind: AgentTraceKind) -> &'static str {
     match kind {
         AgentTraceKind::Status => "状态",
-        AgentTraceKind::Model
-        | AgentTraceKind::Reasoning
-        | AgentTraceKind::Output
-        | AgentTraceKind::Report => "Argus",
+        AgentTraceKind::Model | AgentTraceKind::Reasoning | AgentTraceKind::Output => "Argus",
         AgentTraceKind::Tool => "工具",
         AgentTraceKind::User => "你",
         AgentTraceKind::Warning => "提示",
@@ -2942,14 +1789,6 @@ fn short_id(value: &str) -> String {
 mod tests {
     use super::*;
 
-    /// 验证报告游标按 Unicode 字符而不是 UTF-8 字节逐步展示，避免截断中文字符。
-    #[test]
-    fn report_stream_cursor_reveals_unicode_prefix() {
-        let mut cursor = ReportStreamCursor { remaining_chars: 3 };
-        assert_eq!(cursor.take("内存异常"), Some("内存异".to_string()));
-        assert_eq!(cursor.take("后续字段"), None);
-    }
-
     /// 验证虚拟列表只失效发生变化的中间行，避免流式增量让历史消息重新测量。
     #[test]
     fn changed_stream_items_only_replace_modified_range() {
@@ -3002,15 +1841,8 @@ mod tests {
                 "正在分析证据",
             )),
         ];
-        let items = build_agent_stream_items(
-            &traces,
-            AgentSessionStatus::Investigating,
-            None,
-            0,
-            0,
-            &[],
-            &HashSet::new(),
-        );
+        let items =
+            build_agent_stream_items(&traces, AgentSessionStatus::Investigating, &HashSet::new());
         assert!(
             items
                 .iter()
@@ -3028,32 +1860,6 @@ mod tests {
         );
     }
 
-    /// 验证报告字符数只在接收报告时计算一次，并且各虚拟行之和覆盖完整流式内容。
-    #[test]
-    fn report_stream_rows_cover_all_dynamic_text() {
-        let report = DiagnosticReport {
-            session_id: "session".to_string(),
-            question_sha256: "0".repeat(64),
-            summary: "结论摘要".to_string(),
-            findings: Vec::new(),
-            used_log_profiles: Vec::new(),
-            limitations: vec!["样本范围有限".to_string()],
-            completed_at: "2026-07-16T00:00:00Z".to_string(),
-        };
-        let rows = report_stream_row_character_counts("内存问题", &report);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], "内存问题".chars().count());
-        assert_eq!(rows[1], EMPTY_FINDINGS_MESSAGE.chars().count());
-        assert_eq!(
-            rows[2],
-            report.summary.chars().count() + report.limitations[0].chars().count()
-        );
-        assert_eq!(
-            visible_chars_in_report_row(rows[0] + 2, rows[0], rows[1]),
-            2
-        );
-    }
-
     /// 验证上下文指标把比例和容量拆成稳定的两行展示内容。
     #[test]
     fn context_metric_separates_percentage_and_capacity() {
@@ -3067,34 +1873,12 @@ mod tests {
         );
     }
 
-    /// 验证阶段视图接收运行与完成快照后保存结果和耗时，终态不会留下加载状态。
+    /// 验证整体耗时按秒、分、小时档位压缩为易读文本。
     #[test]
-    fn analysis_stage_view_applies_structured_results() {
-        let mut stage = AgentStageViewState::from_event(AgentAnalysisStageEvent {
-            stage_id: "primary/context".to_string(),
-            title: "提取关键上下文".to_string(),
-            status: AgentAnalysisStageStatus::Running,
-            elapsed_seconds: 2,
-            result_summary: None,
-        });
-        assert_eq!(stage.status, AgentAnalysisStageStatus::Running);
-        assert!(stage.running_since.is_some());
-
-        stage.apply(AgentAnalysisStageEvent {
-            stage_id: "primary/context".to_string(),
-            title: "提取关键上下文".to_string(),
-            status: AgentAnalysisStageStatus::Completed,
-            elapsed_seconds: 7,
-            result_summary: Some("已定位启动失败上下文\n已确认时间窗口".to_string()),
-        });
-        assert_eq!(stage.status, AgentAnalysisStageStatus::Completed);
-        assert_eq!(stage.elapsed_seconds, 7);
-        assert_eq!(
-            stage.result_summary.as_deref(),
-            Some("已定位启动失败上下文\n已确认时间窗口")
-        );
-        assert!(stage.running_since.is_none());
-        assert_eq!(format_stage_duration(7), "7 秒");
+    fn analysis_duration_formats_compact_text() {
+        assert_eq!(format_analysis_duration(0), "< 1 秒");
+        assert_eq!(format_analysis_duration(7), "7 秒");
+        assert_eq!(format_analysis_duration(61), "1 分 1 秒");
         assert_eq!(format_analysis_duration(3_661), "1 小时 1 分 1 秒");
     }
 }

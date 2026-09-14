@@ -61,9 +61,6 @@ pub(crate) struct AiConfig {
     /// 用户确认过的原文授权说明版本。
     #[serde(default)]
     pub consent_version: String,
-    /// 当前会话资源预算档位。
-    #[serde(default)]
-    pub budget_profile: AiBudgetProfile,
     /// 单次模型请求超时秒数。
     #[serde(default = "default_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
@@ -205,7 +202,6 @@ impl Default for AiConfig {
             model_profiles: Vec::new(),
             allow_raw_log_content: false,
             consent_version: String::new(),
-            budget_profile: AiBudgetProfile::Balanced,
             request_timeout_seconds: default_request_timeout_seconds(),
             system_prompt: default_ai_system_prompt(),
             log_profiles: Vec::new(),
@@ -299,15 +295,6 @@ impl AiModelProfile {
             format!("{} Token", self.context_window_tokens)
         }
     }
-}
-
-/// 首期资源预算档位；保留枚举以便后续增加保守或深度分析档。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AiBudgetProfile {
-    /// 平衡延迟、费用和分析深度的默认档位。
-    #[default]
-    Balanced,
 }
 
 /// 用户定义的日志类型和发送给模型的分析说明。

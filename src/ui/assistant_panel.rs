@@ -19,7 +19,6 @@ use gpui::{
     rgb,
 };
 
-use crate::agent::report::AssistantCitation;
 use crate::agent::{
     AgentBudgetSnapshot, AgentEvent, AgentScopeSelection, AgentSessionStatus, AgentStreamKind,
     AgentTraceEntry, AgentTraceKind, AgentUserMessage, AgentUserMessageStatus,
@@ -28,7 +27,7 @@ use crate::agent::{
 };
 use crate::app::{ArgusApp, TextInputState, observe_app_theme};
 use crate::config::{AiConfig, AiModelProfile};
-use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
+use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::text_selection::{character_count, replace_character_range};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -60,9 +59,9 @@ const ASSISTANT_MENTION_RESULT_LIMIT: usize = 8;
 /// 助手输入中可由用户通过“@”选择的来源类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AssistantMentionKind {
-    /// 一个目录或归档目录，模型通过 `list_sources.path_prefix` 分页解析其日志后代。
+    /// 一个目录，模型通过路径前缀在上下文中指代其日志后代。
     Folder,
-    /// 一个可读取日志文件，直接绑定当前不可变快照中的 `source_ref`。
+    /// 一个可读取日志文件。
     File,
 }
 
@@ -85,8 +84,6 @@ struct AssistantMentionCandidate {
     search_key: String,
     /// 候选类型。
     kind: AssistantMentionKind,
-    /// 文件候选对应的不透明引用；目录候选通过路径前缀解析。
-    source_ref: Option<String>,
     /// 目录内日志后代数量；文件固定为 1。
     matching_source_count: usize,
 }
@@ -149,11 +146,8 @@ enum AssistantPanelMessage {
     },
     /// 模型思考过程，仅在当前内存会话展示。
     Reasoning(String),
-    /// 模型最终可见回答及其可信引用。
-    Answer {
-        content: String,
-        citations: Vec<AssistantCitation>,
-    },
+    /// 模型最终可见回答。
+    Answer { content: String },
 }
 
 /// 主窗口内嵌 Agent 助手实体。
@@ -514,7 +508,7 @@ impl AssistantPanel {
         }
         let mut config = self.app.read(cx).config.ai.clone();
         config.normalize();
-        let (registry, default_encoding, loader_config, base_revision) = {
+        let (registry, loader_config, base_revision) = {
             let app = self.app.read(cx);
             if app.source_registry.root_ids().is_empty() {
                 self.error = Some("尚未加载日志来源".to_string());
@@ -522,7 +516,6 @@ impl AssistantPanel {
             }
             (
                 app.source_registry.clone(),
-                app.selected_encoding.clone(),
                 app.config.loader.clone(),
                 app.source_content_revision,
             )
@@ -546,7 +539,6 @@ impl AssistantPanel {
                         registry,
                         AgentScopeSelection::AllLoadedRoots,
                         config,
-                        default_encoding,
                         loader_config,
                         cancellation,
                     )
@@ -811,15 +803,13 @@ impl AssistantPanel {
             }
             AgentEvent::AssistantCompleted {
                 output,
-                citations,
                 accepted_user_messages,
                 history_was_trimmed,
             } => {
-                self.finish_answer(output.clone(), citations.clone());
+                self.finish_answer(output.clone());
                 self.history.push(AssistantHistoryTurn {
                     user_messages: accepted_user_messages,
                     assistant_output: output,
-                    citations,
                 });
                 self.finish_active_turn();
                 if history_was_trimmed {
@@ -843,8 +833,6 @@ impl AssistantPanel {
                     message,
                 ));
             }
-            // 固定分析专属事件不会由交互助手发布。
-            AgentEvent::Stage(_) | AgentEvent::Report(_, _) => {}
         }
     }
 
@@ -868,16 +856,13 @@ impl AssistantPanel {
                 self.push_message(AssistantPanelMessage::Reasoning(delta));
             }
             (AgentStreamKind::Output, _) => {
-                self.push_message(AssistantPanelMessage::Answer {
-                    content: delta,
-                    citations: Vec::new(),
-                });
+                self.push_message(AssistantPanelMessage::Answer { content: delta });
             }
         }
     }
 
-    /// 使用最终响应校正最后一条流式正文并挂载可信引用。
-    fn finish_answer(&mut self, output: String, citations: Vec<AssistantCitation>) {
+    /// 使用最终响应校正最后一条流式正文。
+    fn finish_answer(&mut self, output: String) {
         let messages = Arc::make_mut(&mut self.messages);
         let turn_start = self
             .active_turn_message_start
@@ -887,21 +872,14 @@ impl AssistantPanel {
             .rev()
             .find(|index| matches!(messages[*index], AssistantPanelMessage::Answer { .. }));
         if let Some(index) = answer_index
-            && let AssistantPanelMessage::Answer {
-                content,
-                citations: refs,
-            } = &mut messages[index]
+            && let AssistantPanelMessage::Answer { content } = &mut messages[index]
         {
             if !output.trim().is_empty() {
                 *content = output;
             }
-            *refs = citations;
             self.message_list.splice(index..index + 1, 1);
         } else {
-            self.push_message(AssistantPanelMessage::Answer {
-                content: output,
-                citations,
-            });
+            self.push_message(AssistantPanelMessage::Answer { content: output });
         }
     }
 
@@ -1248,7 +1226,6 @@ fn build_mention_candidates(scope: &SourceScopeSnapshot) -> Vec<AssistantMention
             display_path: source.relative_path.clone(),
             search_key: source.relative_path.to_lowercase(),
             kind: AssistantMentionKind::File,
-            source_ref: Some(source.source_ref.clone()),
             matching_source_count: 1,
         });
     }
@@ -1260,7 +1237,6 @@ fn build_mention_candidates(scope: &SourceScopeSnapshot) -> Vec<AssistantMention
                 search_key: display_path.to_lowercase(),
                 display_path,
                 kind: AssistantMentionKind::Folder,
-                source_ref: None,
                 matching_source_count,
             },
         )
@@ -1310,7 +1286,6 @@ fn assistant_message_with_mentions(
                 "display_path": candidate.display_path,
                 "path_prefix": (candidate.kind == AssistantMentionKind::Folder)
                     .then_some(candidate.display_path.as_str()),
-                "source_ref": candidate.source_ref,
                 "matching_source_count": candidate.matching_source_count,
             })
         })
@@ -1403,8 +1378,6 @@ impl Render for AssistantPanel {
         let messages = self.messages.clone();
         let render_messages = messages.clone();
         let render_theme = theme.clone();
-        let render_app = self.app.clone();
-        let render_scope = self.scope.clone();
         let render_entity = entity.clone();
         let is_active = self.status == AssistantPanelStatus::Running;
         let last_index = messages.len().saturating_sub(1);
@@ -1501,8 +1474,6 @@ impl Render for AssistantPanel {
                                 render_messages.get(index),
                                 index,
                                 is_active && index == last_index,
-                                render_app.clone(),
-                                render_scope.clone(),
                                 render_entity.clone(),
                                 &render_theme,
                             )
@@ -1812,8 +1783,6 @@ fn render_assistant_message(
     message: Option<&AssistantPanelMessage>,
     index: usize,
     is_active: bool,
-    app: Entity<ArgusApp>,
-    scope: Option<Arc<SourceScopeSnapshot>>,
     panel: Entity<AssistantPanel>,
     theme: &AppTheme,
 ) -> AnyElement {
@@ -1832,30 +1801,14 @@ fn render_assistant_message(
             is_expanded,
         } => render_tool_group(traces, *is_expanded, index, is_active, panel, theme)
             .into_any_element(),
-        AssistantPanelMessage::Reasoning(content) => render_model_message(
-            "思考过程",
-            content,
-            true,
-            is_active,
-            index,
-            Vec::new(),
-            app,
-            scope,
-            theme,
-        )
-        .into_any_element(),
-        AssistantPanelMessage::Answer { content, citations } => render_model_message(
-            "AI 回答",
-            content,
-            false,
-            is_active,
-            index,
-            citations.clone(),
-            app,
-            scope,
-            theme,
-        )
-        .into_any_element(),
+        AssistantPanelMessage::Reasoning(content) => {
+            render_model_message("思考过程", content, true, is_active, index, theme)
+                .into_any_element()
+        }
+        AssistantPanelMessage::Answer { content } => {
+            render_model_message("AI 回答", content, false, is_active, index, theme)
+                .into_any_element()
+        }
     }
 }
 
@@ -1913,17 +1866,13 @@ fn render_user_message(message: &AgentUserMessage, theme: &AppTheme) -> impl Int
         )
 }
 
-/// 渲染思考或最终回答，并在回答下方展示可信可点击引用。
-#[allow(clippy::too_many_arguments)]
+/// 渲染思考或最终回答。
 fn render_model_message(
     title: &'static str,
     content: &str,
     is_reasoning: bool,
     is_active: bool,
     index: usize,
-    citations: Vec<AssistantCitation>,
-    app: Entity<ArgusApp>,
-    scope: Option<Arc<SourceScopeSnapshot>>,
     theme: &AppTheme,
 ) -> impl IntoElement {
     let leading = if is_active {
@@ -1945,13 +1894,6 @@ fn render_model_message(
     } else {
         theme.foreground
     };
-    let citation_elements = citations
-        .iter()
-        .enumerate()
-        .map(|(citation_index, citation)| {
-            render_assistant_citation(citation_index, citation, app.clone(), scope.clone(), theme)
-        })
-        .collect::<Vec<_>>();
     div()
         .w_full()
         .px_4()
@@ -1982,111 +1924,8 @@ fn render_model_message(
                         color,
                     },
                     theme,
-                )))
-                .children(citation_elements),
+                ))),
         )
-}
-
-/// 渲染一条可跳转的日志引用卡片。
-fn render_assistant_citation(
-    index: usize,
-    citation: &AssistantCitation,
-    app: Entity<ArgusApp>,
-    scope: Option<Arc<SourceScopeSnapshot>>,
-    theme: &AppTheme,
-) -> AnyElement {
-    let source = scope
-        .as_ref()
-        .and_then(|scope| scope.source(&citation.source_ref));
-    let source_id = source.map(|source| source.source_id);
-    let path = source
-        .map(|source| source.relative_path.clone())
-        .unwrap_or_else(|| "来源已失效".to_string());
-    let start_line = citation.start_line;
-    let lines = citation
-        .display_excerpt
-        .as_ref()
-        .map(|excerpt| {
-            excerpt
-                .lines
-                .iter()
-                .map(|line| {
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .w(px(36.0))
-                                .flex_none()
-                                .text_right()
-                                .text_color(rgb(theme.syntax.comment))
-                                .child(line.line_number.to_string()),
-                        )
-                        .child(div().flex_1().min_w(px(0.0)).child(line.text.clone()))
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    div()
-        .id(("assistant-citation", index))
-        .mt_3()
-        .p_3()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(theme.border))
-        .bg(rgb(theme.content))
-        .when(source_id.is_some(), |this| {
-            let navigate_app = app.clone();
-            this.cursor_pointer()
-                .hover(|hover| hover.border_color(rgb(theme.info)))
-                .on_click(move |_, _, app_cx| {
-                    if let Some(source_id) = source_id {
-                        navigate_app.update(app_cx, |main_app, cx| {
-                            main_app.open_ai_evidence(source_id, start_line, cx);
-                            cx.notify();
-                        });
-                    }
-                })
-        })
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(if source_id.is_some() {
-                    theme.info
-                } else {
-                    theme.foreground_muted
-                }))
-                .child(format!(
-                    "[E{}] {} · 第 {}-{} 行",
-                    index + 1,
-                    path,
-                    citation.start_line,
-                    citation.end_line
-                )),
-        )
-        .child(
-            div()
-                .mt_1()
-                .text_size(px(10.0))
-                .text_color(rgb(theme.foreground_muted))
-                .child(citation.rationale.clone()),
-        )
-        .when(!lines.is_empty(), |this| {
-            this.child(
-                div()
-                    .mt_2()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(rgb(theme.border))
-                    .font_family(ARGUS_LOG_FONT_FAMILY)
-                    .text_size(px(9.0))
-                    .line_height(px(16.0))
-                    .children(lines),
-            )
-        })
-        .into_any_element()
 }
 
 /// 渲染普通轻量轨迹。
@@ -2251,10 +2090,9 @@ fn render_tool_group(
 fn trace_icon(kind: AgentTraceKind) -> ArgusIcon {
     match kind {
         AgentTraceKind::Warning => ArgusIcon::Info,
-        AgentTraceKind::Model
-        | AgentTraceKind::Reasoning
-        | AgentTraceKind::Output
-        | AgentTraceKind::Report => ArgusIcon::SmartAnalysis,
+        AgentTraceKind::Model | AgentTraceKind::Reasoning | AgentTraceKind::Output => {
+            ArgusIcon::SmartAnalysis
+        }
         AgentTraceKind::Tool => ArgusIcon::Settings,
         AgentTraceKind::User => ArgusIcon::ArrowRight,
         AgentTraceKind::Status => ArgusIcon::Info,
@@ -2454,7 +2292,6 @@ mod tests {
                 display_path: "来源/memory.log".to_string(),
                 search_key: "来源/memory.log".to_string(),
                 kind: AssistantMentionKind::File,
-                source_ref: Some("opaque-ref".to_string()),
                 matching_source_count: 1,
             },
         };
@@ -2463,7 +2300,7 @@ mod tests {
             std::slice::from_ref(&selected),
         );
         assert!(runtime.contains("ARGUS_SELECTED_SOURCES"));
-        assert!(runtime.contains("opaque-ref"));
+        assert!(runtime.contains("来源/memory.log"));
         assert_eq!(
             assistant_message_with_mentions("检查全部日志", &[selected]),
             "检查全部日志"
@@ -2512,13 +2349,12 @@ mod tests {
             panel.replace_messages(vec![
                 AssistantPanelMessage::Answer {
                     content: "上一轮答案".to_string(),
-                    citations: Vec::new(),
                 },
                 AssistantPanelMessage::User(current_question),
             ]);
             panel.active_turn_message_start = Some(2);
 
-            panel.finish_answer("当前轮答案".to_string(), Vec::new());
+            panel.finish_answer("当前轮答案".to_string());
 
             assert!(matches!(
                 panel.messages.first(),
@@ -2552,7 +2388,6 @@ mod tests {
                 AssistantPanelMessage::Reasoning("旧配置思考".to_string()),
                 AssistantPanelMessage::Answer {
                     content: "旧配置半截答案".to_string(),
-                    citations: Vec::new(),
                 },
             ]);
             panel.status = AssistantPanelStatus::Running;

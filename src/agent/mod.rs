@@ -1,34 +1,25 @@
-//! 文件职责：组织 Argus AI 日志分析 Agent 的领域模块和公共入口。
+//! 文件职责：组织 Argus AI Agent 的领域模块和公共入口。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-17
+//! 修改日期：2026-09-12
 //! 作者：Argus 开发团队
-//! 主要功能：导出凭据、会话编排、Agent 专用日志访问、报告、来源快照和结构化工具所需类型。
+//! 主要功能：导出凭据、会话编排、来源快照和模型能力探测所需类型。
 
-pub(crate) mod advanced_tools;
-pub(crate) mod analyzers;
 pub(crate) mod assistant;
-pub(crate) mod batch_search;
 pub(crate) mod credential;
-pub(crate) mod log_access;
-pub(crate) mod log_search;
 pub(crate) mod model_gateway;
 pub(crate) mod orchestrator;
-pub(crate) mod report;
 pub(crate) mod runtime;
 pub(crate) mod session;
 pub(crate) mod source_scan;
-pub(crate) mod tools;
 
 pub(crate) use assistant::{AssistantHistoryTurn, AssistantRunRequest, run_assistant_turn};
 pub(crate) use credential::{load_api_key, save_api_key};
 pub(crate) use model_gateway::probe_model_capabilities;
 pub(crate) use orchestrator::{AgentRunRequest, run_agent_session};
-pub(crate) use report::{DiagnosticFinding, DiagnosticReport};
 pub(crate) use runtime::agent_runtime;
 pub(crate) use session::{
-    AgentAnalysisStageEvent, AgentAnalysisStageStatus, AgentBudgetSnapshot, AgentEvent,
-    AgentScopeSelection, AgentSessionStatus, AgentStreamKind, AgentTraceEntry, AgentTraceKind,
-    AgentUserMessage, AgentUserMessageStatus, SourceScopeSnapshot,
+    AgentBudgetSnapshot, AgentEvent, AgentScopeSelection, AgentSessionStatus, AgentStreamKind,
+    AgentTraceEntry, AgentTraceKind, AgentUserMessage, AgentUserMessageStatus, SourceScopeSnapshot,
 };
 pub(crate) use source_scan::{
     AgentLogProfileMatchSummary, AgentSourcePreparation, prepare_agent_source_scope,
@@ -42,13 +33,10 @@ mod architecture_tests {
 
     /// Agent 模型工具允许依赖的实现文件；这些文件共同构成独立的工具执行边界。
     const AGENT_TOOL_IMPLEMENTATION_FILES: &[&str] = &[
-        "src/agent/tools.rs",
-        "src/agent/advanced_tools.rs",
-        "src/agent/batch_search.rs",
-        "src/agent/log_access.rs",
-        "src/agent/log_search.rs",
-        "src/agent/analyzers.rs",
+        "src/agent/orchestrator.rs",
+        "src/agent/assistant.rs",
         "src/agent/source_scan.rs",
+        "src/agent/session.rs",
     ];
     /// 主窗口业务模块的导入前缀；模型工具不得重新接回这些展示或交互流程。
     const FORBIDDEN_BUSINESS_IMPORTS: &[&str] =
@@ -65,12 +53,6 @@ mod architecture_tests {
                 assert!(
                     !source.contains(forbidden_import),
                     "Agent 工具实现 {relative_path} 禁止导入主窗口业务模块 {forbidden_import}"
-                );
-            }
-            if relative_path.ends_with("batch_search.rs") {
-                assert!(
-                    !source.contains("crate::agent::log_access"),
-                    "Agent 流式批量搜索不得重新接入全文日志文档或行索引"
                 );
             }
         }

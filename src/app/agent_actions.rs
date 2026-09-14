@@ -11,10 +11,8 @@ use crate::agent::{
     AgentLogProfileMatchSummary, AgentRunRequest, AgentSourcePreparation, SourceScopeSnapshot,
     agent_runtime, load_api_key, prepare_agent_source_scope, run_agent_session,
 };
-use crate::app::{ArgusApp, Workspace, frameless_resizable_titlebar};
+use crate::app::{ArgusApp, frameless_resizable_titlebar};
 use crate::config::{AiConfig, AiModelProfile};
-use crate::loader::SourceId;
-use crate::search::search_engine::SearchResult;
 use crate::ui::agent_dialog::AgentLaunchDialog;
 use crate::ui::agent_window::AgentWindow;
 
@@ -134,7 +132,6 @@ impl ArgusApp {
         self.ai_agent_source_scan_cancellation = Some(scan_cancellation.clone());
         let registry = self.source_registry.clone();
         let selected_id = self.source_registry.selected_id();
-        let default_encoding = self.selected_encoding.clone();
         let loader_config = self.config.loader.clone();
         let scan_config = config.clone();
         let scan_loader_config = loader_config.clone();
@@ -148,7 +145,6 @@ impl ArgusApp {
                         registry,
                         selected_id,
                         scan_config,
-                        default_encoding,
                         scan_loader_config,
                         scan_cancellation,
                     )
@@ -205,10 +201,8 @@ impl ArgusApp {
             scope,
             warnings,
             match_summaries,
-            source_scan_elapsed_seconds,
-            profile_elapsed_seconds,
         } = preparation;
-        // 回填与生成快照使用同一注册表副本，确保报告中的内部来源 ID 可以继续导航到主窗口。
+        // 回填与生成快照使用同一注册表副本，确保证据行可以继续导航到主窗口。
         self.source_registry = registry;
         self.rebuild_filtered_source_ids();
         self.mark_source_content_changed(cx);
@@ -220,8 +214,6 @@ impl ArgusApp {
             scope,
             match_summaries,
             warnings.len(),
-            source_scan_elapsed_seconds,
-            profile_elapsed_seconds,
             cx,
         ) {
             self.finish_ai_agent_preparing_with_error(error, cx);
@@ -238,8 +230,6 @@ impl ArgusApp {
         scope: SourceScopeSnapshot,
         match_summaries: Vec<AgentLogProfileMatchSummary>,
         warning_count: usize,
-        source_scan_elapsed_seconds: u64,
-        profile_elapsed_seconds: u64,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let context_window_tokens = model.context_window_tokens;
@@ -253,12 +243,6 @@ impl ArgusApp {
         let pending_user_messages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let user_message_gate = std::sync::Arc::new(std::sync::Mutex::new(true));
         let (event_sender, event_receiver) = async_channel::bounded(256);
-        let config_root = self
-            .config_manager
-            .settings_path()
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| "无法解析 AI 报告保存目录".to_string())?;
 
         let app = cx.entity();
         let initial_theme = self.theme.clone();
@@ -324,14 +308,11 @@ impl ArgusApp {
             model,
             scope,
             api_key,
-            config_root,
             cancellation,
             user_message_receiver,
             event_sender,
             pending_user_messages,
             user_message_gate,
-            source_scan_elapsed_seconds,
-            profile_elapsed_seconds,
         }));
         Ok(())
     }
@@ -345,47 +326,6 @@ impl ArgusApp {
             });
         }
         self.placeholder_notice = message;
-    }
-
-    /// 从 Agent 报告证据引用打开主窗口日志并定位到首行。
-    ///
-    /// 参数说明：
-    /// - `source_id`：会话快照中解析得到的内部来源 ID；模型不能直接提供该值。
-    /// - `line`：报告中的 1 基证据首行。
-    /// - `cx`：用于在日志尚未加载时启动现有异步读取流程。
-    pub(crate) fn open_ai_evidence(
-        &mut self,
-        source_id: SourceId,
-        line: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(node) = self.source_registry.node(source_id).cloned() else {
-            self.placeholder_notice =
-                "证据来源已不在当前来源树中，请重新加载来源后复核".to_string();
-            return;
-        };
-        if !node.kind.is_log_candidate() {
-            self.placeholder_notice = "证据来源已变化，当前节点不再是可读取日志".to_string();
-            return;
-        }
-        // 引用可能来自“链接”工作区常驻的助手面板，导航前必须先恢复日志分析布局。
-        self.switch_workspace(Workspace::LogAnalysis);
-        self.select_source(source_id);
-        self.request_open_log_content(source_id, cx);
-        self.scroll_source_into_view(source_id);
-
-        // 复用现有搜索结果待定位机制：日志尚在后台读取时，读取完成回调会自动滚动并高亮目标行。
-        self.log_search.pending_activation = Some(SearchResult {
-            source_id,
-            label: node.label.clone(),
-            path: node.label,
-            line_number: line.saturating_sub(1),
-            line_text: String::new(),
-            match_ranges: Vec::new(),
-            matched_keywords: Vec::new(),
-        });
-        self.finish_pending_search_activation(source_id);
-        self.placeholder_notice = format!("正在定位 Agent 证据第 {} 行", line.max(1));
     }
 
     /// 返回问题模态框预览的来源根名称。

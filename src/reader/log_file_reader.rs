@@ -105,20 +105,6 @@ impl LogReaderHandle {
         self.document.lines(start_line, max_lines)
     }
 
-    /// 按行号升序批量遍历指定范围；分页文档会合并相邻字节读取，避免逐行 seek。
-    ///
-    /// 返回值：`true` 表示完整遍历，`false` 表示调用方通过回调提前停止。
-    pub(crate) fn for_each_line_in_range<F>(
-        &self,
-        line_range: Range<usize>,
-        callback: F,
-    ) -> Result<bool>
-    where
-        F: FnMut(DisplayedLogLine) -> bool,
-    {
-        self.document.for_each_line_in_range(line_range, callback)
-    }
-
     /// 只读取已经命中的缓存行；分页日志缺失行不会触发文件 I/O。
     ///
     /// 参数说明：
@@ -197,28 +183,6 @@ impl LogDocument {
                             .collect()
                     })
             }
-        }
-    }
-
-    /// 按升序遍历指定行范围；内存文档直接借用行表，分页文档复用连续字节批量读取。
-    fn for_each_line_in_range<F>(&self, line_range: Range<usize>, mut callback: F) -> Result<bool>
-    where
-        F: FnMut(DisplayedLogLine) -> bool,
-    {
-        match self {
-            Self::InMemory(document) => {
-                let range_end = line_range.end.min(document.lines.len());
-                for line_number in line_range.start.min(range_end)..range_end {
-                    if !callback(DisplayedLogLine {
-                        line_number,
-                        text: document.lines[line_number].clone(),
-                    }) {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            Self::Paged(document) => document.for_each_line_in_range(line_range, callback),
         }
     }
 

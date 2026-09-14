@@ -4,8 +4,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：调用 SourceTreeScanner 全量扫描目录和归档，匹配日志类型说明，并返回可安全回填 UI 的注册表。
 
-use std::time::Instant;
-
 use crate::agent::session::{AgentScopeSelection, SourceScopeSnapshot};
 use crate::config::{
     AiConfig, LoaderConfig, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
@@ -16,7 +14,7 @@ use crate::loader::{SourceId, SourceRegistry};
 /// AI 来源扫描完成后的不可变会话范围及补齐后的来源注册表。
 #[derive(Debug)]
 pub(crate) struct AgentSourcePreparation {
-    /// 完整扫描后的来源树副本；回填主应用后可继续支持报告证据跳转。
+    /// 完整扫描后的来源树副本；回填主应用后可继续支持证据跳转。
     pub registry: SourceRegistry,
     /// 已完成日志类型匹配的 Agent 会话范围。
     pub scope: SourceScopeSnapshot,
@@ -24,10 +22,6 @@ pub(crate) struct AgentSourcePreparation {
     pub warnings: Vec<String>,
     /// 当前所有已启用日志类型及其逐规则命中统计，只供会话窗口解释匹配结果。
     pub match_summaries: Vec<AgentLogProfileMatchSummary>,
-    /// 完整补齐来源树实际消耗秒数，供阶段时间线展示。
-    pub source_scan_elapsed_seconds: u64,
-    /// 生成范围快照并匹配日志类型实际消耗秒数，供阶段时间线展示。
-    pub profile_elapsed_seconds: u64,
 }
 
 /// 一个日志类型在当前来源范围内的匹配统计。
@@ -66,7 +60,6 @@ pub(crate) struct AgentLogRuleMatchSummary {
 /// - `registry`：点击开始分析时复制的来源树，后台任务只修改该副本；
 /// - `selected_id`：当前选中节点，用于解析所属顶层来源根；
 /// - `config`：已经规范化和校验的 AI 配置，包含日志类型名称匹配规则；
-/// - `default_encoding`：日志工具默认使用的字符编码；
 /// - `loader_config`：目录、符号链接和归档深度边界。
 ///
 /// 返回值：扫描成功且至少发现一个日志候选时返回完整注册表和范围快照。
@@ -74,7 +67,6 @@ pub(crate) fn prepare_agent_source_scope(
     registry: SourceRegistry,
     selected_id: Option<SourceId>,
     config: AiConfig,
-    default_encoding: String,
     loader_config: LoaderConfig,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentSourcePreparation, String> {
@@ -82,7 +74,6 @@ pub(crate) fn prepare_agent_source_scope(
         registry,
         AgentScopeSelection::SelectedRoot(selected_id),
         config,
-        default_encoding,
         loader_config,
         cancellation,
     )
@@ -93,43 +84,31 @@ pub(crate) fn prepare_agent_source_scope_for_selection(
     registry: SourceRegistry,
     selection: AgentScopeSelection,
     config: AiConfig,
-    default_encoding: String,
     loader_config: LoaderConfig,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<AgentSourcePreparation, String> {
-    let source_scan_started_at = Instant::now();
     let root_ids = resolve_scope_roots(&registry, selection)?;
     let scan_result = SourceTreeScanner::new(&registry, loader_config, cancellation)
         .scan(&root_ids)
         .map_err(|error| error.to_string())?;
     let registry = scan_result.registry;
 
-    let source_scan_elapsed_seconds = source_scan_started_at.elapsed().as_secs();
-    let profile_started_at = Instant::now();
     let warnings = scan_result.warnings;
-    let scope = SourceScopeSnapshot::from_registry_selection(
-        &registry,
-        selection,
-        &config,
-        default_encoding,
-    )
-    .map_err(|error| {
-        if warnings.is_empty() {
-            error
-        } else {
-            format!("{error}；扫描警告：{}", warnings.join("；"))
-        }
-    })?;
+    let scope = SourceScopeSnapshot::from_registry_selection(&registry, selection, &config)
+        .map_err(|error| {
+            if warnings.is_empty() {
+                error
+            } else {
+                format!("{error}；扫描警告：{}", warnings.join("；"))
+            }
+        })?;
     let match_summaries = build_match_summaries(&config.log_profiles, &scope);
-    let profile_elapsed_seconds = profile_started_at.elapsed().as_secs();
 
     Ok(AgentSourcePreparation {
         registry,
         scope,
         warnings,
         match_summaries,
-        source_scan_elapsed_seconds,
-        profile_elapsed_seconds,
     })
 }
 
@@ -267,7 +246,6 @@ mod tests {
             registry,
             None,
             config,
-            "UTF-8".to_string(),
             LoaderConfig::default(),
             tokio_util::sync::CancellationToken::new(),
         )
@@ -361,7 +339,6 @@ mod tests {
             registry,
             None,
             config,
-            "UTF-8".to_string(),
             LoaderConfig::default(),
             tokio_util::sync::CancellationToken::new(),
         )
@@ -426,7 +403,6 @@ mod tests {
             registry,
             AgentScopeSelection::AllLoadedRoots,
             config,
-            "UTF-8".to_string(),
             LoaderConfig::default(),
             tokio_util::sync::CancellationToken::new(),
         )
@@ -481,7 +457,6 @@ mod tests {
             registry,
             None,
             AiConfig::default(),
-            "UTF-8".to_string(),
             LoaderConfig::default(),
             cancellation,
         )
