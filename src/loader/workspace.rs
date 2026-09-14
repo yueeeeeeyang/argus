@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::LoaderConfig;
 use crate::config::paths::argus_config_dir;
-use crate::loader::archive::adapter::ArchiveAdapter;
+use crate::loader::archive::adapter::{ArchiveAdapter, ArchiveEntryConsumer, ArchiveEntrySession};
 use crate::loader::archive::detector::{
     ArchiveFormat, detect_archive_format, detect_archive_format_by_name,
 };
@@ -111,6 +111,68 @@ struct ArchiveContainerContext {
     format: ArchiveFormat,
     /// 最外层真实压缩包路径，用于密码查询。
     root_archive: PathBuf,
+}
+
+/// 解压过程中的条目读取来源。
+///
+/// 会话优先：一次打开压缩包复用已解析的中央目录，条目数量大的包不再逐条目
+/// 重新打开；不支持会话的格式回退适配器逐条目路径，语义完全一致。
+enum EntrySource<'a> {
+    /// 一次打开的会话句柄。
+    Session(Box<dyn ArchiveEntrySession>),
+    /// 逐条目打开的适配器路径。
+    Adapter {
+        /// 格式适配器。
+        adapter: &'a dyn ArchiveAdapter,
+        /// 压缩包路径。
+        path: &'a Path,
+        /// 解密密码。
+        password: Option<&'a str>,
+    },
+}
+
+impl EntrySource<'_> {
+    /// 枚举全部条目。
+    fn list_entries(
+        &mut self,
+    ) -> anyhow::Result<Vec<crate::loader::archive::adapter::ArchiveEntryInfo>> {
+        match self {
+            Self::Session(session) => session.list_entries(),
+            Self::Adapter {
+                adapter,
+                path,
+                password,
+            } => adapter.list_entries(path, *password),
+        }
+    }
+
+    /// 读取一个条目的完整字节。
+    fn read_entry_bytes(&mut self, entry_path: &str) -> anyhow::Result<Vec<u8>> {
+        match self {
+            Self::Session(session) => session.read_entry_bytes(entry_path),
+            Self::Adapter {
+                adapter,
+                path,
+                password,
+            } => adapter.read_entry_bytes(path, entry_path, *password),
+        }
+    }
+
+    /// 流式输出一个条目。
+    fn stream_entry(
+        &mut self,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Session(session) => session.stream_entry(entry_path, consumer),
+            Self::Adapter {
+                adapter,
+                path,
+                password,
+            } => adapter.stream_entry(path, entry_path, *password, consumer),
+        }
+    }
 }
 
 /// 物化器：把每个来源根复制或解压为工作目录下的一个顶层目录。
@@ -544,7 +606,28 @@ impl WorkspaceMaterializer<'_> {
 
         let password_key = ArchivePasswordKey::new(&container.root_archive, &chain);
         let password = self.passwords.get(&password_key);
-        let entries = match adapter.list_entries(&container.path, password) {
+        // 会话打开失败按性能降级处理：回退逐条目打开，错误交给后续枚举统一归类。
+        let source = match adapter.open_session(&container.path, password) {
+            Ok(Some(session)) => EntrySource::Session(session),
+            _ => EntrySource::Adapter {
+                adapter,
+                path: &container.path,
+                password,
+            },
+        };
+        self.extract_archive_with_source(container, dest_dir, chain, depth, source)
+    }
+
+    /// 使用已建立的条目来源执行解压循环；嵌套 ZIP 可由内存会话直接进入。
+    fn extract_archive_with_source(
+        &mut self,
+        container: &ArchiveContainerContext,
+        dest_dir: &Path,
+        chain: Vec<String>,
+        depth: usize,
+        mut source: EntrySource<'_>,
+    ) -> Result<(), MaterializeRootError> {
+        let entries = match source.list_entries() {
             Ok(entries) => entries,
             Err(error) => {
                 if is_retryable_password_error(&error) {
@@ -604,22 +687,14 @@ impl WorkspaceMaterializer<'_> {
                 .filter(|format| depth < self.config.max_archive_depth && format.is_supported());
             match nested_format {
                 Some(ArchiveFormat::Gzip) => {
-                    self.extract_nested_gzip(
-                        adapter,
-                        container,
-                        &entry.path,
-                        password,
-                        &target,
-                        &display_entry,
-                    )?;
+                    self.extract_nested_gzip(&mut source, &entry.path, &target, &display_entry)?;
                 }
                 Some(nested) => {
                     self.extract_nested_container(
-                        adapter,
+                        &mut source,
                         container,
                         &entry.path,
                         nested,
-                        password,
                         &target,
                         chain.clone(),
                         depth,
@@ -627,14 +702,7 @@ impl WorkspaceMaterializer<'_> {
                     )?;
                 }
                 None => {
-                    self.stream_entry_to_file(
-                        adapter,
-                        &container.path,
-                        &entry.path,
-                        password,
-                        &target,
-                        &display_entry,
-                    )?;
+                    self.stream_entry_to_file(&mut source, &entry.path, &target, &display_entry)?;
                 }
             }
             self.files_written += 1;
@@ -648,10 +716,8 @@ impl WorkspaceMaterializer<'_> {
     /// 解压嵌套单文件 gzip 条目为普通文件（落盘名沿用条目名去掉 `.gz` 的约定）。
     fn extract_nested_gzip(
         &mut self,
-        adapter: &dyn ArchiveAdapter,
-        container: &ArchiveContainerContext,
+        source: &mut EntrySource<'_>,
         entry_path: &str,
-        password: Option<&str>,
         target: &Path,
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
@@ -668,31 +734,22 @@ impl WorkspaceMaterializer<'_> {
             .parent()
             .map(|parent| parent.join(&file_stem))
             .unwrap_or_else(|| PathBuf::from(&file_stem));
-        self.stream_entry_to_file(
-            adapter,
-            &container.path,
-            entry_path,
-            password,
-            &target,
-            display_entry,
-        )
+        self.stream_entry_to_file(source, entry_path, &target, display_entry)
     }
 
     /// 解压嵌套容器条目：先把容器读入内存并落盘 scratch，再递归解压为同名目录。
     fn extract_nested_container(
         &mut self,
-        adapter: &dyn ArchiveAdapter,
+        source: &mut EntrySource<'_>,
         container: &ArchiveContainerContext,
         entry_path: &str,
         nested_format: ArchiveFormat,
-        password: Option<&str>,
         target: &Path,
         chain: Vec<String>,
         depth: usize,
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
-        let container_bytes = match adapter.read_entry_bytes(&container.path, entry_path, password)
-        {
+        let container_bytes = match source.read_entry_bytes(entry_path) {
             Ok(bytes) => bytes,
             Err(error) if is_retryable_password_error(&error) => {
                 return Err(MaterializeRootError::PasswordPending);
@@ -722,29 +779,74 @@ impl WorkspaceMaterializer<'_> {
             )
         })?;
 
-        let scratch_dir = self.root.join(".argus-scratch");
-        fs::create_dir_all(&scratch_dir).map_err(|error| {
-            MaterializeRootError::Fatal(anyhow::Error::new(error).context(format!(
-                "无法创建嵌套解压暂存目录：{}",
-                scratch_dir.display()
-            )))
-        })?;
-        let scratch_file = scratch_dir.join(format!("nested-{}-{depth}", self.files_written));
-        fs::write(&scratch_file, &container_bytes).map_err(|error| {
-            MaterializeRootError::Fatal(
-                anyhow::Error::new(error).context(format!("无法落盘嵌套压缩容器：{display_entry}")),
-            )
-        })?;
-
         let mut nested_chain = chain;
         nested_chain.push(entry_path.to_string());
-        let nested_container = ArchiveContainerContext {
-            path: scratch_file.clone(),
-            format: nested_format,
-            root_archive: container.root_archive.clone(),
+        let nested_password_key = ArchivePasswordKey::new(&container.root_archive, &nested_chain);
+        let nested_password = self.passwords.get(&nested_password_key).map(str::to_string);
+        let in_memory_session = archive_registry()
+            .adapter_for(nested_format)
+            .and_then(|adapter| {
+                adapter
+                    .open_session_from_bytes(
+                        &container_bytes,
+                        display_entry,
+                        nested_password.as_deref(),
+                    )
+                    .ok()
+                    .flatten()
+            });
+        // 支持内存会话的格式（ZIP）直接在字节上解析，免去临时文件落盘往返；
+        // 其余格式维持临时文件路径。内存会话上下文的 path 仅用于展示。
+        let result = if let Some(session) = in_memory_session {
+            let nested_container = ArchiveContainerContext {
+                path: PathBuf::from(display_entry),
+                format: nested_format,
+                root_archive: container.root_archive.clone(),
+            };
+            self.extract_archive_with_source(
+                &nested_container,
+                &nested_dir,
+                nested_chain,
+                depth + 1,
+                EntrySource::Session(session),
+            )
+        } else {
+            let scratch_dir = self.root.join(".argus-scratch");
+            fs::create_dir_all(&scratch_dir).map_err(|error| {
+                MaterializeRootError::Fatal(anyhow::Error::new(error).context(format!(
+                    "无法创建嵌套解压暂存目录：{}",
+                    scratch_dir.display()
+                )))
+            })?;
+            let scratch_file = scratch_dir.join(format!("nested-{}-{depth}", self.files_written));
+            fs::write(&scratch_file, &container_bytes).map_err(|error| {
+                MaterializeRootError::Fatal(
+                    anyhow::Error::new(error)
+                        .context(format!("无法落盘嵌套压缩容器：{display_entry}")),
+                )
+            })?;
+            let nested_container = ArchiveContainerContext {
+                path: scratch_file.clone(),
+                format: nested_format,
+                root_archive: container.root_archive.clone(),
+            };
+            let adapter = archive_registry()
+                .adapter_for(nested_format)
+                .expect("进入嵌套解压前已确认适配器存在");
+            let result = self.extract_archive_with_source(
+                &nested_container,
+                &nested_dir,
+                nested_chain,
+                depth + 1,
+                EntrySource::Adapter {
+                    adapter,
+                    path: &scratch_file,
+                    password: nested_password.as_deref(),
+                },
+            );
+            let _ = fs::remove_file(&scratch_file);
+            result
         };
-        let result = self.extract_archive(&nested_container, &nested_dir, nested_chain, depth + 1);
-        let _ = fs::remove_file(&scratch_file);
         // 嵌套包只解出一个普通文件时提升到父级，去掉以压缩包名命名的包装目录。
         if result.is_ok() {
             Self::promote_single_file_out_of_dir(&nested_dir);
@@ -817,10 +919,8 @@ impl WorkspaceMaterializer<'_> {
     /// 流式解压单个条目到文件；单条目超限跳过该条目，总预算耗尽降级当前根。
     fn stream_entry_to_file(
         &mut self,
-        adapter: &dyn ArchiveAdapter,
-        archive_file: &Path,
+        source: &mut EntrySource<'_>,
         entry_path: &str,
-        password: Option<&str>,
         target: &Path,
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
@@ -843,21 +943,20 @@ impl WorkspaceMaterializer<'_> {
         let mut entry_too_large = false;
         let mut budget_exhausted = false;
         let mut remaining_budget = self.remaining_extract_budget;
-        let consume_result =
-            adapter.stream_entry(archive_file, entry_path, password, &mut |chunk: &[u8]| {
-                written += chunk.len() as u64;
-                if written > MAX_EXTRACTED_ENTRY_BYTES {
-                    entry_too_large = true;
-                    bail!("压缩包条目超过单文件物化上限");
-                }
-                if chunk.len() as u64 > remaining_budget {
-                    budget_exhausted = true;
-                    bail!("物化超出解压总预算");
-                }
-                remaining_budget -= chunk.len() as u64;
-                file.write_all(chunk)?;
-                Ok(())
-            });
+        let consume_result = source.stream_entry(entry_path, &mut |chunk: &[u8]| {
+            written += chunk.len() as u64;
+            if written > MAX_EXTRACTED_ENTRY_BYTES {
+                entry_too_large = true;
+                bail!("压缩包条目超过单文件物化上限");
+            }
+            if chunk.len() as u64 > remaining_budget {
+                budget_exhausted = true;
+                bail!("物化超出解压总预算");
+            }
+            remaining_budget -= chunk.len() as u64;
+            file.write_all(chunk)?;
+            Ok(())
+        });
         self.remaining_extract_budget = remaining_budget;
 
         if entry_too_large {

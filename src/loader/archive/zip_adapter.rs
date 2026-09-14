@@ -14,6 +14,7 @@ use zip::result::ZipError;
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo,
+    ArchiveEntrySession,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::password::ArchivePasswordError;
@@ -79,6 +80,98 @@ impl ArchiveAdapter for ZipArchiveAdapter {
             consumer,
         )
     }
+
+    /// ZIP 支持会话式读取：一次打开复用句柄，避免大包逐条目重解析中央目录。
+    fn open_session(
+        &self,
+        path: &Path,
+        password: Option<&str>,
+    ) -> Result<Option<Box<dyn ArchiveEntrySession>>> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开 ZIP 压缩包：{}", path.display()))?;
+        let session = ZipEntrySession::new(file, path.display().to_string(), password)?;
+        Ok(Some(Box::new(session)))
+    }
+
+    /// 嵌套 ZIP 直接在内存字节上建立会话，免去临时文件落盘往返。
+    fn open_session_from_bytes(
+        &self,
+        bytes: &[u8],
+        source_label: &str,
+        password: Option<&str>,
+    ) -> Result<Option<Box<dyn ArchiveEntrySession>>> {
+        let session = ZipEntrySession::new(
+            std::io::Cursor::new(bytes.to_vec()),
+            source_label.to_string(),
+            password,
+        )?;
+        Ok(Some(Box::new(session)))
+    }
+}
+
+/// ZIP 会话：持有一次打开的压缩包句柄，跨条目复用已解析的中央目录。
+pub(crate) struct ZipEntrySession<R>
+where
+    R: Read + Seek,
+{
+    /// 已解析的 ZIP 句柄。
+    archive: ZipArchive<R>,
+    /// 错误提示使用的来源名称。
+    source_label: String,
+    /// 解密密码；整个会话共用。
+    password: Option<String>,
+}
+
+impl<R> ZipEntrySession<R>
+where
+    R: Read + Seek,
+{
+    /// 打开句柄并解析中央目录；后续条目读取不再重复解析。
+    fn new(reader: R, source_label: String, password: Option<&str>) -> Result<Self> {
+        let archive = ZipArchive::new(reader)
+            .with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
+        Ok(Self {
+            archive,
+            source_label,
+            password: password.map(str::to_string),
+        })
+    }
+}
+
+impl<R> ArchiveEntrySession for ZipEntrySession<R>
+where
+    R: Read + Seek + Send,
+{
+    fn list_entries(&mut self) -> Result<Vec<ArchiveEntryInfo>> {
+        list_zip_entries_in_archive(
+            &mut self.archive,
+            &self.source_label,
+            self.password.as_deref(),
+        )
+    }
+
+    fn read_entry_bytes(&mut self, entry_path: &str) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.stream_entry(entry_path, &mut |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })?;
+        Ok(bytes)
+    }
+
+    fn stream_entry(
+        &mut self,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()> {
+        stream_zip_entry_in_archive(
+            &mut self.archive,
+            entry_path,
+            &self.source_label,
+            self.password.as_deref(),
+            consumer,
+        )
+    }
 }
 
 /// 从任意可读可 seek 的输入枚举 ZIP 条目。
@@ -101,14 +194,26 @@ where
 {
     let mut archive =
         ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
+    list_zip_entries_in_archive(&mut archive, source_label, password)
+}
+
+/// 在已解析的 ZIP 句柄上枚举条目；会话与单次枚举共用同一实现。
+fn list_zip_entries_in_archive<R>(
+    archive: &mut ZipArchive<R>,
+    source_label: &str,
+    password: Option<&str>,
+) -> Result<Vec<ArchiveEntryInfo>>
+where
+    R: Read + Seek,
+{
     let mut entries = Vec::new();
     let mut password_verified = false;
 
     for index in 0..archive.len() {
         let (entry_path, is_dir, size, encrypted) =
-            read_zip_entry_metadata(&mut archive, index, source_label)?;
+            read_zip_entry_metadata(archive, index, source_label)?;
         if encrypted && !password_verified {
-            ensure_zip_entry_password(&mut archive, index, encrypted, password, source_label)?;
+            ensure_zip_entry_password(archive, index, encrypted, password, source_label)?;
             password_verified = true;
         }
         if entry_path.is_empty() {
@@ -178,13 +283,27 @@ pub(crate) fn stream_zip_entry_from_reader<R>(
 where
     R: Read + Seek,
 {
-    let normalized_entry_path = normalize_archive_entry_path(entry_path);
     let mut archive =
         ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
+    stream_zip_entry_in_archive(&mut archive, entry_path, source_label, password, consumer)
+}
+
+/// 在已解析的 ZIP 句柄上流式输出条目；会话与单次读取共用同一实现。
+fn stream_zip_entry_in_archive<R>(
+    archive: &mut ZipArchive<R>,
+    entry_path: &str,
+    source_label: &str,
+    password: Option<&str>,
+    consumer: &mut ArchiveEntryConsumer<'_>,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
+    let normalized_entry_path = normalize_archive_entry_path(entry_path);
     let mut buffer = [0_u8; 64 * 1024];
 
     // ZIP 中央目录支持按名称直接定位条目；大量 Runtime 日志逐个读取时可避免每次线性扫描全部条目。
-    match open_zip_entry_by_name(&mut archive, &normalized_entry_path, password, source_label) {
+    match open_zip_entry_by_name(archive, &normalized_entry_path, password, source_label) {
         Ok(mut file) => {
             if file.is_dir() {
                 bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
@@ -205,7 +324,7 @@ where
     // 部分异常压缩包可能使用反斜杠或不规范路径名；保留旧的归一化扫描作为兼容回退。
     for index in 0..archive.len() {
         let (current_path, is_dir, _size, encrypted) =
-            read_zip_entry_metadata(&mut archive, index, source_label)?;
+            read_zip_entry_metadata(archive, index, source_label)?;
         if current_path != normalized_entry_path {
             continue;
         }
@@ -213,8 +332,7 @@ where
             bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
         }
 
-        let mut file =
-            open_zip_entry_by_index(&mut archive, index, encrypted, password, source_label)?;
+        let mut file = open_zip_entry_by_index(archive, index, encrypted, password, source_label)?;
         stream_open_zip_file(
             &mut file,
             &normalized_entry_path,

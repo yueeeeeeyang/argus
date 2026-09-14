@@ -1,8 +1,8 @@
 //! 文件职责：定义压缩包统一适配器抽象。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-12
+//! 修改日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：为 ZIP、TAR、压缩 TAR、7Z 和 RAR 等格式提供统一识别、枚举、单条读取和能力声明模型。
+//! 主要功能：为 ZIP、TAR、压缩 TAR、7Z 和 RAR 等格式提供统一识别、枚举、单条读取、会话式读取和能力声明模型。
 
 use std::path::Path;
 
@@ -42,6 +42,25 @@ pub(crate) struct ArchiveCapabilities {
 
 /// 压缩包条目流式输出回调；适配器每读取到一段解压后字节就调用一次。
 pub(crate) type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
+
+/// 一次打开压缩包后的会话式条目读取。
+///
+/// 条目数量大的压缩包（上万个条目、大量嵌套包）如果逐条目重新打开并重解析
+/// 中央目录，开销会随条目数平方增长；会话保证整个解压过程只解析一次。
+pub(crate) trait ArchiveEntrySession: Send {
+    /// 枚举全部条目；语义与 [`ArchiveAdapter::list_entries`] 一致。
+    fn list_entries(&mut self) -> Result<Vec<ArchiveEntryInfo>>;
+
+    /// 读取一个条目的完整字节；语义与 [`ArchiveAdapter::read_entry_bytes`] 一致。
+    fn read_entry_bytes(&mut self, entry_path: &str) -> Result<Vec<u8>>;
+
+    /// 流式输出一个条目；语义与 [`ArchiveAdapter::stream_entry`] 一致。
+    fn stream_entry(
+        &mut self,
+        entry_path: &str,
+        consumer: &mut ArchiveEntryConsumer<'_>,
+    ) -> Result<()>;
+}
 
 /// 压缩包适配器统一接口；每个格式自行声明识别规则、能力和读写入口。
 pub(crate) trait ArchiveAdapter: Sync {
@@ -92,5 +111,28 @@ pub(crate) trait ArchiveAdapter: Sync {
     ) -> Result<()> {
         let bytes = self.read_entry_bytes(path, entry_path, password)?;
         consumer(&bytes)
+    }
+
+    /// 打开压缩包建立会话式读取；返回 `None` 时调用方回退逐条目打开的旧路径。
+    ///
+    /// 默认不提供会话；支持会话是纯性能优化，语义必须与逐条目接口完全一致。
+    fn open_session(
+        &self,
+        _path: &Path,
+        _password: Option<&str>,
+    ) -> Result<Option<Box<dyn ArchiveEntrySession>>> {
+        Ok(None)
+    }
+
+    /// 从内存字节建立会话式读取，供嵌套压缩包免去临时文件落盘。
+    ///
+    /// 默认不提供；调用方在返回 `None` 或错误时回退临时文件路径。
+    fn open_session_from_bytes(
+        &self,
+        _bytes: &[u8],
+        _source_label: &str,
+        _password: Option<&str>,
+    ) -> Result<Option<Box<dyn ArchiveEntrySession>>> {
+        Ok(None)
     }
 }
