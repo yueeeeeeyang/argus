@@ -149,6 +149,21 @@ struct SettingsModalSnapshot {
     is_open_with_registration_busy: bool,
     /// 系统右键菜单最近一次操作提示。
     open_with_registration_message: Option<String>,
+    /// Skill 管理分区的完整列表（内置 + 导入）。
+    skill_entries: Vec<SkillListEntry>,
+}
+
+/// Skill 管理分区的单行展示状态。
+#[derive(Clone, Debug, PartialEq)]
+struct SkillListEntry {
+    /// Skill 稳定名称。
+    name: String,
+    /// 一句话用途说明。
+    description: String,
+    /// 是否为内置 Skill。
+    is_builtin: bool,
+    /// 当前是否启用。
+    is_enabled: bool,
 }
 
 impl SettingsModalSnapshot {
@@ -181,8 +196,46 @@ impl SettingsModalSnapshot {
             open_with_registration_status: app.open_with_registration_status.clone(),
             is_open_with_registration_busy: app.is_open_with_registration_busy,
             open_with_registration_message: app.open_with_registration_message.clone(),
+            skill_entries: build_skill_entries(app),
         }
     }
+}
+
+/// 汇总内置与导入 Skill 为管理列表；导入读取失败的单项以警告占位展示。
+fn build_skill_entries(app: &ArgusApp) -> Vec<SkillListEntry> {
+    let config_root = app
+        .config_manager
+        .settings_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let disabled = app
+        .config
+        .ai
+        .disabled_skills
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let (imported, warnings) = crate::agent::skills::load_imported_skills(&config_root);
+    let mut entries: Vec<SkillListEntry> = crate::agent::skills::builtin_skills()
+        .into_iter()
+        .chain(imported)
+        .map(|skill| SkillListEntry {
+            is_enabled: !disabled.contains(&skill.name),
+            name: skill.name,
+            description: skill.description,
+            is_builtin: skill.origin == crate::agent::skills::SkillOrigin::Builtin,
+        })
+        .collect();
+    for warning in warnings {
+        entries.push(SkillListEntry {
+            name: warning,
+            description: String::new(),
+            is_builtin: false,
+            is_enabled: false,
+        });
+    }
+    entries
 }
 
 /// Jstack 线程段过滤大编辑器窗口；使用独立窗口承载长 textarea，避免设置页行内编辑困难。
@@ -491,6 +544,13 @@ fn render_settings_sidebar(
                     app_handle,
                     theme,
                 ))
+                .child(settings_navigation_item(
+                    SettingsSection::AiSkills,
+                    ArgusIcon::Upload,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
                 .child(
                     div()
                         .mt_3()
@@ -602,6 +662,7 @@ fn settings_section_id(section: SettingsSection) -> &'static str {
         SettingsSection::AiModel => "ai-model",
         SettingsSection::AiLogProfiles => "ai-log-profiles",
         SettingsSection::AiSystemPrompt => "ai-system-prompt",
+        SettingsSection::AiSkills => "ai-skills",
         SettingsSection::LogDisplay => "log-display",
         SettingsSection::LogSearch => "log-search",
         SettingsSection::LogLoading => "log-loading",
@@ -642,6 +703,9 @@ fn render_selected_settings_section(
         }
         SettingsSection::AiSystemPrompt => {
             render_ai_system_prompt_section(snapshot, app_handle, theme).into_any_element()
+        }
+        SettingsSection::AiSkills => {
+            render_ai_skills_section(snapshot, app_handle, theme).into_any_element()
         }
         SettingsSection::LogDisplay => {
             render_log_display_section(snapshot, app_handle, input_focus_handles, theme)
@@ -886,6 +950,149 @@ fn render_ai_system_prompt_section(
         theme,
     )
     .into_any_element()
+}
+
+/// 渲染智能分析分组下的 Skill 管理页面。
+fn render_ai_skills_section(
+    snapshot: &SettingsModalSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> AnyElement {
+    let import_app = app_handle.clone();
+    let has_entries = !snapshot.skill_entries.is_empty();
+    settings_section(
+        "Skill 管理",
+        ArgusIcon::Upload,
+        setting_group(theme)
+            .children(
+                snapshot
+                    .skill_entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| render_skill_entry_row(index, entry, app_handle, theme)),
+            )
+            .when(!has_entries, |this| {
+                this.child(ai_settings_empty_row("尚未配置任何 Skill", theme))
+            })
+            .child(setting_row(
+                "导入 Skill",
+                ai_settings_entry_control(
+                    "目录或 .zip，需包含 SKILL.md".to_string(),
+                    "导入…",
+                    "settings-import-skill",
+                    ArgusIcon::Upload,
+                    theme,
+                    move |cx| {
+                        update_settings_app(&import_app, cx, |app, app_cx| {
+                            app.open_skill_import_picker(app_cx);
+                        });
+                    },
+                ),
+                theme,
+            )),
+        theme,
+    )
+    .into_any_element()
+}
+
+/// 渲染单条 Skill 管理行：名称、说明、来源标记、启用开关和导入项删除。
+fn render_skill_entry_row(
+    index: usize,
+    entry: &SkillListEntry,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> impl IntoElement {
+    let toggle_app = app_handle.clone();
+    let toggle_name = entry.name.clone();
+    let delete_app = app_handle.clone();
+    let delete_name = entry.name.clone();
+    let origin_label = if entry.is_builtin { "内置" } else { "导入" };
+    div()
+        .id(("settings-skill-row", index))
+        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded_sm()
+        .bg(rgb(theme.current_line))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(12.0))
+                        .font_family(crate::fonts::ARGUS_UI_FONT_FAMILY)
+                        .text_color(rgb(theme.foreground))
+                        .child(entry.name.clone())
+                        .child(
+                            div()
+                                .px_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .text_size(px(10.0))
+                                .text_color(rgb(theme.foreground_muted))
+                                .child(origin_label),
+                        ),
+                )
+                .when(!entry.description.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.foreground_muted))
+                            .child(entry.description.clone()),
+                    )
+                }),
+        )
+        .child(value_badge(
+            if entry.is_enabled {
+                "已启用"
+            } else {
+                "已禁用"
+            }
+            .to_string(),
+            theme,
+        ))
+        .child(render_icon_button(
+            "settings-skill-toggle",
+            if entry.is_enabled {
+                ArgusIcon::ToggleRight
+            } else {
+                ArgusIcon::ToggleLeft
+            },
+            "切换 Skill 启用状态",
+            entry.is_enabled,
+            IconButtonSize::Small,
+            theme,
+            move |_, _, cx| {
+                update_settings_app(&toggle_app, cx, |app, _| {
+                    app.toggle_skill_enabled(&toggle_name);
+                });
+            },
+        ))
+        .when(!entry.is_builtin, |this| {
+            this.child(render_icon_button(
+                "settings-skill-delete",
+                ArgusIcon::Trash,
+                "删除导入 Skill",
+                false,
+                IconButtonSize::Small,
+                theme,
+                move |_, _, cx| {
+                    update_settings_app(&delete_app, cx, |app, _| {
+                        app.delete_imported_skill(&delete_name);
+                    });
+                },
+            ))
+        })
 }
 
 /// 渲染模型或日志类型列表的空状态，和其它设置行保持相同高度、背景及文字层级。

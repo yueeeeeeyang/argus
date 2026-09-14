@@ -4,7 +4,7 @@
 //! 主要功能：内置知识与导入知识统一为 AgentSkill；按产品线默认集和用户禁用列表筛选，
 //! 并渲染为进入系统提示词的 <SKILLS> 区块。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::agent::agent_loop::AgentLoopNote;
 use crate::config::AiConfig;
@@ -254,6 +254,201 @@ pub(crate) fn render_skills_section(skills: &[AgentSkill]) -> (String, bool) {
     (section, truncated)
 }
 
+/// 导入 Skill 的单文件数量与总字节上限。
+pub(crate) const SKILL_IMPORT_MAX_FILES: usize = 64;
+pub(crate) const SKILL_IMPORT_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 待落盘的一个导入文件。
+struct ImportFile {
+    /// 相对 Skill 根的路径（已清洗）。
+    relative_path: PathBuf,
+    /// 文件内容。
+    bytes: Vec<u8>,
+}
+
+/// 从目录或 .zip 导入一个 Skill，复制到 config_root/ai/skills/<name>/。
+///
+/// 参数说明：
+/// - `source`：包含 SKILL.md 的目录，或顶层目录内含 SKILL.md 的 .zip 文件；
+/// - `config_root`：settings.toml 所在目录，导入产物写入其 ai/skills 子目录。
+///
+/// 返回值：导入成功后的 Skill 名称。任何校验失败都不留残留目录。
+pub(crate) fn import_skill_from_path(source: &Path, config_root: &Path) -> Result<String, String> {
+    let files = if source.is_file() {
+        collect_zip_skill_files(source)?
+    } else if source.is_dir() {
+        collect_directory_skill_files(source)?
+    } else {
+        return Err(format!("导入路径不存在：{}", source.display()));
+    };
+    let skill_markdown = files
+        .iter()
+        .find(|file| file.relative_path == Path::new("SKILL.md"))
+        .ok_or_else(|| "导入内容缺少 SKILL.md".to_string())?;
+    let skill = parse_skill_markdown(&String::from_utf8_lossy(&skill_markdown.bytes))?;
+    // 内置与既有导入同名时拒绝导入，避免静默覆盖或注入歧义。
+    let existing_names = builtin_skills()
+        .into_iter()
+        .chain(load_imported_skills(config_root).0)
+        .map(|existing| existing.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    if existing_names.contains(&skill.name) {
+        return Err(format!("Skill 名称“{}”已存在，导入被拒绝", skill.name));
+    }
+    let target_dir = config_root.join("ai").join("skills").join(&skill.name);
+    if target_dir.exists() {
+        return Err(format!("目标目录已存在：{}", target_dir.display()));
+    }
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|error| format!("创建 Skill 目录失败：{error}"))?;
+    for file in &files {
+        let destination = target_dir.join(&file.relative_path);
+        if let Some(parent) = destination.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(format!("创建 Skill 子目录失败：{error}"));
+        }
+        if let Err(error) = std::fs::write(&destination, &file.bytes) {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(format!("写入 Skill 文件失败：{error}"));
+        }
+    }
+    Ok(skill.name)
+}
+
+/// 删除一个导入 Skill 的目录；返回是否存在该目录。
+pub(crate) fn remove_imported_skill(name: &str, config_root: &Path) -> Result<bool, String> {
+    let target_dir = config_root.join("ai").join("skills").join(name);
+    if !target_dir.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(&target_dir)
+        .map_err(|error| format!("删除 Skill 目录失败：{error}"))?;
+    Ok(true)
+}
+
+/// 递归收集目录内的 Skill 文件；拒绝符号链接并应用数量与字节预算。
+fn collect_directory_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    let mut stack = vec![(source.to_path_buf(), PathBuf::new())];
+    while let Some((absolute, relative)) = stack.pop() {
+        let entries =
+            std::fs::read_dir(&absolute).map_err(|error| format!("读取目录失败：{error}"))?;
+        for entry in entries.flatten() {
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .map_err(|error| format!("读取文件元数据失败：{error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err("导入目录包含符号链接，已拒绝".to_string());
+            }
+            let entry_relative = relative.join(entry.file_name());
+            if metadata.is_dir() {
+                stack.push((entry.path(), entry_relative));
+                continue;
+            }
+            total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .ok_or("导入内容字节数溢出")?;
+            if total_bytes > SKILL_IMPORT_MAX_TOTAL_BYTES {
+                return Err(format!(
+                    "导入内容超过 {} 字节上限",
+                    SKILL_IMPORT_MAX_TOTAL_BYTES
+                ));
+            }
+            files.push(ImportFile {
+                relative_path: entry_relative,
+                bytes: std::fs::read(entry.path())
+                    .map_err(|error| format!("读取文件失败：{error}"))?,
+            });
+            if files.len() > SKILL_IMPORT_MAX_FILES {
+                return Err(format!("导入文件数超过 {} 上限", SKILL_IMPORT_MAX_FILES));
+            }
+        }
+    }
+    relocate_skill_root(files)
+}
+
+/// 读取 zip 并收集 Skill 文件；条目名先做 zip slip 清洗再定位唯一顶层目录。
+fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
+    let file = std::fs::File::open(source).map_err(|error| format!("打开 ZIP 失败：{error}"))?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .map_err(|error| format!("读取 ZIP 结构失败：{error}"))?;
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("读取 ZIP 条目失败：{error}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        if entry.name().starts_with('/') || entry.name().contains("..") {
+            return Err(format!("ZIP 条目路径不安全：{}", entry.name()));
+        }
+        total_bytes = total_bytes
+            .checked_add(entry.size())
+            .ok_or("导入内容字节数溢出")?;
+        if total_bytes > SKILL_IMPORT_MAX_TOTAL_BYTES {
+            return Err(format!(
+                "导入内容超过 {} 字节上限",
+                SKILL_IMPORT_MAX_TOTAL_BYTES
+            ));
+        }
+        let relative = PathBuf::from(entry.name().replace('\\', "/"));
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        std::io::Read::read_to_end(&mut entry, &mut bytes)
+            .map_err(|error| format!("解压条目失败：{error}"))?;
+        files.push(ImportFile {
+            relative_path: relative,
+            bytes,
+        });
+        if files.len() > SKILL_IMPORT_MAX_FILES {
+            return Err(format!("导入文件数超过 {} 上限", SKILL_IMPORT_MAX_FILES));
+        }
+    }
+    relocate_skill_root(files)
+}
+
+/// 把文件列表的公共顶层目录剥掉，使 SKILL.md 位于导入根。
+fn relocate_skill_root(mut files: Vec<ImportFile>) -> Result<Vec<ImportFile>, String> {
+    let top_components = files
+        .iter()
+        .filter_map(|file| file.relative_path.components().next())
+        .filter(|component| {
+            !matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::RootDir
+            )
+        })
+        .map(|component| component.as_os_str().to_os_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let has_root_skill = files
+        .iter()
+        .any(|file| file.relative_path == Path::new("SKILL.md"));
+    if top_components.len() > 1 && !has_root_skill {
+        return Err("ZIP 内存在多个顶层目录且没有根级 SKILL.md".to_string());
+    }
+    if top_components.len() == 1 && !has_root_skill {
+        let top = top_components.into_iter().next().expect("已确认唯一顶层");
+        for file in &mut files {
+            file.relative_path = file
+                .relative_path
+                .strip_prefix(&top)
+                .map_err(|_| "剥离顶层目录失败".to_string())?
+                .to_path_buf();
+        }
+    }
+    if !files
+        .iter()
+        .any(|file| file.relative_path == Path::new("SKILL.md"))
+    {
+        return Err("导入内容缺少 SKILL.md".to_string());
+    }
+    files.retain(|file| !file.relative_path.as_os_str().is_empty());
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,9 +496,9 @@ mod tests {
         );
 
         let config = AiConfig::default();
-        let workspace = tempfile_dir();
-        let (analysis, _) = enabled_skills(&config, &workspace, AgentLoopNote::Analysis);
-        let (assistant, _) = enabled_skills(&config, &workspace, AgentLoopNote::Assistant);
+        let workspace = tempfile_dir("builtin");
+        let (analysis, _) = enabled_skills(&config, workspace.path(), AgentLoopNote::Analysis);
+        let (assistant, _) = enabled_skills(&config, workspace.path(), AgentLoopNote::Assistant);
         assert_eq!(analysis.len(), 1);
         assert_eq!(analysis[0].name, "argus-log-diagnosis");
         assert_eq!(assistant.len(), 1);
@@ -317,8 +512,8 @@ mod tests {
             disabled_skills: vec!["argus-log-diagnosis".to_string()],
             ..AiConfig::default()
         };
-        let workspace = tempfile_dir();
-        let (analysis, _) = enabled_skills(&config, &workspace, AgentLoopNote::Analysis);
+        let workspace = tempfile_dir("disabled");
+        let (analysis, _) = enabled_skills(&config, workspace.path(), AgentLoopNote::Analysis);
         assert!(analysis.is_empty(), "被禁用的内置 Skill 不应注入");
     }
 
@@ -348,9 +543,96 @@ mod tests {
         assert!(!section.contains("<SKILL name=\"big\">"));
     }
 
-    /// 测试用临时目录；导入加载在空目录上应返回空列表。
-    fn tempfile_dir() -> std::path::PathBuf {
-        let directory = crate::config::paths::temporary_test_dir("agent-skills");
-        directory.path().to_path_buf()
+    /// 验证从目录导入 Skill 后可被加载，重复导入同名被拒绝。
+    #[test]
+    fn imports_skill_from_directory_and_rejects_duplicates() {
+        let home = tempfile_dir("import-dir");
+        let home = home.path();
+        let source = home.join("my-skill-src");
+        std::fs::create_dir_all(source.join("notes")).expect("应创建源目录");
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: my-imported-skill\ndescription: imported for test\n---\nUse it.\n",
+        )
+        .expect("应写入 SKILL.md");
+        std::fs::write(source.join("notes/extra.md"), "extra").expect("应写入附加文件");
+
+        let name = import_skill_from_path(&source, home).expect("目录导入应成功");
+        assert_eq!(name, "my-imported-skill");
+        let (loaded, warnings) = load_imported_skills(home);
+        assert!(warnings.is_empty());
+        assert!(loaded.iter().any(|skill| skill.name == "my-imported-skill"));
+        assert!(
+            home.join("ai/skills/my-imported-skill/notes/extra.md")
+                .is_file()
+        );
+
+        let duplicate = import_skill_from_path(&source, home);
+        assert!(duplicate.is_err(), "同名重复导入必须被拒绝");
+        assert!(remove_imported_skill("my-imported-skill", home).expect("删除应成功"));
+        assert!(load_imported_skills(home).0.is_empty());
+    }
+
+    /// 验证 zip 导入定位唯一顶层目录，zip slip 条目被拒绝。
+    #[test]
+    fn imports_skill_from_zip_and_rejects_zip_slip() {
+        let home = tempfile_dir("import-zip");
+        let home = home.path();
+        let zip_path = home.join("skill.zip");
+        {
+            use std::io::Write as _;
+            use zip::ZipWriter;
+            use zip::write::SimpleFileOptions;
+            let file = std::fs::File::create(&zip_path).expect("应创建 ZIP");
+            let mut writer = ZipWriter::new(file);
+            writer
+                .start_file("top/SKILL.md", SimpleFileOptions::default())
+                .expect("应创建条目");
+            writer
+                .write_all(b"---\nname: zipped-skill\ndescription: from zip\n---\nZipped body.\n")
+                .expect("应写入条目");
+            writer
+                .start_file("top/guide.md", SimpleFileOptions::default())
+                .expect("应创建条目");
+            writer.write_all(b"guide").expect("应写入条目");
+            writer.finish().expect("应完成 ZIP");
+        }
+
+        let name = import_skill_from_path(&zip_path, home).expect("ZIP 导入应成功");
+        assert_eq!(name, "zipped-skill");
+        assert!(home.join("ai/skills/zipped-skill/guide.md").is_file());
+
+        // zip slip：条目路径包含 .. 时必须拒绝且不留残留。
+        let evil_path = home.join("evil.zip");
+        {
+            use std::io::Write as _;
+            use zip::ZipWriter;
+            use zip::write::SimpleFileOptions;
+            let file = std::fs::File::create(&evil_path).expect("应创建 ZIP");
+            let mut writer = ZipWriter::new(file);
+            writer
+                .start_file("../evil.txt", SimpleFileOptions::default())
+                .expect("应创建条目");
+            writer.write_all(b"x").expect("应写入条目");
+            writer.finish().expect("应完成 ZIP");
+        }
+        assert!(import_skill_from_path(&evil_path, home).is_err());
+        assert!(!home.join("evil.txt").exists());
+    }
+
+    /// 验证导入来源缺少 SKILL.md 时被拒绝。
+    #[test]
+    fn import_requires_skill_markdown() {
+        let home = tempfile_dir("import-missing");
+        let home = home.path();
+        let source = home.join("no-skill");
+        std::fs::create_dir_all(&source).expect("应创建目录");
+        std::fs::write(source.join("readme.md"), "no skill here").expect("应写入文件");
+        assert!(import_skill_from_path(&source, home).is_err());
+    }
+
+    /// 按测试名隔离的临时目录；守卫保持在测试栈上，目录随测试结束清理。
+    fn tempfile_dir(name: &str) -> tempfile::TempDir {
+        crate::config::paths::temporary_test_dir(&format!("agent-skills-{name}"))
     }
 }

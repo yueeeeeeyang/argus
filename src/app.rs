@@ -1822,6 +1822,103 @@ impl ArgusApp {
         };
         self.persist_config_or_report();
     }
+
+    /// 切换一个 Skill 的启用状态；保存后下一轮会话生效。
+    pub(crate) fn toggle_skill_enabled(&mut self, name: &str) {
+        let disabled = &mut self.config.ai.disabled_skills;
+        if let Some(position) = disabled.iter().position(|entry| entry == name) {
+            disabled.remove(position);
+            self.placeholder_notice = format!("Skill“{name}”已启用");
+        } else {
+            disabled.push(name.to_string());
+            self.placeholder_notice = format!("Skill“{name}”已禁用");
+        }
+        self.config.ai.normalize();
+        self.persist_config_or_report();
+    }
+
+    /// 删除一个导入 Skill；内置 Skill 不允许删除。
+    pub(crate) fn delete_imported_skill(&mut self, name: &str) {
+        if crate::agent::skills::builtin_skills()
+            .iter()
+            .any(|skill| skill.name == name)
+        {
+            self.placeholder_notice = format!("内置 Skill“{name}”不允许删除");
+            return;
+        }
+        let config_root = self.skill_config_root();
+        match crate::agent::skills::remove_imported_skill(name, &config_root) {
+            Ok(true) => {
+                let disabled = &mut self.config.ai.disabled_skills;
+                if let Some(position) = disabled.iter().position(|entry| entry == name) {
+                    disabled.remove(position);
+                    self.config.ai.normalize();
+                    self.persist_config_or_report();
+                }
+                self.placeholder_notice = format!("已删除导入 Skill“{name}”");
+            }
+            Ok(false) => {
+                self.placeholder_notice = format!("导入 Skill“{name}”不存在");
+            }
+            Err(error) => {
+                self.placeholder_notice = format!("删除 Skill 失败：{error}");
+            }
+        }
+    }
+
+    /// 打开系统路径选择对话框导入 Skill；可选目录或 .zip 文件。
+    pub(crate) fn open_skill_import_picker(&mut self, cx: &mut Context<Self>) {
+        let app_context: &gpui::App = (*cx).borrow();
+        let receiver = app_context.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: false,
+            prompt: Some(gpui::SharedString::from(
+                "选择要导入的 Skill 目录或 .zip 文件",
+            )),
+        });
+        cx.spawn(async move |view, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await
+                && let Some(path) = paths.first()
+            {
+                let _ = view.update(cx, |app, cx| {
+                    app.import_selected_skill(path.clone());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 校验并导入用户选择的 Skill 来源。
+    fn import_selected_skill(&mut self, path: std::path::PathBuf) {
+        if path.is_file()
+            && !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        {
+            self.placeholder_notice = "导入文件必须是 .zip 或包含 SKILL.md 的目录".to_string();
+            return;
+        }
+        let config_root = self.skill_config_root();
+        match crate::agent::skills::import_skill_from_path(&path, &config_root) {
+            Ok(name) => {
+                self.placeholder_notice = format!("已导入 Skill“{name}”，下一轮会话生效");
+            }
+            Err(error) => {
+                self.placeholder_notice = format!("导入 Skill 失败：{error}");
+            }
+        }
+    }
+
+    /// 返回 Skill 导入目录所在的配置根（settings.toml 所在目录）。
+    fn skill_config_root(&self) -> std::path::PathBuf {
+        self.config_manager
+            .settings_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
 }
 
 /// 从标签类型中提取日志来源 ID；非日志标签返回 `None`。

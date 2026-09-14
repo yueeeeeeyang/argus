@@ -34,6 +34,8 @@ pub(crate) enum SettingsSection {
     AiLogProfiles,
     /// 智能分析分组下的默认系统提示词。
     AiSystemPrompt,
+    /// 智能分析分组下的 Skill 管理。
+    AiSkills,
     /// 日志显示设置，包含字号和 Jstack 过滤规则。
     LogDisplay,
     /// 日志搜索设置，包含快搜关键字。
@@ -51,6 +53,7 @@ impl SettingsSection {
             Self::AiModel => "模型配置",
             Self::AiLogProfiles => "日志类型说明",
             Self::AiSystemPrompt => "系统提示词",
+            Self::AiSkills => "Skill 管理",
             Self::LogDisplay => "日志显示",
             Self::LogSearch => "日志搜索",
             Self::LogLoading => "日志加载",
