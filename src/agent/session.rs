@@ -5,6 +5,7 @@
 //! 主要功能：把来源树固化为不可变授权范围，并统一记录 Agent 日志访问、调用、Token 用量和取消边界。
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::AtomicUsize};
 use std::time::Instant;
 
@@ -160,12 +161,16 @@ impl AgentUserMessage {
 pub(crate) struct SnapshotSource {
     /// 末级展示名，不包含真实父目录。
     pub file_name: String,
-    /// 从分析根开始的相对展示路径。
-    pub relative_path: String,
+    /// 工作目录内相对路径（正斜杠分隔）；模型通过该路径调用 read_file 与 bash。
+    pub workspace_path: String,
+    /// 工作目录内的真实绝对路径。
+    pub absolute_path: PathBuf,
     /// 日志类型规则使用的原始根内相对路径；多根展示前缀不得改变用户既有匹配语义。
     pub profile_match_path: String,
     /// 名称规则选出的主日志配置 ID。
     pub profile_id: Option<String>,
+    /// 已知文件大小。
+    pub size: Option<u64>,
 }
 
 /// 会话开始时固化的自定义日志说明。
@@ -173,6 +178,10 @@ pub(crate) struct SnapshotSource {
 pub(crate) struct LogProfileSnapshot {
     /// 稳定配置 ID。
     pub profile_id: String,
+    /// 用户配置的类型名称。
+    pub name: String,
+    /// 用户配置的日志结构化说明全文。
+    pub description: String,
 }
 
 /// 当前 Agent 会话不可变来源范围和读取配置。
@@ -182,6 +191,10 @@ pub(crate) struct SourceScopeSnapshot {
     pub session_id: String,
     /// 来源根展示名称。
     pub root_label: String,
+    /// 当前日志工作目录根；全部工具执行都被限制在该目录内。
+    pub workspace_root: PathBuf,
+    /// 用户选择的兜底解码编码；read_file 按来源检测优先。
+    pub preferred_encoding: String,
     /// 可作为日志打开的已加载叶子节点。
     pub sources: Arc<Vec<SnapshotSource>>,
     /// 按 ID 索引的日志说明快照。
@@ -196,6 +209,8 @@ impl SourceScopeSnapshot {
         registry: &SourceRegistry,
         selection: AgentScopeSelection,
         config: &AiConfig,
+        workspace_root: &Path,
+        preferred_encoding: &str,
     ) -> Result<Self, String> {
         let root_ids = resolve_scope_root_ids(registry, selection)?;
         let root_labels = root_ids
@@ -205,7 +220,6 @@ impl SourceScopeSnapshot {
         if root_labels.len() != root_ids.len() {
             return Err("来源根已经失效".to_string());
         }
-        let include_root_prefix = matches!(selection, AgentScopeSelection::AllLoadedRoots);
         let root_display_labels = unique_root_display_labels(&root_ids, &root_labels);
         let mut profile_snapshots = build_profile_snapshots(&config.log_profiles);
         let mut sources = Vec::new();
@@ -220,26 +234,26 @@ impl SourceScopeSnapshot {
                 continue;
             }
             let inner_path = relative_path_from_root(registry, root_id, *source_id);
-            let relative_path = if include_root_prefix {
-                let root_label = root_display_labels
-                    .get(&root_id)
-                    .map(String::as_str)
-                    .unwrap_or("来源");
-                if inner_path.is_empty() {
-                    root_label.to_string()
-                } else {
-                    format!("{root_label}/{inner_path}")
-                }
+            let root_label = root_display_labels
+                .get(&root_id)
+                .map(String::as_str)
+                .unwrap_or("来源");
+            // 工作目录顶层结构来自物化时的根标签目录；清单路径始终包含该前缀，
+            // 模型引用的路径与 read_file/bash 实际解析的路径保持同一坐标系。
+            let workspace_path = if inner_path.is_empty() {
+                root_label.to_string()
             } else {
-                inner_path.clone()
+                format!("{root_label}/{inner_path}")
             };
             let profile_id = select_profile(&config.log_profiles, &node.label, &inner_path)
                 .map(|profile| profile.profile_id.clone());
             sources.push(SnapshotSource {
                 file_name: node.label.clone(),
-                relative_path,
+                absolute_path: workspace_root.join(&workspace_path),
+                workspace_path,
                 profile_match_path: inner_path,
                 profile_id,
+                size: node.metadata.size,
             });
         }
         if sources.is_empty() {
@@ -258,6 +272,8 @@ impl SourceScopeSnapshot {
             } else {
                 format!("全部已加载来源（{} 个根）", root_labels.len())
             },
+            workspace_root: workspace_root.to_path_buf(),
+            preferred_encoding: preferred_encoding.to_string(),
             sources: Arc::new(sources),
             profiles: Arc::new(profile_snapshots),
             allow_raw_log_content: config.allow_raw_log_content,
@@ -345,6 +361,17 @@ impl AgentBudget {
         Ok(*state)
     }
 
+    /// 记录一次工具调用；只用于用量展示，不形成终止上限。
+    pub(crate) fn record_tool_call(&self) -> Result<AgentBudgetSnapshot, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "AI 预算状态已损坏".to_string())?;
+        state.tool_calls = state.tool_calls.saturating_add(1);
+        state.elapsed_seconds = self.started_at.elapsed().as_secs();
+        Ok(*state)
+    }
+
     /// 累加一轮模型返回的 Token 用量，并返回可直接展示的总量快照。
     pub(crate) fn record_token_usage(
         &self,
@@ -397,8 +424,33 @@ pub(crate) enum AgentEvent {
     },
     /// 交互助手的可恢复模型故障即将重试；界面应丢弃本次尝试尚未完成的流式正文。
     AssistantAttemptReset,
+    /// bash 工具请求用户审批一条命令；界面渲染确认卡片并回传决定。
+    BashApprovalRequired {
+        /// 审批请求标识。
+        request_id: String,
+        /// 待审批的完整命令。
+        command: String,
+    },
+    /// 一条审批请求已得到结论（用户答复、超时或会话取消）。
+    BashApprovalOutcome {
+        /// 审批请求标识。
+        request_id: String,
+        /// 是否批准执行。
+        approved: bool,
+        /// 结论来源说明；展示在审批卡片上。
+        reason: String,
+    },
     /// 后台任务终止错误。
     Failed(String),
+}
+
+/// 用户对一条 bash 命令请求的审批答复；由界面发送给后台工具。
+#[derive(Clone, Debug)]
+pub(crate) struct BashApprovalDecision {
+    /// 审批请求标识。
+    pub request_id: String,
+    /// 是否批准执行。
+    pub approved: bool,
 }
 
 /// 工具和编排 Hook 共享的会话运行上下文。
@@ -415,6 +467,10 @@ pub(crate) struct AgentOperationContext {
     pub accepted_user_messages: Mutex<Vec<AgentUserMessage>>,
     /// 已排队但尚未注入模型上下文的用户提示数量。
     pub pending_user_messages: Arc<AtomicUsize>,
+    /// 等待用户审批的 bash 请求应答通道；键为请求 ID，答复后自动移除。
+    pub bash_pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
+    /// 界面审批答复接收端；由专用泵任务搬运到对应请求。
+    pub bash_decision_receiver: async_channel::Receiver<BashApprovalDecision>,
 }
 
 impl AgentOperationContext {
@@ -482,7 +538,7 @@ fn select_profile<'a>(
         .map(|(_, profile)| profile)
 }
 
-/// 固化所有有效且启用的日志说明 ID。
+/// 固化所有有效且启用的日志说明。
 fn build_profile_snapshots(profiles: &[LogTypeProfile]) -> HashMap<String, LogProfileSnapshot> {
     profiles
         .iter()
@@ -490,6 +546,8 @@ fn build_profile_snapshots(profiles: &[LogTypeProfile]) -> HashMap<String, LogPr
         .map(|profile| {
             let snapshot = LogProfileSnapshot {
                 profile_id: profile.profile_id.clone(),
+                name: profile.name.clone(),
+                description: profile.description.clone(),
             };
             (snapshot.profile_id.clone(), snapshot)
         })
@@ -545,9 +603,9 @@ pub(crate) fn truncate_utf8_with_ellipsis(mut value: String, max_bytes: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::paths::temporary_test_dir;
     use crate::config::{LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget};
     use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
-    use std::path::PathBuf;
 
     /// 构造会匹配 `app.log` 的测试日志配置。
     fn test_profile(name: &str, priority: u16, enabled: bool) -> LogTypeProfile {
@@ -636,9 +694,10 @@ mod tests {
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
     }
 
-    /// 验证来源快照只保留命中过当前范围的日志说明，且模型引用不暴露真实路径。
+    /// 验证来源快照只保留命中过当前范围的日志说明，且清单携带工作目录真实路径。
     #[test]
-    fn source_snapshot_filters_unmatched_guidance_and_uses_opaque_references() {
+    fn source_snapshot_filters_unmatched_guidance_and_maps_workspace_paths() {
+        let workspace_root = temporary_test_dir("scope-snapshot-workspace");
         let mut registry = SourceRegistry::new();
         let root_id = registry.allocate_id();
         registry.insert_node(SourceTreeNode {
@@ -647,7 +706,7 @@ mod tests {
             depth: 0,
             label: "logs".to_string(),
             kind: SourceKind::Directory,
-            location: SourceLocation::LocalPath(PathBuf::from("/private/company/logs")),
+            location: SourceLocation::LocalPath(workspace_root.path().join("logs")),
             metadata: SourceMetadata {
                 children_loaded: true,
                 ..SourceMetadata::default()
@@ -662,7 +721,7 @@ mod tests {
             depth: 1,
             label: "app.log".to_string(),
             kind: SourceKind::LogFile,
-            location: SourceLocation::LocalPath(PathBuf::from("/private/company/logs/app.log")),
+            location: SourceLocation::LocalPath(workspace_root.path().join("logs/app.log")),
             metadata: SourceMetadata {
                 size: Some(128),
                 children_loaded: true,
@@ -694,14 +753,27 @@ mod tests {
             &registry,
             AgentScopeSelection::SelectedRoot(None),
             &config,
+            workspace_root.path(),
+            "UTF-8",
         )
         .expect("应创建来源快照");
+        assert_eq!(snapshot.workspace_root, workspace_root.path());
+        assert_eq!(snapshot.preferred_encoding, "UTF-8");
         assert_eq!(snapshot.sources.len(), 1);
-        assert_eq!(snapshot.sources[0].relative_path, "app.log");
+        assert_eq!(snapshot.sources[0].workspace_path, "logs/app.log");
+        assert_eq!(
+            snapshot.sources[0].absolute_path,
+            workspace_root.path().join("logs/app.log")
+        );
+        assert_eq!(snapshot.sources[0].size, Some(128));
         assert_eq!(
             snapshot.sources[0].profile_id.as_deref(),
             Some(matched.profile_id.as_str())
         );
         assert_eq!(snapshot.profiles.len(), 1);
+        assert_eq!(
+            snapshot.profiles[&matched.profile_id].description,
+            "测试日志说明"
+        );
     }
 }

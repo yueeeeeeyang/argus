@@ -1,25 +1,20 @@
-//! 文件职责：在 AI 会话启动前完整补齐分析范围内的来源树并生成不可变范围快照。
+//! 文件职责：基于当前来源注册表和工作目录直接固化 Agent 会话范围快照。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-17
+//! 修改日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：调用 SourceTreeScanner 全量扫描目录和归档，匹配日志类型说明，并返回可安全回填 UI 的注册表。
+//! 主要功能：从已完整初始化的来源树生成工作区清单快照，并统计日志类型规则命中情况。
+
+use std::path::Path;
 
 use crate::agent::session::{AgentScopeSelection, SourceScopeSnapshot};
-use crate::config::{
-    AiConfig, LoaderConfig, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
-};
-use crate::loader::source_scanner::SourceTreeScanner;
+use crate::config::{AiConfig, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile};
 use crate::loader::{SourceId, SourceRegistry};
 
-/// AI 来源扫描完成后的不可变会话范围及补齐后的来源注册表。
+/// Agent 会话范围固化结果。
 #[derive(Debug)]
 pub(crate) struct AgentSourcePreparation {
-    /// 完整扫描后的来源树副本；回填主应用后可继续支持证据跳转。
-    pub registry: SourceRegistry,
-    /// 已完成日志类型匹配的 Agent 会话范围。
+    /// 已完成日志类型匹配的工作区清单快照。
     pub scope: SourceScopeSnapshot,
-    /// 扫描过程中可容忍的局部读取警告；不包含日志正文。
-    pub warnings: Vec<String>,
     /// 当前所有已启用日志类型及其逐规则命中统计，只供会话窗口解释匹配结果。
     pub match_summaries: Vec<AgentLogProfileMatchSummary>,
 }
@@ -54,60 +49,54 @@ pub(crate) struct AgentLogRuleMatchSummary {
     pub matched_file_count: usize,
 }
 
-/// 完整扫描选定来源根并生成 Agent 会话快照。
+/// 按当前选中节点解析分析根并固化工作区清单快照。
 ///
 /// 参数说明：
-/// - `registry`：点击开始分析时复制的来源树，后台任务只修改该副本；
+/// - `registry`：加载时已一次性完整初始化的来源树；
 /// - `selected_id`：当前选中节点，用于解析所属顶层来源根；
 /// - `config`：已经规范化和校验的 AI 配置，包含日志类型名称匹配规则；
-/// - `loader_config`：目录、符号链接和归档深度边界。
+/// - `workspace_root`：当前日志工作目录根；
+/// - `preferred_encoding`：用户选择的兜底解码编码。
 ///
-/// 返回值：扫描成功且至少发现一个日志候选时返回完整注册表和范围快照。
+/// 返回值：至少存在一个日志候选时返回范围快照和规则命中统计。
 pub(crate) fn prepare_agent_source_scope(
-    registry: SourceRegistry,
+    registry: &SourceRegistry,
     selected_id: Option<SourceId>,
     config: AiConfig,
-    loader_config: LoaderConfig,
-    cancellation: tokio_util::sync::CancellationToken,
+    workspace_root: &Path,
+    preferred_encoding: &str,
 ) -> Result<AgentSourcePreparation, String> {
     prepare_agent_source_scope_for_selection(
         registry,
         AgentScopeSelection::SelectedRoot(selected_id),
         config,
-        loader_config,
-        cancellation,
+        workspace_root,
+        preferred_encoding,
     )
 }
 
-/// 按显式单根或全部根范围完整扫描来源树并生成不可变会话快照。
+/// 按显式单根或全部根范围固化工作区清单快照。
+///
+/// 来源树在日志加载时已经一次性完整初始化，快照构建只读取既有节点和工作目录路径，
+/// 不再触发任何文件系统扫描。
 pub(crate) fn prepare_agent_source_scope_for_selection(
-    registry: SourceRegistry,
+    registry: &SourceRegistry,
     selection: AgentScopeSelection,
     config: AiConfig,
-    loader_config: LoaderConfig,
-    cancellation: tokio_util::sync::CancellationToken,
+    workspace_root: &Path,
+    preferred_encoding: &str,
 ) -> Result<AgentSourcePreparation, String> {
-    let root_ids = resolve_scope_roots(&registry, selection)?;
-    let scan_result = SourceTreeScanner::new(&registry, loader_config, cancellation)
-        .scan(&root_ids)
-        .map_err(|error| error.to_string())?;
-    let registry = scan_result.registry;
-
-    let warnings = scan_result.warnings;
-    let scope = SourceScopeSnapshot::from_registry_selection(&registry, selection, &config)
-        .map_err(|error| {
-            if warnings.is_empty() {
-                error
-            } else {
-                format!("{error}；扫描警告：{}", warnings.join("；"))
-            }
-        })?;
+    let scope = SourceScopeSnapshot::from_registry_selection(
+        registry,
+        selection,
+        &config,
+        workspace_root,
+        preferred_encoding,
+    )?;
     let match_summaries = build_match_summaries(&config.log_profiles, &scope);
 
     Ok(AgentSourcePreparation {
-        registry,
         scope,
-        warnings,
         match_summaries,
     })
 }
@@ -167,32 +156,6 @@ fn build_match_summaries(
         .collect()
 }
 
-/// 解析当前分析根；多根来源继续要求明确选择，避免无提示扩大日志授权范围。
-fn resolve_scope_roots(
-    registry: &SourceRegistry,
-    selection: AgentScopeSelection,
-) -> Result<Vec<SourceId>, String> {
-    match selection {
-        AgentScopeSelection::SelectedRoot(Some(source_id)) => registry
-            .root_id_for(source_id)
-            .map(|root_id| vec![root_id])
-            .ok_or_else(|| "当前选中来源不存在，无法确定 AI 分析范围".to_string()),
-        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().len() == 1 => {
-            Ok(vec![registry.root_ids()[0]])
-        }
-        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().is_empty() => {
-            Err("请先加载日志来源".to_string())
-        }
-        AgentScopeSelection::SelectedRoot(None) => {
-            Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string())
-        }
-        AgentScopeSelection::AllLoadedRoots if registry.root_ids().is_empty() => {
-            Err("请先加载日志来源".to_string())
-        }
-        AgentScopeSelection::AllLoadedRoots => Ok(registry.root_ids().to_vec()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -204,26 +167,62 @@ mod tests {
     use crate::config::{LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile};
     use crate::loader::{SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};
 
-    /// 验证未展开且尚未加载的目录会在后台扫描中补齐，并按文件名匹配日志类型说明。
-    #[test]
-    fn source_scan_loads_collapsed_directory_and_matches_profile() {
-        let directory = temporary_test_dir("source-scan-collapsed");
-        fs::write(directory.path().join("application.log"), "startup failed")
-            .expect("应写入测试日志");
-
-        let mut registry = SourceRegistry::new();
+    /// 在临时工作目录下插入一个完整加载的来源树。
+    fn insert_loaded_tree(registry: &mut SourceRegistry, root_label: &str, workspace: &Path) {
         let root_id = registry.allocate_id();
         registry.insert_node(SourceTreeNode {
             id: root_id,
             parent_id: None,
             depth: 0,
-            label: "logs".to_string(),
+            label: root_label.to_string(),
             kind: SourceKind::Directory,
-            location: SourceLocation::LocalPath(directory.path().to_path_buf()),
+            location: SourceLocation::LocalPath(workspace.join(root_label)),
+            metadata: SourceMetadata {
+                children_loaded: true,
+                ..SourceMetadata::default()
+            },
+            selected: false,
+            expanded: false,
+        });
+    }
+
+    /// 在指定根下插入一个日志文件节点。
+    fn insert_log_file(
+        registry: &mut SourceRegistry,
+        root_label: &str,
+        workspace: &Path,
+        file_name: &str,
+    ) {
+        let root_id = *registry.root_ids().last().expect("应已有来源根");
+        let file_id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id: file_id,
+            parent_id: Some(root_id),
+            depth: 1,
+            label: file_name.to_string(),
+            kind: SourceKind::LogFile,
+            location: SourceLocation::LocalPath(workspace.join(root_label).join(file_name)),
             metadata: SourceMetadata::default(),
             selected: false,
             expanded: false,
         });
+    }
+
+    /// 验证快照直接读取完整来源树并按文件名匹配日志类型说明。
+    #[test]
+    fn source_snapshot_builds_from_complete_tree_and_matches_profile() {
+        let workspace = temporary_test_dir("source-scan-complete");
+        let workspace_path = workspace.path().to_path_buf();
+        fs::create_dir_all(workspace_path.join("logs")).expect("应创建来源目录");
+        fs::write(
+            workspace_path.join("logs/application.log"),
+            "startup failed",
+        )
+        .expect("应写入测试日志");
+
+        let mut registry = SourceRegistry::new();
+        insert_loaded_tree(&mut registry, "logs", &workspace_path);
+        insert_log_file(&mut registry, "logs", &workspace_path, "application.log");
         registry.rebuild_all_indices();
 
         let profile_id = Uuid::new_v4().to_string();
@@ -242,14 +241,9 @@ mod tests {
             description: "用于分析应用启动和运行异常".to_string(),
         });
 
-        let preparation = prepare_agent_source_scope(
-            registry,
-            None,
-            config,
-            LoaderConfig::default(),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .expect("折叠目录应被完整扫描");
+        let preparation =
+            prepare_agent_source_scope(&registry, None, config, &workspace_path, "UTF-8")
+                .expect("完整来源树应直接生成快照");
 
         assert_eq!(preparation.scope.sources.len(), 1);
         assert_eq!(
@@ -265,45 +259,23 @@ mod tests {
             preparation.match_summaries[0].rules[0].matched_file_count,
             1
         );
-        assert!(!preparation.registry.node(root_id).unwrap().expanded);
-        assert!(
-            preparation
-                .registry
-                .node(root_id)
-                .unwrap()
-                .metadata
-                .children_loaded
-        );
     }
 
     /// 验证每条规则独立计数，未命中规则保留零值，且同一文件可命中多条规则。
     #[test]
     fn source_scan_reports_each_matcher_hit_count() {
-        let directory = temporary_test_dir("source-scan-match-count");
-        fs::write(
-            directory.path().join("memory_20260715.log"),
-            "memory pressure",
-        )
-        .expect("应写入内存日志");
-        fs::write(
-            directory.path().join("application.log"),
-            "application started",
-        )
-        .expect("应写入应用日志");
+        let workspace = temporary_test_dir("source-scan-match-count");
+        let workspace_path = workspace.path().to_path_buf();
 
         let mut registry = SourceRegistry::new();
-        let root_id = registry.allocate_id();
-        registry.insert_node(SourceTreeNode {
-            id: root_id,
-            parent_id: None,
-            depth: 0,
-            label: "logs".to_string(),
-            kind: SourceKind::Directory,
-            location: SourceLocation::LocalPath(directory.path().to_path_buf()),
-            metadata: SourceMetadata::default(),
-            selected: false,
-            expanded: false,
-        });
+        insert_loaded_tree(&mut registry, "logs", &workspace_path);
+        insert_log_file(
+            &mut registry,
+            "logs",
+            &workspace_path,
+            "memory_20260715.log",
+        );
+        insert_log_file(&mut registry, "logs", &workspace_path, "application.log");
         registry.rebuild_all_indices();
 
         let mut config = AiConfig::default();
@@ -335,14 +307,9 @@ mod tests {
             description: "用于分析内存压力".to_string(),
         });
 
-        let preparation = prepare_agent_source_scope(
-            registry,
-            None,
-            config,
-            LoaderConfig::default(),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .expect("来源扫描应成功");
+        let preparation =
+            prepare_agent_source_scope(&registry, None, config, &workspace_path, "UTF-8")
+                .expect("来源快照应构建成功");
         let summary = &preparation.match_summaries[0];
 
         assert_eq!(summary.matched_file_count, 2);
@@ -352,34 +319,17 @@ mod tests {
         assert_eq!(summary.rules[2].matched_file_count, 0);
     }
 
-    /// 验证交互助手一次补齐全部来源根，并为同名日志生成带根前缀的唯一展示路径。
+    /// 验证交互助手一次固化全部来源根，并为同名日志生成带根前缀的工作区路径。
     #[test]
     fn assistant_source_scan_covers_all_roots_and_disambiguates_paths() {
-        let first_directory = temporary_test_dir("assistant-source-scan-first");
-        let second_directory = temporary_test_dir("assistant-source-scan-second");
-        fs::write(first_directory.path().join("application.log"), "first root")
-            .expect("应写入第一个来源日志");
-        fs::write(
-            second_directory.path().join("application.log"),
-            "second root",
-        )
-        .expect("应写入第二个来源日志");
+        let workspace = temporary_test_dir("assistant-source-scan-roots");
+        let workspace_path = workspace.path().to_path_buf();
 
         let mut registry = SourceRegistry::new();
-        for path in [first_directory.path(), second_directory.path()] {
-            let root_id = registry.allocate_id();
-            registry.insert_node(SourceTreeNode {
-                id: root_id,
-                parent_id: None,
-                depth: 0,
-                label: "logs".to_string(),
-                kind: SourceKind::Directory,
-                location: SourceLocation::LocalPath(path.to_path_buf()),
-                metadata: SourceMetadata::default(),
-                selected: false,
-                expanded: false,
-            });
-        }
+        insert_loaded_tree(&mut registry, "logs", &workspace_path);
+        insert_log_file(&mut registry, "logs", &workspace_path, "application.log");
+        insert_loaded_tree(&mut registry, "logs", &workspace_path);
+        insert_log_file(&mut registry, "logs", &workspace_path, "application.log");
         registry.rebuild_all_indices();
 
         let profile_id = Uuid::new_v4().to_string();
@@ -400,19 +350,19 @@ mod tests {
             ..AiConfig::default()
         };
         let preparation = prepare_agent_source_scope_for_selection(
-            registry,
+            &registry,
             AgentScopeSelection::AllLoadedRoots,
             config,
-            LoaderConfig::default(),
-            tokio_util::sync::CancellationToken::new(),
+            &workspace_path,
+            "UTF-8",
         )
-        .expect("助手应完整扫描全部根来源");
+        .expect("助手应固化全部根来源");
 
         let paths = preparation
             .scope
             .sources
             .iter()
-            .map(|source| source.relative_path.as_str())
+            .map(|source| source.workspace_path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(preparation.scope.sources.len(), 2);
         assert!(paths.contains(&"logs (1)/application.log"));
@@ -420,48 +370,10 @@ mod tests {
         assert!(preparation.scope.sources.iter().all(|source| {
             source.profile_id.as_deref() == Some(profile_id.as_str())
                 && source.profile_match_path == "application.log"
+                && source
+                    .absolute_path
+                    .starts_with(preparation.scope.workspace_root.as_path())
         }));
         assert_eq!(preparation.match_summaries[0].matched_file_count, 2);
-        assert_eq!(preparation.registry.root_ids().len(), 2);
-        assert!(preparation.registry.root_ids().iter().all(|root_id| {
-            preparation
-                .registry
-                .node(*root_id)
-                .is_some_and(|root| root.metadata.children_loaded)
-        }));
-    }
-
-    /// 验证启动对话框关闭后，已取消的来源扫描不会继续构建或回填会话范围。
-    #[test]
-    fn source_scan_stops_when_cancelled_before_start() {
-        let directory = temporary_test_dir("source-scan-priority");
-        fs::write(directory.path().join("application.log"), "started").expect("应写入测试日志");
-        let mut registry = SourceRegistry::new();
-        let root_id = registry.allocate_id();
-        registry.insert_node(SourceTreeNode {
-            id: root_id,
-            parent_id: None,
-            depth: 0,
-            label: "logs".to_string(),
-            kind: SourceKind::Directory,
-            location: SourceLocation::LocalPath(directory.path().to_path_buf()),
-            metadata: SourceMetadata::default(),
-            selected: false,
-            expanded: false,
-        });
-        registry.rebuild_all_indices();
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        cancellation.cancel();
-
-        let error = prepare_agent_source_scope(
-            registry,
-            None,
-            AiConfig::default(),
-            LoaderConfig::default(),
-            cancellation,
-        )
-        .expect_err("取消后的扫描必须停止");
-
-        assert!(error.contains("已取消"));
     }
 }

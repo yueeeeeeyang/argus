@@ -22,14 +22,17 @@ use gpui::{
 use crate::agent::{
     AgentBudgetSnapshot, AgentEvent, AgentScopeSelection, AgentSessionStatus, AgentStreamKind,
     AgentTraceEntry, AgentTraceKind, AgentUserMessage, AgentUserMessageStatus,
-    AssistantHistoryTurn, AssistantRunRequest, SourceScopeSnapshot, agent_runtime, load_api_key,
-    prepare_agent_source_scope_for_selection, run_assistant_turn,
+    AssistantHistoryTurn, AssistantRunRequest, BashApprovalDecision, SourceScopeSnapshot,
+    agent_runtime, load_api_key, prepare_agent_source_scope_for_selection, run_assistant_turn,
 };
 use crate::app::{ArgusApp, TextInputState, observe_app_theme};
 use crate::config::{AiConfig, AiModelProfile};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::text_selection::{character_count, replace_character_range};
 use crate::theme::AppTheme;
+use crate::ui::components::bash_approval::{
+    BashApprovalStatus, bash_approval_reason_label, render_bash_approval_card,
+};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_round_icon_button};
 use crate::ui::components::input::{
@@ -144,6 +147,15 @@ enum AssistantPanelMessage {
         traces: Vec<AgentTraceEntry>,
         is_expanded: bool,
     },
+    /// 一条 bash 审批确认卡片。
+    BashApproval {
+        /// 审批请求标识。
+        request_id: String,
+        /// 待审批的完整命令。
+        command: String,
+        /// 当前审批状态。
+        status: BashApprovalStatus,
+    },
     /// 模型思考过程，仅在当前内存会话展示。
     Reasoning(String),
     /// 模型最终可见回答。
@@ -208,12 +220,12 @@ pub(crate) struct AssistantPanel {
     budget: AgentBudgetSnapshot,
     /// 当前回答追加消息发送端。
     user_message_sender: Option<async_channel::Sender<AgentUserMessage>>,
+    /// 当前回答 bash 审批答复发送端。
+    bash_decision_sender: Option<async_channel::Sender<BashApprovalDecision>>,
     /// 当前回答未消费消息计数。
     pending_user_messages: Arc<AtomicUsize>,
     /// 当前回答取消令牌。
     turn_cancellation: Option<tokio_util::sync::CancellationToken>,
-    /// 当前来源扫描取消令牌。
-    scan_cancellation: Option<tokio_util::sync::CancellationToken>,
     /// 来源扫描 generation，拒绝取消或重置后的迟到结果。
     scan_generation: u64,
     /// 回答 generation，拒绝上一轮事件污染新回答。
@@ -244,7 +256,7 @@ impl AssistantPanel {
         let welcome = AssistantPanelMessage::Trace(AgentTraceEntry::new(
             AgentTraceKind::Status,
             "Agent 助手",
-            "输入问题后将完整扫描全部已加载来源，并按需调用只读日志工具。",
+            "输入问题后固化当前工作区清单，并按需调用工作目录内的只读工具；非白名单命令需要你确认。",
         ));
         let mut panel = Self {
             app,
@@ -275,9 +287,9 @@ impl AssistantPanel {
             error: None,
             budget: AgentBudgetSnapshot::default(),
             user_message_sender: None,
+            bash_decision_sender: None,
             pending_user_messages: Arc::new(AtomicUsize::new(0)),
             turn_cancellation: None,
-            scan_cancellation: None,
             scan_generation: 0,
             turn_generation: 0,
             active_turn_message_start: None,
@@ -303,9 +315,7 @@ impl AssistantPanel {
         self.has_loaded_sources = has_loaded_sources;
         self.scope_revision = Some(revision);
         if self.status == AssistantPanelStatus::Scanning {
-            if let Some(cancellation) = self.scan_cancellation.take() {
-                cancellation.cancel();
-            }
+            // 清单固化是同步过程；该分支只在新来源到达时重置状态并重新调度。
             self.scan_generation = self.scan_generation.wrapping_add(1);
             self.scope = None;
             self.clear_source_mention_state();
@@ -501,125 +511,94 @@ impl AssistantPanel {
         }
     }
 
-    /// 启动全来源树扫描；扫描结果回填主应用并成为当前会话可信范围。
+    /// 固化当前工作区清单；来源树在日志加载时已完整初始化，这里只构建会话快照。
     fn start_source_scan(&mut self, cx: &mut Context<Self>) {
         if self.status != AssistantPanelStatus::Idle {
             return;
         }
         let mut config = self.app.read(cx).config.ai.clone();
         config.normalize();
-        let (registry, loader_config, base_revision) = {
+        let (registry, workspace_root, preferred_encoding, base_revision) = {
             let app = self.app.read(cx);
             if app.source_registry.root_ids().is_empty() {
-                self.error = Some("尚未加载日志来源".to_string());
                 return;
             }
+            let Some(workspace_root) = app.source_workspace_root.clone() else {
+                return;
+            };
             (
                 app.source_registry.clone(),
-                app.config.loader.clone(),
+                workspace_root,
+                app.selected_encoding.clone(),
                 app.source_content_revision,
             )
         };
-
+        if registry.root_ids().is_empty() {
+            self.error = Some("尚未加载日志来源".to_string());
+            return;
+        }
         self.scan_generation = self.scan_generation.wrapping_add(1);
-        let generation = self.scan_generation;
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        self.scan_cancellation = Some(cancellation.clone());
         self.status = AssistantPanelStatus::Scanning;
         self.push_trace(AgentTraceEntry::new(
             AgentTraceKind::Status,
-            "正在扫描全部来源",
-            "正在补齐未展开目录和归档，并匹配日志类型说明",
+            "正在固化工作区清单",
+            "基于当前来源树和日志工作目录构建会话范围",
         ));
-        cx.spawn(async move |view, cx| {
-            let preparation = cx
-                .background_executor()
-                .spawn(async move {
-                    prepare_agent_source_scope_for_selection(
-                        registry,
-                        AgentScopeSelection::AllLoadedRoots,
-                        config,
-                        loader_config,
-                        cancellation,
-                    )
-                })
-                .await;
-            view.update(cx, |panel, panel_cx| {
-                panel.finish_source_scan(generation, base_revision, preparation, panel_cx);
-                panel_cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        let preparation = prepare_agent_source_scope_for_selection(
+            &registry,
+            AgentScopeSelection::AllLoadedRoots,
+            config,
+            &workspace_root,
+            &preferred_encoding,
+        );
+        self.finish_source_scan(base_revision, preparation, cx);
     }
 
-    /// 接收扫描结果并原子回填来源注册表；外部来源变化会让本结果失效。
+    /// 应用清单固化结果；构建期间来源被替换时丢弃结果并重新固化。
     fn finish_source_scan(
         &mut self,
-        generation: u64,
         base_revision: u64,
         preparation: Result<crate::agent::AgentSourcePreparation, String>,
         cx: &mut Context<Self>,
     ) {
-        if generation != self.scan_generation {
-            return;
-        }
-        self.scan_cancellation = None;
         let preparation = match preparation {
             Ok(preparation) => preparation,
             Err(error) => {
                 self.status = AssistantPanelStatus::Idle;
-                if !error.contains("已取消") {
-                    self.error = Some(format!("来源树完整扫描失败：{error}"));
-                    self.push_trace(AgentTraceEntry::new(
-                        AgentTraceKind::Warning,
-                        "来源扫描失败",
-                        error,
-                    ));
-                }
-                return;
-            }
-        };
-        let source_count = preparation.scope.sources.len();
-        let profile_count = preparation.scope.profiles.len();
-        let warning_count = preparation.warnings.len();
-        let registry = preparation.registry;
-        let scope = Arc::new(preparation.scope);
-        let mention_candidates = Arc::new(build_mention_candidates(&scope));
-        let revision = self.app.update(cx, |app, _| {
-            app.apply_assistant_scanned_registry(base_revision, registry)
-        });
-        let revision = match revision {
-            Ok(revision) => revision,
-            Err(error) => {
-                let current_revision = self.app.read(cx).source_content_revision;
-                self.status = AssistantPanelStatus::Idle;
-                self.accept_source_registry_revision(current_revision, true, cx);
+                self.error = Some(format!("固化工作区清单失败：{error}"));
                 self.push_trace(AgentTraceEntry::new(
-                    AgentTraceKind::Status,
-                    "来源扫描已重新调度",
+                    AgentTraceKind::Warning,
+                    "工作区清单固化失败",
                     error,
                 ));
                 return;
             }
         };
+        let source_count = preparation.scope.sources.len();
+        let profile_count = preparation.scope.profiles.len();
+        let scope = Arc::new(preparation.scope);
+        let mention_candidates = Arc::new(build_mention_candidates(&scope));
+        let current_revision = self.app.read(cx).source_content_revision;
+        if current_revision != base_revision {
+            self.status = AssistantPanelStatus::Idle;
+            self.push_trace(AgentTraceEntry::new(
+                AgentTraceKind::Status,
+                "来源已更新，重新固化工作区清单",
+                "构建期间来源内容版本发生变化，本次结果已丢弃",
+            ));
+            self.schedule_source_scan(cx);
+            return;
+        }
         self.scope = Some(scope);
         self.mention_candidates = mention_candidates;
         self.refresh_mention_picker();
-        self.scope_revision = Some(revision);
+        self.scope_revision = Some(base_revision);
         self.has_loaded_sources = source_count > 0;
         self.status = AssistantPanelStatus::Idle;
         self.push_trace(AgentTraceEntry::new(
             AgentTraceKind::Status,
-            "全部来源扫描完成",
-            format!(
-                "已固化 {source_count} 个日志文件，匹配 {profile_count} 种日志类型说明{}",
-                if warning_count == 0 {
-                    String::new()
-                } else {
-                    format!("，包含 {warning_count} 项可容忍警告")
-                }
-            ),
+            "工作区清单已固化",
+            format!("已固化 {source_count} 个日志文件，匹配 {profile_count} 种日志类型说明"),
         ));
         self.start_queued_turn(cx);
     }
@@ -693,11 +672,13 @@ impl AssistantPanel {
         let cancellation = tokio_util::sync::CancellationToken::new();
         let (user_message_sender, user_message_receiver) = async_channel::bounded(20);
         let pending_user_messages = Arc::new(AtomicUsize::new(0));
+        let (bash_decision_sender, bash_decision_receiver) = async_channel::bounded(8);
         let (event_sender, event_receiver) = async_channel::bounded(256);
         self.turn_generation = self.turn_generation.wrapping_add(1);
         let generation = self.turn_generation;
         self.turn_cancellation = Some(cancellation.clone());
         self.user_message_sender = Some(user_message_sender);
+        self.bash_decision_sender = Some(bash_decision_sender);
         self.pending_user_messages = pending_user_messages.clone();
         self.status = AssistantPanelStatus::Running;
         self.active_turn_message_start = Some(self.messages.len());
@@ -716,6 +697,7 @@ impl AssistantPanel {
             user_message_receiver,
             event_sender,
             pending_user_messages,
+            bash_decision_receiver,
         }));
     }
 
@@ -825,6 +807,43 @@ impl AssistantPanel {
                 }
             }
             AgentEvent::AssistantAttemptReset => self.reset_incomplete_stream_messages(),
+            AgentEvent::BashApprovalRequired {
+                request_id,
+                command,
+            } => {
+                self.push_message(AssistantPanelMessage::BashApproval {
+                    request_id,
+                    command,
+                    status: BashApprovalStatus::Pending,
+                });
+            }
+            AgentEvent::BashApprovalOutcome {
+                request_id,
+                approved,
+                reason,
+            } => {
+                let messages = Arc::make_mut(&mut self.messages);
+                let index = messages.iter().rposition(|message| {
+                    matches!(
+                        message,
+                        AssistantPanelMessage::BashApproval {
+                            request_id: id,
+                            status: BashApprovalStatus::Pending,
+                            ..
+                        } if id.as_str() == request_id.as_str()
+                    )
+                });
+                if let Some(index) = index
+                    && let AssistantPanelMessage::BashApproval { status, .. } = &mut messages[index]
+                {
+                    *status = if approved {
+                        BashApprovalStatus::Approved
+                    } else {
+                        BashApprovalStatus::Denied(bash_approval_reason_label(&reason))
+                    };
+                    self.message_list.splice(index..index + 1, 1);
+                }
+            }
             AgentEvent::Failed(message) => {
                 self.error = Some(message.clone());
                 self.push_trace(AgentTraceEntry::new(
@@ -833,6 +852,38 @@ impl AssistantPanel {
                     message,
                 ));
             }
+        }
+    }
+
+    /// 回传用户对一条 bash 审批的答复，并即时更新卡片状态。
+    fn resolve_bash_approval(&mut self, request_id: &str, approved: bool) {
+        let messages = Arc::make_mut(&mut self.messages);
+        let index = messages.iter().rposition(|message| {
+            matches!(
+                message,
+                AssistantPanelMessage::BashApproval {
+                    request_id: id,
+                    status: BashApprovalStatus::Pending,
+                    ..
+                } if id.as_str() == request_id
+            )
+        });
+        let Some(index) = index else {
+            return;
+        };
+        if let AssistantPanelMessage::BashApproval { status, .. } = &mut messages[index] {
+            *status = if approved {
+                BashApprovalStatus::Approved
+            } else {
+                BashApprovalStatus::Denied("你未批准这条命令".to_string())
+            };
+        }
+        self.message_list.splice(index..index + 1, 1);
+        if let Some(sender) = &self.bash_decision_sender {
+            let _ = sender.try_send(BashApprovalDecision {
+                request_id: request_id.to_string(),
+                approved,
+            });
         }
     }
 
@@ -940,15 +991,12 @@ impl AssistantPanel {
         })
     }
 
-    /// 停止当前来源扫描或模型回答；对话历史和面板实体不销毁。
+    /// 停止当前模型回答；对话历史和面板实体不销毁。
     fn stop_current_work(&mut self) {
         if !self.status.is_busy() || self.status == AssistantPanelStatus::Cancelling {
             return;
         }
         self.status = AssistantPanelStatus::Cancelling;
-        if let Some(cancellation) = self.scan_cancellation.as_ref() {
-            cancellation.cancel();
-        }
         if let Some(cancellation) = self.turn_cancellation.as_ref() {
             cancellation.cancel();
         }
@@ -961,6 +1009,7 @@ impl AssistantPanel {
         }
         self.status = AssistantPanelStatus::Idle;
         self.user_message_sender = None;
+        self.bash_decision_sender = None;
         self.turn_cancellation = None;
         self.pending_user_messages = Arc::new(AtomicUsize::new(0));
         self.active_turn_message_start = None;
@@ -970,9 +1019,6 @@ impl AssistantPanel {
     ///
     /// 返回值：存在运行中的模型轮次且至少恢复了一条用户消息时返回 `true`。
     fn cancel_background_work_and_requeue_active_turn(&mut self) -> bool {
-        if let Some(cancellation) = self.scan_cancellation.take() {
-            cancellation.cancel();
-        }
         if let Some(cancellation) = self.turn_cancellation.take() {
             cancellation.cancel();
         }
@@ -1040,9 +1086,6 @@ impl AssistantPanel {
 
     /// 取消全部后台 generation，供分析配置更新和实体销毁复用。
     fn cancel_background_work(&mut self) {
-        if let Some(cancellation) = self.scan_cancellation.take() {
-            cancellation.cancel();
-        }
         if let Some(cancellation) = self.turn_cancellation.take() {
             cancellation.cancel();
         }
@@ -1053,6 +1096,7 @@ impl AssistantPanel {
         }
         self.active_turn_message_start = None;
         self.user_message_sender = None;
+        self.bash_decision_sender = None;
         self.pending_user_messages = Arc::new(AtomicUsize::new(0));
     }
 
@@ -1213,18 +1257,19 @@ impl AssistantPanel {
 }
 
 /// 从来源快照生成目录和文件候选；目录只保存后代计数，避免为大目录复制数千个引用。
+/// 基于工作区清单构建“@”候选；路径即工作目录内相对路径，模型可直接用于工具调用。
 fn build_mention_candidates(scope: &SourceScopeSnapshot) -> Vec<AssistantMentionCandidate> {
     let mut folder_counts = BTreeMap::<String, usize>::new();
     let mut files = Vec::with_capacity(scope.sources.len());
     for source in scope.sources.iter() {
-        let components = source.relative_path.split('/').collect::<Vec<_>>();
+        let components = source.workspace_path.split('/').collect::<Vec<_>>();
         for component_count in 1..components.len() {
             let folder_path = components[..component_count].join("/");
             *folder_counts.entry(folder_path).or_default() += 1;
         }
         files.push(AssistantMentionCandidate {
-            display_path: source.relative_path.clone(),
-            search_key: source.relative_path.to_lowercase(),
+            display_path: source.workspace_path.clone(),
+            search_key: source.workspace_path.to_lowercase(),
             kind: AssistantMentionKind::File,
             matching_source_count: 1,
         });
@@ -1283,7 +1328,7 @@ fn assistant_message_with_mentions(
             let candidate = &selected.candidate;
             serde_json::json!({
                 "kind": candidate.kind.as_str(),
-                "display_path": candidate.display_path,
+                "workspace_path": candidate.display_path,
                 "path_prefix": (candidate.kind == AssistantMentionKind::Folder)
                     .then_some(candidate.display_path.as_str()),
                 "matching_source_count": candidate.matching_source_count,
@@ -1295,7 +1340,7 @@ fn assistant_message_with_mentions(
     }
     let serialized = serde_json::to_string(&metadata).unwrap_or_else(|_| "[]".to_string());
     format!(
-        "{content}\n\n<ARGUS_SELECTED_SOURCES app_generated=\"true\">\n{serialized}\n</ARGUS_SELECTED_SOURCES>"
+        "{content}\n\n<ARGUS_SELECTED_SOURCES app_generated=\"true\" note=\"Workspace-relative paths the user asked you to focus on; use them with read_file, bash or as a list_loaded_sources path_prefix.\">\n{serialized}\n</ARGUS_SELECTED_SOURCES>"
     )
 }
 
@@ -1801,6 +1846,28 @@ fn render_assistant_message(
             is_expanded,
         } => render_tool_group(traces, *is_expanded, index, is_active, panel, theme)
             .into_any_element(),
+        AssistantPanelMessage::BashApproval {
+            request_id,
+            command,
+            status,
+        } => {
+            let decision_panel = panel.clone();
+            let decision_request_id = request_id.clone();
+            render_bash_approval_card(
+                request_id,
+                command,
+                status,
+                theme,
+                640.0,
+                move |approved, _, _, app_cx| {
+                    decision_panel.update(app_cx, |panel, panel_cx| {
+                        panel.resolve_bash_approval(&decision_request_id, approved);
+                        panel_cx.notify();
+                    });
+                },
+            )
+            .into_any_element()
+        }
         AssistantPanelMessage::Reasoning(content) => {
             render_model_message("思考过程", content, true, is_active, index, theme)
                 .into_any_element()

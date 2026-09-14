@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 
 use crate::config::LoaderConfig;
 use crate::loader::archive::detector::detect_archive_format;
@@ -48,9 +48,7 @@ pub(crate) struct SourceTreeScanProgress {
 }
 
 /// 来源树全量扫描器，一次构建完整来源树，不调用 UI 展开或渐进探测逻辑。
-pub(crate) struct SourceTreeScanner<'a> {
-    /// 扫描前的来源树，只用于取得根位置、复用稳定 ID 和保留未选根。
-    original_registry: &'a SourceRegistry,
+pub(crate) struct SourceTreeScanner {
     /// 目录与符号链接行为配置。
     config: LoaderConfig,
     /// 用户主动停止时由所有目录边界检查的取消令牌。
@@ -69,15 +67,14 @@ pub(crate) struct SourceTreeScanner<'a> {
     ordered_nodes: Vec<SourceTreeNode>,
 }
 
-impl<'a> SourceTreeScanner<'a> {
-    /// 为来源树副本创建独立扫描器；构造阶段不访问文件系统。
-    pub(crate) fn new(
-        original_registry: &'a SourceRegistry,
+impl SourceTreeScanner {
+    /// 创建扫描器；构造阶段不访问文件系统。
+    fn new(
+        original_registry: &SourceRegistry,
         config: LoaderConfig,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
-            original_registry,
             config,
             cancellation,
             progress: None,
@@ -111,39 +108,6 @@ impl<'a> SourceTreeScanner<'a> {
         scanner.scan_path_roots(paths)
     }
 
-    /// 完整扫描指定根；其它根的已有子树保持不变，避免单根智能分析破坏主窗口其它来源。
-    pub(crate) fn scan(mut self, selected_root_ids: &[SourceId]) -> Result<SourceTreeScanResult> {
-        self.ensure_not_cancelled()?;
-        let selected_roots = selected_root_ids.iter().copied().collect::<HashSet<_>>();
-        if selected_roots.is_empty() {
-            bail!("来源树扫描至少需要一个来源根");
-        }
-
-        // 未授权根不会参与扫描，但它们的 ID 必须提前保留，防止相同真实路径被选中根误复用。
-        for source_id in self.original_registry.tree_order_source_ids() {
-            let Some(root_id) = self.original_registry.root_id_for(*source_id) else {
-                continue;
-            };
-            if !selected_roots.contains(&root_id) {
-                self.stable_ids.reserve(*source_id);
-            }
-        }
-
-        for root_id in self.original_registry.root_ids() {
-            self.ensure_not_cancelled()?;
-            if selected_roots.contains(root_id) {
-                self.scan_selected_root(*root_id)?;
-            } else {
-                self.copy_existing_subtree(*root_id);
-            }
-        }
-
-        Ok(SourceTreeScanResult {
-            registry: SourceRegistry::from_ordered_nodes(self.ordered_nodes),
-            warnings: self.warnings.into_iter().collect(),
-        })
-    }
-
     /// 逐个扫描用户给定路径；每个路径边界都检查取消令牌，保证新加载请求能及时中断在途扫描。
     fn scan_path_roots(mut self, paths: Vec<PathBuf>) -> Result<SourceTreeScanResult> {
         self.ensure_not_cancelled()?;
@@ -161,26 +125,6 @@ impl<'a> SourceTreeScanner<'a> {
             registry: SourceRegistry::from_ordered_nodes(self.ordered_nodes),
             warnings: self.warnings.into_iter().collect(),
         })
-    }
-
-    /// 根据根节点的真实位置重新发现其完整内容，并始终保留根 ID。
-    fn scan_selected_root(&mut self, root_id: SourceId) -> Result<()> {
-        let root = self
-            .original_registry
-            .node(root_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("来源树根不存在"))?;
-        match &root.location {
-            SourceLocation::LocalPath(path) => {
-                self.scan_local_root(&root, path.clone())?;
-            }
-        }
-        Ok(())
-    }
-
-    /// 扫描本地目录或普通文件根；保持根 ID 稳定。
-    fn scan_local_root(&mut self, root: &SourceTreeNode, path: PathBuf) -> Result<()> {
-        self.scan_local_path(None, root.depth, root.label.clone(), path, Some(root.id))
     }
 
     /// 扫描任意本地路径并生成对应来源节点；`preferred_id` 仅在重建既有根时保留稳定 ID。
@@ -478,17 +422,6 @@ impl<'a> SourceTreeScanner<'a> {
         id
     }
 
-    /// 原样复制一个未扫描根的已有子树，保持主窗口未授权范围完全不变。
-    fn copy_existing_subtree(&mut self, source_id: SourceId) {
-        let Some(node) = self.original_registry.node(source_id).cloned() else {
-            return;
-        };
-        self.ordered_nodes.push(node);
-        for child_id in self.original_registry.child_ids(source_id) {
-            self.copy_existing_subtree(*child_id);
-        }
-    }
-
     /// 在高成本边界及时响应用户停止。
     fn ensure_not_cancelled(&self) -> Result<()> {
         if self.cancellation.is_cancelled() {
@@ -589,11 +522,6 @@ impl StableSourceIds {
         }
     }
 
-    /// 提前保留未扫描子树 ID。
-    fn reserve(&mut self, source_id: SourceId) {
-        self.used_ids.insert(source_id);
-    }
-
     /// 优先使用显式根 ID，其次按来源路径复用旧 ID，最后分配全新 ID。
     fn take(&mut self, path: &Path, preferred_id: Option<SourceId>) -> SourceId {
         if let Some(preferred_id) = preferred_id {
@@ -638,117 +566,6 @@ fn safe_io_error(error: &std::io::Error) -> String {
 mod tests {
     use super::*;
     use crate::config::paths::temporary_test_dir;
-
-    /// 构造一个尚未加载子级的本地目录根。
-    fn unloaded_directory_registry(path: &Path) -> (SourceRegistry, SourceId) {
-        let mut registry = SourceRegistry::new();
-        let root_id = registry.allocate_id();
-        registry.insert_node(SourceTreeNode {
-            id: root_id,
-            parent_id: None,
-            depth: 0,
-            label: "logs".to_string(),
-            kind: SourceKind::Directory,
-            location: SourceLocation::LocalPath(path.to_path_buf()),
-            metadata: SourceMetadata::default(),
-            selected: false,
-            expanded: false,
-        });
-        registry.rebuild_all_indices();
-        (registry, root_id)
-    }
-
-    /// 验证独立扫描器递归发现目录日志且不需要逐级调用 UI 加载器。
-    #[test]
-    fn scans_local_directory_into_one_complete_registry() {
-        let directory = temporary_test_dir("agent-native-source-directory");
-        fs::create_dir(directory.path().join("nested")).expect("应创建嵌套目录");
-        fs::write(directory.path().join("nested/application.log"), "ready")
-            .expect("应写入测试日志");
-        let (registry, root_id) = unloaded_directory_registry(directory.path());
-
-        let result = SourceTreeScanner::new(
-            &registry,
-            LoaderConfig::default(),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .scan(&[root_id])
-        .expect("独立目录扫描应成功");
-
-        let labels = result
-            .registry
-            .tree_order_source_ids()
-            .iter()
-            .filter_map(|source_id| result.registry.node(*source_id))
-            .map(|node| node.label.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(labels, vec!["logs", "nested", "application.log"]);
-        assert!(
-            result
-                .registry
-                .node(root_id)
-                .unwrap()
-                .metadata
-                .children_loaded
-        );
-    }
-
-    /// 验证重新扫描后相同真实日志继续使用旧 ID，保证已打开标签和证据导航不会失效。
-    #[test]
-    fn preserves_existing_source_id_for_unchanged_log() {
-        let directory = temporary_test_dir("agent-native-source-stable-id");
-        let log_path = directory.path().join("application.log");
-        fs::write(&log_path, "ready").expect("应写入测试日志");
-        let (mut registry, root_id) = unloaded_directory_registry(directory.path());
-        let existing_log_id = registry.allocate_id();
-        registry.insert_node(SourceTreeNode {
-            id: existing_log_id,
-            parent_id: Some(root_id),
-            depth: 1,
-            label: "application.log".to_string(),
-            kind: SourceKind::LogFile,
-            location: SourceLocation::LocalPath(log_path),
-            metadata: SourceMetadata {
-                size: Some(5),
-                children_loaded: true,
-                ..SourceMetadata::default()
-            },
-            selected: true,
-            expanded: false,
-        });
-        registry.node_mut(root_id).unwrap().metadata.children_loaded = true;
-        registry.rebuild_all_indices();
-
-        let result = SourceTreeScanner::new(
-            &registry,
-            LoaderConfig::default(),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .scan(&[root_id])
-        .expect("重新扫描应成功");
-
-        let node = result
-            .registry
-            .node(existing_log_id)
-            .expect("未变化日志必须保留原 ID");
-        assert_eq!(node.label, "application.log");
-        assert_eq!(result.registry.selected_id(), Some(existing_log_id));
-    }
-
-    /// 验证已取消扫描不会访问来源内容。
-    #[test]
-    fn cancelled_scan_stops_before_source_access() {
-        let directory = temporary_test_dir("agent-native-source-cancelled");
-        let (registry, root_id) = unloaded_directory_registry(directory.path());
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        cancellation.cancel();
-
-        let error = SourceTreeScanner::new(&registry, LoaderConfig::default(), cancellation)
-            .scan(&[root_id])
-            .expect_err("取消后的独立扫描必须立即停止");
-
-        assert!(error.to_string().contains("已取消"));
-    }
 
     /// 收集注册表中全部节点的树序标签。
     fn tree_order_labels(registry: &SourceRegistry) -> Vec<&str> {

@@ -1,25 +1,27 @@
 //! 文件职责：组织 Argus AI Agent 的领域模块和公共入口。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-09-12
+//! 修改日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：导出凭据、会话编排、来源快照和模型能力探测所需类型。
+//! 主要功能：导出凭据、通用智能体循环、交互助手装配、来源快照和模型能力探测所需类型。
 
+pub(crate) mod agent_loop;
 pub(crate) mod assistant;
 pub(crate) mod credential;
 pub(crate) mod model_gateway;
-pub(crate) mod orchestrator;
 pub(crate) mod runtime;
 pub(crate) mod session;
 pub(crate) mod source_scan;
+pub(crate) mod tools;
 
+pub(crate) use agent_loop::{AgentLoopNote, AgentLoopRequest, run_agent_loop};
 pub(crate) use assistant::{AssistantHistoryTurn, AssistantRunRequest, run_assistant_turn};
 pub(crate) use credential::{load_api_key, save_api_key};
 pub(crate) use model_gateway::probe_model_capabilities;
-pub(crate) use orchestrator::{AgentRunRequest, run_agent_session};
 pub(crate) use runtime::agent_runtime;
 pub(crate) use session::{
     AgentBudgetSnapshot, AgentEvent, AgentScopeSelection, AgentSessionStatus, AgentStreamKind,
-    AgentTraceEntry, AgentTraceKind, AgentUserMessage, AgentUserMessageStatus, SourceScopeSnapshot,
+    AgentTraceEntry, AgentTraceKind, AgentUserMessage, AgentUserMessageStatus,
+    BashApprovalDecision, SourceScopeSnapshot,
 };
 pub(crate) use source_scan::{
     AgentLogProfileMatchSummary, AgentSourcePreparation, prepare_agent_source_scope,
@@ -33,10 +35,11 @@ mod architecture_tests {
 
     /// Agent 模型工具允许依赖的实现文件；这些文件共同构成独立的工具执行边界。
     const AGENT_TOOL_IMPLEMENTATION_FILES: &[&str] = &[
-        "src/agent/orchestrator.rs",
+        "src/agent/agent_loop.rs",
         "src/agent/assistant.rs",
         "src/agent/source_scan.rs",
         "src/agent/session.rs",
+        "src/agent/tools.rs",
     ];
     /// 主窗口业务模块的导入前缀；模型工具不得重新接回这些展示或交互流程。
     const FORBIDDEN_BUSINESS_IMPORTS: &[&str] =

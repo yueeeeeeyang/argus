@@ -1,9 +1,10 @@
 //! 文件职责：导出 UI 可复用组件。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：组织输入框、弹窗、下拉框、上下文菜单、滚动条和图标等通用组件。
+//! 主要功能：组织输入框、弹窗、下拉框、上下文菜单、审批卡片、滚动条和图标等通用组件。
 
+pub(crate) mod bash_approval;
 pub(crate) mod context_menu;
 pub(crate) mod datetime_picker;
 pub(crate) mod dropdown;

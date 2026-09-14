@@ -1,15 +1,16 @@
-//! 文件职责：连接来源树智能分析入口、问题模态框、Agent 独立窗口和后台编排任务。
+//! 文件职责：连接来源树智能分析入口、问题模态框、Agent 独立窗口和后台通用智能体任务。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-17
+//! 修改日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：解析分析根范围、读取系统凭据、先创建独立窗口，再在专用 Tokio 运行时启动单会话 Agent。
+//! 主要功能：解析分析根范围、读取系统凭据、先创建独立窗口，再在专用 Tokio 运行时启动通用智能体循环。
 
 use gpui::{AppContext, Bounds, Context, WindowBounds, WindowOptions, px, size};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::agent::{
-    AgentLogProfileMatchSummary, AgentRunRequest, AgentSourcePreparation, SourceScopeSnapshot,
-    agent_runtime, load_api_key, prepare_agent_source_scope, run_agent_session,
+    AgentLoopNote, AgentLoopRequest, AgentSourcePreparation, agent_runtime, load_api_key,
+    prepare_agent_source_scope, run_agent_loop,
 };
 use crate::app::{ArgusApp, frameless_resizable_titlebar};
 use crate::config::{AiConfig, AiModelProfile};
@@ -86,16 +87,11 @@ impl ArgusApp {
 
     /// 关闭初始问题模态框，不影响已经启动的独立 Agent 窗口。
     pub(crate) fn close_ai_agent_launch_dialog(&mut self) {
-        // 底层单次归档枚举完成后，扫描会在下一节点边界观察取消；generation 同时阻止过期结果回填。
-        if let Some(cancellation) = self.ai_agent_source_scan_cancellation.take() {
-            cancellation.cancel();
-        }
-        self.ai_agent_source_scan_generation = self.ai_agent_source_scan_generation.wrapping_add(1);
         self.ai_agent_launch_modal = None;
         self.placeholder_notice = "已取消智能分析问题输入".to_string();
     }
 
-    /// 校验配置和范围，在后台完整扫描来源根后创建独立窗口并启动 Agent。
+    /// 校验配置和范围，固化工作区清单后创建独立窗口并启动通用智能体循环。
     ///
     /// 返回值：窗口和后台任务成功建立时返回 `Ok`；失败时保留问题模态框并展示错误。
     pub(crate) fn start_ai_agent_session(
@@ -104,144 +100,82 @@ impl ArgusApp {
         model_profile_id: String,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if let Some(window_handle) = self.ai_agent_window_handle
-            && window_handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-        {
-            return Err("已有智能分析会话正在窗口中运行".to_string());
+        // 旧窗口已进入终态时关闭重建；仍在运行时拒绝并发会话。
+        if let Some(window_handle) = self.ai_agent_window_handle.take() {
+            let is_idle = window_handle
+                .update(cx, |window, _, _| window.is_session_terminal())
+                .unwrap_or(true);
+            if is_idle {
+                let _ = window_handle.update(cx, |_, window, _| window.remove_window());
+            } else {
+                let _ = window_handle.update(cx, |_, window, _| window.activate_window());
+                self.ai_agent_window_handle = Some(window_handle);
+                return Err(
+                    "已有智能分析会话正在运行，请先取消或等待完成后再发起新分析".to_string()
+                );
+            }
         }
-        self.ai_agent_window_handle = None;
         let mut config = self.config.ai.clone();
         config.normalize();
         config.validate()?;
         let model = config.enabled_model(&model_profile_id)?.clone();
-        // 启动扫描前先验证凭据，避免长时间枚举来源后才发现模型不可用；真正启动时会再次读取最新密钥。
+        // 启动前先验证凭据，避免会话建立后才发现模型不可用；真正启动时会再次读取最新密钥。
         load_api_key(&model.base_url)?;
         self.ai_agent_scope_unavailable_reason()
             .map_or(Ok(()), Err)?;
-        // 整体耗时从用户提交问题后正式开始准备来源时计算，覆盖扫描、模型、工具、复核与报告。
+        let workspace_root = self
+            .source_workspace_root
+            .clone()
+            .ok_or_else(|| "日志工作目录已失效，请重新加载日志来源".to_string())?;
+        // 整体耗时从用户提交问题后正式开始准备来源时计算。
         let analysis_started_at = Instant::now();
+        let preparation = prepare_agent_source_scope(
+            &self.source_registry,
+            self.source_registry.selected_id(),
+            config.clone(),
+            &workspace_root,
+            &self.selected_encoding,
+        );
 
-        let scan_generation = self.ai_agent_source_scan_generation.wrapping_add(1);
-        self.ai_agent_source_scan_generation = scan_generation;
-        if let Some(previous) = self.ai_agent_source_scan_cancellation.take() {
-            previous.cancel();
-        }
-        let scan_cancellation = tokio_util::sync::CancellationToken::new();
-        self.ai_agent_source_scan_cancellation = Some(scan_cancellation.clone());
-        let registry = self.source_registry.clone();
-        let selected_id = self.source_registry.selected_id();
-        let loader_config = self.config.loader.clone();
-        let scan_config = config.clone();
-        let scan_loader_config = loader_config.clone();
-        self.placeholder_notice = "正在完整扫描来源树并匹配日志类型".to_string();
-
-        cx.spawn(async move |view, cx| {
-            let preparation = cx
-                .background_executor()
-                .spawn(async move {
-                    prepare_agent_source_scope(
-                        registry,
-                        selected_id,
-                        scan_config,
-                        scan_loader_config,
-                        scan_cancellation,
-                    )
-                })
-                .await;
-            view.update(cx, |app, cx| {
-                app.finish_ai_agent_source_scan(
-                    scan_generation,
-                    analysis_started_at,
-                    question,
-                    config,
-                    model,
-                    preparation,
-                    cx,
-                );
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        Ok(())
-    }
-
-    /// 接收后台完整扫描结果；过期 generation 直接丢弃，禁止用户关闭后仍自动启动会话。
-    fn finish_ai_agent_source_scan(
-        &mut self,
-        scan_generation: usize,
-        analysis_started_at: Instant,
-        question: String,
-        config: AiConfig,
-        model: AiModelProfile,
-        preparation: Result<AgentSourcePreparation, String>,
-        cx: &mut Context<Self>,
-    ) {
-        if scan_generation != self.ai_agent_source_scan_generation
-            || self.ai_agent_launch_modal.is_none()
-        {
-            return;
-        }
-        self.ai_agent_source_scan_cancellation = None;
-        let preparation = match preparation {
-            Ok(preparation) => preparation,
-            Err(error) => {
-                self.finish_ai_agent_preparing_with_error(
-                    format!("来源树完整扫描失败：{error}"),
-                    cx,
-                );
-                return;
-            }
-        };
-
-        let AgentSourcePreparation {
-            registry,
-            scope,
-            warnings,
-            match_summaries,
-        } = preparation;
-        // 回填与生成快照使用同一注册表副本，确保证据行可以继续导航到主窗口。
-        self.source_registry = registry;
-        self.rebuild_filtered_source_ids();
-        self.mark_source_content_changed(cx);
         if let Err(error) = self.launch_prepared_ai_agent(
             analysis_started_at,
             question,
             config,
             model,
-            scope,
-            match_summaries,
-            warnings.len(),
+            preparation,
             cx,
         ) {
             self.finish_ai_agent_preparing_with_error(error, cx);
         }
+        Ok(())
     }
 
-    /// 使用已经完整扫描并匹配日志类型的来源快照创建窗口和后台模型会话。
+    /// 使用已固化的工作区清单创建窗口和后台通用智能体会话。
     fn launch_prepared_ai_agent(
         &mut self,
         analysis_started_at: Instant,
         question: String,
         config: AiConfig,
         model: AiModelProfile,
-        scope: SourceScopeSnapshot,
-        match_summaries: Vec<AgentLogProfileMatchSummary>,
-        warning_count: usize,
+        preparation: Result<AgentSourcePreparation, String>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let preparation = preparation.map_err(|error| format!("固化分析范围失败：{error}"))?;
+        let AgentSourcePreparation {
+            scope,
+            match_summaries,
+        } = preparation;
         let context_window_tokens = model.context_window_tokens;
         let source_count = scope.sources.len();
         let profile_count = scope.profiles.len();
-        let scope = std::sync::Arc::new(scope);
+        let scope = Arc::new(scope);
         let api_key = load_api_key(&model.base_url)?;
         let session_id = scope.session_id.clone();
         let cancellation = crate::agent::session::new_cancellation_token();
         let (user_message_sender, user_message_receiver) = async_channel::bounded(20);
-        let pending_user_messages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let user_message_gate = std::sync::Arc::new(std::sync::Mutex::new(true));
+        let pending_user_messages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let user_message_gate = Arc::new(std::sync::Mutex::new(true));
+        let (bash_decision_sender, bash_decision_receiver) = async_channel::bounded(8);
         let (event_sender, event_receiver) = async_channel::bounded(256);
 
         let app = cx.entity();
@@ -282,6 +216,7 @@ impl ArgusApp {
                         window_user_message_gate,
                         window_scope,
                         window_match_summaries,
+                        bash_decision_sender,
                         context_window_tokens,
                         analysis_started_at,
                         cx,
@@ -294,16 +229,15 @@ impl ArgusApp {
         self.ai_agent_window_handle = Some(window_handle);
         self.ai_agent_launch_modal = None;
         self.placeholder_notice = format!(
-            "已扫描 {source_count} 个日志文件并匹配 {profile_count} 种日志类型，启动会话 {}{}",
-            session_id.chars().take(8).collect::<String>(),
-            if warning_count > 0 {
-                format!("（{warning_count} 项扫描警告）")
-            } else {
-                String::new()
-            }
+            "已固化 {source_count} 个日志文件并匹配 {profile_count} 种日志类型，启动会话 {}",
+            session_id.chars().take(8).collect::<String>()
         );
-        agent_runtime().spawn(run_agent_session(AgentRunRequest {
+        agent_runtime().spawn(run_agent_loop(AgentLoopRequest {
+            note: AgentLoopNote::Analysis,
             question,
+            history: Vec::new(),
+            history_was_trimmed: false,
+            initial_user_messages: Vec::new(),
             config,
             model,
             scope,
@@ -312,12 +246,13 @@ impl ArgusApp {
             user_message_receiver,
             event_sender,
             pending_user_messages,
-            user_message_gate,
+            user_message_gate: Some(user_message_gate),
+            bash_decision_receiver,
         }));
         Ok(())
     }
 
-    /// 把来源扫描或窗口创建错误回写到仍打开的问题对话框，允许用户原地重试。
+    /// 把范围固化或窗口创建错误回写到仍打开的问题对话框，允许用户原地重试。
     fn finish_ai_agent_preparing_with_error(&mut self, message: String, cx: &mut Context<Self>) {
         if let Some(dialog) = self.ai_agent_launch_modal.as_ref() {
             dialog.update(cx, |dialog, dialog_cx| {
@@ -354,6 +289,9 @@ impl ArgusApp {
     fn ai_agent_scope_unavailable_reason(&self) -> Option<String> {
         if self.source_registry.root_ids().is_empty() {
             return Some("尚未加载日志来源，请先添加包含日志文件的来源".to_string());
+        }
+        if self.source_workspace_root.is_none() {
+            return Some("日志工作目录已失效，请重新加载日志来源".to_string());
         }
         if self.source_registry.root_ids().len() > 1 && self.source_registry.selected_id().is_none()
         {

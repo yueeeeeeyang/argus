@@ -10,7 +10,6 @@ use crate::app::{
     ASSISTANT_PANEL_MAIN_CONTENT_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH, ASSISTANT_PANEL_MIN_WIDTH,
     ArgusApp, SettingsSection,
 };
-use crate::loader::SourceRegistry;
 use crate::ui::assistant_panel::AssistantPanel;
 
 impl ArgusApp {
@@ -116,21 +115,6 @@ impl ArgusApp {
         };
         (window_width - source_panel_width - ASSISTANT_PANEL_MAIN_CONTENT_MIN_WIDTH)
             .clamp(0.0, ASSISTANT_PANEL_MAX_WIDTH)
-    }
-
-    /// 原子应用助手自己完成的全来源扫描，不向该助手发送外部来源变化重置事件。
-    pub(crate) fn apply_assistant_scanned_registry(
-        &mut self,
-        expected_revision: u64,
-        registry: SourceRegistry,
-    ) -> Result<u64, String> {
-        if self.source_content_revision != expected_revision {
-            return Err("日志来源在扫描期间发生变化，请重新发送问题".to_string());
-        }
-        self.source_registry = registry;
-        self.rebuild_filtered_source_ids();
-        self.source_content_revision = self.source_content_revision.wrapping_add(1);
-        Ok(self.source_content_revision)
     }
 
     /// 标记来源注册表的非替换式补齐；推进并发版本，但保留助手现有上下文和可信快照。
@@ -260,27 +244,17 @@ mod tests {
         assert_eq!(app.current_assistant_panel_width_for_window(820.0), 340.0);
     }
 
-    /// 验证助手自己的来源回填原子推进基线，旧扫描结果无法覆盖更新后的来源树。
+    /// 验证纯界面折叠不会被误判为日志来源内容变化。
     #[test]
-    fn assistant_source_scan_updates_revision_without_accepting_stale_result() {
+    fn assistant_panel_toggle_keeps_source_revision() {
         let directory = isolated_test_dir("assistant-source-revision");
         let manager = ConfigManager::new(directory.join("settings.toml"));
         let mut app = ArgusApp::new_with_config_manager(manager);
-
-        let revision = app
-            .apply_assistant_scanned_registry(0, SourceRegistry::new())
-            .expect("当前版本的助手扫描结果应原子回填");
-        assert_eq!(revision, 1);
-        assert_eq!(app.source_content_revision, 1);
-        assert!(
-            app.apply_assistant_scanned_registry(0, SourceRegistry::new())
-                .is_err(),
-            "旧版本扫描结果不得覆盖更新后的来源树"
-        );
+        assert_eq!(app.source_content_revision, 0);
 
         app.toggle_source_panel();
         assert_eq!(
-            app.source_content_revision, 1,
+            app.source_content_revision, 0,
             "纯界面折叠不应被误判为日志来源内容变化"
         );
     }

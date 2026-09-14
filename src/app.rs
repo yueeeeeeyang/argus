@@ -275,10 +275,6 @@ pub(crate) struct ArgusApp {
     pub source_picker_modal: Option<Entity<SourcePickerWindow>>,
     /// AI 初始问题输入模态框子视图。
     pub ai_agent_launch_modal: Option<Entity<AgentLaunchDialog>>,
-    /// AI 来源完整扫描 generation；关闭启动对话框或重新提交后用于丢弃过期后台结果。
-    pub ai_agent_source_scan_generation: usize,
-    /// 当前来源完整扫描取消令牌；关闭启动对话框后在下一来源节点边界停止。
-    pub ai_agent_source_scan_cancellation: Option<tokio_util::sync::CancellationToken>,
     /// 当前唯一非终态或最近一次 AI 分析独立窗口句柄。
     pub ai_agent_window_handle: Option<WindowHandle<AgentWindow>>,
     /// 主窗口右侧 Agent 助手面板；首次展开时延迟创建，收起后继续保留会话。
@@ -501,8 +497,6 @@ impl ArgusApp {
             source_picker: SourcePickerState::default(),
             source_picker_modal: None,
             ai_agent_launch_modal: None,
-            ai_agent_source_scan_generation: 0,
-            ai_agent_source_scan_cancellation: None,
             ai_agent_window_handle: None,
             assistant_panel: None,
             is_assistant_panel_collapsed: true,

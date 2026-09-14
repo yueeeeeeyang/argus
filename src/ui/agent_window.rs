@@ -20,12 +20,15 @@ use std::time::{Duration, Instant};
 use crate::agent::{
     AgentBudgetSnapshot, AgentEvent, AgentLogProfileMatchSummary, AgentSessionStatus,
     AgentStreamKind, AgentTraceEntry, AgentTraceKind, AgentUserMessage, AgentUserMessageStatus,
-    SourceScopeSnapshot,
+    BashApprovalDecision, SourceScopeSnapshot,
 };
 use crate::app::{ArgusApp, TextInputState, observe_app_theme};
 use crate::config::{LogNameMatcherMode, LogNameMatcherTarget};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::theme::AppTheme;
+use crate::ui::components::bash_approval::{
+    BashApprovalCard, BashApprovalStatus, bash_approval_reason_label, render_bash_approval_card,
+};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{
     IconButtonSize, render_icon_button, render_round_icon_button,
@@ -96,6 +99,13 @@ enum AgentStreamItem {
         /// 是否显示正在执行动画。
         is_active: bool,
     },
+    /// 一条 bash 审批确认卡片。
+    BashApproval {
+        /// 卡片在审批列表中的索引。
+        approval_index: usize,
+        /// 当前审批状态；状态变化驱动虚拟行重新测量。
+        status: BashApprovalStatus,
+    },
     /// 消息流末尾保留的呼吸空间。
     Spacer,
 }
@@ -132,6 +142,10 @@ pub(crate) struct AgentWindow {
     trace_scrollbar_drag_offset: Option<Pixels>,
     /// 最新资源预算快照。
     budget: AgentBudgetSnapshot,
+    /// 会话内累计的 bash 审批卡片；按创建时间与轨迹交错展示。
+    bash_approvals: Vec<BashApprovalCard>,
+    /// 发送给后台工具的审批答复通道。
+    bash_decision_sender: async_channel::Sender<BashApprovalDecision>,
     /// 底部追加提示输入状态。
     message_input: TextInputState,
     /// 提示输入框滚动句柄。
@@ -177,6 +191,7 @@ impl AgentWindow {
         user_message_gate: Arc<std::sync::Mutex<bool>>,
         scope: Arc<SourceScopeSnapshot>,
         match_summaries: Vec<AgentLogProfileMatchSummary>,
+        bash_decision_sender: async_channel::Sender<BashApprovalDecision>,
         context_window_tokens: u64,
         analysis_started_at: Instant,
         cx: &mut Context<Self>,
@@ -265,6 +280,8 @@ impl AgentWindow {
             has_registered_trace_scroll_handler: false,
             trace_scrollbar_drag_offset: None,
             budget: AgentBudgetSnapshot::default(),
+            bash_approvals: Vec::new(),
+            bash_decision_sender,
             message_input,
             message_scroll: ScrollHandle::new(),
             message_scroll_state: TextareaScrollState::new(),
@@ -328,8 +345,37 @@ impl AgentWindow {
                     reason,
                 ));
             }
-            // 交互助手使用独立右侧面板消费该事件，固定分析窗口不会收到它。
-            AgentEvent::AssistantCompleted { .. } | AgentEvent::AssistantAttemptReset => {}
+            // 交互助手完成事件只由右侧面板消费；本窗口不会收到它。
+            AgentEvent::AssistantCompleted { .. } => {}
+            // 统一循环重试前丢弃本次尝试尚未完成的流式正文，避免重试内容重复拼接。
+            AgentEvent::AssistantAttemptReset => {
+                self.drop_incomplete_stream_text();
+            }
+            AgentEvent::BashApprovalRequired {
+                request_id,
+                command,
+            } => {
+                self.bash_approvals
+                    .push(BashApprovalCard::pending(request_id, command));
+            }
+            AgentEvent::BashApprovalOutcome {
+                request_id,
+                approved,
+                reason,
+            } => {
+                if let Some(card) = self
+                    .bash_approvals
+                    .iter_mut()
+                    .find(|card| card.request_id == request_id)
+                    && card.status == BashApprovalStatus::Pending
+                {
+                    card.status = if approved {
+                        BashApprovalStatus::Approved
+                    } else {
+                        BashApprovalStatus::Denied(bash_approval_reason_label(&reason))
+                    };
+                }
+            }
             AgentEvent::Failed(message) => {
                 self.input_error = Some(message.clone());
                 self.push_trace(AgentTraceEntry::new(
@@ -339,6 +385,49 @@ impl AgentWindow {
                 ));
             }
         }
+    }
+
+    /// 丢弃末尾连续的思考与正文轨迹；模型重试会从空白重新流式输出。
+    fn drop_incomplete_stream_text(&mut self) {
+        let traces = Arc::make_mut(&mut self.traces);
+        while let Some(last) = traces.last() {
+            if matches!(
+                last.kind,
+                AgentTraceKind::Reasoning | AgentTraceKind::Output
+            ) {
+                traces.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// 返回会话是否已经进入终态；供应用层决定关闭重建或拒绝并发会话。
+    pub(crate) fn is_session_terminal(&self) -> bool {
+        self.status.is_terminal()
+    }
+
+    /// 回传用户对一条 bash 审批的答复，并即时更新卡片状态。
+    fn resolve_bash_approval(&mut self, request_id: &str, approved: bool) {
+        let Some(card) = self
+            .bash_approvals
+            .iter_mut()
+            .find(|card| card.request_id == request_id)
+        else {
+            return;
+        };
+        if card.status != BashApprovalStatus::Pending {
+            return;
+        }
+        card.status = if approved {
+            BashApprovalStatus::Approved
+        } else {
+            BashApprovalStatus::Denied("你拒绝了这条命令".to_string())
+        };
+        let _ = self.bash_decision_sender.try_send(BashApprovalDecision {
+            request_id: request_id.to_string(),
+            approved,
+        });
     }
 
     /// 合并相邻同类模型增量，让每轮思考和正文各自形成持续增长的一条瀑布流消息。
@@ -378,10 +467,14 @@ impl AgentWindow {
             .set_offset_from_scrollbar(point(px(0.0), -max_offset));
     }
 
-    /// 根据当前轨迹和展开状态更新虚拟列表条目，并只失效变化的连续区间。
+    /// 根据当前轨迹、审批卡片和展开状态更新虚拟列表条目，并只失效变化的连续区间。
     fn sync_trace_items(&mut self) {
-        let next_items =
-            build_agent_stream_items(&self.traces, self.status, &self.expanded_tool_groups);
+        let next_items = build_agent_stream_items(
+            &self.traces,
+            self.status,
+            &self.expanded_tool_groups,
+            &self.bash_approvals,
+        );
         for (old_range, replacement_count) in
             changed_stream_item_ranges(&self.trace_items, &next_items)
         {
@@ -506,8 +599,14 @@ fn build_agent_stream_items(
     traces: &[Arc<AgentTraceEntry>],
     status: AgentSessionStatus,
     expanded_tool_groups: &HashSet<i64>,
+    bash_approvals: &[BashApprovalCard],
 ) -> Vec<AgentStreamItem> {
-    let mut items = Vec::with_capacity(traces.len().saturating_add(2));
+    let mut items = Vec::with_capacity(
+        traces
+            .len()
+            .saturating_add(bash_approvals.len())
+            .saturating_add(2),
+    );
     items.push(AgentStreamItem::Question);
     let active_trace_index = if status.is_terminal() {
         None
@@ -523,6 +622,21 @@ fn build_agent_stream_items(
         })
     };
 
+    // 审批卡片按创建时间插入对应轨迹之前；索引单调递增，保证差异键稳定。
+    let mut pending_approval_index = 0usize;
+    let mut flush_approvals_before =
+        |items: &mut Vec<AgentStreamItem>, boundary: chrono::DateTime<chrono::Utc>| {
+            while let Some(card) = bash_approvals.get(pending_approval_index)
+                && chrono::DateTime::<chrono::Utc>::from(card.created_at) <= boundary
+            {
+                items.push(AgentStreamItem::BashApproval {
+                    approval_index: pending_approval_index,
+                    status: card.status.clone(),
+                });
+                pending_approval_index += 1;
+            }
+        };
+
     let mut trace_index = 0;
     while trace_index < traces.len() {
         let trace = &traces[trace_index];
@@ -532,6 +646,7 @@ fn build_agent_stream_items(
             trace_index += 1;
             continue;
         }
+        flush_approvals_before(&mut items, trace.created_at);
         if trace.kind != AgentTraceKind::Tool {
             items.push(AgentStreamItem::Trace {
                 trace_index,
@@ -561,6 +676,14 @@ fn build_agent_stream_items(
             is_active: active_trace_index
                 .is_some_and(|active_index| (start..trace_index).contains(&active_index)),
         });
+    }
+    // 晚于全部轨迹的审批卡片追加在末尾。
+    while pending_approval_index < bash_approvals.len() {
+        items.push(AgentStreamItem::BashApproval {
+            approval_index: pending_approval_index,
+            status: bash_approvals[pending_approval_index].status.clone(),
+        });
+        pending_approval_index += 1;
     }
 
     items.push(AgentStreamItem::Spacer);
@@ -613,13 +736,14 @@ fn changed_stream_item_ranges(
     vec![(common_prefix..old_end, new_end - common_prefix)]
 }
 
-/// 格式化完整来源扫描和逐规则命中统计，供会话首条状态消息展示。
+/// 格式化工作区清单固化结果和逐规则命中统计，供会话首条状态消息展示。
 fn format_source_scan_summary(
     scope: &SourceScopeSnapshot,
     match_summaries: &[AgentLogProfileMatchSummary],
 ) -> String {
     let mut lines = vec![format!(
-        "来源树已完整扫描，共发现 {} 个日志文件，最终匹配 {} 种日志类型说明。",
+        "工作区清单已固化，共 {} 个日志文件，匹配 {} 种日志类型说明；模型可调用 \
+        list_loaded_sources、read_file 和受控 bash 在工作目录内取证。",
         scope.sources.len(),
         scope.profiles.len()
     )];
@@ -811,6 +935,7 @@ impl Render for AgentWindow {
                                 &self.question,
                                 self.traces.clone(),
                                 self.trace_items.clone(),
+                                self.bash_approvals.clone(),
                                 self.trace_list.clone(),
                                 entity.clone(),
                                 &theme,
@@ -1130,6 +1255,7 @@ fn render_message_stream(
     question: &str,
     traces: Arc<Vec<Arc<AgentTraceEntry>>>,
     items: Vec<AgentStreamItem>,
+    bash_approvals: Vec<BashApprovalCard>,
     list_state: ListState,
     agent_window: Entity<AgentWindow>,
     theme: &AppTheme,
@@ -1138,6 +1264,7 @@ fn render_message_stream(
     let items = Arc::new(items);
     let render_items = items.clone();
     let render_traces = traces.clone();
+    let render_approvals = Arc::new(bash_approvals);
     let render_agent_window = agent_window.clone();
     let render_theme = theme.clone();
     let render_question = question.clone();
@@ -1157,6 +1284,7 @@ fn render_message_stream(
                     item,
                     &render_question,
                     &render_traces,
+                    &render_approvals,
                     render_agent_window.clone(),
                     &render_theme,
                 )
@@ -1175,11 +1303,38 @@ fn render_agent_stream_item(
     item: &AgentStreamItem,
     question: &str,
     traces: &[Arc<AgentTraceEntry>],
+    bash_approvals: &[BashApprovalCard],
     agent_window: Entity<AgentWindow>,
     theme: &AppTheme,
 ) -> AnyElement {
     match *item {
         AgentStreamItem::Question => render_question_message(question, theme).into_any_element(),
+        AgentStreamItem::BashApproval { approval_index, .. } => {
+            bash_approvals.get(approval_index).map_or_else(
+                || div().into_any_element(),
+                |card| {
+                    let decision_window = agent_window.clone();
+                    let decision_request_id = card.request_id.clone();
+                    div()
+                        .w_full()
+                        .px_6()
+                        .child(render_bash_approval_card(
+                            &card.request_id,
+                            &card.command,
+                            &card.status,
+                            theme,
+                            AGENT_STREAM_MAX_WIDTH,
+                            move |approved, _, _, app_cx| {
+                                decision_window.update(app_cx, |window, cx| {
+                                    window.resolve_bash_approval(&decision_request_id, approved);
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                        .into_any_element()
+                },
+            )
+        }
         AgentStreamItem::Trace {
             trace_index,
             is_active,
@@ -1841,8 +1996,12 @@ mod tests {
                 "正在分析证据",
             )),
         ];
-        let items =
-            build_agent_stream_items(&traces, AgentSessionStatus::Investigating, &HashSet::new());
+        let items = build_agent_stream_items(
+            &traces,
+            AgentSessionStatus::Investigating,
+            &HashSet::new(),
+            &[],
+        );
         assert!(
             items
                 .iter()
