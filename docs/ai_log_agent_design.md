@@ -27,7 +27,7 @@ v3 方案的用户决策（已确认）：
   显示工作目录真实结构；浏览器与 AI 全部只读普通文件。
 - **通用智能体**：不硬编码任何诊断逻辑；内置 bash + 文件读取工具，只允许在工作目录
   内执行；白名单外命令弹窗确认。智能分析与 Agent 助手都是其上的薄壳，不保留旧行为。
-- **Skill 体系**：方法论以知识文本形式注入（内置可禁用 + 用户导入），与代码解耦。
+- **Skill 体系**：方法论以用户导入的知识文本注入，与代码解耦；不提供内置 Skill。
 
 ## 二、总体架构
 
@@ -45,11 +45,10 @@ AI 层：src/agent/agent_loop.rs 通用单轮模型循环
   ├─ preamble = 安全骨架 + <CONFIGURED_SYSTEM_PROMPT> + <SKILLS>
   └─ 工具 = list_loaded_sources + read_file + bash（均限定工作目录）
 两条薄壳：agent_window（智能分析独立窗口）/ assistant_panel（主窗口助手）
-Skill：src/agent/skills.rs 内置（可禁用）+ config_root/ai/skills/ 导入（目录/ZIP）
+Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/skills/ 落盘
 ```
 
-两条产品线的差异只剩：入口、默认内置 Skill 集（分析用 `argus-log-diagnosis`，助手用
-`argus-log-chat`）、历史（助手有跨模型中立历史）。
+两条产品线的差异只剩：入口与历史（助手有跨模型中立历史）；Skill 集两条线共用。
 
 ## 三、工作目录物化
 
@@ -115,13 +114,12 @@ Skill：src/agent/skills.rs 内置（可禁用）+ config_root/ai/skills/ 导入
 
 - 格式：`<skill-dir>/SKILL.md`，`---` frontmatter（`name`/`description`，手写极简解析）
   + Markdown 正文 ≤32 KiB；名称限 `[A-Za-z0-9._-]` 且 ≤64 字节。
-- 内置（代码内嵌，允许禁用）：`argus-log-diagnosis`（智能分析默认）、`argus-log-chat`
-  （助手默认）；旧 preamble 方法论改写为纯知识文本，不含强制流程。
-- 注入：安全骨架 → `<CONFIGURED_SYSTEM_PROMPT>` → `<SKILLS>`（内置在前、导入按名称
-  排序，`<SKILL name>` 边界）；区块总量 ≤24 KiB，截断以用户可见轨迹记录 WARN。
+- 不提供内置 Skill；方法论与领域知识全部由用户导入，未导入时不注入 `<SKILLS>` 区块。
+- 注入：安全骨架 → `<CONFIGURED_SYSTEM_PROMPT>` → `<SKILLS>`（按名称排序，
+  `<SKILL name>` 边界）；区块总量 ≤24 KiB，截断以用户可见轨迹记录 WARN。
 - 导入（设置页"Skill 管理"）：系统路径对话框选目录或 `.zip`；目录递归收集（拒符号
   链接），zip 条目 zip slip 清洗并定位唯一含 SKILL.md 的顶层目录；统一预算 ≤64 文件、
-  ≤2 MiB；解析失败或与内置/既有导入同名冲突拒绝且不留残留；产物复制到
+  ≤2 MiB；解析失败或与既有导入同名冲突拒绝且不留残留；产物复制到
   `config_root/ai/skills/<name>/`。
 - 持久化：`AiConfig.disabled_skills`（默认空=全启用），保存后下一轮会话生效。
 
@@ -157,7 +155,7 @@ Skill：src/agent/skills.rs 内置（可禁用）+ config_root/ai/skills/ 导入
 |---|---|
 | 16 个 source_ref 结构化工具及引擎 | 删除；由 3 个领域无关工作区工具取代 |
 | source_ref 不透明引用与安全层 | 删除；清单直接携带工作目录真实路径 |
-| 固定十二阶段 + 隔离复核 | 删除；方法论迁入内置 Skill 知识文本 |
+| 固定十二阶段 + 隔离复核 | 删除；方法论由用户导入的 Skill 知识文本承载 |
 | 结构化诊断报告与落盘 | 删除；模型以 Markdown 直接回答 |
 | 引用卡片 / 证据复读 / `open_ai_evidence` | 删除 |
 | 归档虚拟路径与流式/落盘双后端 | 删除；加载期一次性物化为普通文件 |
@@ -169,6 +167,6 @@ Skill：src/agent/skills.rs 内置（可禁用）+ config_root/ai/skills/ 导入
   沙箱。工作目录是可丢弃的副本，批准写操作的最坏后果是重新加载来源。
 - **普通来源复制的 I/O 成本**：大文件加载时一次性复制（进度明示），换取读取/AI/搜索
   全链路统一；同设备硬链接优化为后续可选项。
-- **Skill 知识质量**：内置方法论是默认基线，效果依赖模型对知识文本的遵循；导入
-  Skill 同样只影响提示词，不获得额外执行能力。
+- **Skill 知识质量**：效果依赖模型对导入知识文本的遵循；Skill 只影响提示词，
+  不获得额外执行能力，未导入时模型仅依靠安全骨架与通用工具能力工作。
 - **日志浏览器、本地 analysis 页签、日志搜索不受 AI 改动影响**；物化只让其读取更快。

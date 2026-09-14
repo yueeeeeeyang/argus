@@ -1,12 +1,12 @@
 //! 文件职责：Skill 的解析、筛选与注入。
 //! 创建日期：2026-09-14
+//! 修改日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：内置知识与导入知识统一为 AgentSkill；按产品线默认集和用户禁用列表筛选，
-//! 并渲染为进入系统提示词的 <SKILLS> 区块。
+//! 主要功能：导入知识解析为 AgentSkill；按用户禁用列表筛选，并渲染为进入系统提示词的
+//! <SKILLS> 区块。不提供任何内置 Skill。
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::agent_loop::AgentLoopNote;
 use crate::config::AiConfig;
 
 /// Skill 正文上限；导入和解析统一按该上限拒绝。
@@ -19,66 +19,6 @@ const SKILL_FRONTMATTER_MAX_LINES: usize = 64;
 /// Skill 名称最大字节数。
 const SKILL_NAME_MAX_BYTES: usize = 64;
 
-/// 智能分析默认内置的日志诊断方法论 Skill。
-const BUILTIN_LOG_DIAGNOSIS_SKILL: &str = r#"---
-name: argus-log-diagnosis
-description: Structured methodology for diagnosing incidents from plain log files with only generic workspace tools.
----
-# Log diagnosis methodology
-
-Work as an incident analyst. You have three generic tools: `list_loaded_sources`, `read_file`
-and a sandboxed `bash`. No specialized analyzers exist; combine them freely.
-
-## Investigation loop
-1. **Orient**: call `list_loaded_sources` first. Note the log-type guidance attached to each
-   file; it encodes user knowledge about format and meaning.
-2. **Scope by time**: logs are usually chronologically ordered. Use line ranges and
-   timestamps to bracket the incident window before reading details (`bash` with `head`,
-   `tail`, `grep -n` is efficient; `read_file` gives bounded, line-numbered context).
-3. **Triage signals**: scan for ERROR/FATAL/exception/OOM/restart/timeout patterns, then
-   expand context around the first occurrence of each distinct failure, not every occurrence.
-4. **Form hypotheses**: state 2-3 candidate root causes, then seek confirming and refuting
-   evidence for each. Prefer hypotheses that explain all observed symptoms with fewest
-   assumptions.
-5. **Correlate**: cross-check timeline ordering across files (application, GC, access logs)
-   to distinguish cause from consequence.
-6. **Conclude**: report conclusion, confidence, the evidence (workspace-relative path +
-   line numbers) and what remains unverified. Never present an unverified guess as a finding.
-
-## Practical patterns
-- Wide grep first (`grep -c`), narrow reads second (`read_file` with `offset_line`).
-- Count-based questions (`sort | uniq -c | sort -rn`) beat manual scanning.
-- Watch for log rotation and restart boundaries that reset sequence numbers.
-- When logs contradict each other, trust the lower-level component and say so explicitly.
-"#;
-
-/// 交互助手默认内置的轻量对话辅助 Skill。
-const BUILTIN_LOG_CHAT_SKILL: &str = r#"---
-name: argus-log-chat
-description: Lightweight guidance for conversational log Q&A in the assistant panel.
----
-# Conversational log assistance
-
-You chat with a user who has logs loaded in Argus and expects quick, grounded answers.
-
-- Answer the actual question first; add background only when it changes the decision.
-- Use `list_loaded_sources` to see what is loaded, and read just enough lines with
-  `read_file` / read-only `bash` to support the claim. Cite path and line numbers.
-- If the user selected sources with "@", treat them as the focus scope.
-- For wide investigations, suggest the dedicated analysis window instead of dumping a
-  long report in chat.
-- Keep answers short by default; offer to go deeper rather than pre-emptively doing so.
-"#;
-
-/// Skill 来源。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SkillOrigin {
-    /// 代码内嵌的内置 Skill。
-    Builtin,
-    /// 用户导入到 config_root/ai/skills 的 Skill。
-    Imported,
-}
-
 /// 一个 Skill 的内存表示。
 #[derive(Clone, Debug)]
 pub(crate) struct AgentSkill {
@@ -88,8 +28,6 @@ pub(crate) struct AgentSkill {
     pub description: String,
     /// Markdown 正文。
     pub body: String,
-    /// 来源。
-    pub origin: SkillOrigin,
 }
 
 /// 解析 SKILL.md 文本；frontmatter 只提取 name 与 description，不引入 YAML 依赖。
@@ -149,21 +87,7 @@ pub(crate) fn parse_skill_markdown(content: &str) -> Result<AgentSkill, String> 
         name,
         description,
         body,
-        origin: SkillOrigin::Imported,
     })
-}
-
-/// 返回两个内置 Skill；随产品线默认集注入且允许用户禁用。
-pub(crate) fn builtin_skills() -> Vec<AgentSkill> {
-    [BUILTIN_LOG_DIAGNOSIS_SKILL, BUILTIN_LOG_CHAT_SKILL]
-        .into_iter()
-        .map(|content| {
-            let mut skill =
-                parse_skill_markdown(content).expect("内置 Skill 文本必须通过自身解析校验");
-            skill.origin = SkillOrigin::Builtin;
-            skill
-        })
-        .collect()
 }
 
 /// 读取 config_root/ai/skills 下的导入 Skill；单个目录解析失败只降级为警告。
@@ -198,16 +122,14 @@ pub(crate) fn load_imported_skills(config_root: &Path) -> (Vec<AgentSkill>, Vec<
     (skills, warnings)
 }
 
-/// 按产品线默认集和用户禁用列表筛选本次会话注入的 Skill。
+/// 按用户禁用列表筛选本次会话注入的导入 Skill；同名目录以名称排序的第一份为准。
 ///
 /// 返回值：`(待注入 Skill 列表, 加载警告)`。
 pub(crate) fn enabled_skills(
     config: &AiConfig,
     config_root: &Path,
-    note: AgentLoopNote,
 ) -> (Vec<AgentSkill>, Vec<String>) {
     let (imported, warnings) = load_imported_skills(config_root);
-    // 导入 Skill 与内置同名时以先注册的内置为准，避免覆盖内置方法论。
     let mut seen_names = std::collections::BTreeSet::new();
     let disabled = config
         .disabled_skills
@@ -215,14 +137,8 @@ pub(crate) fn enabled_skills(
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
     let mut selected = Vec::new();
-    for skill in builtin_skills().into_iter().chain(imported) {
-        let is_default_for_line = match note {
-            AgentLoopNote::Analysis => skill.name == "argus-log-diagnosis",
-            AgentLoopNote::Assistant => skill.name == "argus-log-chat",
-        };
-        let is_selected = skill.origin == SkillOrigin::Imported || is_default_for_line;
-        if !is_selected || disabled.contains(&skill.name) || !seen_names.insert(skill.name.clone())
-        {
+    for skill in imported {
+        if disabled.contains(&skill.name) || !seen_names.insert(skill.name.clone()) {
             continue;
         }
         selected.push(skill);
@@ -286,10 +202,10 @@ pub(crate) fn import_skill_from_path(source: &Path, config_root: &Path) -> Resul
         .find(|file| file.relative_path == Path::new("SKILL.md"))
         .ok_or_else(|| "导入内容缺少 SKILL.md".to_string())?;
     let skill = parse_skill_markdown(&String::from_utf8_lossy(&skill_markdown.bytes))?;
-    // 内置与既有导入同名时拒绝导入，避免静默覆盖或注入歧义。
-    let existing_names = builtin_skills()
+    // 与既有导入同名时拒绝导入，避免静默覆盖或注入歧义。
+    let existing_names = load_imported_skills(config_root)
+        .0
         .into_iter()
-        .chain(load_imported_skills(config_root).0)
         .map(|existing| existing.name)
         .collect::<std::collections::BTreeSet<_>>();
     if existing_names.contains(&skill.name) {
@@ -463,7 +379,6 @@ mod tests {
         assert_eq!(skill.name, "my-skill");
         assert_eq!(skill.description, "does things");
         assert!(skill.body.contains("# Guide"));
-        assert_eq!(skill.origin, SkillOrigin::Imported);
     }
 
     /// 验证缺失结束分隔符、非法名称和缺失 description 都被拒绝。
@@ -484,37 +399,34 @@ mod tests {
         assert!(parse_skill_markdown(&content).is_err());
     }
 
-    /// 验证内置 Skill 文本可解析且两个产品线默认集筛选正确。
+    /// 验证无导入时筛选结果为空；导入后按禁用列表过滤。
     #[test]
-    fn builtin_skills_parse_and_default_sets_filter() {
-        let builtins = builtin_skills();
-        assert_eq!(builtins.len(), 2);
-        assert!(
-            builtins
-                .iter()
-                .all(|skill| skill.origin == SkillOrigin::Builtin)
-        );
-
+    fn enabled_skills_returns_imported_minus_disabled() {
+        let home = tempfile_dir("enabled-filter");
+        let home = home.path();
         let config = AiConfig::default();
-        let workspace = tempfile_dir("builtin");
-        let (analysis, _) = enabled_skills(&config, workspace.path(), AgentLoopNote::Analysis);
-        let (assistant, _) = enabled_skills(&config, workspace.path(), AgentLoopNote::Assistant);
-        assert_eq!(analysis.len(), 1);
-        assert_eq!(analysis[0].name, "argus-log-diagnosis");
-        assert_eq!(assistant.len(), 1);
-        assert_eq!(assistant[0].name, "argus-log-chat");
-    }
+        let (empty, _) = enabled_skills(&config, home);
+        assert!(empty.is_empty(), "没有任何导入 Skill 时不应注入");
 
-    /// 验证禁用列表可以移除默认内置 Skill。
-    #[test]
-    fn disabled_skills_filter_defaults() {
+        let source = home.join("src-skill");
+        std::fs::create_dir_all(&source).expect("应创建源目录");
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: filterable\ndescription: d\n---\nbody\n",
+        )
+        .expect("应写入 SKILL.md");
+        import_skill_from_path(&source, home).expect("导入应成功");
+
+        let (selected, _) = enabled_skills(&config, home);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "filterable");
+
         let config = AiConfig {
-            disabled_skills: vec!["argus-log-diagnosis".to_string()],
+            disabled_skills: vec!["filterable".to_string()],
             ..AiConfig::default()
         };
-        let workspace = tempfile_dir("disabled");
-        let (analysis, _) = enabled_skills(&config, workspace.path(), AgentLoopNote::Analysis);
-        assert!(analysis.is_empty(), "被禁用的内置 Skill 不应注入");
+        let (filtered, _) = enabled_skills(&config, home);
+        assert!(filtered.is_empty(), "被禁用的 Skill 不应注入");
     }
 
     /// 验证注入区块使用 <SKILL> 边界并在超预算时截断。
@@ -524,7 +436,6 @@ mod tests {
             name: "small".to_string(),
             description: "d".to_string(),
             body: "keep".to_string(),
-            origin: SkillOrigin::Imported,
         };
         let (section, truncated) = render_skills_section(std::slice::from_ref(&small));
         assert!(!truncated);
@@ -536,7 +447,6 @@ mod tests {
             name: "big".to_string(),
             description: "d".to_string(),
             body: "y".repeat(SKILLS_SECTION_MAX_BYTES),
-            origin: SkillOrigin::Imported,
         };
         let (section, truncated) = render_skills_section(&[big]);
         assert!(truncated);

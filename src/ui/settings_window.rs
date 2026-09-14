@@ -160,8 +160,6 @@ struct SkillListEntry {
     name: String,
     /// 一句话用途说明。
     description: String,
-    /// 是否为内置 Skill。
-    is_builtin: bool,
     /// 当前是否启用。
     is_enabled: bool,
 }
@@ -201,7 +199,7 @@ impl SettingsModalSnapshot {
     }
 }
 
-/// 汇总内置与导入 Skill 为管理列表；导入读取失败的单项以警告占位展示。
+/// 汇总已导入 Skill 为管理列表；导入读取失败的单项以警告占位展示。
 fn build_skill_entries(app: &ArgusApp) -> Vec<SkillListEntry> {
     let config_root = app
         .config_manager
@@ -217,21 +215,18 @@ fn build_skill_entries(app: &ArgusApp) -> Vec<SkillListEntry> {
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
     let (imported, warnings) = crate::agent::skills::load_imported_skills(&config_root);
-    let mut entries: Vec<SkillListEntry> = crate::agent::skills::builtin_skills()
+    let mut entries: Vec<SkillListEntry> = imported
         .into_iter()
-        .chain(imported)
         .map(|skill| SkillListEntry {
             is_enabled: !disabled.contains(&skill.name),
             name: skill.name,
             description: skill.description,
-            is_builtin: skill.origin == crate::agent::skills::SkillOrigin::Builtin,
         })
         .collect();
     for warning in warnings {
         entries.push(SkillListEntry {
             name: warning,
             description: String::new(),
-            is_builtin: false,
             is_enabled: false,
         });
     }
@@ -995,7 +990,7 @@ fn render_ai_skills_section(
     .into_any_element()
 }
 
-/// 渲染单条 Skill 管理行：名称、说明、来源标记、启用开关和导入项删除。
+/// 渲染单条 Skill 管理行：名称、说明、启用开关和删除。
 fn render_skill_entry_row(
     index: usize,
     entry: &SkillListEntry,
@@ -1006,7 +1001,6 @@ fn render_skill_entry_row(
     let toggle_name = entry.name.clone();
     let delete_app = app_handle.clone();
     let delete_name = entry.name.clone();
-    let origin_label = if entry.is_builtin { "内置" } else { "导入" };
     div()
         .id(("settings-skill-row", index))
         .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
@@ -1031,17 +1025,7 @@ fn render_skill_entry_row(
                         .text_size(px(12.0))
                         .font_family(crate::fonts::ARGUS_UI_FONT_FAMILY)
                         .text_color(rgb(theme.foreground))
-                        .child(entry.name.clone())
-                        .child(
-                            div()
-                                .px_1()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .text_size(px(10.0))
-                                .text_color(rgb(theme.foreground_muted))
-                                .child(origin_label),
-                        ),
+                        .child(entry.name.clone()),
                 )
                 .when(!entry.description.is_empty(), |this| {
                     this.child(
@@ -1078,21 +1062,19 @@ fn render_skill_entry_row(
                 });
             },
         ))
-        .when(!entry.is_builtin, |this| {
-            this.child(render_icon_button(
-                "settings-skill-delete",
-                ArgusIcon::Trash,
-                "删除导入 Skill",
-                false,
-                IconButtonSize::Small,
-                theme,
-                move |_, _, cx| {
-                    update_settings_app(&delete_app, cx, |app, _| {
-                        app.delete_imported_skill(&delete_name);
-                    });
-                },
-            ))
-        })
+        .child(render_icon_button(
+            "settings-skill-delete",
+            ArgusIcon::Trash,
+            "删除 Skill",
+            false,
+            IconButtonSize::Small,
+            theme,
+            move |_, _, cx| {
+                update_settings_app(&delete_app, cx, |app, _| {
+                    app.delete_skill(&delete_name);
+                });
+            },
+        ))
 }
 
 /// 渲染模型或日志类型列表的空状态，和其它设置行保持相同高度、背景及文字层级。

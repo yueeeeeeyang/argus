@@ -1837,15 +1837,8 @@ impl ArgusApp {
         self.persist_config_or_report();
     }
 
-    /// 删除一个导入 Skill；内置 Skill 不允许删除。
-    pub(crate) fn delete_imported_skill(&mut self, name: &str) {
-        if crate::agent::skills::builtin_skills()
-            .iter()
-            .any(|skill| skill.name == name)
-        {
-            self.placeholder_notice = format!("内置 Skill“{name}”不允许删除");
-            return;
-        }
+    /// 删除一个已导入的 Skill；同时清理禁用列表残留。
+    pub(crate) fn delete_skill(&mut self, name: &str) {
         let config_root = self.skill_config_root();
         match crate::agent::skills::remove_imported_skill(name, &config_root) {
             Ok(true) => {
@@ -1855,10 +1848,10 @@ impl ArgusApp {
                     self.config.ai.normalize();
                     self.persist_config_or_report();
                 }
-                self.placeholder_notice = format!("已删除导入 Skill“{name}”");
+                self.placeholder_notice = format!("已删除 Skill“{name}”");
             }
             Ok(false) => {
-                self.placeholder_notice = format!("导入 Skill“{name}”不存在");
+                self.placeholder_notice = format!("Skill“{name}”不存在");
             }
             Err(error) => {
                 self.placeholder_notice = format!("删除 Skill 失败：{error}");

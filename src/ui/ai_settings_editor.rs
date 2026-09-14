@@ -187,7 +187,7 @@ struct AiSettingsDraft {
     request_timeout_seconds: u64,
     /// 用户可编辑的专业分析系统提示词。
     system_prompt: TextInputState,
-    /// 被禁用的 Skill 名称；Skill 管理分区在阶段 6 提供编辑入口，这里保持透传。
+    /// 被禁用的 Skill 名称；编辑入口在设置的 Skill 管理分区，这里保持透传。
     disabled_skills: Vec<String>,
     /// 日志类型配置草稿。
     profiles: Vec<ProfileDraft>,

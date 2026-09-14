@@ -157,7 +157,7 @@ pub(crate) async fn run_agent_loop(request: AgentLoopRequest) {
         ),
     );
 
-    let (skills, skill_warnings) = enabled_skills(&config, &config_root, note);
+    let (skills, skill_warnings) = enabled_skills(&config, &config_root);
     for warning in &skill_warnings {
         context.trace(AgentTraceKind::Warning, "Skill 加载警告", warning.clone());
     }
