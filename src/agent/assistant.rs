@@ -31,6 +31,8 @@ pub(crate) struct AssistantRunRequest {
     pub history: Vec<AssistantHistoryTurn>,
     /// 已规范化配置快照。
     pub config: AiConfig,
+    /// settings.toml 所在目录；导入 Skill 从其 ai/skills 子目录加载。
+    pub config_root: std::path::PathBuf,
     /// 当前选择的模型快照。
     pub model: AiModelProfile,
     /// 全部已加载来源的不可变工作区清单。
@@ -56,6 +58,7 @@ pub(crate) async fn run_assistant_turn(request: AssistantRunRequest) {
         initial_user_messages,
         history,
         config,
+        config_root,
         model,
         scope,
         api_key,
@@ -75,6 +78,7 @@ pub(crate) async fn run_assistant_turn(request: AssistantRunRequest) {
         history_was_trimmed,
         initial_user_messages,
         config,
+        config_root,
         model,
         scope,
         api_key,

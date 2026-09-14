@@ -67,6 +67,9 @@ pub(crate) struct AiConfig {
     /// 用户可编辑的专业分析系统提示词；不可覆盖编排器内置的权限、证据和流程规则。
     #[serde(default = "default_ai_system_prompt")]
     pub system_prompt: String,
+    /// 被用户禁用的 Skill 名称列表；默认空表示全部启用，保存后下轮会话生效。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_skills: Vec<String>,
     /// 用户定义的日志类型和分析说明。
     #[serde(default)]
     pub log_profiles: Vec<LogTypeProfile>,
@@ -104,6 +107,18 @@ impl AiConfig {
         if self.system_prompt.is_empty() {
             self.system_prompt = default_ai_system_prompt();
         }
+        // 禁用列表规范化为去重后的非空名称集合，保持与 Skill 名称可比对。
+        self.disabled_skills = {
+            let mut names = self
+                .disabled_skills
+                .iter()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            names
+        };
         self.model_profiles.truncate(MAX_AI_MODEL_PROFILE_COUNT);
         for profile in &mut self.model_profiles {
             profile.normalize();
@@ -204,6 +219,7 @@ impl Default for AiConfig {
             consent_version: String::new(),
             request_timeout_seconds: default_request_timeout_seconds(),
             system_prompt: default_ai_system_prompt(),
+            disabled_skills: Vec::new(),
             log_profiles: Vec::new(),
         }
     }

@@ -187,6 +187,8 @@ struct AiSettingsDraft {
     request_timeout_seconds: u64,
     /// 用户可编辑的专业分析系统提示词。
     system_prompt: TextInputState,
+    /// 被禁用的 Skill 名称；Skill 管理分区在阶段 6 提供编辑入口，这里保持透传。
+    disabled_skills: Vec<String>,
     /// 日志类型配置草稿。
     profiles: Vec<ProfileDraft>,
     /// 当前选中日志类型。
@@ -216,6 +218,7 @@ impl AiSettingsDraft {
             consent_version: config.consent_version,
             request_timeout_seconds: config.request_timeout_seconds,
             system_prompt: TextInputState::from_value(config.system_prompt),
+            disabled_skills: config.disabled_skills,
             selected_profile: None,
             selected_matcher: 0,
             profiles,
@@ -250,6 +253,7 @@ impl AiSettingsDraft {
             consent_version: self.consent_version.clone(),
             request_timeout_seconds: self.request_timeout_seconds,
             system_prompt: self.system_prompt.value.clone(),
+            disabled_skills: self.disabled_skills.clone(),
             log_profiles: self.profiles.iter().map(ProfileDraft::to_profile).collect(),
         }
     }

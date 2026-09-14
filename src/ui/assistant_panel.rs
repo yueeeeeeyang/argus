@@ -635,6 +635,14 @@ impl AssistantPanel {
         };
         let mut config = self.app.read(cx).config.ai.clone();
         config.normalize();
+        let config_root = self
+            .app
+            .read(cx)
+            .config_manager
+            .settings_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let Some(model) = self.selected_model().cloned() else {
             self.error = Some("当前模型配置已经失效".to_string());
             return;
@@ -690,6 +698,7 @@ impl AssistantPanel {
             initial_user_messages: initial_messages,
             history: self.history.clone(),
             config,
+            config_root,
             model,
             scope,
             api_key,

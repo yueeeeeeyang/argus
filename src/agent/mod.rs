@@ -10,6 +10,7 @@ pub(crate) mod credential;
 pub(crate) mod model_gateway;
 pub(crate) mod runtime;
 pub(crate) mod session;
+pub(crate) mod skills;
 pub(crate) mod source_scan;
 pub(crate) mod tools;
 

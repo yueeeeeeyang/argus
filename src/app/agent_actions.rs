@@ -26,6 +26,15 @@ const AGENT_WINDOW_MIN_WIDTH: f32 = 860.0;
 /// Agent 独立窗口最小高度。
 const AGENT_WINDOW_MIN_HEIGHT: f32 = 600.0;
 
+/// 返回导入 Skill 的加载根目录（settings.toml 所在目录）。
+fn config_root_for_skill_loading(app: &ArgusApp) -> std::path::PathBuf {
+    app.config_manager
+        .settings_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 impl ArgusApp {
     /// 打开初始问题模态框；已有 Agent 窗口仍有效时直接置前。
     pub(crate) fn open_ai_agent_launch_dialog(&mut self, cx: &mut Context<Self>) {
@@ -239,6 +248,7 @@ impl ArgusApp {
             history_was_trimmed: false,
             initial_user_messages: Vec::new(),
             config,
+            config_root: config_root_for_skill_loading(self),
             model,
             scope,
             api_key,
