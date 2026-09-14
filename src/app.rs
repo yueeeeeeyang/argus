@@ -213,6 +213,33 @@ pub(crate) fn frameless_resizable_titlebar() -> TitlebarOptions {
     }
 }
 
+/// Skill 管理分区最近一次操作结果。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillManagementMessage {
+    /// 展示文本。
+    pub text: String,
+    /// 是否为失败结果；失败用错误色展示。
+    pub is_failure: bool,
+}
+
+impl SkillManagementMessage {
+    /// 构造成功消息。
+    pub(crate) fn success(text: String) -> Self {
+        Self {
+            text,
+            is_failure: false,
+        }
+    }
+
+    /// 构造失败消息。
+    pub(crate) fn failure(text: String) -> Self {
+        Self {
+            text,
+            is_failure: true,
+        }
+    }
+}
+
 /// Argus 根视图状态，驱动界面、真实来源加载和本地 UI 行为。
 pub(crate) struct ArgusApp {
     /// 应用运行期配置。
@@ -393,6 +420,8 @@ pub(crate) struct ArgusApp {
     pub is_settings_modal_open: bool,
     /// 设置模态框左侧导航当前选中的分类。
     pub selected_settings_section: SettingsSection,
+    /// Skill 管理分区最近一次操作结果；设置弹窗遮住主窗口状态栏，反馈必须在分区内展示。
+    pub skill_management_message: Option<SkillManagementMessage>,
     /// Jstack 线程段过滤编辑器是否处于打开状态。
     pub is_jstack_stack_segment_filter_editor_open: bool,
     /// Jstack 线程段过滤编辑器窗口句柄，用于从设置页重复点击时置前已有编辑器。
@@ -565,6 +594,7 @@ impl ArgusApp {
                 upgrade_public_key_input_value,
             ),
             is_settings_modal_open: false,
+            skill_management_message: None,
             selected_settings_section: SettingsSection::default(),
             is_jstack_stack_segment_filter_editor_open: false,
             jstack_stack_segment_filter_editor_handle: None,
@@ -1826,13 +1856,22 @@ impl ArgusApp {
     /// 切换一个 Skill 的启用状态；保存后下一轮会话生效。
     pub(crate) fn toggle_skill_enabled(&mut self, name: &str) {
         let disabled = &mut self.config.ai.disabled_skills;
-        if let Some(position) = disabled.iter().position(|entry| entry == name) {
-            disabled.remove(position);
-            self.placeholder_notice = format!("Skill“{name}”已启用");
-        } else {
-            disabled.push(name.to_string());
-            self.placeholder_notice = format!("Skill“{name}”已禁用");
-        }
+        let (message, notice) =
+            if let Some(position) = disabled.iter().position(|entry| entry == name) {
+                disabled.remove(position);
+                (
+                    format!("Skill“{name}”已启用，下一轮会话生效"),
+                    format!("Skill“{name}”已启用"),
+                )
+            } else {
+                disabled.push(name.to_string());
+                (
+                    format!("Skill“{name}”已禁用，下一轮会话生效"),
+                    format!("Skill“{name}”已禁用"),
+                )
+            };
+        self.skill_management_message = Some(SkillManagementMessage::success(message));
+        self.placeholder_notice = notice;
         self.config.ai.normalize();
         self.persist_config_or_report();
     }
@@ -1840,7 +1879,7 @@ impl ArgusApp {
     /// 删除一个已导入的 Skill；同时清理禁用列表残留。
     pub(crate) fn delete_skill(&mut self, name: &str) {
         let config_root = self.skill_config_root();
-        match crate::agent::skills::remove_imported_skill(name, &config_root) {
+        let outcome = match crate::agent::skills::remove_imported_skill(name, &config_root) {
             Ok(true) => {
                 let disabled = &mut self.config.ai.disabled_skills;
                 if let Some(position) = disabled.iter().position(|entry| entry == name) {
@@ -1848,15 +1887,12 @@ impl ArgusApp {
                     self.config.ai.normalize();
                     self.persist_config_or_report();
                 }
-                self.placeholder_notice = format!("已删除 Skill“{name}”");
+                Ok(format!("已删除 Skill“{name}”"))
             }
-            Ok(false) => {
-                self.placeholder_notice = format!("Skill“{name}”不存在");
-            }
-            Err(error) => {
-                self.placeholder_notice = format!("删除 Skill 失败：{error}");
-            }
-        }
+            Ok(false) => Err(format!("Skill“{name}”不存在")),
+            Err(error) => Err(format!("删除 Skill 失败：{error}")),
+        };
+        self.apply_skill_management_message(outcome);
     }
 
     /// 打开系统路径选择对话框导入 Skill；可选目录或 .zip 文件。
@@ -1890,18 +1926,25 @@ impl ArgusApp {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
         {
-            self.placeholder_notice = "导入文件必须是 .zip 或包含 SKILL.md 的目录".to_string();
+            self.apply_skill_management_message(Err(
+                "导入文件必须是 .zip 或包含 SKILL.md 的目录".to_string()
+            ));
             return;
         }
         let config_root = self.skill_config_root();
-        match crate::agent::skills::import_skill_from_path(&path, &config_root) {
-            Ok(name) => {
-                self.placeholder_notice = format!("已导入 Skill“{name}”，下一轮会话生效");
-            }
-            Err(error) => {
-                self.placeholder_notice = format!("导入 Skill 失败：{error}");
-            }
-        }
+        let outcome = crate::agent::skills::import_skill_from_path(&path, &config_root)
+            .map(|name| format!("已导入 Skill“{name}”，下一轮会话生效"));
+        self.apply_skill_management_message(outcome);
+    }
+
+    /// 把 Skill 管理操作结果同时写入分区内反馈和主窗口状态栏。
+    fn apply_skill_management_message(&mut self, outcome: Result<String, String>) {
+        let message = match outcome {
+            Ok(text) => SkillManagementMessage::success(text),
+            Err(text) => SkillManagementMessage::failure(text),
+        };
+        self.placeholder_notice = message.text.clone();
+        self.skill_management_message = Some(message);
     }
 
     /// 返回 Skill 导入目录所在的配置根（settings.toml 所在目录）。

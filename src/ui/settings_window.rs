@@ -149,8 +149,10 @@ struct SettingsModalSnapshot {
     is_open_with_registration_busy: bool,
     /// 系统右键菜单最近一次操作提示。
     open_with_registration_message: Option<String>,
-    /// Skill 管理分区的完整列表（内置 + 导入）。
+    /// Skill 管理分区的完整列表。
     skill_entries: Vec<SkillListEntry>,
+    /// Skill 管理分区最近一次操作结果。
+    skill_management_message: Option<crate::app::SkillManagementMessage>,
 }
 
 /// Skill 管理分区的单行展示状态。
@@ -195,6 +197,7 @@ impl SettingsModalSnapshot {
             is_open_with_registration_busy: app.is_open_with_registration_busy,
             open_with_registration_message: app.open_with_registration_message.clone(),
             skill_entries: build_skill_entries(app),
+            skill_management_message: app.skill_management_message.clone(),
         }
     }
 }
@@ -984,7 +987,31 @@ fn render_ai_skills_section(
                     },
                 ),
                 theme,
-            )),
+            ))
+            .when_some(
+                snapshot.skill_management_message.clone(),
+                |this, message| {
+                    let color = if message.is_failure {
+                        theme.error
+                    } else {
+                        theme.foreground_muted
+                    };
+                    this.child(
+                        div()
+                            .id("settings-skill-message")
+                            .px_3()
+                            .py_2()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .rounded_sm()
+                            .bg(rgb(theme.current_line))
+                            .text_size(px(11.0))
+                            .text_color(rgb(color))
+                            .child(message.text),
+                    )
+                },
+            ),
         theme,
     )
     .into_any_element()

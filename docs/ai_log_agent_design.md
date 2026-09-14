@@ -118,9 +118,11 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 - 注入：安全骨架 → `<CONFIGURED_SYSTEM_PROMPT>` → `<SKILLS>`（按名称排序，
   `<SKILL name>` 边界）；区块总量 ≤24 KiB，截断以用户可见轨迹记录 WARN。
 - 导入（设置页"Skill 管理"）：系统路径对话框选目录或 `.zip`；目录递归收集（拒符号
-  链接），zip 条目 zip slip 清洗并定位唯一含 SKILL.md 的顶层目录；统一预算 ≤64 文件、
-  ≤2 MiB；解析失败或与既有导入同名冲突拒绝且不留残留；产物复制到
-  `config_root/ai/skills/<name>/`。
+  链接），zip 条目 zip slip 清洗并定位唯一含 SKILL.md 的顶层目录；`__MACOSX/`、
+  `.DS_Store`、`._*` 等打包器元数据统一跳过；名称支持 Unicode（拒空白、引号、
+  尖括号、`&` 与路径分隔符，保证目录名与 `<SKILL name>` 边界安全）；统一预算
+  ≤64 文件、≤2 MiB；解析失败或与既有导入同名冲突拒绝且不留残留；产物复制到
+  `config_root/ai/skills/<name>/`，导入结果在设置分区内即时展示。
 - 持久化：`AiConfig.disabled_skills`（默认空=全启用），保存后下一轮会话生效。
 
 ## 六、界面与交互

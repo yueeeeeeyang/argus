@@ -69,11 +69,14 @@ pub(crate) fn parse_skill_markdown(content: &str) -> Result<AgentSkill, String> 
     if name.is_empty() || name.len() > SKILL_NAME_MAX_BYTES {
         return Err("frontmatter 的 name 不能为空且不超过 64 字节".to_string());
     }
-    if !name
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
-    {
-        return Err("name 只能包含字母、数字、-、_ 和 .".to_string());
+    // 名称同时用作目录名和 <SKILL name="..."> 注入边界：允许 Unicode 字母数字与 -_.，
+    // 拒绝空白、路径分隔符、控制字符以及会破坏 XML 边界的引号与尖括号。
+    if !name.chars().all(|character| {
+        !character.is_whitespace()
+            && !character.is_control()
+            && !matches!(character, '"' | '\'' | '<' | '>' | '&' | '/' | '\\')
+    }) {
+        return Err("name 不能包含空白、引号、尖括号、& 或路径分隔符，且不能为空".to_string());
     }
     let description = description.unwrap_or_default();
     if description.is_empty() {
@@ -182,6 +185,19 @@ struct ImportFile {
     bytes: Vec<u8>,
 }
 
+/// 判断相对路径是否为应忽略的打包器元数据。
+///
+/// macOS Finder 压缩会生成 `__MACOSX/` 目录、`._*` AppleDouble 文件与 `.DS_Store`；
+/// 这些条目既不是 Skill 内容，还会破坏唯一顶层目录判定。
+fn is_packaging_metadata(relative: &Path) -> bool {
+    relative
+        .components()
+        .any(|component| match component.as_os_str().to_str() {
+            Some(name) => name == "__MACOSX" || name == ".DS_Store" || name.starts_with("._"),
+            None => false,
+        })
+}
+
 /// 从目录或 .zip 导入一个 Skill，复制到 config_root/ai/skills/<name>/。
 ///
 /// 参数说明：
@@ -259,6 +275,9 @@ fn collect_directory_skill_files(source: &Path) -> Result<Vec<ImportFile>, Strin
                 return Err("导入目录包含符号链接，已拒绝".to_string());
             }
             let entry_relative = relative.join(entry.file_name());
+            if is_packaging_metadata(&entry_relative) {
+                continue;
+            }
             if metadata.is_dir() {
                 stack.push((entry.path(), entry_relative));
                 continue;
@@ -301,6 +320,9 @@ fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
         }
         if entry.name().starts_with('/') || entry.name().contains("..") {
             return Err(format!("ZIP 条目路径不安全：{}", entry.name()));
+        }
+        if is_packaging_metadata(&PathBuf::from(entry.name().replace('\\', "/"))) {
+            continue;
         }
         total_bytes = total_bytes
             .checked_add(entry.size())
@@ -528,6 +550,86 @@ mod tests {
         }
         assert!(import_skill_from_path(&evil_path, home).is_err());
         assert!(!home.join("evil.txt").exists());
+    }
+
+    /// 验证 macOS Finder 压缩的 zip（含 __MACOSX 元数据）可以正常导入。
+    #[test]
+    fn imports_finder_zip_with_macos_metadata() {
+        let home = tempfile_dir("import-finder");
+        let home = home.path();
+        let zip_path = home.join("finder-skill.zip");
+        {
+            use std::io::Write as _;
+            use zip::ZipWriter;
+            use zip::write::SimpleFileOptions;
+            let file = std::fs::File::create(&zip_path).expect("应创建 ZIP");
+            let mut writer = ZipWriter::new(file);
+            for (name, content) in [
+                (
+                    "MySkill/SKILL.md",
+                    "---\nname: finder-skill\ndescription: d\n---\nBody.\n",
+                ),
+                ("__MACOSX/MySkill/._SKILL.md", "apple-double junk"),
+                ("__MACOSX/._MySkill", "apple-double junk"),
+                ("MySkill/.DS_Store", "junk"),
+            ] {
+                writer
+                    .start_file(name, SimpleFileOptions::default())
+                    .expect("应创建条目");
+                writer.write_all(content.as_bytes()).expect("应写入条目");
+            }
+            writer.finish().expect("应完成 ZIP");
+        }
+
+        let name = import_skill_from_path(&zip_path, home).expect("含 __MACOSX 的 zip 应导入成功");
+        assert_eq!(name, "finder-skill");
+        assert!(home.join("ai/skills/finder-skill/SKILL.md").is_file());
+        assert!(
+            !home.join("ai/skills/finder-skill/.DS_Store").exists(),
+            "打包器元数据不应落盘"
+        );
+        assert!(
+            !home.join("ai/skills/__MACOSX").exists(),
+            "__MACOSX 目录不应落盘"
+        );
+    }
+
+    /// 验证目录导入跳过 .DS_Store 与 AppleDouble 文件，中文 Skill 名称可用。
+    #[test]
+    fn imports_directory_skipping_metadata_and_allows_unicode_name() {
+        let home = tempfile_dir("import-unicode");
+        let home = home.path();
+        let source = home.join("src");
+        std::fs::create_dir_all(&source).expect("应创建源目录");
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: 日志诊断\ndescription: 中文技能\n---\n正文。\n",
+        )
+        .expect("应写入 SKILL.md");
+        std::fs::write(source.join(".DS_Store"), "junk").expect("应写入元数据");
+        std::fs::write(source.join("._SKILL.md"), "junk").expect("应写入元数据");
+
+        let name = import_skill_from_path(&source, home).expect("中文名称 Skill 应导入成功");
+        assert_eq!(name, "日志诊断");
+        let (loaded, warnings) = load_imported_skills(home);
+        assert!(warnings.is_empty());
+        assert!(loaded.iter().any(|skill| skill.name == "日志诊断"));
+        assert!(
+            !home.join("ai/skills/日志诊断/.DS_Store").exists(),
+            "元数据文件不应落盘"
+        );
+    }
+
+    /// 验证破坏注入边界或目录语义的名称仍被拒绝。
+    #[test]
+    fn rejects_names_breaking_boundaries() {
+        for name in ["has space", "has\"quote", "has<angle>", "a/b", "a\\b"] {
+            let content = format!("---\nname: {name}\ndescription: d\n---\nbody\n");
+            assert!(
+                parse_skill_markdown(&content).is_err(),
+                "名称“{name}”应被拒绝"
+            );
+        }
     }
 
     /// 验证导入来源缺少 SKILL.md 时被拒绝。
