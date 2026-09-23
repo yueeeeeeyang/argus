@@ -94,10 +94,11 @@ ssh2 = { version = "0.9.5", features = ["vendored-openssl"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 主窗口使用透明原生标题栏，需要按视图区分可拖拽空白与标签等交互元素。
+# NSWorkspace 用于查询 LaunchServices 的“用 Argus 打开”注册状态。
 block = "0.1.6"
 objc = "0.2.7"
 objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry", "NSArray", "NSString", "NSURL"] }
 raw-window-handle = "0.6.2"
 
 [build-dependencies]

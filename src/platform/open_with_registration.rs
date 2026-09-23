@@ -288,26 +288,37 @@ mod platform_impl {
     use std::process::Command;
 
     use anyhow::{Context as _, Result, anyhow, bail};
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSArray, NSString, NSURL};
 
     use super::RegistrationStatus;
 
     /// macOS LaunchServices 注册工具的固定系统路径。
     const LSREGISTER_PATH: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    /// 注册状态探测目录名；带进程号避免多个实例互相清理对方的探测文件。
+    const PROBE_DIR_PREFIX: &str = "argus-open-with-probe";
+    /// 注册状态探测文件名；扩展名需与 Info.plist 声明的日志类型一致。
+    const PROBE_FILE_NAME: &str = "probe.log";
 
-    /// 查询 macOS 运行环境是否具备注册条件。
+    /// 查询 macOS 的“用 Argus 打开”注册状态。
+    ///
+    /// 说明：macOS 没有公开的“已注册”标记，这里通过 NSWorkspace 查询系统当前把
+    /// 哪些应用列为 `.log` 文件与目录的打开目标，命中当前 bundle 即视为已注册。
     pub(super) fn registration_status() -> RegistrationStatus {
-        match current_app_bundle() {
-            Some(app_bundle) => {
-                match ensure_bundle_declares_open_with_document_types(&app_bundle) {
-                    Ok(()) => RegistrationStatus::Unknown(
-                        "可注册；macOS LaunchServices 状态由系统缓存维护".to_string(),
-                    ),
-                    Err(reason) => RegistrationStatus::Unsupported(reason),
-                }
-            }
-            None => RegistrationStatus::Unsupported(
+        let Some(app_bundle) = current_app_bundle() else {
+            return RegistrationStatus::Unsupported(
                 "请使用打包后的 Argus.app 运行，cargo run 环境无法注册".to_string(),
-            ),
+            );
+        };
+        if let Err(reason) = ensure_bundle_declares_open_with_document_types(&app_bundle) {
+            return RegistrationStatus::Unsupported(reason);
+        }
+
+        match launch_services_lists_app(&app_bundle) {
+            Ok(true) => RegistrationStatus::Registered,
+            Ok(false) => RegistrationStatus::NotRegistered,
+            Err(reason) => RegistrationStatus::Unknown(reason),
         }
     }
 
@@ -374,6 +385,76 @@ mod platform_impl {
         }
 
         Ok(())
+    }
+
+    /// 判断 LaunchServices 是否把当前 bundle 列为日志文件和目录的打开目标。
+    ///
+    /// 说明：`URLsForApplicationsToOpenURL:` 要求目标文件真实存在，因此先创建临时
+    /// 探测文件与目录，查询完成后无论成败都清理。
+    fn launch_services_lists_app(app_bundle: &Path) -> std::result::Result<bool, String> {
+        let probe_dir =
+            std::env::temp_dir().join(format!("{PROBE_DIR_PREFIX}-{}", std::process::id()));
+        let probe_file = probe_dir.join(PROBE_FILE_NAME);
+        let probe_result: std::result::Result<(Vec<PathBuf>, Vec<PathBuf>), String> = (|| {
+            fs::create_dir_all(&probe_dir)
+                .map_err(|error| format!("无法创建探测目录 {}：{error}", probe_dir.display()))?;
+            fs::write(&probe_file, b"")
+                .map_err(|error| format!("无法创建探测文件 {}：{error}", probe_file.display()))?;
+            let file_applications = applications_that_can_open(&probe_file)?;
+            let directory_applications = applications_that_can_open(&probe_dir)?;
+            Ok((file_applications, directory_applications))
+        })();
+        let _ = fs::remove_file(&probe_file);
+        let _ = fs::remove_dir(&probe_dir);
+
+        let (file_applications, directory_applications): (Vec<PathBuf>, Vec<PathBuf>) =
+            probe_result?;
+        Ok(file_applications
+            .iter()
+            .any(|application| paths_equal(application, app_bundle))
+            && directory_applications
+                .iter()
+                .any(|application| paths_equal(application, app_bundle)))
+    }
+
+    /// 查询系统当前能打开指定路径的全部应用 bundle 路径。
+    pub(super) fn applications_that_can_open(
+        path: &Path,
+    ) -> std::result::Result<Vec<PathBuf>, String> {
+        let workspace_class =
+            AnyClass::get(c"NSWorkspace").ok_or_else(|| "无法加载 NSWorkspace".to_string())?;
+        // sharedWorkspace 返回自动释放的单例，按 +0 借用，不进入 Retained 所有权。
+        let workspace: *mut AnyObject = unsafe { msg_send![workspace_class, sharedWorkspace] };
+        if workspace.is_null() {
+            return Err("NSWorkspace 不可用".to_string());
+        }
+
+        let path_string = NSString::from_str(&path.to_string_lossy());
+        let file_url = NSURL::fileURLWithPath(&path_string);
+        // URLsForApplicationsToOpenURL: 返回自动释放数组，同样按 +0 借用。
+        let applications: *mut NSArray<NSURL> =
+            unsafe { msg_send![workspace, URLsForApplicationsToOpenURL: &*file_url] };
+        if applications.is_null() {
+            return Err("LaunchServices 未返回打开方式列表".to_string());
+        }
+        let applications = unsafe { &*applications };
+
+        Ok(applications
+            .to_vec()
+            .iter()
+            .filter_map(|url| url.path().map(|path| PathBuf::from(path.to_string())))
+            .collect())
+    }
+
+    /// 比较两个应用路径是否指向同一 bundle；任一路径无法规范化时回退到字面比较。
+    pub(super) fn paths_equal(left: &Path, right: &Path) -> bool {
+        if left == right {
+            return true;
+        }
+        match (left.canonicalize(), right.canonicalize()) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
     }
 
     /// 执行 LaunchServices 注册工具。
@@ -444,6 +525,45 @@ mod tests {
             );
             let cargo_exe = PathBuf::from("/tmp/argus/target/debug/argus");
             assert_eq!(platform_impl::app_bundle_from_exe_path(&cargo_exe), None);
+        }
+    }
+
+    /// 验证 LaunchServices 返回路径按规范化结果比较，符号链接访问视为同一 bundle。
+    #[test]
+    fn macos_launch_services_path_comparison_normalizes() {
+        #[cfg(target_os = "macos")]
+        {
+            let dir =
+                std::env::temp_dir().join(format!("argus-open-with-paths-{}", std::process::id()));
+            let bundle = dir.join("Argus.app");
+            std::fs::create_dir_all(&bundle).expect("应创建测试 bundle 目录");
+            let link = dir.join("Argus-link.app");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&bundle, &link).expect("应创建测试符号链接");
+
+            assert!(platform_impl::paths_equal(&bundle, &bundle));
+            assert!(platform_impl::paths_equal(&link, &bundle));
+            assert!(!platform_impl::paths_equal(&dir.join("Other.app"), &bundle));
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// 验证 NSWorkspace 查询链路可用；具体应用列表由系统环境决定，只要求调用成功。
+    #[test]
+    fn macos_launch_services_query_succeeds_for_existing_file() {
+        #[cfg(target_os = "macos")]
+        {
+            let dir =
+                std::env::temp_dir().join(format!("argus-open-with-query-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("应创建测试目录");
+            let probe = dir.join("probe.log");
+            std::fs::write(&probe, b"").expect("应创建测试文件");
+
+            let result = platform_impl::applications_that_can_open(&probe);
+            assert!(result.is_ok(), "LaunchServices 查询应成功：{result:?}");
+
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
