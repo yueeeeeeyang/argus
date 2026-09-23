@@ -1,11 +1,10 @@
-//! 文件职责：提取远程连接和升级弹窗状态类型定义。
+//! 文件职责：提取远程连接弹窗状态类型定义。
 //! 创建日期：2026-07-08
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
 //! 主要功能：定义连接目录表单、SSH/SMB/Git/SVN 链接表单、主机指纹确认和文件管理弹窗状态。
 
 use super::types::TextInputState;
-use crate::infra::updater::AvailableUpgrade;
 use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
 
 /// 链接工作区当前打开的弹窗。
@@ -139,28 +138,4 @@ pub(crate) struct RemoteFileDeletePromptState {
     pub name: String,
     /// 是否为目录。
     pub is_directory: bool,
-}
-
-/// 升级弹窗状态，覆盖发现版本、安装进度和失败提示三类用户可见流程。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum UpgradeDialogState {
-    /// 发现可安装版本，等待用户确认升级、跳过或稍后。
-    Available {
-        /// 待安装的新版本信息。
-        upgrade: AvailableUpgrade,
-    },
-    /// 正在下载、校验、替换或重启。
-    Progress {
-        /// 正在处理的新版本号。
-        version: String,
-        /// 当前阶段说明。
-        message: String,
-    },
-    /// 升级失败，等待用户关闭后继续使用旧版本。
-    Failed {
-        /// 失败关联版本；手动检查失败时可能没有版本号。
-        version: Option<String>,
-        /// 失败原因。
-        message: String,
-    },
 }

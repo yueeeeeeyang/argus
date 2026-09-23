@@ -53,10 +53,6 @@ impl ArgusApp {
             Some(AppTextInputTarget::SettingsJstackThreadNameFilter)
         } else if self.settings_jstack_stack_segment_filter_input.is_focused {
             Some(AppTextInputTarget::SettingsJstackStackSegmentFilter)
-        } else if self.settings_upgrade_server_input.is_focused {
-            Some(AppTextInputTarget::SettingsUpgradeServer)
-        } else if self.settings_upgrade_public_key_input.is_focused {
-            Some(AppTextInputTarget::SettingsUpgradePublicKey)
         } else {
             None
         };
@@ -68,8 +64,6 @@ impl ArgusApp {
         self.settings_jstack_thread_name_filter_input.clear_focus();
         self.settings_jstack_stack_segment_filter_input
             .clear_focus();
-        self.settings_upgrade_server_input.clear_focus();
-        self.settings_upgrade_public_key_input.clear_focus();
 
         self.log_search.keyword_input.clear_focus();
         self.log_search.directory_input.clear_focus();
@@ -171,19 +165,6 @@ impl ArgusApp {
                     );
                 }
             }
-            AppTextInputTarget::SettingsUpgradeServer => {
-                self.settings_upgrade_server_input.apply_native_edit(&edit);
-                if edit.marked_range.is_none() {
-                    self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradeServer);
-                }
-            }
-            AppTextInputTarget::SettingsUpgradePublicKey => {
-                self.settings_upgrade_public_key_input
-                    .apply_native_edit(&edit);
-                if edit.marked_range.is_none() {
-                    self.commit_settings_text_input(AppTextInputTarget::SettingsUpgradePublicKey);
-                }
-            }
         }
     }
 
@@ -234,10 +215,6 @@ impl ArgusApp {
                 self.settings_jstack_thread_name_filter_input.marked_range = None;
                 self.settings_jstack_stack_segment_filter_input.is_focused = false;
                 self.settings_jstack_stack_segment_filter_input.marked_range = None;
-                self.settings_upgrade_server_input.is_focused = false;
-                self.settings_upgrade_server_input.marked_range = None;
-                self.settings_upgrade_public_key_input.is_focused = false;
-                self.settings_upgrade_public_key_input.marked_range = None;
             }
             AppTextInputTarget::SettingsJstackThreadNameFilter => {
                 self.is_theme_dropdown_open = false;
@@ -246,10 +223,6 @@ impl ArgusApp {
                 self.settings_jstack_thread_name_filter_input.is_focused = true;
                 self.settings_jstack_stack_segment_filter_input.is_focused = false;
                 self.settings_jstack_stack_segment_filter_input.marked_range = None;
-                self.settings_upgrade_server_input.is_focused = false;
-                self.settings_upgrade_server_input.marked_range = None;
-                self.settings_upgrade_public_key_input.is_focused = false;
-                self.settings_upgrade_public_key_input.marked_range = None;
             }
             AppTextInputTarget::SettingsJstackStackSegmentFilter => {
                 self.is_theme_dropdown_open = false;
@@ -258,34 +231,6 @@ impl ArgusApp {
                 self.settings_jstack_thread_name_filter_input.is_focused = false;
                 self.settings_jstack_thread_name_filter_input.marked_range = None;
                 self.settings_jstack_stack_segment_filter_input.is_focused = true;
-                self.settings_upgrade_server_input.is_focused = false;
-                self.settings_upgrade_server_input.marked_range = None;
-                self.settings_upgrade_public_key_input.is_focused = false;
-                self.settings_upgrade_public_key_input.marked_range = None;
-            }
-            AppTextInputTarget::SettingsUpgradeServer => {
-                self.is_theme_dropdown_open = false;
-                self.settings_quick_keywords_input.is_focused = false;
-                self.settings_quick_keywords_input.marked_range = None;
-                self.settings_jstack_thread_name_filter_input.is_focused = false;
-                self.settings_jstack_thread_name_filter_input.marked_range = None;
-                self.settings_jstack_stack_segment_filter_input.is_focused = false;
-                self.settings_jstack_stack_segment_filter_input.marked_range = None;
-                self.settings_upgrade_server_input.is_focused = true;
-                self.settings_upgrade_public_key_input.is_focused = false;
-                self.settings_upgrade_public_key_input.marked_range = None;
-            }
-            AppTextInputTarget::SettingsUpgradePublicKey => {
-                self.is_theme_dropdown_open = false;
-                self.settings_quick_keywords_input.is_focused = false;
-                self.settings_quick_keywords_input.marked_range = None;
-                self.settings_jstack_thread_name_filter_input.is_focused = false;
-                self.settings_jstack_thread_name_filter_input.marked_range = None;
-                self.settings_jstack_stack_segment_filter_input.is_focused = false;
-                self.settings_jstack_stack_segment_filter_input.marked_range = None;
-                self.settings_upgrade_server_input.is_focused = false;
-                self.settings_upgrade_server_input.marked_range = None;
-                self.settings_upgrade_public_key_input.is_focused = true;
             }
         }
     }
@@ -440,13 +385,13 @@ mod tests {
     #[test]
     fn native_text_input_focuses_selected_settings_target() {
         let mut app = ArgusApp::new();
-        app.settings_upgrade_server_input.value = "old".to_string();
-        app.settings_upgrade_server_input.cursor = 3;
-        app.settings_upgrade_public_key_input.value.clear();
-        app.settings_upgrade_public_key_input.cursor = 0;
+        app.settings_quick_keywords_input.value = "old".to_string();
+        app.settings_quick_keywords_input.cursor = 3;
+        app.settings_jstack_thread_name_filter_input.value.clear();
+        app.settings_jstack_thread_name_filter_input.cursor = 0;
 
         app.apply_native_text_input_edit(
-            AppTextInputTarget::SettingsUpgradeServer,
+            AppTextInputTarget::SettingsQuickKeywords,
             NativeTextEdit {
                 replacement_range: 3..3,
                 text: "A".to_string(),
@@ -455,7 +400,7 @@ mod tests {
             },
         );
         app.apply_native_text_input_edit(
-            AppTextInputTarget::SettingsUpgradePublicKey,
+            AppTextInputTarget::SettingsJstackThreadNameFilter,
             NativeTextEdit {
                 replacement_range: 0..0,
                 text: "B".to_string(),
@@ -464,10 +409,10 @@ mod tests {
             },
         );
 
-        assert_eq!(app.settings_upgrade_server_input.value, "oldA");
-        assert_eq!(app.settings_upgrade_public_key_input.value, "B");
-        assert!(!app.settings_upgrade_server_input.is_focused);
-        assert!(app.settings_upgrade_public_key_input.is_focused);
+        assert_eq!(app.settings_quick_keywords_input.value, "oldA");
+        assert_eq!(app.settings_jstack_thread_name_filter_input.value, "B");
+        assert!(!app.settings_quick_keywords_input.is_focused);
+        assert!(app.settings_jstack_thread_name_filter_input.is_focused);
     }
 
     /// 验证点击外部触发的统一失焦不会清空用户输入内容。
@@ -479,11 +424,12 @@ mod tests {
         app.source_tree_search_input.selection_anchor = Some(0);
         app.source_tree_search_input.marked_range = Some(0..2);
         app.source_tree_search_input.is_focused = true;
-        app.settings_upgrade_server_input.value = "https://updates.example.com".to_string();
-        app.settings_upgrade_server_input.cursor = 27;
-        app.settings_upgrade_server_input.selection_anchor = Some(0);
-        app.settings_upgrade_server_input.marked_range = Some(0..5);
-        app.settings_upgrade_server_input.is_focused = true;
+        app.settings_jstack_thread_name_filter_input.value = "Attach Listener".to_string();
+        app.settings_jstack_thread_name_filter_input.cursor = 15;
+        app.settings_jstack_thread_name_filter_input
+            .selection_anchor = Some(0);
+        app.settings_jstack_thread_name_filter_input.marked_range = Some(0..5);
+        app.settings_jstack_thread_name_filter_input.is_focused = true;
         app.log_search.keyword_input.value = "中文".to_string();
         app.log_search.keyword_input.cursor = 2;
         app.log_search.keyword_input.is_focused = true;
@@ -492,16 +438,24 @@ mod tests {
 
         assert_eq!(app.source_tree_search_input.value, "错误");
         assert_eq!(
-            app.settings_upgrade_server_input.value,
-            "https://updates.example.com"
+            app.settings_jstack_thread_name_filter_input.value,
+            "Attach Listener"
         );
         assert_eq!(app.log_search.keyword_input.value, "中文");
         assert!(!app.source_tree_search_input.is_focused);
-        assert!(!app.settings_upgrade_server_input.is_focused);
+        assert!(!app.settings_jstack_thread_name_filter_input.is_focused);
         assert!(!app.log_search.keyword_input.is_focused);
         assert!(app.source_tree_search_input.selection_anchor.is_none());
-        assert!(app.settings_upgrade_server_input.selection_anchor.is_none());
+        assert!(
+            app.settings_jstack_thread_name_filter_input
+                .selection_anchor
+                .is_none()
+        );
         assert!(app.source_tree_search_input.marked_range.is_none());
-        assert!(app.settings_upgrade_server_input.marked_range.is_none());
+        assert!(
+            app.settings_jstack_thread_name_filter_input
+                .marked_range
+                .is_none()
+        );
     }
 }

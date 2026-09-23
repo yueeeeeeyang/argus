@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
-//! 主要功能：渲染标题栏、来源侧栏、日志内容区、右侧 Agent 助手、AI 分析弹窗、升级弹窗和设置模态框。
+//! 主要功能：渲染标题栏、来源侧栏、日志内容区、右侧 Agent 助手、AI 分析弹窗和设置模态框。
 
 use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
@@ -10,7 +10,7 @@ use crate::infra::perf::PerfSpan;
 use crate::ui::{
     agent_dialog, ai_settings_editor, archive_password_dialog, components::context_menu,
     connection_dialog, custom_title_bar, log_content_view, remote_file_dialog, settings_window,
-    source_panel, source_picker, source_resizer, upgrade_dialog,
+    source_panel, source_picker, source_resizer,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
@@ -124,9 +124,6 @@ pub(crate) fn render(
         })
         .when(app.archive_password_prompt.is_some(), |this| {
             this.child(archive_password_dialog::render(app, cx))
-        })
-        .when(app.upgrade_dialog.is_some(), |this| {
-            this.child(upgrade_dialog::render(app, cx))
         })
         .when(app.active_menu.is_some(), |this| {
             this.child(context_menu::render_active_menu(app, cx))

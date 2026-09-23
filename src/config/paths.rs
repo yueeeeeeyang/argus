@@ -22,8 +22,6 @@ const ARGUS_TEST_DIR_NAME: &str = ".argus_test";
 const ARGUS_THEME_DIR_NAME: &str = "themes";
 /// Argus 用户设置文件名称。
 const ARGUS_SETTINGS_FILE_NAME: &str = "settings.toml";
-/// Argus 升级缓存目录名称。
-const ARGUS_UPDATES_DIR_NAME: &str = "updates";
 /// Argus 内置仓库缓存目录名称。
 const ARGUS_REPOSITORIES_DIR_NAME: &str = "repositories";
 /// Git 裸仓库缓存子目录名称。
@@ -161,13 +159,6 @@ pub(crate) fn argus_settings_file() -> PathBuf {
     argus_settings_file_from_config(&argus_config_dir())
 }
 
-/// 返回当前用户的 Argus 升级缓存目录。
-///
-/// 返回值：固定为 `~/.argus/updates`，用于保存下载完成且已校验的升级二进制。
-pub(crate) fn argus_updates_dir() -> PathBuf {
-    argus_updates_dir_from_config(&argus_config_dir())
-}
-
 /// 返回 Git 持久裸仓库缓存根目录。
 ///
 /// 返回值：固定为 `~/.argus/repositories/git`，每个 Git 链接在其下使用独立目录。
@@ -195,11 +186,6 @@ pub(crate) fn argus_theme_dir_from_config(config_dir: &Path) -> PathBuf {
 /// 根据指定配置目录构造设置文件路径，供配置管理器和测试复用。
 pub(crate) fn argus_settings_file_from_config(config_dir: &Path) -> PathBuf {
     config_dir.join(ARGUS_SETTINGS_FILE_NAME)
-}
-
-/// 根据指定配置目录构造升级缓存目录，供升级模块和测试复用。
-pub(crate) fn argus_updates_dir_from_config(config_dir: &Path) -> PathBuf {
-    config_dir.join(ARGUS_UPDATES_DIR_NAME)
 }
 
 /// 根据指定配置目录构造 Git 裸仓库缓存根目录，供实现与测试复用。
@@ -294,10 +280,6 @@ mod tests {
         assert_eq!(
             argus_settings_file_from_config(&config_dir),
             PathBuf::from("/tmp/argus-home/.argus/settings.toml")
-        );
-        assert_eq!(
-            argus_updates_dir_from_config(&config_dir),
-            PathBuf::from("/tmp/argus-home/.argus/updates")
         );
     }
 

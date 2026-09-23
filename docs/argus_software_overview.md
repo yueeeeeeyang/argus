@@ -153,14 +153,12 @@ Git 使用随应用构建的 `git2/libgit2` 完成 HTTPS 与 SSH 访问，不调
 
 Git SSH 与 SVN SSH 都先展示 SHA-256 主机指纹并复用 Argus 受信主机流程；SVN 的 Rust SSH 栈禁用 agent、默认密钥和 OpenSSH 配置回退。Git HTTPS 和 SVN HTTPS 都使用操作系统信任根执行证书链及主机名校验，因此可识别已安装到系统证书库的企业 CA。`svn://` 与 `http://` 链路不加密，界面会分别提示改用 `svn+ssh://` 或 `https://`；DAV 凭据不会写入 URL、日志或错误响应正文，带认证请求只允许同源重定向并禁止 HTTPS 降级。
 
-### 3.8 外观、配置与安全升级
+### 3.8 外观、配置与持久化
 
 - 主题使用 TOML 令牌定义，内置深色主题，也可从 `~/.argus/themes` 加载用户主题；
 - 日志字号可在 12–20 px 范围调整；
-- 来源加载策略、搜索偏好、Jstack 过滤规则、连接配置和升级配置统一持久化到 `~/.argus/settings.toml`；
-- 自动升级默认关闭，只有配置服务器地址和 Ed25519 公钥后才会执行；
-- 升级流程验证清单签名、平台/架构、SemVer、文件大小和 SHA-256；
-- Windows/Linux 裸二进制与 macOS `.app` 使用不同的安全替换流程，macOS 会校验应用包结构后再替换和重启。
+- 来源加载策略、搜索偏好、Jstack 过滤规则和连接配置统一持久化到 `~/.argus/settings.toml`；
+- 应用不提供自动升级能力，版本更新由用户自行下载安装包完成。
 
 ## 4. 软件优势
 
@@ -182,7 +180,7 @@ SSH 终端负责实时操作，SFTP/SMB 负责文件获取和管理，Git/SVN �
 
 ### 4.5 具备明确的安全校验点
 
-压缩包密码只驻留进程内存；SSH、Git SSH 和 SVN SSH 首次连接要求确认主机指纹；HTTPS Git 不放宽系统证书校验；升级包必须通过签名、哈希、大小和平台匹配校验。这些机制能够降低错误主机、篡改升级清单和损坏安装包带来的风险。
+压缩包密码只驻留进程内存；SSH、Git SSH 和 SVN SSH 首次连接要求确认主机指纹；HTTPS Git 不放宽系统证书校验。这些机制能够降低错误主机、凭据泄露和文件损坏带来的风险。
 
 ### 4.6 架构便于扩展
 
@@ -218,9 +216,8 @@ SSH 终端负责实时操作，SFTP/SMB 负责文件获取和管理，Git/SVN �
 - 远程文件管理当前不提供新建目录、跨目录移动或远程文件复制；删除目录仅支持空目录；
 - Git/SVN 不支持仓库写入、目录递归下载、任意 Git 提交 SHA 输入、SVN 历史列表、子模块递归浏览或 Git LFS 对象下载；Git 缓存首版不设置自动容量上限；SVN HTTP(S) 要求服务端提供 Subversion 1.7+ HTTPv2 修订资源头并开放 `OPTIONS`、`PROPFIND`、`GET`，首版支持匿名和 HTTP Basic，不支持 Digest、NTLM 或客户端证书认证；
 - Runtime 分析依赖项目约定的请求日志格式，并不是任意日志都能自动生成请求与 SQL 统计；
-- 自动升级依赖用户自行配置可信升级服务器和 Ed25519 公钥；未配置时不会发起升级请求；
 - 系统右键入口的注册管理目前面向 Windows 和 macOS，其他平台会返回不支持说明；
-- 仓库包含 macOS、Windows 打包脚本以及 Linux 升级资产选择逻辑，但各目标平台的完整发布质量仍应通过对应系统的构建、安装和交互验收确认。
+- 仓库包含 macOS、Windows 打包脚本，但各目标平台的完整发布质量仍应通过对应系统的构建、安装和交互验收确认。
 
 ## 7. 代码依据索引
 
@@ -237,8 +234,7 @@ SSH 终端负责实时操作，SFTP/SMB 负责文件获取和管理，Git/SVN �
 | SSH、SFTP、SMB、Git 与 SVN | `src/remote/`、`src/app/remote/` |
 | 设置、主题与持久化配置 | `src/config/`、`src/theme/`、`src/ui/settings_window.rs` |
 | 系统打开入口 | `src/platform/external_sources.rs`、`src/platform/open_with_registration.rs` |
-| 安全升级 | `src/infra/updater.rs`、`UPGRADE.md` |
 
 ---
 
-本文档依据 2026-07-15 工作区中的实际源码整理。产品功能仍在演进，对外发布前应结合目标平台的安装包和真实日志样本进行验收。
+本文档依据当前工作区中的实际源码整理。产品功能仍在演进，对外发布前应结合目标平台的安装包和真实日志样本进行验收。

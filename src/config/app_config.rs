@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供 AI、外观、日志加载、日志搜索、链接、编码和升级设置的默认值及 TOML 模型。
+//! 主要功能：提供 AI、外观、日志加载、日志搜索、链接和编码设置的默认值及 TOML 模型。
 
 use crate::config::ai_config::AiConfig;
 use crate::remote::connection::ConnectionConfig;
@@ -84,9 +84,6 @@ pub(crate) struct AppConfig {
     /// 编码配置，后续日志读取模块会据此选择默认解码策略。
     #[serde(default)]
     pub encoding: EncodingConfig,
-    /// 升级配置，控制是否从用户配置的服务器检查并安装新版本。
-    #[serde(default)]
-    pub upgrade: UpgradeConfig,
 }
 
 impl AppConfig {
@@ -122,10 +119,6 @@ impl AppConfig {
         if self.encoding.selected.trim().is_empty() {
             self.encoding.selected = EncodingConfig::default().selected;
         }
-        self.upgrade.server_url = self.upgrade.server_url.trim().to_string();
-        self.upgrade.public_key_base64 = self.upgrade.public_key_base64.trim().to_string();
-        self.upgrade.skipped_version = normalized_optional_text(self.upgrade.skipped_version);
-        self.upgrade.last_check_at = normalized_optional_text(self.upgrade.last_check_at);
         self
     }
 }
@@ -141,7 +134,6 @@ impl Default for AppConfig {
             log_display: LogDisplayConfig::default(),
             connections: ConnectionConfig::default(),
             encoding: EncodingConfig::default(),
-            upgrade: UpgradeConfig::default(),
         }
     }
 }
@@ -244,44 +236,6 @@ impl Default for EncodingConfig {
     }
 }
 
-/// 自动升级配置，保存升级服务器和用户跳过版本等跨会话偏好。
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct UpgradeConfig {
-    /// 是否启用启动时自动检查升级。
-    pub enabled: bool,
-    /// 升级服务器基础地址；为空时不会发起网络请求。
-    pub server_url: String,
-    /// Ed25519 验签公钥 Base64；为空时不会信任任何升级清单。
-    #[serde(default)]
-    pub public_key_base64: String,
-    /// 用户选择跳过的版本号，自动检查时不再弹出该版本。
-    #[serde(default)]
-    pub skipped_version: Option<String>,
-    /// 最近一次检查升级的 RFC3339 时间戳，仅用于设置页展示和诊断。
-    #[serde(default)]
-    pub last_check_at: Option<String>,
-}
-
-impl Default for UpgradeConfig {
-    /// 构造默认升级配置，避免新安装用户在没有服务器地址时产生网络访问。
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            server_url: String::new(),
-            public_key_base64: String::new(),
-            skipped_version: None,
-            last_check_at: None,
-        }
-    }
-}
-
-/// 归一化可选文本配置，去掉空白并把空字符串折叠成 `None`。
-fn normalized_optional_text(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 /// 归一化单行设置文本，清理首尾空白并把回车换行折叠为空格。
 fn normalized_inline_text(value: String) -> String {
     value.replace(['\r', '\n'], " ").trim().to_string()
@@ -330,13 +284,6 @@ mod tests {
             encoding: EncodingConfig {
                 selected: String::new(),
             },
-            upgrade: UpgradeConfig {
-                enabled: true,
-                server_url: " https://updates.example.com/argus ".to_string(),
-                public_key_base64: " TEST_PUBLIC_KEY_BASE64 ".to_string(),
-                skipped_version: Some(" 0.2.0 ".to_string()),
-                last_check_at: Some(" ".to_string()),
-            },
         }
         .normalized();
 
@@ -353,13 +300,6 @@ mod tests {
             "java.net.SocketInputStream\n\nread"
         );
         assert_eq!(config.encoding.selected, "UTF-8");
-        assert_eq!(
-            config.upgrade.server_url,
-            "https://updates.example.com/argus"
-        );
-        assert_eq!(config.upgrade.public_key_base64, "TEST_PUBLIC_KEY_BASE64");
-        assert_eq!(config.upgrade.skipped_version.as_deref(), Some("0.2.0"));
-        assert_eq!(config.upgrade.last_check_at, None);
     }
 
     /// 验证新安装用户默认使用设计文档要求的 12px 日志字号。
@@ -400,17 +340,5 @@ mod tests {
         );
         assert!(!config.jstack_stack_segment_filters.contains("||"));
         assert!(config.jstack_stack_segment_filters.contains("\n\n"));
-    }
-
-    /// 验证默认升级配置不会在未配置服务器时发起自动检查。
-    #[test]
-    fn default_upgrade_config_is_disabled() {
-        let config = UpgradeConfig::default();
-
-        assert!(!config.enabled);
-        assert!(config.server_url.is_empty());
-        assert!(config.public_key_base64.is_empty());
-        assert!(config.skipped_version.is_none());
-        assert!(config.last_check_at.is_none());
     }
 }

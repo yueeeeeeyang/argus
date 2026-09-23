@@ -640,7 +640,7 @@ fn build_agent_stream_items(
     let mut trace_index = 0;
     while trace_index < traces.len() {
         let trace = &traces[trace_index];
-        // 模型请求统计只在顶部信息栏展示；同时隐藏后台升级前残留的模型轨迹，
+        // 模型请求统计只在顶部信息栏展示；同时隐藏后台重试前残留的模型轨迹，
         // 确保重试或事件竞态不会让请求行重新出现。
         if trace.kind == AgentTraceKind::Model {
             trace_index += 1;

@@ -32,4 +32,3 @@ pub(crate) mod source_resizer;
 pub(crate) mod tab_bar;
 pub(crate) mod terminal_view;
 pub(crate) mod toolbar;
-pub(crate) mod upgrade_dialog;

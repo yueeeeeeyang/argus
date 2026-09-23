@@ -55,8 +55,6 @@ const SETTINGS_THEME_DROPDOWN_ROW_HEIGHT: f32 = 30.0;
 const SETTINGS_THEME_DROPDOWN_MAX_HEIGHT: f32 = 220.0;
 /// 设置行最小高度，主题菜单使用它在外观分组内部定位。
 const SETTINGS_ROW_MIN_HEIGHT: f32 = 44.0;
-/// 是否在设置模态框展示升级相关入口；当前按产品要求隐藏，底层升级能力保留。
-const SHOW_UPGRADE_SETTINGS_ENTRIES: bool = false;
 /// 主题下拉按钮高度，需和通用下拉框保持一致。
 const SETTINGS_THEME_DROPDOWN_BUTTON_HEIGHT: f32 = 30.0;
 /// 主题下拉菜单与按钮之间的视觉间距。
@@ -79,10 +77,6 @@ struct SettingsInputFocusHandles {
     quick_keywords: FocusHandle,
     /// Jstack 线程名过滤输入框焦点。
     jstack_thread_names: FocusHandle,
-    /// 升级服务器输入框焦点。
-    upgrade_server: FocusHandle,
-    /// 升级验签公钥输入框焦点。
-    upgrade_public_key: FocusHandle,
 }
 
 impl SettingsInputFocusHandles {
@@ -92,8 +86,6 @@ impl SettingsInputFocusHandles {
             root: handles.root.clone(),
             quick_keywords: handles.settings_quick_keywords.clone(),
             jstack_thread_names: handles.settings_jstack_thread_names.clone(),
-            upgrade_server: handles.settings_upgrade_server.clone(),
-            upgrade_public_key: handles.settings_upgrade_public_key.clone(),
         }
     }
 }
@@ -131,18 +123,6 @@ struct SettingsModalSnapshot {
     jstack_thread_name_filter_input: TextInputState,
     /// Jstack 完整线程段过滤输入框状态。
     jstack_stack_segment_filter_input: TextInputState,
-    /// 是否启用启动时自动检查升级。
-    upgrade_enabled: bool,
-    /// 升级服务器输入框状态。
-    upgrade_server_input: TextInputState,
-    /// 升级验签公钥输入框状态。
-    upgrade_public_key_input: TextInputState,
-    /// 当前平台 manifest 标识。
-    upgrade_platform_label: String,
-    /// 是否正在检查升级。
-    is_upgrade_checking: bool,
-    /// 最近一次升级消息。
-    upgrade_message: Option<String>,
     /// 系统右键菜单注册状态。
     open_with_registration_status: RegistrationStatus,
     /// 系统右键菜单是否正在注册或卸载。
@@ -187,12 +167,6 @@ impl SettingsModalSnapshot {
             jstack_stack_segment_filter_input: app
                 .settings_jstack_stack_segment_filter_input
                 .clone(),
-            upgrade_enabled: app.config.upgrade.enabled,
-            upgrade_server_input: app.settings_upgrade_server_input.clone(),
-            upgrade_public_key_input: app.settings_upgrade_public_key_input.clone(),
-            upgrade_platform_label: app.upgrade_platform_label(),
-            is_upgrade_checking: app.is_upgrade_checking,
-            upgrade_message: app.upgrade_message.clone(),
             open_with_registration_status: app.open_with_registration_status.clone(),
             is_open_with_registration_busy: app.is_open_with_registration_busy,
             open_with_registration_message: app.open_with_registration_message.clone(),
@@ -680,15 +654,7 @@ fn render_selected_settings_section(
             .flex()
             .flex_col()
             .gap_5()
-            .child(render_about_section(snapshot, app_handle, theme))
-            .when(SHOW_UPGRADE_SETTINGS_ENTRIES, |this| {
-                this.child(settings_section(
-                    "升级",
-                    ArgusIcon::Refresh,
-                    render_upgrade_section(snapshot, app_handle, input_focus_handles, theme),
-                    theme,
-                ))
-            })
+            .child(render_about_section(theme))
             .into_any_element(),
         SettingsSection::Appearance => {
             render_appearance_section(snapshot, app_handle, theme).into_any_element()
@@ -1453,16 +1419,9 @@ fn settings_section(
         .child(content)
 }
 
-/// 渲染关于设置区；升级入口当前隐藏，仅保留版本和平台信息。
-fn render_about_section(
-    snapshot: &SettingsModalSnapshot,
-    app_handle: &Entity<ArgusApp>,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let message = snapshot
-        .upgrade_message
-        .clone()
-        .unwrap_or_else(|| "等待检查".to_string());
+/// 渲染关于设置区；只展示版本和当前平台信息。
+fn render_about_section(theme: &AppTheme) -> impl IntoElement + use<> {
+    let platform_label = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
 
     setting_group(theme)
         .child(setting_row(
@@ -1472,16 +1431,9 @@ fn render_about_section(
         ))
         .child(setting_row(
             "当前平台",
-            text_value(&snapshot.upgrade_platform_label, theme),
+            text_value(&platform_label, theme),
             theme,
         ))
-        .when(SHOW_UPGRADE_SETTINGS_ENTRIES, |this| {
-            this.child(setting_row(
-                "检查更新",
-                upgrade_check_control(snapshot, app_handle, &message, theme),
-                theme,
-            ))
-        })
 }
 
 /// 渲染外观设置区。
@@ -1572,31 +1524,6 @@ fn render_log_search_section(
         quick_keywords_input_control(snapshot, app_handle, input_focus_handles, theme),
         theme,
     ))
-}
-
-/// 渲染自动升级设置区。
-fn render_upgrade_section(
-    snapshot: &SettingsModalSnapshot,
-    app_handle: &Entity<ArgusApp>,
-    input_focus_handles: &SettingsInputFocusHandles,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    setting_group(theme)
-        .child(setting_row(
-            "自动检查",
-            upgrade_enabled_control(snapshot.upgrade_enabled, app_handle, theme),
-            theme,
-        ))
-        .child(setting_row(
-            "升级服务器",
-            upgrade_server_input_control(snapshot, app_handle, input_focus_handles, theme),
-            theme,
-        ))
-        .child(setting_row(
-            "验签公钥",
-            upgrade_public_key_input_control(snapshot, app_handle, input_focus_handles, theme),
-            theme,
-        ))
 }
 
 /// 渲染日志加载设置区。
@@ -1845,165 +1772,6 @@ fn jstack_stack_segment_filter_input_control(
         ))
 }
 
-/// 渲染升级服务器配置输入框。
-fn upgrade_server_input_control(
-    snapshot: &SettingsModalSnapshot,
-    app_handle: &Entity<ArgusApp>,
-    input_focus_handles: &SettingsInputFocusHandles,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let input_state = snapshot.upgrade_server_input.clone();
-    let key_app = app_handle.clone();
-    let click_app = app_handle.clone();
-    let pointer_app = app_handle.clone();
-    let clear_app = app_handle.clone();
-    let native_input = app_native_input(
-        app_handle.clone(),
-        AppTextInputTarget::SettingsUpgradeServer,
-        input_focus_handles.upgrade_server.clone(),
-    );
-
-    div().w(px(360.0)).child(render_input(
-        Input {
-            id: "settings-upgrade-server-input",
-            placeholder: "https://updates.example.com/argus/",
-            value: input_state.value.clone(),
-            is_disabled: false,
-            is_focused: input_state.is_focused,
-            cursor_index: input_state.cursor,
-            selection_range: settings_input_selection_range(&input_state),
-            marked_range: input_state.marked_range.clone(),
-            is_pointer_selecting: input_state.selection_drag.is_some(),
-            is_secret: false,
-            size: InputSize::Regular,
-            leading_accessory: Some(InputAccessory {
-                id: "settings-upgrade-server-leading",
-                icon: ArgusIcon::Connection,
-                tooltip: "升级服务器地址",
-            }),
-            trailing_accessory: Some(InputAccessory {
-                id: "settings-upgrade-server-clear",
-                icon: ArgusIcon::Close,
-                tooltip: "清空升级服务器",
-            }),
-            native_input: Some(native_input),
-        },
-        theme,
-        move |event: &KeyDownEvent, _, cx| {
-            update_settings_app(&key_app, cx, |app, app_cx| {
-                app.handle_settings_upgrade_server_key(&event.keystroke, app_cx);
-            });
-        },
-        move |_, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&click_app, cx, |app, _| {
-                app.focus_settings_upgrade_server_input();
-            });
-        },
-        move |event: &InputPointerEvent, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&pointer_app, cx, |app, _| match event.action {
-                InputPointerAction::Begin => app.begin_settings_upgrade_server_pointer_selection(
-                    event.character_index,
-                    event.granularity,
-                ),
-                InputPointerAction::Extend => {
-                    app.update_settings_upgrade_server_pointer_selection(event.character_index)
-                }
-                InputPointerAction::Finish => {
-                    app.finish_settings_upgrade_server_pointer_selection()
-                }
-            });
-        },
-        move |_, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&clear_app, cx, |app, _| {
-                app.clear_settings_upgrade_server_input();
-            });
-        },
-    ))
-}
-
-/// 渲染升级 manifest 验签公钥输入框。
-fn upgrade_public_key_input_control(
-    snapshot: &SettingsModalSnapshot,
-    app_handle: &Entity<ArgusApp>,
-    input_focus_handles: &SettingsInputFocusHandles,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let input_state = snapshot.upgrade_public_key_input.clone();
-    let key_app = app_handle.clone();
-    let click_app = app_handle.clone();
-    let pointer_app = app_handle.clone();
-    let clear_app = app_handle.clone();
-    let native_input = app_native_input(
-        app_handle.clone(),
-        AppTextInputTarget::SettingsUpgradePublicKey,
-        input_focus_handles.upgrade_public_key.clone(),
-    );
-
-    div().w(px(360.0)).child(render_input(
-        Input {
-            id: "settings-upgrade-public-key-input",
-            placeholder: "ARGUS_UPDATE_PUBLIC_KEY_BASE64",
-            value: input_state.value.clone(),
-            is_disabled: false,
-            is_focused: input_state.is_focused,
-            cursor_index: input_state.cursor,
-            selection_range: settings_input_selection_range(&input_state),
-            marked_range: input_state.marked_range.clone(),
-            is_pointer_selecting: input_state.selection_drag.is_some(),
-            is_secret: false,
-            size: InputSize::Regular,
-            leading_accessory: Some(InputAccessory {
-                id: "settings-upgrade-public-key-leading",
-                icon: ArgusIcon::Key,
-                tooltip: "Ed25519 公钥 Base64",
-            }),
-            trailing_accessory: Some(InputAccessory {
-                id: "settings-upgrade-public-key-clear",
-                icon: ArgusIcon::Close,
-                tooltip: "清空升级验签公钥",
-            }),
-            native_input: Some(native_input),
-        },
-        theme,
-        move |event: &KeyDownEvent, _, cx| {
-            update_settings_app(&key_app, cx, |app, app_cx| {
-                app.handle_settings_upgrade_public_key_key(&event.keystroke, app_cx);
-            });
-        },
-        move |_, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&click_app, cx, |app, _| {
-                app.focus_settings_upgrade_public_key_input();
-            });
-        },
-        move |event: &InputPointerEvent, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&pointer_app, cx, |app, _| match event.action {
-                InputPointerAction::Begin => app
-                    .begin_settings_upgrade_public_key_pointer_selection(
-                        event.character_index,
-                        event.granularity,
-                    ),
-                InputPointerAction::Extend => {
-                    app.update_settings_upgrade_public_key_pointer_selection(event.character_index)
-                }
-                InputPointerAction::Finish => {
-                    app.finish_settings_upgrade_public_key_pointer_selection()
-                }
-            });
-        },
-        move |_, _, cx| {
-            cx.stop_propagation();
-            update_settings_app(&clear_app, cx, |app, _| {
-                app.clear_settings_upgrade_public_key_input();
-            });
-        },
-    ))
-}
-
 /// 返回设置输入框的规范化非空选区。
 fn settings_input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize>> {
     input.selection_range()
@@ -2185,81 +1953,6 @@ fn follow_symlink_control(
             theme,
             move |_, _, cx| {
                 update_settings_app(&toggle_app, cx, |app, _| app.toggle_follow_symlinks());
-            },
-        ))
-}
-
-/// 渲染自动升级开关。
-fn upgrade_enabled_control(
-    upgrade_enabled: bool,
-    app_handle: &Entity<ArgusApp>,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let toggle_app = app_handle.clone();
-    let policy_text = if upgrade_enabled { "启用" } else { "关闭" };
-
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(value_badge(policy_text.to_string(), theme))
-        .child(render_icon_button(
-            "settings-upgrade-enabled-toggle",
-            if upgrade_enabled {
-                ArgusIcon::ToggleRight
-            } else {
-                ArgusIcon::ToggleLeft
-            },
-            "切换自动升级检查",
-            upgrade_enabled,
-            IconButtonSize::Small,
-            theme,
-            move |_, _, cx| {
-                update_settings_app(&toggle_app, cx, |app, _| app.toggle_upgrade_enabled());
-            },
-        ))
-}
-
-/// 渲染升级状态和手动检查按钮。
-fn upgrade_check_control(
-    snapshot: &SettingsModalSnapshot,
-    app_handle: &Entity<ArgusApp>,
-    message: &str,
-    theme: &AppTheme,
-) -> impl IntoElement + use<> {
-    let check_app = app_handle.clone();
-    let is_busy = snapshot.is_upgrade_checking;
-
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .max_w(px(260.0))
-                .h(px(28.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .rounded_sm()
-                .bg(rgb(theme.current_line))
-                .text_size(px(12.0))
-                .line_height(px(28.0))
-                .text_color(rgb(theme.foreground_muted))
-                .child(div().truncate().child(if is_busy {
-                    "检查中...".to_string()
-                } else {
-                    message.to_string()
-                })),
-        )
-        .child(registration_action_button(
-            "settings-upgrade-check",
-            "检查",
-            ArgusIcon::Refresh,
-            is_busy,
-            theme,
-            move |cx| {
-                update_settings_app(&check_app, cx, |app, cx| app.start_upgrade_check(true, cx));
             },
         ))
 }

@@ -192,10 +192,6 @@ pub(crate) enum AppTextInputTarget {
     SettingsJstackThreadNameFilter,
     /// 设置模态框 Jstack 完整线程段过滤输入框。
     SettingsJstackStackSegmentFilter,
-    /// 设置模态框升级服务器输入框。
-    SettingsUpgradeServer,
-    /// 设置模态框升级验签公钥输入框。
-    SettingsUpgradePublicKey,
 }
 
 /// 主窗口内输入框真实焦点句柄集合。
@@ -217,10 +213,6 @@ pub(crate) struct AppInputFocusHandles {
     pub settings_quick_keywords: FocusHandle,
     /// 设置模态框 Jstack 线程名过滤输入框焦点。
     pub settings_jstack_thread_names: FocusHandle,
-    /// 设置模态框升级服务器输入框焦点。
-    pub settings_upgrade_server: FocusHandle,
-    /// 设置模态框升级验签公钥输入框焦点。
-    pub settings_upgrade_public_key: FocusHandle,
     /// 右侧终端面板焦点。
     pub terminal: FocusHandle,
     /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。

@@ -23,7 +23,6 @@ base64 = "0.22.1"
 bzip2 = "0.6.1"
 chardetng = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-ed25519-dalek = "2.2.0"
 encoding_rs = "0.8.35"
 flate2 = "1.1.9"
 # 消费 Rig 的多轮流式响应，并把思考和正文增量分批转发到 GPUI。
@@ -47,8 +46,6 @@ roxmltree = "0.20.0"
 schemars = "1.2.1"
 # SVN SSH 主机指纹预检直接复用与 svn crate 相同的纯 Rust russh 栈，不启动系统 ssh。
 russh = { version = "0.62.2", default-features = false, features = ["ring", "rsa"] }
-self-replace = "1.5.0"
-semver = "1.0.28"
 sevenz-rust = "0.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

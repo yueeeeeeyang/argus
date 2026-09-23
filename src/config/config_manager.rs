@@ -131,7 +131,7 @@ mod tests {
     use super::*;
     use crate::config::app_config::{
         AppearanceConfig, DEFAULT_JSTACK_STACK_SEGMENT_FILTERS, DEFAULT_JSTACK_THREAD_NAME_FILTERS,
-        EncodingConfig, LoaderConfig, LogDisplayConfig, LogSearchConfig, UpgradeConfig,
+        EncodingConfig, LoaderConfig, LogDisplayConfig, LogSearchConfig,
     };
     use crate::config::paths::{argus_config_dir_from_home, isolated_test_dir, user_home_dir};
     use crate::remote::connection::{
@@ -325,13 +325,6 @@ private_key_passphrase = " phrase "
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
             },
-            upgrade: UpgradeConfig {
-                enabled: true,
-                server_url: "https://updates.example.com/argus".to_string(),
-                public_key_base64: "TEST_PUBLIC_KEY_BASE64".to_string(),
-                skipped_version: Some("0.2.0".to_string()),
-                last_check_at: Some("2026-06-15T12:00:00Z".to_string()),
-            },
         };
 
         ConfigManager::save_to_path(&path, &config).expect("测试配置应可写入临时目录");
@@ -362,13 +355,6 @@ private_key_passphrase = " phrase "
             "SHA256:test"
         );
         assert_eq!(loaded.encoding.selected, "GBK");
-        assert!(loaded.upgrade.enabled);
-        assert_eq!(
-            loaded.upgrade.server_url,
-            "https://updates.example.com/argus"
-        );
-        assert_eq!(loaded.upgrade.public_key_base64, "TEST_PUBLIC_KEY_BASE64");
-        assert_eq!(loaded.upgrade.skipped_version.as_deref(), Some("0.2.0"));
     }
 
     /// 验证旧版无效缓存配置可以被忽略，并在下一次保存时从设置文件中清除。

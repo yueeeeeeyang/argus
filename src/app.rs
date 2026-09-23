@@ -26,7 +26,6 @@ mod runtime_state;
 mod search_state;
 mod source_tree_actions;
 mod types;
-mod upgrade_actions;
 
 pub(crate) use constants::*;
 pub(crate) use jstack_state::*;
@@ -59,9 +58,6 @@ use crate::infra::perf::PerfSpan;
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, insert_text_at_character_index,
     remove_character_range, replace_character_range, slice_character_range, word_range_at,
-};
-use crate::infra::updater::{
-    UpgradeCheckOutcome, UpgradeService, current_platform_arch, current_platform_os,
 };
 #[cfg(test)]
 use crate::loader::SourceMetadata;
@@ -412,10 +408,6 @@ pub(crate) struct ArgusApp {
     pub settings_jstack_thread_name_filter_input: TextInputState,
     /// 设置模态框“Jstack 线程段过滤”输入框状态。
     pub settings_jstack_stack_segment_filter_input: TextInputState,
-    /// 设置模态框“升级服务器”输入框状态。
-    pub settings_upgrade_server_input: TextInputState,
-    /// 设置模态框“升级验签公钥”输入框状态。
-    pub settings_upgrade_public_key_input: TextInputState,
     /// 设置模态框是否处于打开状态。
     pub is_settings_modal_open: bool,
     /// 设置模态框左侧导航当前选中的分类。
@@ -437,14 +429,6 @@ pub(crate) struct ArgusApp {
     pub log_content_font_size: f32,
     /// 设置页编码选项。
     pub selected_encoding: String,
-    /// 是否正在后台检查升级。
-    pub is_upgrade_checking: bool,
-    /// 是否正在下载、替换或重启升级版本。
-    pub is_upgrade_installing: bool,
-    /// 最近一次升级检查或安装提示。
-    pub upgrade_message: Option<String>,
-    /// 当前升级弹窗状态。
-    pub upgrade_dialog: Option<UpgradeDialogState>,
     /// 主窗口输入框真实焦点句柄；首次渲染时创建，测试环境可保持为空。
     pub input_focus_handles: Option<AppInputFocusHandles>,
 }
@@ -491,8 +475,6 @@ impl ArgusApp {
             config.log_display.jstack_thread_name_filters.clone();
         let jstack_stack_segment_filter_input_value =
             config.log_display.jstack_stack_segment_filters.clone();
-        let upgrade_server_input_value = config.upgrade.server_url.clone();
-        let upgrade_public_key_input_value = config.upgrade.public_key_base64.clone();
         config.appearance.theme_mode = selected_theme_id.clone();
         config.appearance.log_content_font_size = log_content_font_size;
         Self {
@@ -589,10 +571,6 @@ impl ArgusApp {
             settings_jstack_stack_segment_filter_input: TextInputState::from_value(
                 jstack_stack_segment_filter_input_value,
             ),
-            settings_upgrade_server_input: TextInputState::from_value(upgrade_server_input_value),
-            settings_upgrade_public_key_input: TextInputState::from_value(
-                upgrade_public_key_input_value,
-            ),
             is_settings_modal_open: false,
             skill_management_message: None,
             selected_settings_section: SettingsSection::default(),
@@ -603,10 +581,6 @@ impl ArgusApp {
             open_with_registration_message: None,
             log_content_font_size,
             selected_encoding,
-            is_upgrade_checking: false,
-            is_upgrade_installing: false,
-            upgrade_message: None,
-            upgrade_dialog: None,
             input_focus_handles: None,
         }
     }
@@ -626,8 +600,6 @@ impl ArgusApp {
                 archive_password: cx.focus_handle(),
                 settings_quick_keywords: cx.focus_handle(),
                 settings_jstack_thread_names: cx.focus_handle(),
-                settings_upgrade_server: cx.focus_handle(),
-                settings_upgrade_public_key: cx.focus_handle(),
                 terminal: cx.focus_handle(),
                 jstack_analysis: cx.focus_handle(),
                 runtime_analysis: cx.focus_handle(),
