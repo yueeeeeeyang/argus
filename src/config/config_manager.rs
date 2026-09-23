@@ -264,7 +264,6 @@ private_key_passphrase = " phrase "
             loader: LoaderConfig {
                 max_archive_depth: 4,
                 follow_symlinks: true,
-                ..LoaderConfig::default()
             },
             log_search: LogSearchConfig {
                 quick_keywords: "ERROR,WARN".to_string(),

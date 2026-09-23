@@ -172,14 +172,6 @@ pub(crate) struct LoaderConfig {
     pub max_archive_depth: usize,
     /// 是否跟随符号链接；默认关闭以避免大目录扫描时出现循环。
     pub follow_symlinks: bool,
-    /// 物化到工作目录时的解压字节总预算，默认 8 GiB，防止压缩炸弹耗尽磁盘。
-    #[serde(default = "default_workspace_extract_budget_bytes")]
-    pub workspace_extract_budget_bytes: u64,
-}
-
-/// 返回物化解压总预算默认值（8 GiB）。
-fn default_workspace_extract_budget_bytes() -> u64 {
-    8 << 30
 }
 
 impl Default for LoaderConfig {
@@ -188,7 +180,6 @@ impl Default for LoaderConfig {
         Self {
             max_archive_depth: 2,
             follow_symlinks: false,
-            workspace_extract_budget_bytes: default_workspace_extract_budget_bytes(),
         }
     }
 }
@@ -326,7 +317,6 @@ mod tests {
             loader: LoaderConfig {
                 max_archive_depth: 99,
                 follow_symlinks: true,
-                workspace_extract_budget_bytes: 1024,
             },
             log_search: LogSearchConfig {
                 quick_keywords: " ERROR, WARN ".to_string(),

@@ -57,9 +57,8 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 - 选址 `argus_config_dir()/cache/workdirs/<uuid>/`；顶层布局 `<标签>/`，标签清洗为合法
   目录名，同名根追加 ` (1)` 消歧。
-- 单批解压总字节上限（`LoaderConfig.workspace_extract_budget_bytes`，默认 8 GiB）、
-  单条目 4 GiB 上限；zip slip 清洗（拒 `..`/绝对路径/控制字符/Windows 保留名）；重名
-  冲突条目拒绝；超限根回滚降级为警告节点，不阻断其它来源。
+- 解压不设总量、单条目或条目数上限；zip slip 清洗（拒 `..`/绝对路径/控制字符/Windows
+  保留名）；重名冲突条目拒绝；嵌套容器流式落盘 scratch 后递归解压，不留内存整包缓冲。
 - 密码包两阶段：加载时保持"需要密码"占位；解锁后向当前工作目录追加物化并重扫顶层。
 - 生命周期：替换加载时后台删除旧工作目录（Windows 句柄重试）；窗口关闭钩子删除；
   启动时清扫 `cache/workdirs` 与历史 `log_pages` 残留。
@@ -142,7 +141,7 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 每阶段 `cargo fmt && cargo clippy --all-targets && cargo test` 全绿（当前 494 项）。
 重点覆盖：
 
-- 物化器：复制/解压/zip slip/重名冲突/预算回滚/嵌套/GZIP 命名/密码包追加（loader 模块）；
+- 物化器：复制/解压/zip slip/重名冲突/嵌套/GZIP 命名/密码包追加（loader 模块）；
 - 清单：树 → workspace 路径映射、多根消歧、日志类型说明全文固化；
 - read_file：`..`/绝对路径/符号链接越界拒绝、行窗口与续读偏移、未授权只回元数据；
 - bash：白名单与管道逐段判定、重定向/命令替换/破坏性参数/越界路径转确认、审批超时

@@ -81,7 +81,6 @@ fn single_gzip_entry(source_label: &str) -> Vec<ArchiveEntryInfo> {
     vec![ArchiveEntryInfo {
         path: label,
         is_dir: false,
-        size: None,
     }]
 }
 

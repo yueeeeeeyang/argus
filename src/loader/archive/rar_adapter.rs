@@ -202,11 +202,7 @@ fn list_rar_entries_with_rars(
             continue;
         }
 
-        entries.push(build_entry(
-            entry_path,
-            member.meta.is_directory,
-            Some(member.meta.unpacked_size),
-        ));
+        entries.push(build_entry(entry_path, member.meta.is_directory));
     }
 
     if has_encrypted_member && password.is_none() {
@@ -604,11 +600,7 @@ fn parse_rar4_file_block(
     let file_info = read_rar4_file_info(bytes, block_offset, header, header_end, source_label)?;
 
     if !file_info.entry_path.is_empty() {
-        entries.push(build_entry(
-            file_info.entry_path,
-            file_info.is_dir,
-            Some(file_info.unpacked_size),
-        ));
+        entries.push(build_entry(file_info.entry_path, file_info.is_dir));
     }
 
     Ok(file_info.packed_size)
@@ -852,11 +844,7 @@ fn parse_rar5_file_block(
         return Ok(());
     }
 
-    entries.push(build_entry(
-        file_info.entry_path,
-        file_info.is_dir,
-        Some(file_info.unpacked_size),
-    ));
+    entries.push(build_entry(file_info.entry_path, file_info.is_dir));
     Ok(())
 }
 
@@ -945,12 +933,8 @@ fn skip_bytes(
 }
 
 /// 构建统一压缩包条目模型。
-fn build_entry(path: String, is_dir: bool, size: Option<u64>) -> ArchiveEntryInfo {
-    ArchiveEntryInfo {
-        path,
-        is_dir,
-        size: if is_dir { None } else { size },
-    }
+fn build_entry(path: String, is_dir: bool) -> ArchiveEntryInfo {
+    ArchiveEntryInfo { path, is_dir }
 }
 
 /// 读取小端 u16。
@@ -1073,7 +1057,7 @@ mod tests {
         assert_eq!(entries[0].path, "logs");
         assert!(entries[0].is_dir);
         assert_eq!(entries[1].path, "logs/app.log");
-        assert_eq!(entries[1].size, Some(12));
+        assert!(!entries[1].is_dir);
     }
 
     /// 验证 RAR5 文件头可生成目录和文件条目。
@@ -1100,6 +1084,6 @@ mod tests {
         assert_eq!(entries[0].path, "logs");
         assert!(entries[0].is_dir);
         assert_eq!(entries[1].path, "logs/app.log");
-        assert_eq!(entries[1].size, Some(42));
+        assert!(!entries[1].is_dir);
     }
 }

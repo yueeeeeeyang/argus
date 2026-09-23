@@ -92,21 +92,6 @@ impl ArchiveAdapter for ZipArchiveAdapter {
         let session = ZipEntrySession::new(file, path.display().to_string(), password)?;
         Ok(Some(Box::new(session)))
     }
-
-    /// 嵌套 ZIP 直接在内存字节上建立会话，免去临时文件落盘往返。
-    fn open_session_from_bytes(
-        &self,
-        bytes: &[u8],
-        source_label: &str,
-        password: Option<&str>,
-    ) -> Result<Option<Box<dyn ArchiveEntrySession>>> {
-        let session = ZipEntrySession::new(
-            std::io::Cursor::new(bytes.to_vec()),
-            source_label.to_string(),
-            password,
-        )?;
-        Ok(Some(Box::new(session)))
-    }
 }
 
 /// ZIP 会话：持有一次打开的压缩包句柄，跨条目复用已解析的中央目录。
@@ -148,15 +133,6 @@ where
             &self.source_label,
             self.password.as_deref(),
         )
-    }
-
-    fn read_entry_bytes(&mut self, entry_path: &str) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        self.stream_entry(entry_path, &mut |chunk| {
-            bytes.extend_from_slice(chunk);
-            Ok(())
-        })?;
-        Ok(bytes)
     }
 
     fn stream_entry(
@@ -210,7 +186,7 @@ where
     let mut password_verified = false;
 
     for index in 0..archive.len() {
-        let (entry_path, is_dir, size, encrypted) =
+        let (entry_path, is_dir, encrypted) =
             read_zip_entry_metadata(archive, index, source_label)?;
         if encrypted && !password_verified {
             ensure_zip_entry_password(archive, index, encrypted, password, source_label)?;
@@ -223,7 +199,6 @@ where
         entries.push(ArchiveEntryInfo {
             path: entry_path,
             is_dir,
-            size: Some(size),
         });
     }
 
@@ -323,7 +298,7 @@ where
 
     // 部分异常压缩包可能使用反斜杠或不规范路径名；保留旧的归一化扫描作为兼容回退。
     for index in 0..archive.len() {
-        let (current_path, is_dir, _size, encrypted) =
+        let (current_path, is_dir, encrypted) =
             read_zip_entry_metadata(archive, index, source_label)?;
         if current_path != normalized_entry_path {
             continue;
@@ -351,7 +326,7 @@ fn read_zip_entry_metadata<R>(
     archive: &mut ZipArchive<R>,
     index: usize,
     source_label: &str,
-) -> Result<(String, bool, u64, bool)>
+) -> Result<(String, bool, bool)>
 where
     R: Read + Seek,
 {
@@ -362,7 +337,6 @@ where
     Ok((
         normalize_archive_entry_path(file.name()),
         file.is_dir(),
-        file.size(),
         file.encrypted(),
     ))
 }

@@ -93,7 +93,6 @@ where
         entries.push(ArchiveEntryInfo {
             path: entry_path,
             is_dir: entry.header().entry_type().is_dir(),
-            size: Some(entry.size()),
         });
     }
 

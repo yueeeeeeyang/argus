@@ -17,8 +17,6 @@ pub(crate) struct ArchiveEntryInfo {
     pub path: String,
     /// 是否为目录条目。
     pub is_dir: bool,
-    /// 条目未压缩大小；部分格式可能无法提供。
-    pub size: Option<u64>,
 }
 
 /// 压缩格式能力声明，供 UI、加载器和后续格式扩展判断可用能力。
@@ -50,9 +48,6 @@ pub(crate) type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
 pub(crate) trait ArchiveEntrySession: Send {
     /// 枚举全部条目；语义与 [`ArchiveAdapter::list_entries`] 一致。
     fn list_entries(&mut self) -> Result<Vec<ArchiveEntryInfo>>;
-
-    /// 读取一个条目的完整字节；语义与 [`ArchiveAdapter::read_entry_bytes`] 一致。
-    fn read_entry_bytes(&mut self, entry_path: &str) -> Result<Vec<u8>>;
 
     /// 流式输出一个条目；语义与 [`ArchiveAdapter::stream_entry`] 一致。
     fn stream_entry(
@@ -119,18 +114,6 @@ pub(crate) trait ArchiveAdapter: Sync {
     fn open_session(
         &self,
         _path: &Path,
-        _password: Option<&str>,
-    ) -> Result<Option<Box<dyn ArchiveEntrySession>>> {
-        Ok(None)
-    }
-
-    /// 从内存字节建立会话式读取，供嵌套压缩包免去临时文件落盘。
-    ///
-    /// 默认不提供；调用方在返回 `None` 或错误时回退临时文件路径。
-    fn open_session_from_bytes(
-        &self,
-        _bytes: &[u8],
-        _source_label: &str,
         _password: Option<&str>,
     ) -> Result<Option<Box<dyn ArchiveEntrySession>>> {
         Ok(None)

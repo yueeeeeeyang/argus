@@ -2,7 +2,7 @@
 //! 创建日期：2026-09-12
 //! 作者：Argus 开发团队
 //! 主要功能：加载日志时将普通文件/目录复制、压缩包（含嵌套）解压到 `cache/workdirs/<id>/`，
-//! 统一浏览器与 AI 的读取模型为普通文件；提供条目路径清洗、解压预算和残留工作目录清扫。
+//! 统一浏览器与 AI 的读取模型为普通文件；提供条目路径清洗和残留工作目录清扫。
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -29,10 +29,6 @@ use crate::loader::source_scanner::{SourceLoadPhase, SourceTreeScanProgress};
 const ARGUS_CACHE_DIR_NAME: &str = "cache";
 /// 物化工作目录根目录名。
 const WORKSPACES_DIR_NAME: &str = "workdirs";
-/// 单个解压条目大小上限（4 GiB），防御压缩炸弹；超限条目跳过，不影响同包其它条目。
-const MAX_EXTRACTED_ENTRY_BYTES: u64 = 4 << 30;
-/// 嵌套压缩容器读入内存的大小上限（与来源扫描器嵌套组预算保持一致）。
-const MAX_NESTED_CONTAINER_BYTES: u64 = 256 << 20;
 /// 复制/解压写入缓冲区大小。
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 /// 物化进度上报条目间隔，避免高频进度淹没通道。
@@ -51,7 +47,7 @@ pub(crate) struct MaterializedWorkspace {
     pub roots: Vec<MaterializedRootInfo>,
     /// 因密码未授权而跳过的最外层压缩包（用于来源树密码占位节点）。
     pub password_pending: Vec<PasswordPendingArchive>,
-    /// 物化期间的非致命警告（跳过条目、冲突、预算降级等）。
+    /// 物化期间的非致命警告（跳过条目、冲突等）。
     pub warnings: Vec<String>,
     /// 已物化文件数量。
     pub materialized_files: usize,
@@ -76,11 +72,9 @@ pub(crate) struct PasswordPendingArchive {
 /// 物化进度通道；后台物化任务与来源扫描共用同一进度模型。
 type MaterializeProgress<'a> = Option<&'a std::sync::mpsc::Sender<SourceTreeScanProgress>>;
 
-/// 单个来源根物化的失败分类；总预算耗尽只降级当前根，取消和致命错误终止整个加载。
+/// 单个来源根物化的失败分类；取消和致命错误终止整个加载。
 #[derive(Debug)]
 enum MaterializeRootError {
-    /// 解压总预算耗尽；该根回滚并降级为警告，后续压缩包来源直接跳过。
-    BudgetExhausted,
     /// 最外层压缩包需要密码；该根回滚并转为密码占位，解锁后可追加物化。
     PasswordPending,
     /// 加载被新请求取消，整个物化必须立即终止。
@@ -93,7 +87,6 @@ impl std::fmt::Display for MaterializeRootError {
     /// 输出用户可读的物化失败原因。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BudgetExhausted => write!(f, "物化解压总预算耗尽"),
             Self::PasswordPending => write!(f, "压缩包需要密码"),
             Self::Cancelled => write!(f, "已取消日志加载"),
             Self::Fatal(error) => write!(f, "{error}"),
@@ -107,6 +100,8 @@ impl std::error::Error for MaterializeRootError {}
 struct ArchiveContainerContext {
     /// 当前容器文件路径（根为真实压缩包，嵌套为 scratch 落盘文件）。
     path: PathBuf,
+    /// 用户可见的容器展示名；嵌套容器保留"外层包!/内层包"链路，避免暴露 scratch 路径。
+    display: String,
     /// 当前容器格式。
     format: ArchiveFormat,
     /// 最外层真实压缩包路径，用于密码查询。
@@ -146,18 +141,6 @@ impl EntrySource<'_> {
         }
     }
 
-    /// 读取一个条目的完整字节。
-    fn read_entry_bytes(&mut self, entry_path: &str) -> anyhow::Result<Vec<u8>> {
-        match self {
-            Self::Session(session) => session.read_entry_bytes(entry_path),
-            Self::Adapter {
-                adapter,
-                path,
-                password,
-            } => adapter.read_entry_bytes(path, entry_path, *password),
-        }
-    }
-
     /// 流式输出一个条目。
     fn stream_entry(
         &mut self,
@@ -189,10 +172,6 @@ struct WorkspaceMaterializer<'a> {
     root: PathBuf,
     /// 已使用的顶层目录名（小写），避免不同来源根互相覆盖。
     used_labels: HashSet<String>,
-    /// 解压字节剩余预算；普通复制不计入（用户磁盘上已存在的文件不会膨胀）。
-    remaining_extract_budget: u64,
-    /// 解压预算是否已耗尽；耗尽后剩余压缩包来源直接降级，不再做无用功。
-    extract_budget_exhausted: bool,
     /// 已物化文件计数，用于进度展示。
     files_written: usize,
     /// 物化成功的顶层根。
@@ -207,7 +186,7 @@ struct WorkspaceMaterializer<'a> {
 ///
 /// 参数说明：
 /// - `paths`：用户选择的本地文件、目录或压缩包路径。
-/// - `config`：目录、符号链接、嵌套深度和物化预算配置。
+/// - `config`：目录、符号链接和嵌套深度配置。
 /// - `archive_passwords`：当前进程已授权的归档密码快照。
 /// - `cancellation`：新加载请求到来时中断物化的取消令牌。
 /// - `progress`：可选进度通道，与来源扫描共用同一进度模型。
@@ -231,8 +210,6 @@ pub(crate) fn materialize_sources(
         progress,
         root: root.clone(),
         used_labels: HashSet::new(),
-        remaining_extract_budget: config.workspace_extract_budget_bytes,
-        extract_budget_exhausted: false,
         files_written: 0,
         roots: Vec::new(),
         password_pending: Vec::new(),
@@ -309,11 +286,11 @@ pub(crate) fn delete_workspace_best_effort(root: PathBuf) {
 /// - `workspace_root`：当前工作目录根。
 /// - `preferred_label`：期望的顶层目录名（通常取占位节点标签）；冲突时自动消歧。
 /// - `archive_path`：已解锁的压缩包真实路径。
-/// - `config`：嵌套深度和物化预算配置。
+/// - `config`：嵌套深度配置。
 /// - `archive_passwords`：当前进程已授权的归档密码快照。
 /// - `cancellation`：中断追加物化的取消令牌。
 ///
-/// 返回值：追加成功的顶层目录；密码错误、预算超限或 I/O 失败时返回 `Err` 并回滚半成品。
+/// 返回值：追加成功的顶层目录；密码错误或 I/O 失败时返回 `Err` 并回滚半成品。
 pub(crate) fn append_materialize_archive(
     workspace_root: &Path,
     preferred_label: &str,
@@ -335,8 +312,6 @@ pub(crate) fn append_materialize_archive(
         progress: None,
         root: workspace_root.to_path_buf(),
         used_labels: HashSet::new(),
-        remaining_extract_budget: config.workspace_extract_budget_bytes,
-        extract_budget_exhausted: false,
         files_written: 0,
         roots: Vec::new(),
         password_pending: Vec::new(),
@@ -344,6 +319,7 @@ pub(crate) fn append_materialize_archive(
     };
     let container = ArchiveContainerContext {
         path: archive_path.to_path_buf(),
+        display: archive_path.display().to_string(),
         format,
         root_archive: archive_path.to_path_buf(),
     };
@@ -365,10 +341,6 @@ pub(crate) fn append_materialize_archive(
                     )
                     .into(),
             )
-        }
-        Err(MaterializeRootError::BudgetExhausted) => {
-            let _ = fs::remove_dir_all(&label_dir);
-            bail!("压缩包超出物化预算：{}", archive_path.display())
         }
         Err(MaterializeRootError::Cancelled) => {
             let _ = fs::remove_dir_all(&label_dir);
@@ -441,16 +413,13 @@ fn unique_workspace_root() -> PathBuf {
 }
 
 impl WorkspaceMaterializer<'_> {
-    /// 逐个物化来源根；预算耗尽只降级当前根，取消和致命错误上抛。
+    /// 逐个物化来源根；取消和致命错误上抛。
     fn materialize_all(&mut self, paths: &[PathBuf]) -> Result<()> {
         for path in paths {
             self.ensure_not_cancelled()?;
             self.report_progress(&display_path_for_progress(path));
             if let Err(error) = self.materialize_root(path) {
                 match error {
-                    MaterializeRootError::BudgetExhausted => {
-                        self.extract_budget_exhausted = true;
-                    }
                     // 密码占位已在 materialize_root 内部消化，不会传播到这里。
                     MaterializeRootError::PasswordPending => unreachable!("密码占位不应上抛"),
                     MaterializeRootError::Cancelled => bail!("已取消日志加载"),
@@ -539,35 +508,13 @@ impl WorkspaceMaterializer<'_> {
                     .copy_file_into(path, &label_dir.join(file_name_for(path)))
                     .map_err(MaterializeRootError::Fatal);
             }
-            if self.extract_budget_exhausted {
-                self.warnings.push(format!(
-                    "压缩包“{}”因物化预算耗尽未展开，按原文件保留",
-                    path.display()
-                ));
-                return self
-                    .copy_file_into(path, &label_dir.join(file_name_for(path)))
-                    .map_err(MaterializeRootError::Fatal);
-            }
             let container = ArchiveContainerContext {
                 path: path.to_path_buf(),
+                display: path.display().to_string(),
                 format,
                 root_archive: path.to_path_buf(),
             };
-            return match self.extract_archive(&container, label_dir, Vec::new(), 0) {
-                Ok(()) => Ok(()),
-                Err(MaterializeRootError::BudgetExhausted) => {
-                    // 预算耗尽：回滚后按原文件保留，并标记预算耗尽避免后续无用功。
-                    self.extract_budget_exhausted = true;
-                    self.warnings.push(format!(
-                        "压缩包“{}”超出物化预算未展开，按原文件保留",
-                        path.display()
-                    ));
-                    let _ = fs::remove_dir_all(label_dir);
-                    self.copy_file_into(path, &label_dir.join(file_name_for(path)))
-                        .map_err(MaterializeRootError::Fatal)
-                }
-                Err(error) => Err(error),
-            };
+            return self.extract_archive(&container, label_dir, Vec::new(), 0);
         }
 
         self.copy_file_into(path, &label_dir.join(file_name_for(path)))
@@ -588,18 +535,10 @@ impl WorkspaceMaterializer<'_> {
         chain: Vec<String>,
         depth: usize,
     ) -> Result<(), MaterializeRootError> {
-        if self.extract_budget_exhausted {
-            self.warnings.push(format!(
-                "压缩包“{}”因物化预算耗尽已跳过",
-                container.path.display()
-            ));
-            return Ok(());
-        }
-
         let Some(adapter) = archive_registry().adapter_for(container.format) else {
             self.warnings.push(format!(
                 "压缩包“{}”没有可用解压适配器，已跳过",
-                container.path.display()
+                container.display
             ));
             return Ok(());
         };
@@ -636,8 +575,7 @@ impl WorkspaceMaterializer<'_> {
                 }
                 self.warnings.push(format!(
                     "压缩包“{}”无法枚举条目（{}），已跳过",
-                    container.path.display(),
-                    error
+                    container.display, error
                 ));
                 return Ok(());
             }
@@ -646,7 +584,7 @@ impl WorkspaceMaterializer<'_> {
         let mut written_paths = HashSet::new();
         for entry in entries {
             self.ensure_not_cancelled()?;
-            let display_entry = format!("{}!/{}", container.path.display(), entry.path);
+            let display_entry = format!("{}!/{}", container.display, entry.path);
             let Some(relative) = sanitize_entry_path(&entry.path) else {
                 self.warnings
                     .push(format!("压缩包条目路径不安全，已跳过：{display_entry}"));
@@ -668,18 +606,6 @@ impl WorkspaceMaterializer<'_> {
                             .context(format!("无法创建物化目录：{}", target.display())),
                     )
                 })?;
-                continue;
-            }
-
-            // 头部声明大小已知且超限的条目直接跳过，避免为必然拒绝的内容浪费解压 IO。
-            if entry
-                .size
-                .is_some_and(|size| size > MAX_EXTRACTED_ENTRY_BYTES)
-            {
-                self.warnings.push(format!(
-                    "压缩包条目声明大小超过 {} GiB 上限，已跳过：{display_entry}",
-                    MAX_EXTRACTED_ENTRY_BYTES >> 30
-                ));
                 continue;
             }
 
@@ -737,7 +663,9 @@ impl WorkspaceMaterializer<'_> {
         self.stream_entry_to_file(source, entry_path, &target, display_entry)
     }
 
-    /// 解压嵌套容器条目：先把容器读入内存并落盘 scratch，再递归解压为同名目录。
+    /// 解压嵌套容器条目：先把容器条目流式落盘到 scratch，再从 scratch 递归解压为同名目录。
+    ///
+    /// 说明：嵌套容器可能远大于内存，统一经临时文件解压，避免把整包读入内存。
     fn extract_nested_container(
         &mut self,
         source: &mut EntrySource<'_>,
@@ -749,25 +677,6 @@ impl WorkspaceMaterializer<'_> {
         depth: usize,
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
-        let container_bytes = match source.read_entry_bytes(entry_path) {
-            Ok(bytes) => bytes,
-            Err(error) if is_retryable_password_error(&error) => {
-                return Err(MaterializeRootError::PasswordPending);
-            }
-            Err(error) => {
-                return Err(MaterializeRootError::Fatal(
-                    error.context(format!("无法读取嵌套压缩容器：{display_entry}")),
-                ));
-            }
-        };
-        if container_bytes.len() as u64 > MAX_NESTED_CONTAINER_BYTES {
-            self.warnings.push(format!(
-                "嵌套压缩容器超过 {} MiB，已跳过：{display_entry}",
-                MAX_NESTED_CONTAINER_BYTES >> 20
-            ));
-            return Ok(());
-        }
-
         let nested_dir = target
             .parent()
             .map(|parent| parent.join(nested_dir_name_for(entry_path)))
@@ -779,74 +688,31 @@ impl WorkspaceMaterializer<'_> {
             )
         })?;
 
+        let scratch_dir = self.root.join(".argus-scratch");
+        fs::create_dir_all(&scratch_dir).map_err(|error| {
+            MaterializeRootError::Fatal(anyhow::Error::new(error).context(format!(
+                "无法创建嵌套解压暂存目录：{}",
+                scratch_dir.display()
+            )))
+        })?;
+        let scratch_file = scratch_dir.join(format!("nested-{}-{depth}", self.files_written));
+        if let Err(error) =
+            self.stream_entry_to_path(source, entry_path, &scratch_file, display_entry)
+        {
+            let _ = fs::remove_file(&scratch_file);
+            return Err(error);
+        }
+
         let mut nested_chain = chain;
         nested_chain.push(entry_path.to_string());
-        let nested_password_key = ArchivePasswordKey::new(&container.root_archive, &nested_chain);
-        let nested_password = self.passwords.get(&nested_password_key).map(str::to_string);
-        let in_memory_session = archive_registry()
-            .adapter_for(nested_format)
-            .and_then(|adapter| {
-                adapter
-                    .open_session_from_bytes(
-                        &container_bytes,
-                        display_entry,
-                        nested_password.as_deref(),
-                    )
-                    .ok()
-                    .flatten()
-            });
-        // 支持内存会话的格式（ZIP）直接在字节上解析，免去临时文件落盘往返；
-        // 其余格式维持临时文件路径。内存会话上下文的 path 仅用于展示。
-        let result = if let Some(session) = in_memory_session {
-            let nested_container = ArchiveContainerContext {
-                path: PathBuf::from(display_entry),
-                format: nested_format,
-                root_archive: container.root_archive.clone(),
-            };
-            self.extract_archive_with_source(
-                &nested_container,
-                &nested_dir,
-                nested_chain,
-                depth + 1,
-                EntrySource::Session(session),
-            )
-        } else {
-            let scratch_dir = self.root.join(".argus-scratch");
-            fs::create_dir_all(&scratch_dir).map_err(|error| {
-                MaterializeRootError::Fatal(anyhow::Error::new(error).context(format!(
-                    "无法创建嵌套解压暂存目录：{}",
-                    scratch_dir.display()
-                )))
-            })?;
-            let scratch_file = scratch_dir.join(format!("nested-{}-{depth}", self.files_written));
-            fs::write(&scratch_file, &container_bytes).map_err(|error| {
-                MaterializeRootError::Fatal(
-                    anyhow::Error::new(error)
-                        .context(format!("无法落盘嵌套压缩容器：{display_entry}")),
-                )
-            })?;
-            let nested_container = ArchiveContainerContext {
-                path: scratch_file.clone(),
-                format: nested_format,
-                root_archive: container.root_archive.clone(),
-            };
-            let adapter = archive_registry()
-                .adapter_for(nested_format)
-                .expect("进入嵌套解压前已确认适配器存在");
-            let result = self.extract_archive_with_source(
-                &nested_container,
-                &nested_dir,
-                nested_chain,
-                depth + 1,
-                EntrySource::Adapter {
-                    adapter,
-                    path: &scratch_file,
-                    password: nested_password.as_deref(),
-                },
-            );
-            let _ = fs::remove_file(&scratch_file);
-            result
+        let nested_container = ArchiveContainerContext {
+            path: scratch_file.clone(),
+            display: display_entry.to_string(),
+            format: nested_format,
+            root_archive: container.root_archive.clone(),
         };
+        let result = self.extract_archive(&nested_container, &nested_dir, nested_chain, depth + 1);
+        let _ = fs::remove_file(&scratch_file);
         // 嵌套包只解出一个普通文件时提升到父级，去掉以压缩包名命名的包装目录。
         if result.is_ok() {
             Self::promote_single_file_out_of_dir(&nested_dir);
@@ -916,8 +782,24 @@ impl WorkspaceMaterializer<'_> {
         }
     }
 
-    /// 流式解压单个条目到文件；单条目超限跳过该条目，总预算耗尽降级当前根。
+    /// 流式解压单个条目到文件，并计入物化文件数与进度。
     fn stream_entry_to_file(
+        &mut self,
+        source: &mut EntrySource<'_>,
+        entry_path: &str,
+        target: &Path,
+        display_entry: &str,
+    ) -> Result<(), MaterializeRootError> {
+        self.stream_entry_to_path(source, entry_path, target, display_entry)?;
+        self.files_written += 1;
+        if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
+            self.report_progress(display_entry);
+        }
+        Ok(())
+    }
+
+    /// 把条目流式解压到指定路径；不计数、不上报进度，供普通条目与嵌套容器 scratch 共用。
+    fn stream_entry_to_path(
         &mut self,
         source: &mut EntrySource<'_>,
         entry_path: &str,
@@ -939,40 +821,10 @@ impl WorkspaceMaterializer<'_> {
             )
         })?;
 
-        let mut written: u64 = 0;
-        let mut entry_too_large = false;
-        let mut budget_exhausted = false;
-        let mut remaining_budget = self.remaining_extract_budget;
         let consume_result = source.stream_entry(entry_path, &mut |chunk: &[u8]| {
-            written += chunk.len() as u64;
-            if written > MAX_EXTRACTED_ENTRY_BYTES {
-                entry_too_large = true;
-                bail!("压缩包条目超过单文件物化上限");
-            }
-            if chunk.len() as u64 > remaining_budget {
-                budget_exhausted = true;
-                bail!("物化超出解压总预算");
-            }
-            remaining_budget -= chunk.len() as u64;
             file.write_all(chunk)?;
             Ok(())
         });
-        self.remaining_extract_budget = remaining_budget;
-
-        if entry_too_large {
-            let _ = fs::remove_file(target);
-            self.warnings.push(format!(
-                "压缩包条目超过 {} GiB 上限，已跳过：{display_entry}",
-                MAX_EXTRACTED_ENTRY_BYTES >> 30
-            ));
-            return Ok(());
-        }
-        if budget_exhausted {
-            let _ = fs::remove_file(target);
-            self.warnings
-                .push(format!("物化解压总预算耗尽，回滚来源：{display_entry}"));
-            return Err(MaterializeRootError::BudgetExhausted);
-        }
         consume_result.map_err(|error| {
             let _ = fs::remove_file(target);
             if is_retryable_password_error(&error) {
@@ -982,7 +834,7 @@ impl WorkspaceMaterializer<'_> {
         })
     }
 
-    /// 流式复制普通文件；普通文件是用户磁盘上已有内容，不占用解压预算。
+    /// 流式复制普通文件。
     fn copy_file_into(&mut self, source: &Path, target: &Path) -> Result<()> {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
@@ -1064,17 +916,11 @@ impl WorkspaceMaterializer<'_> {
         else {
             return self.copy_file_into(source, target);
         };
-        if self.extract_budget_exhausted {
-            self.warnings.push(format!(
-                "目录中的压缩包因物化预算耗尽未展开，按原文件保留：{}",
-                source.display()
-            ));
-            return self.copy_file_into(source, target);
-        }
 
         let stem_dir = target.with_file_name(nested_dir_name_for(&file_name_for(source)));
         let container = ArchiveContainerContext {
             path: source.to_path_buf(),
+            display: source.display().to_string(),
             format,
             root_archive: source.to_path_buf(),
         };
@@ -1084,15 +930,6 @@ impl WorkspaceMaterializer<'_> {
                 let _ = fs::remove_dir_all(&stem_dir);
                 self.warnings.push(format!(
                     "目录中的加密压缩包未展开，按原文件保留：{}",
-                    source.display()
-                ));
-                self.copy_file_into(source, target)
-            }
-            Err(MaterializeRootError::BudgetExhausted) => {
-                self.extract_budget_exhausted = true;
-                let _ = fs::remove_dir_all(&stem_dir);
-                self.warnings.push(format!(
-                    "目录中的压缩包超出物化预算未展开，按原文件保留：{}",
                     source.display()
                 ));
                 self.copy_file_into(source, target)
@@ -1662,37 +1499,92 @@ mod tests {
         assert_eq!(workspace.roots[0].path, workspace.root.join("access.log"));
     }
 
-    /// 验证解压总预算耗尽时该根回滚半成品、按原文件保留并记录警告。
+    /// 验证解压不受总量或条目数限制：大条目与大量条目都必须完整展开。
     #[test]
-    fn materialize_zip_over_budget_rolls_back_root() {
-        let dir = isolated_test_dir("workspace-budget");
-        let archive = write_test_zip(
-            &dir.join("big.zip"),
-            &[("big.log", vec![b'x'; 4096].as_slice())],
-        );
-        let config = LoaderConfig {
-            workspace_extract_budget_bytes: 1024,
-            ..LoaderConfig::default()
-        };
+    fn materialize_extracts_without_total_size_or_entry_count_limits() {
+        let dir = isolated_test_dir("workspace-unlimited");
+        let large_entry = vec![b'x'; 2 * 1024 * 1024];
+        let small_entry = vec![b'y'; 4096];
+        let small_names = (0..128)
+            .map(|index| format!("many/entry-{index:03}.log"))
+            .collect::<Vec<_>>();
+        let mut entries: Vec<(&str, &[u8])> = vec![("large.log", large_entry.as_slice())];
+        for name in &small_names {
+            entries.push((name.as_str(), small_entry.as_slice()));
+        }
+        let archive = write_test_zip(&dir.join("big.zip"), &entries);
 
         let workspace = materialize_sources(
             &[archive],
-            &config,
+            &LoaderConfig::default(),
             &ArchivePasswordStore::default(),
             &test_cancellation(),
             None,
         )
-        .expect("预算耗尽应按根降级而不是失败整个加载");
+        .expect("大压缩包物化应成功");
 
-        // 半成品解压内容已回滚，原始压缩包按原文件保留并提升为顶层文件
-        // （来源树标记未展开）。
-        assert!(!workspace.root.join("big/big.log").exists());
-        assert!(workspace.root.join("big.zip").is_file());
+        assert_eq!(
+            fs::metadata(workspace.root.join("big/large.log"))
+                .expect("应读取大条目")
+                .len(),
+            large_entry.len() as u64
+        );
+        for index in 0..small_names.len() {
+            assert!(
+                workspace
+                    .root
+                    .join(format!("big/many/entry-{index:03}.log"))
+                    .is_file(),
+                "第 {index} 个条目应被完整展开"
+            );
+        }
         assert!(
-            workspace
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("预算"))
+            workspace.warnings.is_empty(),
+            "不应出现预算或条目数降级警告：{:?}",
+            workspace.warnings
+        );
+    }
+
+    /// 验证大嵌套容器经 scratch 流式解压，产物完整且不留暂存文件。
+    #[test]
+    fn nested_container_streams_through_scratch_file() {
+        let dir = isolated_test_dir("workspace-nested-large");
+        let inner_content = vec![b'z'; 512 * 1024];
+        let mut inner_cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut inner_writer = ZipWriter::new(&mut inner_cursor);
+            inner_writer
+                .start_file("inner.log", SimpleFileOptions::default())
+                .expect("应写入内层条目");
+            inner_writer
+                .write_all(&inner_content)
+                .expect("应写入内层条目内容");
+            inner_writer.finish().expect("应完成内层 zip");
+        }
+        let inner_bytes = inner_cursor.into_inner();
+        let archive = write_test_zip(
+            &dir.join("outer.zip"),
+            &[("nested/inner.zip", inner_bytes.as_slice())],
+        );
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("大嵌套容器物化应成功");
+
+        assert_eq!(
+            fs::metadata(workspace.root.join("outer/nested/inner.log"))
+                .expect("应读取嵌套大条目")
+                .len(),
+            inner_content.len() as u64
+        );
+        assert!(
+            !workspace.root.join(".argus-scratch").exists(),
+            "scratch 暂存目录不应留在最终产物中"
         );
     }
 
