@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
@@ -33,6 +35,12 @@ const WORKSPACES_DIR_NAME: &str = "workdirs";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 /// 物化进度上报条目间隔，避免高频进度淹没通道。
 const PROGRESS_REPORT_INTERVAL: usize = 32;
+/// 并行解压普通条目的最小任务数；任务过少时线程调度开销大于收益。
+const PARALLEL_EXTRACT_MIN_JOBS: usize = 8;
+/// 并行解压的 worker 上限；磁盘写入带宽是共享资源，worker 过多反而互相争抢。
+const PARALLEL_EXTRACT_MAX_WORKERS: usize = 10;
+/// 允许并行的最大嵌套层级；更深层保持顺序，避免线程池随嵌套层级成倍扩张。
+const PARALLEL_EXTRACT_MAX_DEPTH: usize = 1;
 /// 删除工作目录失败时的后台重试次数，规避 Windows 句柄延迟释放。
 const DELETE_RETRY_COUNT: usize = 5;
 /// 删除工作目录失败时的重试间隔（毫秒）。
@@ -106,6 +114,82 @@ struct ArchiveContainerContext {
     format: ArchiveFormat,
     /// 最外层真实压缩包路径，用于密码查询。
     root_archive: PathBuf,
+}
+
+/// 普通文件条目的解压任务；条目之间互不依赖，可交给 worker 线程池并行执行。
+struct PlainEntryJob {
+    /// 压缩包内条目路径。
+    entry_path: String,
+    /// 落盘目标路径。
+    target: PathBuf,
+    /// 用户可见的条目展示名。
+    display_entry: String,
+}
+
+/// 嵌套条目的解压任务；同样彼此独立，可交给 worker 线程池并行执行。
+#[derive(Clone)]
+enum NestedEntryJob {
+    /// 嵌套单文件 gzip。
+    Gzip {
+        /// 压缩包内条目路径。
+        entry_path: String,
+        /// 落盘目标路径。
+        target: PathBuf,
+        /// 用户可见的条目展示名。
+        display_entry: String,
+    },
+    /// 嵌套压缩容器。
+    Container {
+        /// 压缩包内条目路径。
+        entry_path: String,
+        /// 嵌套容器格式。
+        format: ArchiveFormat,
+        /// 落盘目标路径。
+        target: PathBuf,
+        /// 用户可见的条目展示名。
+        display_entry: String,
+    },
+}
+
+/// 并行嵌套解压 worker 的实际产出，供主线程合并文件计数与警告。
+#[derive(Default)]
+struct NestedWorkerOutcome {
+    /// 该 worker 实际写盘的文件数。
+    files_written: usize,
+    /// 该 worker 产生的非致命警告。
+    warnings: Vec<String>,
+}
+
+/// 嵌套 scratch 文件名的全局序号；并行解压时保证不同 worker 不会重名。
+static NEXT_SCRATCH_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+/// 嵌套单文件提升到父目录时的全局互斥；避免并行 worker 重名竞争导致覆盖。
+static NESTED_PROMOTE_LOCK: Mutex<()> = Mutex::new(());
+
+/// 生成唯一嵌套 scratch 文件路径。
+fn next_scratch_file(root: &Path, depth: usize) -> PathBuf {
+    let sequence = NEXT_SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    root.join(".argus-scratch")
+        .join(format!("nested-{sequence}-{depth}"))
+}
+
+/// 并行解压 worker 的独立会话工厂；只对支持会话式读取的格式可用。
+struct SessionFactory<'a> {
+    /// 当前容器格式适配器。
+    adapter: &'a dyn ArchiveAdapter,
+    /// 容器文件路径。
+    path: &'a Path,
+    /// 解密密码。
+    password: Option<&'a str>,
+}
+
+impl SessionFactory<'_> {
+    /// 新建一个独立会话；格式不支持或打开失败时返回 `None`，调用方退回顺序解压。
+    fn open(&self) -> Option<Box<dyn ArchiveEntrySession>> {
+        self.adapter
+            .open_session(self.path, self.password)
+            .ok()
+            .flatten()
+    }
 }
 
 /// 解压过程中的条目读取来源。
@@ -378,6 +462,60 @@ fn is_retryable_password_error(error: &anyhow::Error) -> bool {
         })
 }
 
+/// 把条目流式解压到指定路径；不计数、不上报进度，供普通条目与嵌套容器 scratch 共用。
+///
+/// 说明：该函数不访问物化器状态，可由并行解压 worker 直接调用；失败时删除半成品文件。
+fn stream_entry_to_path(
+    source: &mut EntrySource<'_>,
+    entry_path: &str,
+    target: &Path,
+    display_entry: &str,
+) -> Result<(), MaterializeRootError> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            MaterializeRootError::Fatal(
+                anyhow::Error::new(error)
+                    .context(format!("无法创建物化目录：{}", parent.display())),
+            )
+        })?;
+    }
+    let mut file = File::create(target).map_err(|error| {
+        MaterializeRootError::Fatal(
+            anyhow::Error::new(error).context(format!("无法创建物化文件：{}", target.display())),
+        )
+    })?;
+
+    let consume_result = source.stream_entry(entry_path, &mut |chunk: &[u8]| {
+        file.write_all(chunk)?;
+        Ok(())
+    });
+    consume_result.map_err(|error| {
+        let _ = fs::remove_file(target);
+        if is_retryable_password_error(&error) {
+            return MaterializeRootError::PasswordPending;
+        }
+        MaterializeRootError::Fatal(error.context(format!("解压条目失败：{display_entry}")))
+    })
+}
+
+/// 根据任务数与 CPU 数决定并行解压 worker 数量。
+fn parallel_worker_count(job_count: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(PARALLEL_EXTRACT_MAX_WORKERS);
+    job_count.min(available).max(1)
+}
+
+/// 记录并行解压的失败原因；多个 worker 同时失败时保留先写入的那个。
+fn store_parallel_failure(slot: &Mutex<Option<MaterializeRootError>>, error: MaterializeRootError) {
+    if let Ok(mut guard) = slot.lock()
+        && guard.is_none()
+    {
+        *guard = Some(error);
+    }
+}
+
 /// 启动时清扫全部残留工作目录和历史压缩分页缓存（崩溃或强杀后的兜底清理）。
 pub(crate) fn sweep_stale_workspaces() {
     let workspaces = workspaces_dir();
@@ -545,19 +683,34 @@ impl WorkspaceMaterializer<'_> {
 
         let password_key = ArchivePasswordKey::new(&container.root_archive, &chain);
         let password = self.passwords.get(&password_key);
+        let session_factory = SessionFactory {
+            adapter,
+            path: &container.path,
+            password,
+        };
         // 会话打开失败按性能降级处理：回退逐条目打开，错误交给后续枚举统一归类。
-        let source = match adapter.open_session(&container.path, password) {
-            Ok(Some(session)) => EntrySource::Session(session),
-            _ => EntrySource::Adapter {
+        let source = match session_factory.open() {
+            Some(session) => EntrySource::Session(session),
+            None => EntrySource::Adapter {
                 adapter,
                 path: &container.path,
                 password,
             },
         };
-        self.extract_archive_with_source(container, dest_dir, chain, depth, source)
+        self.extract_archive_with_source(
+            container,
+            dest_dir,
+            chain,
+            depth,
+            source,
+            Some(&session_factory),
+        )
     }
 
-    /// 使用已建立的条目来源执行解压循环；嵌套 ZIP 可由内存会话直接进入。
+    /// 使用已建立的条目来源执行解压循环。
+    ///
+    /// 说明：目录条目在规划阶段直接创建；嵌套条目与普通文件条目彼此独立，在支持
+    /// 会话式读取的格式上分别交给 worker 线程池并行解压。
     fn extract_archive_with_source(
         &mut self,
         container: &ArchiveContainerContext,
@@ -565,6 +718,7 @@ impl WorkspaceMaterializer<'_> {
         chain: Vec<String>,
         depth: usize,
         mut source: EntrySource<'_>,
+        session_factory: Option<&SessionFactory<'_>>,
     ) -> Result<(), MaterializeRootError> {
         let entries = match source.list_entries() {
             Ok(entries) => entries,
@@ -582,6 +736,8 @@ impl WorkspaceMaterializer<'_> {
         };
 
         let mut written_paths = HashSet::new();
+        let mut nested_jobs = Vec::new();
+        let mut plain_jobs = Vec::new();
         for entry in entries {
             self.ensure_not_cancelled()?;
             let display_entry = format!("{}!/{}", container.display, entry.path);
@@ -613,30 +769,313 @@ impl WorkspaceMaterializer<'_> {
                 .filter(|format| depth < self.config.max_archive_depth && format.is_supported());
             match nested_format {
                 Some(ArchiveFormat::Gzip) => {
-                    self.extract_nested_gzip(&mut source, &entry.path, &target, &display_entry)?;
+                    nested_jobs.push(NestedEntryJob::Gzip {
+                        entry_path: entry.path,
+                        target,
+                        display_entry,
+                    });
                 }
                 Some(nested) => {
-                    self.extract_nested_container(
-                        &mut source,
-                        container,
-                        &entry.path,
-                        nested,
-                        &target,
-                        chain.clone(),
-                        depth,
-                        &display_entry,
-                    )?;
+                    nested_jobs.push(NestedEntryJob::Container {
+                        entry_path: entry.path,
+                        format: nested,
+                        target,
+                        display_entry,
+                    });
                 }
                 None => {
-                    self.stream_entry_to_file(&mut source, &entry.path, &target, &display_entry)?;
+                    plain_jobs.push(PlainEntryJob {
+                        entry_path: entry.path,
+                        target,
+                        display_entry,
+                    });
                 }
             }
+        }
+
+        // 普通文件先落盘，嵌套包随后解压并在提升单文件时按序号消歧；
+        // 这样同名条目不会互相覆盖，也保持与串行时代"普通文件在前"一致的结果。
+        self.extract_plain_entries(plain_jobs, &mut source, session_factory, depth)?;
+        self.extract_nested_entries(
+            nested_jobs,
+            &mut source,
+            session_factory,
+            container,
+            &chain,
+            depth,
+        )
+    }
+
+    /// 解压嵌套条目；支持会话且任务足够多时并行，否则按条目顺序执行。
+    fn extract_nested_entries(
+        &mut self,
+        jobs: Vec<NestedEntryJob>,
+        source: &mut EntrySource<'_>,
+        session_factory: Option<&SessionFactory<'_>>,
+        container: &ArchiveContainerContext,
+        chain: &[String],
+        depth: usize,
+    ) -> Result<(), MaterializeRootError> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(factory) = session_factory
+            && depth <= PARALLEL_EXTRACT_MAX_DEPTH
+            && jobs.len() >= PARALLEL_EXTRACT_MIN_JOBS
+            && let Some(result) =
+                self.extract_nested_entries_parallel(&jobs, factory, container, chain, depth)
+        {
+            return result;
+        }
+
+        for job in jobs {
+            self.run_nested_entry_job(job, source, container, chain, depth)?;
+        }
+        Ok(())
+    }
+
+    /// 执行单个嵌套条目任务；顺序路径与并行 worker 共用同一实现。
+    fn run_nested_entry_job(
+        &mut self,
+        job: NestedEntryJob,
+        source: &mut EntrySource<'_>,
+        container: &ArchiveContainerContext,
+        chain: &[String],
+        depth: usize,
+    ) -> Result<(), MaterializeRootError> {
+        match job {
+            NestedEntryJob::Gzip {
+                entry_path,
+                target,
+                display_entry,
+            } => self.extract_nested_gzip(source, &entry_path, &target, &display_entry),
+            NestedEntryJob::Container {
+                entry_path,
+                format,
+                target,
+                display_entry,
+            } => self.extract_nested_container(
+                source,
+                container,
+                &entry_path,
+                format,
+                &target,
+                chain.to_vec(),
+                depth,
+                &display_entry,
+            ),
+        }
+    }
+
+    /// 用固定大小 worker 线程池并行解压嵌套条目。
+    ///
+    /// 说明：每个 worker 持有独立的容器会话与轻量物化器状态（嵌套解压不涉及顶层
+    /// roots/used_labels/password_pending），完成后统一合并文件计数与警告。
+    ///
+    /// 返回值：`None` 表示无法为全部 worker 建立独立会话，调用方退回顺序解压；
+    /// `Some` 表示并行解压已执行，成败由内部结果给出。
+    fn extract_nested_entries_parallel(
+        &mut self,
+        jobs: &[NestedEntryJob],
+        factory: &SessionFactory<'_>,
+        container: &ArchiveContainerContext,
+        chain: &[String],
+        depth: usize,
+    ) -> Option<Result<(), MaterializeRootError>> {
+        let worker_count = parallel_worker_count(jobs.len());
+        let mut sessions = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            sessions.push(factory.open()?);
+        }
+
+        let config = self.config;
+        let passwords = self.passwords;
+        let cancellation = self.cancellation.clone();
+        let root = self.root.clone();
+        let next_index = AtomicUsize::new(0);
+        let failure: Mutex<Option<MaterializeRootError>> = Mutex::new(None);
+        let outcomes: Mutex<Vec<NestedWorkerOutcome>> = Mutex::new(Vec::new());
+        let base_files = self.files_written;
+
+        std::thread::scope(|scope| {
+            for session in sessions {
+                let next_index = &next_index;
+                let failure = &failure;
+                let outcomes = &outcomes;
+                let cancellation = cancellation.clone();
+                let root = root.clone();
+                scope.spawn(move || {
+                    // 嵌套 worker 不上报进度：各自持有局部计数会让全局进度抖动，
+                    // 外层阶段会在合并计数后继续上报。
+                    let mut worker = WorkspaceMaterializer {
+                        config,
+                        passwords,
+                        cancellation: &cancellation,
+                        progress: None,
+                        root,
+                        used_labels: HashSet::new(),
+                        files_written: 0,
+                        roots: Vec::new(),
+                        password_pending: Vec::new(),
+                        warnings: Vec::new(),
+                    };
+                    let mut source = EntrySource::Session(session);
+                    (|| {
+                        loop {
+                            if failure.lock().map(|slot| slot.is_some()).unwrap_or(false) {
+                                return;
+                            }
+                            if cancellation.is_cancelled() {
+                                store_parallel_failure(failure, MaterializeRootError::Cancelled);
+                                return;
+                            }
+                            let index = next_index.fetch_add(1, Ordering::Relaxed);
+                            let Some(job) = jobs.get(index) else {
+                                return;
+                            };
+                            if let Err(error) = worker.run_nested_entry_job(
+                                job.clone(),
+                                &mut source,
+                                container,
+                                chain,
+                                depth,
+                            ) {
+                                store_parallel_failure(failure, error);
+                                return;
+                            }
+                        }
+                    })();
+
+                    if let Ok(mut guard) = outcomes.lock() {
+                        guard.push(NestedWorkerOutcome {
+                            files_written: worker.files_written,
+                            warnings: worker.warnings,
+                        });
+                    }
+                });
+            }
+        });
+
+        let error = failure.into_inner().ok().flatten();
+        let outcomes = outcomes.into_inner().unwrap_or_default();
+        self.files_written = base_files
+            + outcomes
+                .iter()
+                .map(|outcome| outcome.files_written)
+                .sum::<usize>();
+        for outcome in outcomes {
+            self.warnings.extend(outcome.warnings);
+        }
+        Some(match error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        })
+    }
+
+    /// 解压普通文件条目；支持会话且任务足够多时并行，否则按条目顺序执行。
+    fn extract_plain_entries(
+        &mut self,
+        jobs: Vec<PlainEntryJob>,
+        source: &mut EntrySource<'_>,
+        session_factory: Option<&SessionFactory<'_>>,
+        depth: usize,
+    ) -> Result<(), MaterializeRootError> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(factory) = session_factory
+            && depth <= PARALLEL_EXTRACT_MAX_DEPTH
+            && jobs.len() >= PARALLEL_EXTRACT_MIN_JOBS
+            && let Some(result) = self.extract_plain_entries_parallel(&jobs, factory)
+        {
+            return result;
+        }
+
+        for job in jobs {
+            stream_entry_to_path(source, &job.entry_path, &job.target, &job.display_entry)?;
             self.files_written += 1;
             if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
-                self.report_progress(&display_entry);
+                self.report_progress(&job.display_entry);
             }
         }
         Ok(())
+    }
+
+    /// 用固定大小 worker 线程池并行解压普通文件条目。
+    ///
+    /// 返回值：`None` 表示无法为全部 worker 建立独立会话，调用方退回顺序解压；
+    /// `Some` 表示并行解压已执行，成败由内部结果给出。
+    fn extract_plain_entries_parallel(
+        &mut self,
+        jobs: &[PlainEntryJob],
+        factory: &SessionFactory<'_>,
+    ) -> Option<Result<(), MaterializeRootError>> {
+        let worker_count = parallel_worker_count(jobs.len());
+        let mut sessions = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            sessions.push(factory.open()?);
+        }
+
+        let cancellation = self.cancellation.clone();
+        let progress = self.progress.cloned();
+        let next_index = AtomicUsize::new(0);
+        let completed = AtomicUsize::new(0);
+        let failure: Mutex<Option<MaterializeRootError>> = Mutex::new(None);
+        let base_files = self.files_written;
+
+        std::thread::scope(|scope| {
+            for session in sessions {
+                let next_index = &next_index;
+                let completed = &completed;
+                let failure = &failure;
+                let cancellation = cancellation.clone();
+                let progress = progress.clone();
+                scope.spawn(move || {
+                    let mut source = EntrySource::Session(session);
+                    loop {
+                        if failure.lock().map(|slot| slot.is_some()).unwrap_or(false) {
+                            return;
+                        }
+                        if cancellation.is_cancelled() {
+                            store_parallel_failure(failure, MaterializeRootError::Cancelled);
+                            return;
+                        }
+                        let index = next_index.fetch_add(1, Ordering::Relaxed);
+                        let Some(job) = jobs.get(index) else {
+                            return;
+                        };
+                        if let Err(error) = stream_entry_to_path(
+                            &mut source,
+                            &job.entry_path,
+                            &job.target,
+                            &job.display_entry,
+                        ) {
+                            store_parallel_failure(failure, error);
+                            return;
+                        }
+                        let finished = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if finished.is_multiple_of(PROGRESS_REPORT_INTERVAL)
+                            && let Some(sender) = progress.as_ref()
+                        {
+                            let _ = sender.send(SourceTreeScanProgress {
+                                phase: SourceLoadPhase::Materializing,
+                                scanned: base_files + finished,
+                                current: job.display_entry.clone(),
+                            });
+                        }
+                    }
+                });
+            }
+        });
+
+        let error = failure.into_inner().ok().flatten();
+        self.files_written = base_files + completed.load(Ordering::Relaxed);
+        Some(match error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        })
     }
 
     /// 解压嵌套单文件 gzip 条目为普通文件（落盘名沿用条目名去掉 `.gz` 的约定）。
@@ -695,10 +1134,8 @@ impl WorkspaceMaterializer<'_> {
                 scratch_dir.display()
             )))
         })?;
-        let scratch_file = scratch_dir.join(format!("nested-{}-{depth}", self.files_written));
-        if let Err(error) =
-            self.stream_entry_to_path(source, entry_path, &scratch_file, display_entry)
-        {
+        let scratch_file = next_scratch_file(&self.root, depth);
+        if let Err(error) = stream_entry_to_path(source, entry_path, &scratch_file, display_entry) {
             let _ = fs::remove_file(&scratch_file);
             return Err(error);
         }
@@ -754,6 +1191,11 @@ impl WorkspaceMaterializer<'_> {
         let (stem, extension) = Self::split_file_name_extension(&file_name);
         let mut candidate = file_name.clone();
         let mut suffix = 1_usize;
+        // 并行解压时多个嵌套包会同时向同一父目录提升文件；加锁保证重名消歧与落位
+        // 不互相竞争，避免 rename 覆盖同名文件。
+        let _promote_guard = NESTED_PROMOTE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // 包装目录自身占用的名称即将释放，视为可用。
         while parent.join(&candidate).exists() && parent.join(&candidate) != wrapper_dir {
             suffix += 1;
@@ -790,48 +1232,12 @@ impl WorkspaceMaterializer<'_> {
         target: &Path,
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
-        self.stream_entry_to_path(source, entry_path, target, display_entry)?;
+        stream_entry_to_path(source, entry_path, target, display_entry)?;
         self.files_written += 1;
         if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
             self.report_progress(display_entry);
         }
         Ok(())
-    }
-
-    /// 把条目流式解压到指定路径；不计数、不上报进度，供普通条目与嵌套容器 scratch 共用。
-    fn stream_entry_to_path(
-        &mut self,
-        source: &mut EntrySource<'_>,
-        entry_path: &str,
-        target: &Path,
-        display_entry: &str,
-    ) -> Result<(), MaterializeRootError> {
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                MaterializeRootError::Fatal(
-                    anyhow::Error::new(error)
-                        .context(format!("无法创建物化目录：{}", parent.display())),
-                )
-            })?;
-        }
-        let mut file = File::create(target).map_err(|error| {
-            MaterializeRootError::Fatal(
-                anyhow::Error::new(error)
-                    .context(format!("无法创建物化文件：{}", target.display())),
-            )
-        })?;
-
-        let consume_result = source.stream_entry(entry_path, &mut |chunk: &[u8]| {
-            file.write_all(chunk)?;
-            Ok(())
-        });
-        consume_result.map_err(|error| {
-            let _ = fs::remove_file(target);
-            if is_retryable_password_error(&error) {
-                return MaterializeRootError::PasswordPending;
-            }
-            MaterializeRootError::Fatal(error.context(format!("解压条目失败：{display_entry}")))
-        })
     }
 
     /// 流式复制普通文件。
@@ -1468,6 +1874,108 @@ mod tests {
                 .is_file()
         );
         assert!(workspace.root.join("outer/monitorThread/inner").is_dir());
+    }
+
+    /// 构造一个只含单个指定名称文件的内层 zip 字节。
+    fn nested_zip_bytes(file_name: &str, payload: &str) -> Vec<u8> {
+        let mut inner_cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut inner_writer = ZipWriter::new(&mut inner_cursor);
+            inner_writer
+                .start_file(file_name, SimpleFileOptions::default())
+                .expect("应写入内层条目");
+            inner_writer
+                .write_all(payload.as_bytes())
+                .expect("应写入内层内容");
+            inner_writer.finish().expect("应完成内层 zip");
+        }
+        inner_cursor.into_inner()
+    }
+
+    /// 验证超过并行阈值的多个嵌套包全部解压并提升单文件。
+    #[test]
+    fn materialize_parallel_nested_archives_promote_all_files() {
+        let dir = isolated_test_dir("workspace-nested-parallel");
+        let blobs = (0..12)
+            .map(|index| {
+                nested_zip_bytes(&format!("log-{index:02}.log"), &format!("payload-{index}"))
+            })
+            .collect::<Vec<_>>();
+        let names = (0..12)
+            .map(|index| format!("nested/pack-{index:02}.zip"))
+            .collect::<Vec<_>>();
+        let entries = names
+            .iter()
+            .zip(blobs.iter())
+            .map(|(name, blob)| (name.as_str(), blob.as_slice()))
+            .collect::<Vec<_>>();
+        let archive = write_test_zip(&dir.join("outer.zip"), &entries);
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("多嵌套包并行物化应成功");
+
+        for index in 0..12 {
+            let path = workspace
+                .root
+                .join(format!("outer/nested/log-{index:02}.log"));
+            assert_eq!(
+                fs::read_to_string(&path).expect("应读取提升后的嵌套文件"),
+                format!("payload-{index}")
+            );
+        }
+        // 嵌套包本身不计入文件数，只统计实际解出的文件。
+        assert_eq!(workspace.materialized_files, 12);
+        assert!(
+            workspace.warnings.is_empty(),
+            "并行嵌套解压不应产生警告：{:?}",
+            workspace.warnings
+        );
+    }
+
+    /// 验证并行提升同名文件时按序号消歧且不丢失任何文件。
+    #[test]
+    fn materialize_parallel_nested_promotion_keeps_all_same_name_files() {
+        let dir = isolated_test_dir("workspace-nested-parallel-same-name");
+        let blobs = (0..12)
+            .map(|index| nested_zip_bytes("app.log", &format!("payload-{index}")))
+            .collect::<Vec<_>>();
+        let names = (0..12)
+            .map(|index| format!("nested/pack-{index:02}.zip"))
+            .collect::<Vec<_>>();
+        let entries = names
+            .iter()
+            .zip(blobs.iter())
+            .map(|(name, blob)| (name.as_str(), blob.as_slice()))
+            .collect::<Vec<_>>();
+        let archive = write_test_zip(&dir.join("outer.zip"), &entries);
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("同名嵌套文件并行物化应成功");
+
+        let mut payloads = fs::read_dir(workspace.root.join("outer/nested"))
+            .expect("应读取嵌套目录")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| fs::read_to_string(entry.path()).expect("应读取提升后的文件"))
+            .collect::<Vec<_>>();
+        payloads.sort();
+        let mut expected = (0..12)
+            .map(|index| format!("payload-{index}"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(payloads, expected, "并行提升不得覆盖或丢失同名文件");
     }
 
     /// 验证顶层 gzip 单文件包解压为去 `.gz` 的普通文件并直接提升为顶层文件根。
