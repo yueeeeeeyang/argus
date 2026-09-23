@@ -17,17 +17,16 @@ use super::{
     log_text_position_le, log_viewer_display_text, log_viewer_line_number_width,
 };
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
+use crate::infra::selection_autoscroll::{
+    advance_negative_scroll, advance_positive_scroll, selection_autoscroll_intensity,
+    selection_autoscroll_step_px,
+};
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, slice_character_range, word_range_at,
 };
 use crate::loader::SourceId;
 use crate::reader::log_file_reader::{LogDocument, LogOpenState};
-
-/// 拖拽选择时触发自动滚动的视口顶/底边缘宽度（像素）。
-const LOG_SELECTION_AUTOSCROLL_MARGIN: f32 = 16.0;
-/// 拖拽选择自动滚动每帧最大步长（像素），限制滚动速度避免跳跃感。
-const LOG_SELECTION_AUTOSCROLL_MAX_STEP: f32 = 24.0;
 
 impl ArgusApp {
     /// 返回当前是否存在可搜索的日志标签页。
@@ -318,7 +317,7 @@ impl ArgusApp {
         }
     }
 
-    /// 记录拖拽选择过程中的指针位置；指针进入视口顶/底边缘区时启动逐帧自动滚动循环。
+    /// 记录拖拽选择过程中的指针位置；指针进入视口任一轴的边缘区时启动逐帧自动滚动循环。
     ///
     /// 说明：GPUI 按命中测试分发鼠标事件，行元素的 `on_mouse_move` 在指针拖出可见行后
     /// 不再触发，因此需要窗口级监听把指针位置持续喂给自动滚动循环。
@@ -354,9 +353,12 @@ impl ArgusApp {
         true
     }
 
-    /// 拖拽选择期间执行一帧自动滚动，并把选区扩展到指针钳制在视口内后对应的边缘行。
+    /// 拖拽选择期间执行一帧自动滚动，并把选区扩展到指针钳制在视口内后对应的边缘行与列。
     ///
-    /// 返回值：拖拽仍在进行且指针停留在边缘滚动区时返回 `true`，表示需要继续调度下一帧。
+    /// 横向与纵向各自独立判定边缘强度；任一轴需要滚动就更新该轴，并把选区焦点更新到
+    /// 指针钳制后的可见行列，使选区随滚动逐帧向不可见区域扩展。
+    ///
+    /// 返回值：拖拽仍在进行且指针停留在任一轴的边缘滚动区时返回 `true`，表示需要继续调度下一帧。
     pub(crate) fn step_log_selection_autoscroll(&mut self, window: &mut Window) -> bool {
         let Some(autoscroll) = self.log_selection_autoscroll else {
             return false;
@@ -369,17 +371,21 @@ impl ArgusApp {
             self.log_selection_autoscroll = None;
             return false;
         }
-        let Some((viewport_top, viewport_bottom)) = self.log_viewport_vertical_bounds(tab_id)
-        else {
+        let Some(viewport) = self.log_viewport_bounds(tab_id) else {
             self.log_selection_autoscroll = None;
             return false;
         };
-        let intensity = log_selection_autoscroll_intensity(
+        let vertical_intensity = selection_autoscroll_intensity(
             f32::from(pointer.y),
-            f32::from(viewport_top),
-            f32::from(viewport_bottom),
+            f32::from(viewport.top()),
+            f32::from(viewport.bottom()),
         );
-        if intensity == 0.0 {
+        let horizontal_intensity = selection_autoscroll_intensity(
+            f32::from(pointer.x),
+            f32::from(viewport.left()),
+            f32::from(viewport.right()),
+        );
+        if vertical_intensity == 0.0 && horizontal_intensity == 0.0 {
             return false;
         }
         let Some(handle) = self.active_log_handle() else {
@@ -392,21 +398,36 @@ impl ArgusApp {
             self.log_selection_autoscroll = None;
             return false;
         }
-        let viewport_height = viewport_bottom - viewport_top;
-        let step = px(log_selection_autoscroll_step_px(intensity));
+        let viewport_height = viewport.size.height;
+        let viewport_width = viewport.size.width;
+        let vertical_step = f32::from(px(selection_autoscroll_step_px(vertical_intensity)));
+        let horizontal_step = f32::from(px(selection_autoscroll_step_px(horizontal_intensity)));
+        let estimated_columns = handle.estimated_longest_display_columns();
+        let font_size = self.log_content_font_size;
 
-        // 应用滚动并读取滚动后视口首行对应的文档像素位置，用于反算边缘行号。
+        // 应用滚动并读取滚动后视口左上角对应的文档像素位置，用于反算边缘行列。
         let scrolled_top_px = if is_paged {
+            let max_vertical = (line_count as f64 * LOG_VIEWER_ROW_HEIGHT as f64
+                - f64::from(viewport_height))
+            .max(0.0);
+            let max_horizontal = paged_log_horizontal_max_scroll(
+                estimated_columns,
+                font_size,
+                line_count,
+                f64::from(viewport_width),
+            );
             let Some(state) = self.log_tab_view_state_mut(tab_id) else {
                 self.log_selection_autoscroll = None;
                 return false;
             };
-            let max_scroll = (line_count as f64 * LOG_VIEWER_ROW_HEIGHT as f64
-                - f64::from(viewport_height))
-            .max(0.0);
-            let new_top = (state.paged_scroll.top_px + f64::from(step)).clamp(0.0, max_scroll);
-            state.paged_scroll.top_px = new_top;
-            new_top
+            state.paged_scroll.top_px =
+                advance_positive_scroll(state.paged_scroll.top_px, vertical_step, max_vertical);
+            state.paged_scroll.left_px = advance_positive_scroll(
+                state.paged_scroll.left_px,
+                horizontal_step,
+                max_horizontal,
+            );
+            state.paged_scroll.top_px
         } else {
             let Some(state) = self.log_tab_view_state(tab_id) else {
                 self.log_selection_autoscroll = None;
@@ -414,32 +435,47 @@ impl ArgusApp {
             };
             let scroll_state = state.scroll_handle.0.as_ref().borrow();
             let base_handle = scroll_state.base_handle.clone();
-            let max_scroll = scroll_state
-                .last_item_size
-                .map(|size| (size.contents.height - viewport_height).max(px(0.0)))
-                .unwrap_or(px(0.0));
+            let content_size = scroll_state.last_item_size.map(|size| size.contents);
             drop(scroll_state);
+            let max_vertical = content_size
+                .map(|size| (size.height - viewport_height).max(px(0.0)))
+                .unwrap_or(px(0.0));
+            let max_horizontal = content_size
+                .map(|size| (size.width - viewport_width).max(px(0.0)))
+                .unwrap_or(px(0.0));
             let current_offset = base_handle.offset();
-            let new_offset_y = (current_offset.y - step).clamp(-max_scroll, px(0.0));
-            base_handle.set_offset(point(current_offset.x, new_offset_y));
-            f64::from(-new_offset_y)
+            let new_offset = point(
+                px(advance_negative_scroll(
+                    f32::from(current_offset.x),
+                    horizontal_step,
+                    f32::from(max_horizontal),
+                )),
+                px(advance_negative_scroll(
+                    f32::from(current_offset.y),
+                    vertical_step,
+                    f32::from(max_vertical),
+                )),
+            );
+            base_handle.set_offset(new_offset);
+            f64::from(-new_offset.y)
         };
         self.clear_line_marker_jump_cache(tab_id);
 
-        // 指针钳制在视口内，把选区扩展到当前边缘可见行；滚动过程中该行随滚动逐帧推进。
-        let clamped_y = pointer.y.clamp(viewport_top, viewport_bottom);
-        let target_line = ((scrolled_top_px + f64::from(clamped_y - viewport_top))
+        // 指针钳制在视口内，把选区扩展到当前边缘可见行列；滚动过程中行列随滚动逐帧推进。
+        let clamped_y = pointer.y.clamp(viewport.top(), viewport.bottom());
+        let target_line = ((scrolled_top_px + f64::from(clamped_y - viewport.top()))
             / LOG_VIEWER_ROW_HEIGHT as f64)
             .floor() as usize;
         let target_line = target_line.min(line_count.saturating_sub(1));
+        let clamped_x = pointer.x.clamp(viewport.left(), viewport.right());
         if let Some(line_text) = self.log_line_text_for_tab(tab_id, target_line) {
-            self.update_log_text_selection(tab_id, target_line, &line_text, pointer.x, window);
+            self.update_log_text_selection(tab_id, target_line, &line_text, clamped_x, window);
         }
         true
     }
 
-    /// 返回指定日志 tab 视口的纵向范围（窗口坐标）；视口未布局完成时返回 `None`。
-    fn log_viewport_vertical_bounds(&self, tab_id: usize) -> Option<(Pixels, Pixels)> {
+    /// 返回指定日志 tab 视口的范围（窗口坐标）；视口未布局完成时返回 `None`。
+    fn log_viewport_bounds(&self, tab_id: usize) -> Option<gpui::Bounds<Pixels>> {
         let handle = self.active_log_handle()?;
         let state = self.log_tab_view_state(tab_id)?;
         let bounds = match handle.document() {
@@ -448,24 +484,28 @@ impl ArgusApp {
                 state.scroll_handle.0.as_ref().borrow().base_handle.bounds()
             }
         };
-        (bounds.size.height > px(0.0)).then_some((bounds.top(), bounds.bottom()))
+        (bounds.size.height > px(0.0) && bounds.size.width > px(0.0)).then_some(bounds)
     }
 
-    /// 判断指针是否位于日志视口顶/底的自动滚动边缘区。
+    /// 判断指针是否位于日志视口任一轴的自动滚动边缘区。
     fn pointer_in_log_selection_autoscroll_zone(
         &self,
         tab_id: usize,
         pointer: Point<Pixels>,
     ) -> bool {
-        let Some((viewport_top, viewport_bottom)) = self.log_viewport_vertical_bounds(tab_id)
-        else {
+        let Some(viewport) = self.log_viewport_bounds(tab_id) else {
             return false;
         };
-        log_selection_autoscroll_intensity(
+        selection_autoscroll_intensity(
             f32::from(pointer.y),
-            f32::from(viewport_top),
-            f32::from(viewport_bottom),
+            f32::from(viewport.top()),
+            f32::from(viewport.bottom()),
         ) != 0.0
+            || selection_autoscroll_intensity(
+                f32::from(pointer.x),
+                f32::from(viewport.left()),
+                f32::from(viewport.right()),
+            ) != 0.0
     }
 
     /// 在指定日志行内按字符列选中一个词；点到空白时清空选区。
@@ -919,12 +959,12 @@ impl ArgusApp {
         let max_vertical = (line_count as f64 * LOG_VIEWER_ROW_HEIGHT as f64
             - f64::from(viewport.height))
         .max(0.0);
-        let estimated_char_width = (self.log_content_font_size * 0.62).max(6.0);
-        let content_width = longest_display_columns as f64 * estimated_char_width as f64
-            + f64::from(px(log_viewer_line_number_width(line_count)
-                + LOG_VIEWER_TEXT_LEFT_PADDING
-                + LOG_VIEWER_TEXT_RIGHT_PADDING));
-        let max_horizontal = (content_width - f64::from(viewport.width)).max(0.0);
+        let max_horizontal = paged_log_horizontal_max_scroll(
+            longest_display_columns,
+            self.log_content_font_size,
+            line_count,
+            f64::from(viewport.width),
+        );
 
         state.paged_scroll.top_px =
             (state.paged_scroll.top_px - f64::from(pixel_delta.y)).clamp(0.0, max_vertical);
@@ -947,6 +987,29 @@ impl ArgusApp {
 
         clear_last_line_marker_jump(state)
     }
+}
+
+/// 计算分页日志的横向最大滚动像素；滚轮滚动与拖拽选择自动滚动共用同一内容宽度估算。
+///
+/// 参数说明：
+/// - `longest_display_columns`：文档最长显示列数估算。
+/// - `font_size`：日志内容字号（像素）。
+/// - `line_count`：日志总行数，用于行号栏宽度。
+/// - `viewport_width`：日志视口宽度。
+///
+/// 返回值：受内容宽度限制的横向最大滚动像素，非负。
+fn paged_log_horizontal_max_scroll(
+    longest_display_columns: usize,
+    font_size: f32,
+    line_count: usize,
+    viewport_width: f64,
+) -> f64 {
+    let estimated_char_width = (font_size * 0.62).max(6.0);
+    let content_width = longest_display_columns as f64 * estimated_char_width as f64
+        + f64::from(px(log_viewer_line_number_width(line_count)
+            + LOG_VIEWER_TEXT_LEFT_PADDING
+            + LOG_VIEWER_TEXT_RIGHT_PADDING));
+    (content_width - viewport_width).max(0.0)
 }
 
 /// 计算跳转目标行居中显示时的分页日志滚动偏移。
@@ -1131,31 +1194,6 @@ fn schedule_log_selection_autoscroll_frame(entity: Entity<ArgusApp>, window: &mu
     });
 }
 
-/// 计算拖拽指针的纵向自动滚动强度：负值向上滚动、正值向下滚动、0 表示不在边缘滚动区。
-fn log_selection_autoscroll_intensity(
-    pointer_y: f32,
-    viewport_top: f32,
-    viewport_bottom: f32,
-) -> f32 {
-    if viewport_bottom <= viewport_top {
-        return 0.0;
-    }
-    if pointer_y < viewport_top + LOG_SELECTION_AUTOSCROLL_MARGIN {
-        pointer_y - (viewport_top + LOG_SELECTION_AUTOSCROLL_MARGIN)
-    } else if pointer_y > viewport_bottom - LOG_SELECTION_AUTOSCROLL_MARGIN {
-        pointer_y - (viewport_bottom - LOG_SELECTION_AUTOSCROLL_MARGIN)
-    } else {
-        0.0
-    }
-}
-
-/// 按滚动强度计算每帧滚动像素；强度越大滚动越快，并限制最大步长避免跳跃感。
-fn log_selection_autoscroll_step_px(intensity: f32) -> f32 {
-    (intensity.abs() * 0.5)
-        .clamp(1.0, LOG_SELECTION_AUTOSCROLL_MAX_STEP)
-        .copysign(intensity)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1264,65 +1302,17 @@ mod tests {
         );
     }
 
-    /// 验证指针位于视口中部和边缘区边界时不触发自动滚动。
+    /// 验证分页日志横向最大滚动由内容宽度和视口宽度共同决定，内容不足时为零。
     #[test]
-    fn autoscroll_intensity_is_zero_inside_viewport() {
-        assert_eq!(log_selection_autoscroll_intensity(200.0, 100.0, 500.0), 0.0);
-        assert_eq!(
-            log_selection_autoscroll_intensity(
-                100.0 + LOG_SELECTION_AUTOSCROLL_MARGIN,
-                100.0,
-                500.0
-            ),
-            0.0
-        );
-        assert_eq!(
-            log_selection_autoscroll_intensity(
-                500.0 - LOG_SELECTION_AUTOSCROLL_MARGIN,
-                100.0,
-                500.0
-            ),
-            0.0
-        );
-    }
+    fn paged_horizontal_max_scroll_follows_content_width() {
+        let viewport_width = 400.0;
+        let narrow = paged_log_horizontal_max_scroll(1, 12.0, 10, viewport_width);
+        assert_eq!(narrow, 0.0);
 
-    /// 验证指针越过视口顶/底边缘时按超出距离产生对应方向的滚动强度。
-    #[test]
-    fn autoscroll_intensity_grows_beyond_viewport_edges() {
-        // 顶部边缘区内为负值（向上滚），越过窗口顶部后强度更大。
-        let top_near = log_selection_autoscroll_intensity(110.0, 100.0, 500.0);
-        let top_far = log_selection_autoscroll_intensity(50.0, 100.0, 500.0);
-        assert!(top_near < 0.0);
-        assert!(top_far < top_near);
+        let wide = paged_log_horizontal_max_scroll(400, 12.0, 10, viewport_width);
+        assert!(wide > 0.0);
 
-        // 底部对称：正值向下滚，超出越远强度越大。
-        let bottom_near = log_selection_autoscroll_intensity(490.0, 100.0, 500.0);
-        let bottom_far = log_selection_autoscroll_intensity(560.0, 100.0, 500.0);
-        assert!(bottom_near > 0.0);
-        assert!(bottom_far > bottom_near);
-    }
-
-    /// 验证视口高度异常时不产生滚动强度，避免除零和无意义滚动。
-    #[test]
-    fn autoscroll_intensity_handles_degenerate_viewport() {
-        assert_eq!(log_selection_autoscroll_intensity(10.0, 100.0, 100.0), 0.0);
-        assert_eq!(log_selection_autoscroll_intensity(10.0, 100.0, 50.0), 0.0);
-    }
-
-    /// 验证每帧滚动步长有最小生效值和最大上限，避免过慢和跳跃。
-    #[test]
-    fn autoscroll_step_clamps_speed_range() {
-        assert_eq!(log_selection_autoscroll_step_px(1.0), 1.0);
-        assert_eq!(log_selection_autoscroll_step_px(-1.0), -1.0);
-        assert_eq!(log_selection_autoscroll_step_px(8.0), 4.0);
-        assert_eq!(log_selection_autoscroll_step_px(-8.0), -4.0);
-        assert_eq!(
-            log_selection_autoscroll_step_px(1000.0),
-            LOG_SELECTION_AUTOSCROLL_MAX_STEP
-        );
-        assert_eq!(
-            log_selection_autoscroll_step_px(-1000.0),
-            -LOG_SELECTION_AUTOSCROLL_MAX_STEP
-        );
+        let wider = paged_log_horizontal_max_scroll(800, 12.0, 10, viewport_width);
+        assert!(wider > wide);
     }
 }

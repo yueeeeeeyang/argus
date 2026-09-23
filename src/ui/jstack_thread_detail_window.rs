@@ -10,6 +10,9 @@ use std::ops::Range;
 use crate::analysis::jstack::{JstackThreadDetail, JstackThreadStackOccurrence};
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{HighlightLanguage, HighlightTokenKind, SyntaxHighlighter};
+use crate::infra::selection_autoscroll::{
+    advance_negative_scroll, selection_autoscroll_intensity, selection_autoscroll_step_px,
+};
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, slice_character_range, word_range_at,
@@ -22,9 +25,9 @@ use crate::ui::components::scrollbar::{
 };
 use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
 use gpui::{
-    AnyElement, Bounds, ClipboardItem, Context, FocusHandle, FontWeight, HighlightStyle,
+    AnyElement, Bounds, ClipboardItem, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Render, ScrollHandle, SharedString, StyledText, TextRun, Window, canvas, div, point,
+    Point, Render, ScrollHandle, SharedString, StyledText, TextRun, Window, canvas, div, point,
     prelude::*, px, rgb,
 };
 
@@ -132,6 +135,10 @@ pub(crate) struct JstackThreadDetailWindow {
     stack_selection: Option<StackTextSelection>,
     /// 当前堆栈正文拖拽选择状态。
     stack_selection_drag: Option<StackTextSelectionDrag>,
+    /// 拖拽选择自动滚动的最近指针位置；为空表示当前没有进行中的拖拽。
+    selection_autoscroll_pointer: Option<Point<Pixels>>,
+    /// 自动滚动逐帧循环是否已启动，避免重复调度。
+    selection_autoscroll_loop_active: bool,
     /// 根视图焦点句柄；堆栈文本选择后仍用它稳定接收 Cmd/Ctrl+C。
     focus_handle: FocusHandle,
 }
@@ -181,6 +188,8 @@ impl JstackThreadDetailWindow {
             scrollbar_drag: None,
             stack_selection: None,
             stack_selection_drag: None,
+            selection_autoscroll_pointer: None,
+            selection_autoscroll_loop_active: false,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -211,6 +220,7 @@ impl JstackThreadDetailWindow {
         self.scrollbar_drag = None;
         self.stack_selection = None;
         self.stack_selection_drag = None;
+        self.selection_autoscroll_pointer = None;
     }
 
     /// 复制当前详情窗口的堆栈正文选区；没有选区时不执行复制。
@@ -262,6 +272,7 @@ impl JstackThreadDetailWindow {
     /// 结束堆栈正文选择；没有选中字符时清理选区。
     fn finish_stack_text_selection(&mut self) {
         self.stack_selection_drag = None;
+        self.selection_autoscroll_pointer = None;
         if self
             .stack_selection
             .as_ref()
@@ -269,6 +280,124 @@ impl JstackThreadDetailWindow {
         {
             self.stack_selection = None;
         }
+    }
+
+    /// 记录拖拽选择指针位置；指针进入视口任一轴边缘区时启动逐帧自动滚动循环。
+    ///
+    /// 说明：GPUI 按命中测试分发鼠标事件，行元素的 `on_mouse_move` 在指针离开行后不再
+    /// 触发，这里通过窗口级监听把指针位置持续喂给自动滚动循环。
+    ///
+    /// 返回值：本次调用新启动了自动滚动循环时返回 `true`。
+    fn track_selection_autoscroll_pointer(
+        &mut self,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.stack_selection_drag.is_none() {
+            return false;
+        }
+        self.selection_autoscroll_pointer = Some(pointer);
+        if self.selection_autoscroll_loop_active
+            || !self.pointer_in_selection_autoscroll_zone(pointer)
+        {
+            return false;
+        }
+
+        self.selection_autoscroll_loop_active = true;
+        schedule_selection_autoscroll_frame(cx.entity(), window);
+        true
+    }
+
+    /// 执行一帧自动滚动，并把选区扩展到指针钳制在视口内后对应的行列。
+    ///
+    /// 横向与纵向各自独立判定边缘强度；滚动后按当前偏移反算指针所在堆栈行，
+    /// 使选区随滚动逐帧向不可见区域扩展。
+    ///
+    /// 返回值：拖拽仍在进行且指针停留在任一轴边缘滚动区时返回 `true`，表示继续调度下一帧。
+    fn step_selection_autoscroll(&mut self, window: &mut Window) -> bool {
+        let Some(pointer) = self.selection_autoscroll_pointer else {
+            return false;
+        };
+        if self.stack_selection_drag.is_none() {
+            self.selection_autoscroll_pointer = None;
+            return false;
+        }
+        let bounds = self.stack_scroll.bounds();
+        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+            self.selection_autoscroll_pointer = None;
+            return false;
+        }
+        let vertical_intensity = selection_autoscroll_intensity(
+            f32::from(pointer.y),
+            f32::from(bounds.top()),
+            f32::from(bounds.bottom()),
+        );
+        let horizontal_intensity = selection_autoscroll_intensity(
+            f32::from(pointer.x),
+            f32::from(bounds.left()),
+            f32::from(bounds.right()),
+        );
+        if vertical_intensity == 0.0 && horizontal_intensity == 0.0 {
+            return false;
+        }
+
+        let max_offset = self.stack_scroll.max_offset();
+        let current_offset = self.stack_scroll.offset();
+        let next_offset = point(
+            px(advance_negative_scroll(
+                f32::from(current_offset.x),
+                selection_autoscroll_step_px(horizontal_intensity),
+                f32::from(max_offset.width),
+            )),
+            px(advance_negative_scroll(
+                f32::from(current_offset.y),
+                selection_autoscroll_step_px(vertical_intensity),
+                f32::from(max_offset.height),
+            )),
+        );
+        self.stack_scroll.set_offset(next_offset);
+
+        let line_count = self
+            .active_occurrence()
+            .map(|occurrence| occurrence.stack_lines.len())
+            .unwrap_or(0);
+        if line_count == 0 {
+            self.selection_autoscroll_pointer = None;
+            return false;
+        }
+        let clamped_y = pointer.y.clamp(bounds.top(), bounds.bottom());
+        let content_y = f32::from(clamped_y - bounds.top()) - f32::from(next_offset.y);
+        let line_index =
+            ((content_y / DETAIL_STACK_LINE_HEIGHT).floor().max(0.0) as usize).min(line_count - 1);
+        let Some(line) = self
+            .active_occurrence()
+            .and_then(|occurrence| occurrence.stack_lines.get(line_index).cloned())
+        else {
+            self.selection_autoscroll_pointer = None;
+            return false;
+        };
+        let clamped_x = pointer.x.clamp(bounds.left(), bounds.right());
+        self.update_stack_text_selection(line_index, &line, clamped_x, window);
+        true
+    }
+
+    /// 判断指针是否位于堆栈视口任一轴的自动滚动边缘区。
+    fn pointer_in_selection_autoscroll_zone(&self, pointer: Point<Pixels>) -> bool {
+        let bounds = self.stack_scroll.bounds();
+        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+            return false;
+        }
+        selection_autoscroll_intensity(
+            f32::from(pointer.y),
+            f32::from(bounds.top()),
+            f32::from(bounds.bottom()),
+        ) != 0.0
+            || selection_autoscroll_intensity(
+                f32::from(pointer.x),
+                f32::from(bounds.left()),
+                f32::from(bounds.right()),
+            ) != 0.0
     }
 
     /// 根据鼠标横坐标计算堆栈正文行内字符列。
@@ -637,6 +766,79 @@ fn render_stack_content(
                 )),
         )
         .children(render_detail_scrollbars(stack_scroll, theme, cx))
+        .child(render_stack_selection_autoscroll_sensor(cx))
+}
+
+/// 调度详情窗口拖拽选择自动滚动的下一帧；拖拽结束或指针离开边缘区时循环自动停止。
+fn schedule_selection_autoscroll_frame(
+    entity: Entity<JstackThreadDetailWindow>,
+    window: &mut Window,
+) {
+    window.on_next_frame(move |window, cx| {
+        let keep_running = entity.update(cx, |view, _| view.step_selection_autoscroll(window));
+        if keep_running {
+            cx.notify(entity.entity_id());
+            schedule_selection_autoscroll_frame(entity, window);
+        } else {
+            entity.update(cx, |view, _| {
+                view.selection_autoscroll_loop_active = false;
+            });
+        }
+    });
+}
+
+/// 渲染拖拽选择自动滚动传感器。
+///
+/// 说明：行元素的 `on_mouse_move` 在指针离开行后不再触发，这里通过 canvas 在绘制期注册
+/// 窗口级鼠标监听，持续把指针位置喂给自动滚动循环；canvas 不参与命中测试，不影响行交互。
+fn render_stack_selection_autoscroll_sensor(
+    cx: &mut Context<JstackThreadDetailWindow>,
+) -> AnyElement {
+    let entity = cx.entity();
+    canvas(
+        |_, _, _| (),
+        move |_, _, window: &mut Window, _| {
+            window.on_mouse_event({
+                let entity = entity.clone();
+                move |event: &MouseMoveEvent, phase, window, cx| {
+                    if !phase.bubble() || !event.dragging() {
+                        return;
+                    }
+                    let entity_id = entity.entity_id();
+                    let started = entity.update(cx, |view, view_cx| {
+                        view.track_selection_autoscroll_pointer(event.position, window, view_cx)
+                    });
+                    if started {
+                        cx.notify(entity_id);
+                    }
+                }
+            });
+
+            // 指针在行外释放时行级监听收不到事件，这里兜底结束选择，避免拖拽状态悬挂。
+            window.on_mouse_event({
+                let entity = entity.clone();
+                move |event: &MouseUpEvent, phase, _, cx| {
+                    if !phase.bubble() || event.button != MouseButton::Left {
+                        return;
+                    }
+                    let entity_id = entity.entity_id();
+                    let handled = entity.update(cx, |view, _| {
+                        let handled = view.stack_selection_drag.is_some();
+                        if handled {
+                            view.finish_stack_text_selection();
+                        }
+                        handled
+                    });
+                    if handled {
+                        cx.notify(entity_id);
+                    }
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 /// 根据堆栈滚动状态绘制横向和纵向滚动条。
