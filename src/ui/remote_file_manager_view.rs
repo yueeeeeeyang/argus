@@ -123,8 +123,6 @@ fn render_toolbar(
         .items_center()
         .gap_2()
         .px_3()
-        .border_b_1()
-        .border_color(rgb(theme.border))
         .child(toolbar_button(
             app_entity.clone(),
             "remote-file-parent-dir",
@@ -466,8 +464,6 @@ fn render_status_line(session: &RemoteFileSessionState, theme: &AppTheme) -> imp
         .items_center()
         .justify_between()
         .px_3()
-        .border_t_1()
-        .border_color(rgb(theme.border))
         .text_size(px(12.0))
         .text_color(rgb(theme.foreground_muted))
         .child(
