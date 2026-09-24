@@ -35,6 +35,9 @@ const TEXTAREA_SCROLLBAR_BORDER_GAP: f32 = 3.0;
 const TEXTAREA_SCROLLBAR_MIN_THUMB: f32 = 18.0;
 /// 多行文本域滚动条滑块厚度。
 const TEXTAREA_SCROLLBAR_THUMB_SIZE: f32 = 4.0;
+/// 普通样式附件按钮（如清空）的右侧留白：避开贴边纵向滚动条（边距 + 滑块厚度），再留 2px 间距。
+const TEXTAREA_ACCESSORY_RIGHT_INSET: f32 =
+    TEXTAREA_SCROLLBAR_BORDER_GAP + TEXTAREA_SCROLLBAR_THUMB_SIZE + 2.0;
 
 /// 原生文本编辑写回回调；单行输入框和文本域共享同一签名。
 type NativeEditCallback = Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>;
@@ -426,10 +429,11 @@ pub(crate) fn render_textarea(
         !textarea.is_disabled && (textarea.trailing_accessory_always_visible || textarea.is_focused)
     });
     // 对话编辑器的发送按钮收进独立底栏，文本区不再为按钮预留整列横向空间；
-    // 普通样式的辅助按钮仍悬浮在文本区角落，文本区按按钮宽度让位。
+    // 普通样式的辅助按钮悬浮在右上角、贴边纵向滚动条左侧，文本区按
+    // "按钮宽 + 按钮右侧留白 + 4px 文本间距"让位，按钮、滚动条与文本互不遮挡。
     let right_padding =
         if textarea.style == TextareaStyle::Default && visible_trailing_accessory.is_some() {
-            trailing_button_size + horizontal_padding
+            trailing_button_size + TEXTAREA_ACCESSORY_RIGHT_INSET + 4.0
         } else {
             horizontal_padding
         };
@@ -665,6 +669,7 @@ pub(crate) fn render_textarea(
                                     theme.foreground_muted,
                                     has_user_content,
                                     horizontal_padding,
+                                    right_padding,
                                     vertical_padding,
                                 )),
                         ),
@@ -691,13 +696,13 @@ pub(crate) fn render_textarea(
                     )),
             )
         })
-        // 普通样式的辅助按钮继续悬浮在文本区角落。
+        // 普通样式的辅助按钮悬浮在文本区右上角，右侧留白避开贴边纵向滚动条。
         .when_some(default_accessory, |this, accessory| {
             let on_trailing_click = on_trailing_click.clone();
             this.child(
                 div()
                     .absolute()
-                    .right(px(4.0))
+                    .right(px(TEXTAREA_ACCESSORY_RIGHT_INSET))
                     .when(
                         textarea.trailing_accessory_position == TextareaAccessoryPosition::TopRight,
                         |this| this.top(px(4.0)),
@@ -1328,13 +1333,16 @@ struct TextareaScrollbarDrag {
 ///
 /// 滚动条贴近文本域边框绘制：轨道沿滚动方向向容器内边距区域延伸、滑块近侧边越过
 /// 内边距贴合边框，使滑块与边框的间隔保持为 `TEXTAREA_SCROLLBAR_BORDER_GAP`。
+/// 左右内边距分别传入：普通样式附件按钮可见时右侧内边距更大，纵向滚动条仍贴合边框，
+/// 不被按钮挤到按钮左侧。
 fn render_textarea_scrollbars(
     textarea_id: &'static str,
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
     color: u32,
     has_user_content: bool,
-    horizontal_inset: f32,
+    left_inset: f32,
+    right_inset: f32,
     vertical_inset: f32,
 ) -> Vec<AnyElement> {
     let bounds = scroll_handle.bounds();
@@ -1369,7 +1377,7 @@ fn render_textarea_scrollbars(
                 textarea_id,
                 TextareaScrollbarAxis::Vertical,
                 metrics,
-                px(TEXTAREA_SCROLLBAR_BORDER_GAP - horizontal_inset),
+                px(TEXTAREA_SCROLLBAR_BORDER_GAP - right_inset),
                 bounds,
                 scroll_handle.clone(),
                 scroll_state.clone(),
@@ -1384,10 +1392,12 @@ fn render_textarea_scrollbars(
         } else {
             px(0.0)
         };
-        let track_extension = px(horizontal_inset - TEXTAREA_SCROLLBAR_BORDER_GAP);
+        // 轨道两端分别按左右内边距向边框延伸；右侧附件按钮可见时右端延伸更多。
+        let track_start_extension = px(left_inset - TEXTAREA_SCROLLBAR_BORDER_GAP);
+        let track_end_extension = px(right_inset - TEXTAREA_SCROLLBAR_BORDER_GAP);
         if let Some(metrics) = textarea_scrollbar_metrics(
-            -track_extension,
-            bounds.size.width + track_extension * 2.0 - reserved_corner,
+            -track_start_extension,
+            bounds.size.width + track_start_extension + track_end_extension - reserved_corner,
             bounds.size.width,
             max_offset.width,
             -offset.x,

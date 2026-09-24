@@ -205,8 +205,6 @@ const SOURCE_LOAD_PROGRESS_TRACK_WIDTH: f32 = 320.0;
 const SOURCE_LOAD_PROGRESS_SEGMENT_WIDTH: f32 = 120.0;
 /// 来源完整加载进度条滑动段单次滑出时长。
 const SOURCE_LOAD_PROGRESS_DURATION_MS: u64 = 1200;
-/// 当前处理位置展示的最大字符数；超长路径保留尾部，文件名比前缀更有辨识度。
-const SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS: usize = 120;
 
 /// 渲染来源完整加载进度界面：旋转图标、不定态进度条、已扫描节点数和正在处理的位置。
 ///
@@ -221,9 +219,9 @@ fn render_source_load_progress(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
                 format!("正在物化日志到工作目录…已处理 {} 项", progress.scanned)
             } else {
                 format!(
-                    "正在物化日志到工作目录（已处理 {} 项），当前：{}",
+                    "正在物化日志（已处理 {} 项），当前：{}",
                     progress.scanned,
-                    truncate_source_load_current(&progress.current)
+                    source_load_current_display(&progress.current)
                 )
             }
         }
@@ -234,7 +232,7 @@ fn render_source_load_progress(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
                 format!(
                     "已扫描 {} 项，当前：{}",
                     progress.scanned,
-                    truncate_source_load_current(&progress.current)
+                    source_load_current_display(&progress.current)
                 )
             }
         }
@@ -307,7 +305,6 @@ fn render_source_load_progress(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
                     div()
                         .w_full()
                         .overflow_hidden()
-                        .whitespace_nowrap()
                         .text_size(px(detail_font_size))
                         .text_color(rgb(theme.foreground_muted))
                         .child(detail),
@@ -316,17 +313,18 @@ fn render_source_load_progress(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
         .into_any_element()
 }
 
-/// 截断超长当前处理路径；保留尾部并补省略号前缀，避免单行文本撑出内容区。
-fn truncate_source_load_current(current: &str) -> String {
-    let char_count = current.chars().count();
-    if char_count <= SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS {
-        return current.to_string();
+/// 提取当前处理位置的展示文本：只保留末尾两级路径分量（目录/文件名），
+/// 完整路径前缀对定位进度没有帮助，精简后详情行能在内容区内完整显示。
+fn source_load_current_display(current: &str) -> String {
+    let trimmed = current.trim_end_matches(['/', '\\']);
+    let mut segments = trimmed.rsplit(['/', '\\']);
+    let Some(file_name) = segments.next() else {
+        return String::new();
+    };
+    match segments.next() {
+        Some(parent) if !parent.is_empty() => format!("{parent}/{file_name}"),
+        _ => file_name.to_string(),
     }
-    let tail = current
-        .chars()
-        .skip(char_count - SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS)
-        .collect::<String>();
-    format!("…{tail}")
 }
 
 /// 渲染内容区居中提示，可选在标题前追加一个状态图标。
@@ -454,18 +452,20 @@ mod tests {
         assert_eq!(visible.char_range, 2..8);
     }
 
-    /// 验证超长当前处理路径截断时保留尾部文件名并补省略号前缀。
+    /// 验证当前处理位置只展示末尾两级路径分量，精简后详情行可完整显示。
     #[test]
-    fn source_load_current_truncation_keeps_tail() {
-        let long_path = format!("{}/target.log", "a".repeat(200));
-        let truncated = truncate_source_load_current(&long_path);
-
-        assert!(truncated.starts_with('…'));
-        assert!(truncated.ends_with("target.log"));
+    fn source_load_current_display_keeps_last_two_segments() {
         assert_eq!(
-            truncated.chars().count(),
-            SOURCE_LOAD_PROGRESS_CURRENT_MAX_CHARS + 1
+            source_load_current_display("/Users/me/Downloads/pack.zip!/2026-09-23/server.log"),
+            "2026-09-23/server.log"
         );
-        assert_eq!(truncate_source_load_current("logs/app.log"), "logs/app.log");
+        assert_eq!(source_load_current_display("logs/app.log"), "logs/app.log");
+        assert_eq!(source_load_current_display("app.log"), "app.log");
+        assert_eq!(
+            source_load_current_display("C:\\logs\\2026-09-23\\server.log"),
+            "2026-09-23/server.log"
+        );
+        assert_eq!(source_load_current_display("logs/"), "logs");
+        assert_eq!(source_load_current_display(""), "");
     }
 }
