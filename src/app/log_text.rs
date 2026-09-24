@@ -703,7 +703,7 @@ impl ArgusApp {
 
         let key = keystroke.key.to_lowercase();
         if keystroke.modifiers.secondary() && key == "f" {
-            self.open_log_search_window(cx);
+            self.open_log_search_dialog(cx);
             return;
         }
 

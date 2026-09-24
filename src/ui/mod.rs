@@ -20,7 +20,7 @@ pub(crate) mod input_native;
 pub(crate) mod jstack_analysis_view;
 pub(crate) mod jstack_thread_detail_window;
 pub(crate) mod log_content_view;
-pub(crate) mod log_search_window;
+pub(crate) mod log_search_dialog;
 pub(crate) mod main_window;
 pub(crate) mod remote_file_dialog;
 pub(crate) mod remote_file_manager_view;

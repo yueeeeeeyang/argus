@@ -184,7 +184,7 @@ pub(crate) const SEARCH_RECENT_KEYWORDS_MAX: usize = 20;
 pub(crate) struct LogSearchConfig {
     /// 快搜关键字原始输入，使用英文逗号分隔；解析和去重在搜索启动时执行。
     pub quick_keywords: String,
-    /// 最近搜索关键字历史，最新在前；保存最近 20 条，搜索窗口关键字输入框下拉展示。
+    /// 最近搜索关键字历史，最新在前；保存最近 20 条，搜索对话框关键字输入框下拉展示。
     #[serde(default)]
     pub recent_keywords: Vec<String>,
 }

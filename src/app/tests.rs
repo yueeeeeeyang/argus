@@ -1761,6 +1761,42 @@ fn log_search_shortcut_requires_log_text_focus() {
     assert!(!app.is_active_log_view_focused());
 }
 
+/// 验证日志搜索以主窗口内模态框形态打开与关闭，不再创建独立窗口。
+#[gpui::test]
+fn log_search_opens_and_closes_as_main_window_modal(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| app_with_placeholder_sources());
+    let app_log_id = app.read_with(cx, |app, _| source_id_by_label(app, "app.log"));
+
+    app.update(cx, |app, app_cx| {
+        app.select_source(app_log_id);
+        assert!(!app.log_search.is_dialog_open);
+
+        app.open_log_search_dialog(app_cx);
+        assert!(app.log_search.is_dialog_open, "搜索应以对话框形态打开");
+        assert!(
+            app.log_search.search_view.is_some(),
+            "应创建主窗口内搜索模态框子视图"
+        );
+        assert!(
+            app.log_search.keyword_input.is_focused,
+            "打开后关键字输入框应获得焦点"
+        );
+
+        // 再次打开只聚焦已有对话框，不重建子视图。
+        let existing_view = app.log_search.search_view.clone();
+        app.open_log_search_dialog(app_cx);
+        assert_eq!(app.log_search.search_view, existing_view);
+
+        app.close_log_search_dialog();
+        assert!(!app.log_search.is_dialog_open);
+        assert!(
+            app.log_search.search_view.is_none(),
+            "关闭后应移除模态框子视图"
+        );
+        assert!(!app.log_search.keyword_input.is_focused);
+    });
+}
+
 /// 验证日志行号打点在同一行重复点击时会添加再移除。
 #[test]
 fn toggling_log_line_marker_adds_and_removes_line() {

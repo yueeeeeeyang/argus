@@ -267,7 +267,7 @@ impl ArgusApp {
     }
 }
 
-/// 应用日志搜索窗口输入框的原生编辑，并维护关键字搜索缓存。
+/// 应用日志搜索对话框输入框的原生编辑，并维护关键字搜索缓存。
 fn apply_native_log_search_edit(
     app: &mut ArgusApp,
     input_kind: LogSearchInputKind,

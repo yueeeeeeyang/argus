@@ -202,7 +202,7 @@ fn load_external_paths_in_main_window(
 
 /// 前置观察主窗口日志阅读快捷键。
 ///
-/// 说明：搜索窗口属于全局日志操作，只要已有日志标签即可触发；F2 打点跳转只要求当前为已读取
+/// 说明：搜索对话框属于全局日志操作，只要已有日志标签即可触发；F2 打点跳转只要求当前为已读取
 /// 日志标签，避免日志正文子元素焦点丢失时快捷键失效；复制仍限制在日志正文焦点内，避免抢走输入框、
 /// 下拉框等普通控件的复制快捷键。
 fn observe_log_view_shortcuts(cx: &mut App, window_handle: gpui::WindowHandle<ArgusApp>) {
@@ -232,7 +232,7 @@ fn observe_log_view_shortcuts(cx: &mut App, window_handle: gpui::WindowHandle<Ar
                 if !app.has_open_log_tab() {
                     return false;
                 }
-                app.open_log_search_window(cx);
+                app.open_log_search_dialog(cx);
                 cx.notify();
                 return true;
             }

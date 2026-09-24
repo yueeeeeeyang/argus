@@ -9,8 +9,8 @@ use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::ui::{
     agent_dialog, ai_settings_editor, archive_password_dialog, components::context_menu,
-    connection_dialog, custom_title_bar, log_content_view, remote_file_dialog, settings_window,
-    source_panel, source_picker, source_resizer,
+    connection_dialog, custom_title_bar, log_content_view, log_search_dialog, remote_file_dialog,
+    settings_window, source_panel, source_picker, source_resizer,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
@@ -121,6 +121,14 @@ pub(crate) fn render(
         })
         .when(app.remote_file_dialog.is_some(), |this| {
             this.child(remote_file_dialog::render(app, cx))
+        })
+        // 搜索对话框先于密码弹窗等更高优先级提示渲染，保证搜索加密来源时密码弹窗显示在最上层。
+        .when_some(app.log_search.search_view.clone(), |this, search_view| {
+            this.child(log_search_dialog::render_log_search_dialog(
+                search_view,
+                &theme,
+                cx,
+            ))
         })
         .when(app.archive_password_prompt.is_some(), |this| {
             this.child(archive_password_dialog::render(app, cx))

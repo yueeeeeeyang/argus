@@ -340,7 +340,7 @@ pub(crate) struct ArgusApp {
     pub log_selection_autoscroll: Option<LogSelectionAutoscroll>,
     /// 拖拽选择自动滚动逐帧循环是否已注册，避免重复注册。
     pub log_selection_autoscroll_loop_active: bool,
-    /// 独立日志搜索窗口、搜索任务和结果面板状态。
+    /// 日志搜索对话框、搜索任务和结果面板状态。
     pub log_search: LogSearchState,
     /// Jstack 线程日志分析页签状态表。
     pub jstack_analyses: HashMap<usize, JstackAnalysisState>,
@@ -1527,7 +1527,7 @@ impl ArgusApp {
     ///
     /// 说明：结果面板由结果、运行中任务或提示消息共同决定是否可见，并没有独立的打开
     /// 标志；这里只在面板确实可见且当前标签属于分析页时复用完整关闭流程，以同步取消
-    /// 搜索任务、清理结果和正文命中高亮，同时保留搜索窗口中的查询条件。
+    /// 搜索任务、清理结果和正文命中高亮，同时保留搜索对话框中的查询条件。
     fn close_log_search_results_for_active_analysis_tab(&mut self) {
         let is_analysis_tab = matches!(
             self.active_tab_kind(),

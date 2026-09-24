@@ -6,12 +6,12 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use gpui::{Pixels, UniformListScrollHandle, WindowHandle};
+use gpui::{Entity, Pixels, UniformListScrollHandle};
 
 use crate::loader::SourceId;
 use crate::search::search_engine::{SearchProgress, SearchResult, SearchScope};
 use crate::search::search_task::SearchTaskState;
-use crate::ui::log_search_window::LogSearchWindow;
+use crate::ui::log_search_dialog::LogSearchDialog;
 
 use super::constants::SEARCH_RESULT_PANEL_HEIGHT_DEFAULT;
 use super::types::TextInputState;
@@ -56,7 +56,7 @@ pub(crate) enum SearchResultListItem {
 /// 日志搜索任务来源，用于结果面板区分普通搜索和快搜。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SearchRunKind {
-    /// 搜索窗口关键字输入框发起的普通搜索。
+    /// 搜索对话框关键字输入框发起的普通搜索。
     Normal,
     /// 设置中的快搜关键字集合发起的一键搜索。
     QuickKeywords,
@@ -89,13 +89,13 @@ pub(crate) struct SearchResultPanelResizeDrag {
     pub start_height: f32,
 }
 
-/// 独立日志搜索窗口和结果面板共享的运行期状态。
+/// 日志搜索对话框和结果面板共享的运行期状态。
 #[derive(Clone, Debug)]
 pub(crate) struct LogSearchState {
-    /// 搜索窗口是否已打开。
-    pub is_window_open: bool,
-    /// 搜索窗口句柄；再次打开时用于置前。
-    pub window_handle: Option<WindowHandle<LogSearchWindow>>,
+    /// 搜索对话框是否已打开。
+    pub is_dialog_open: bool,
+    /// 搜索对话框子视图；打开时由主窗口渲染为主窗口内模态框。
+    pub search_view: Option<Entity<LogSearchDialog>>,
     /// 当前搜索范围。
     pub scope: SearchScope,
     /// 关键字输入框状态。
@@ -172,8 +172,8 @@ impl Default for LogSearchState {
     /// 创建空闲搜索状态。
     fn default() -> Self {
         Self {
-            is_window_open: false,
-            window_handle: None,
+            is_dialog_open: false,
+            search_view: None,
             scope: SearchScope::CurrentFile,
             keyword_input: TextInputState::default(),
             keyword_history_open: false,

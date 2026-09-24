@@ -106,7 +106,7 @@ pub(crate) struct ArgusTab {
     pub kind: TabKind,
 }
 
-/// 日志搜索窗口输入框类型，用于复用同一套输入状态处理。
+/// 日志搜索对话框输入框类型，用于复用同一套输入状态处理。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LogSearchInputKind {
     /// 关键字输入框。
@@ -177,7 +177,7 @@ pub(crate) enum AppTextInputTarget {
     ArchivePassword,
     /// 来源选择器路径输入框。
     SourcePickerPath,
-    /// 独立日志搜索窗口输入框。
+    /// 日志搜索对话框输入框。
     LogSearch(LogSearchInputKind),
     /// Runtime 分析页过滤输入框。
     RuntimeFilter {

@@ -1,4 +1,4 @@
-//! 文件职责：维护日志搜索窗口、后台搜索任务、来源树多选和结果跳转逻辑。
+//! 文件职责：维护日志搜索对话框、后台搜索任务、来源树多选和结果跳转逻辑。
 //! 创建日期：2026-06-11
 //! 修改日期：2026-07-16
 //! 作者：Argus 开发团队
@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use gpui::{
     AppContext, ClipboardItem, Context, Keystroke, Modifiers, Pixels, ScrollStrategy, Timer,
-    WindowBounds, WindowOptions, px, size,
 };
 
 use super::{
@@ -36,19 +35,8 @@ use crate::search::search_engine::{
     SearchResult, SearchScope, SearchTarget, SearchTaskSummary,
 };
 use crate::search::search_task::SearchTaskState;
-use crate::ui::log_search_window::LogSearchWindow;
+use crate::ui::log_search_dialog::LogSearchDialog;
 
-/// 搜索窗口默认宽度。
-const LOG_SEARCH_WINDOW_WIDTH: f32 = 560.0;
-/// 搜索窗口默认高度。
-///
-/// 内容（标题 + 关键字 + 目录 + 模式行 + 操作行 + 内外边距）约需 244px；底部用 flex_1 占位
-/// 把操作行顶到底部，280px 既容下完整内容与按钮上方留白，也为关键字历史下拉留出展开空间。
-const LOG_SEARCH_WINDOW_HEIGHT: f32 = 280.0;
-/// 搜索窗口最小宽度。
-const LOG_SEARCH_WINDOW_MIN_WIDTH: f32 = 460.0;
-/// 搜索窗口最小高度。
-const LOG_SEARCH_WINDOW_MIN_HEIGHT: f32 = 250.0;
 /// 搜索后台事件合并刷新间隔；降低大量结果时主窗口重绘频率。
 const LOG_SEARCH_UI_POLL_INTERVAL_MS: u64 = 80;
 /// 单次 UI tick 最多处理的后台事件数，避免一次性追加过多结果造成滚动卡顿。
@@ -139,76 +127,36 @@ enum QuickMatchAction {
 }
 
 impl ArgusApp {
-    /// 打开或置前独立日志搜索窗口，并聚焦关键字输入框。
+    /// 打开日志搜索对话框；已打开时只把焦点交还关键字输入框。
     ///
     /// 参数说明：
-    /// - `cx`：GPUI 上下文，用于创建独立无标题栏窗口。
-    pub(crate) fn open_log_search_window(&mut self, cx: &mut Context<Self>) {
+    /// - `cx`：GPUI 上下文，用于创建主窗口内的搜索模态框子视图。
+    pub(crate) fn open_log_search_dialog(&mut self, cx: &mut Context<Self>) {
         if !self.ensure_active_log_tab_for_search() {
             self.placeholder_notice = "请先打开日志再搜索".to_string();
             return;
         }
 
-        if self.log_search.is_window_open {
-            if let Some(window_handle) = self.log_search.window_handle
-                && window_handle
-                    .update(cx, |_, window, _| window.activate_window())
-                    .is_ok()
-            {
-                self.prepare_log_search_defaults();
-                self.focus_log_search_keyword_for_open();
-                self.placeholder_notice = "日志搜索窗口已显示到最前".to_string();
-                return;
-            }
-
-            self.log_search.is_window_open = false;
-            self.log_search.window_handle = None;
-        }
-
         self.prepare_log_search_defaults();
-        self.log_search.is_window_open = true;
-        self.focus_log_search_keyword_for_open();
-
-        let app_entity = cx.entity();
-        let initial_theme = self.theme.clone();
-        let initial_search = self.log_search.clone();
-        let bounds = gpui::Bounds::centered(
-            None,
-            size(px(LOG_SEARCH_WINDOW_WIDTH), px(LOG_SEARCH_WINDOW_HEIGHT)),
-            cx,
-        );
-        let window_options = WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(
-                px(LOG_SEARCH_WINDOW_MIN_WIDTH),
-                px(LOG_SEARCH_WINDOW_MIN_HEIGHT),
-            )),
-            ..Default::default()
-        };
-
-        match cx.open_window(window_options, move |_, cx| {
-            cx.new(|cx| LogSearchWindow::new(app_entity, initial_theme, initial_search, cx))
-        }) {
-            Ok(window_handle) => {
-                self.log_search.window_handle = Some(window_handle);
-                self.placeholder_notice = "已打开日志搜索窗口".to_string();
-            }
-            Err(error) => {
-                self.log_search.is_window_open = false;
-                self.log_search.window_handle = None;
-                self.log_search.message = Some(error.to_string());
-                self.placeholder_notice = format!("打开日志搜索窗口失败：{error}");
-            }
+        if self.log_search.search_view.is_none() {
+            let app_entity = cx.entity();
+            let initial_theme = self.theme.clone();
+            let initial_search = self.log_search.clone();
+            self.log_search.search_view = Some(
+                cx.new(|cx| LogSearchDialog::new(app_entity, initial_theme, initial_search, cx)),
+            );
         }
+        self.log_search.is_dialog_open = true;
+        self.focus_log_search_keyword_for_open();
+        self.placeholder_notice = "已打开日志搜索".to_string();
     }
 
-    /// 关闭独立日志搜索窗口；保留底部结果面板，便于继续查看搜索结果。
-    pub(crate) fn close_log_search_window(&mut self) {
-        self.log_search.is_window_open = false;
-        self.log_search.window_handle = None;
+    /// 关闭日志搜索对话框；保留底部结果面板，便于继续查看搜索结果。
+    pub(crate) fn close_log_search_dialog(&mut self) {
+        self.log_search.is_dialog_open = false;
+        self.log_search.search_view = None;
         self.clear_log_search_input_focus();
-        self.placeholder_notice = "已关闭日志搜索窗口".to_string();
+        self.placeholder_notice = "已关闭日志搜索".to_string();
     }
 
     /// 设置搜索范围。
@@ -271,7 +219,7 @@ impl ArgusApp {
         self.start_log_search_with_queries(scope, vec![query], SearchRunKind::Normal, cx);
     }
 
-    /// 按当前搜索窗口范围启动一键快搜。
+    /// 按当前搜索对话框范围启动一键快搜。
     ///
     /// 参数说明：
     /// - `cx`：GPUI 上下文，用于安排后台线程事件轮询。
@@ -396,6 +344,9 @@ impl ArgusApp {
         }
 
         Self::poll_log_search_worker_events(generation, receiver, cx);
+
+        // 搜索任务已启动：自动关闭搜索对话框，由底部结果面板展示进度与结果。
+        self.close_log_search_dialog();
 
         self.placeholder_notice = (if scope == SearchScope::Directory {
             "正在发现目录搜索目标".to_string()
@@ -1188,7 +1139,7 @@ impl ArgusApp {
         }
     }
 
-    /// 处理搜索窗口输入框键盘输入。
+    /// 处理搜索对话框输入框键盘输入。
     pub(crate) fn handle_log_search_input_key(
         &mut self,
         input_kind: LogSearchInputKind,
@@ -1214,7 +1165,7 @@ impl ArgusApp {
             return;
         }
 
-        // 关键字历史下拉展开时，优先消费导航键，避免方向键移动光标或 Esc 误关窗口。
+        // 关键字历史下拉展开时，优先消费导航键，避免方向键移动光标或 Esc 误关对话框。
         if input_kind == LogSearchInputKind::Keyword && self.log_search.keyword_history_open {
             match key.as_str() {
                 "up" | "arrowup" => {
@@ -1244,7 +1195,7 @@ impl ArgusApp {
         match key.as_str() {
             "backspace" => self.delete_log_search_input_backward(input_kind),
             "delete" => self.delete_log_search_input_forward(input_kind),
-            "escape" => self.close_log_search_window(),
+            "escape" => self.close_log_search_dialog(),
             "enter" => self.start_log_search(self.log_search.scope, cx),
             "left" | "arrowleft" => {
                 self.move_log_search_input_left(input_kind, keystroke.modifiers.shift)
@@ -1560,7 +1511,7 @@ impl ArgusApp {
         was_resizing
     }
 
-    /// 从当前 UI 状态推导搜索窗口默认值。
+    /// 从当前 UI 状态推导搜索对话框默认值。
     fn prepare_log_search_defaults(&mut self) {
         self.prepare_log_search_keyword_default();
         self.prepare_log_search_directory_default();
@@ -1588,7 +1539,7 @@ impl ArgusApp {
         }
     }
 
-    /// 搜索窗口被唤起时聚焦关键字输入框；若已有内容则自动全选，便于直接覆盖搜索。
+    /// 搜索对话框被唤起时聚焦关键字输入框；若已有内容则自动全选，便于直接覆盖搜索。
     fn focus_log_search_keyword_for_open(&mut self) {
         self.clear_log_search_input_focus();
         let keyword = &mut self.log_search.keyword_input;
@@ -2773,7 +2724,7 @@ mod tests {
         assert!(app.log_search.results.is_empty());
     }
 
-    /// 验证唤起搜索窗口时会保留上次关键字并自动全选，方便直接覆盖输入。
+    /// 验证唤起搜索对话框时会保留上次关键字并自动全选，方便直接覆盖输入。
     #[test]
     fn opening_search_window_selects_existing_keyword() {
         let mut app = test_app();
@@ -2785,6 +2736,44 @@ mod tests {
         assert_eq!(app.log_search.keyword_input.cursor, 5);
         assert_eq!(app.log_search.keyword_input.selection_anchor, Some(0));
         assert!(app.log_search.keyword_input.is_focused);
+    }
+
+    /// 验证启动搜索后自动关闭搜索对话框，进度交由底部结果面板展示。
+    #[gpui::test]
+    fn starting_log_search_closes_search_dialog(cx: &mut gpui::TestAppContext) {
+        let (registry, _root_id, first_id, _second_id) = registry_with_directory_logs();
+        let app = cx.new(|_| test_app());
+
+        app.update(cx, |app, app_cx| {
+            app.source_registry = registry;
+            app.tabs.push(crate::app::ArgusTab {
+                id: 1,
+                title: "app.log".to_string(),
+                kind: TabKind::LogSource {
+                    source_id: first_id,
+                    path: "logs/app.log".to_string(),
+                },
+            });
+            app.active_tab_id = 1;
+            app.next_tab_id = 2;
+            app.log_search.directory_input.value = "logs".to_string();
+
+            app.open_log_search_dialog(app_cx);
+            assert!(app.log_search.is_dialog_open);
+
+            app.log_search.keyword_input.value = "ERROR".to_string();
+            app.start_log_search(SearchScope::Directory, app_cx);
+
+            assert!(
+                !app.log_search.is_dialog_open,
+                "开始搜索后应自动关闭搜索对话框"
+            );
+            assert!(app.log_search.search_view.is_none(), "对话框子视图应被移除");
+            assert!(
+                app.log_search.task_state.is_running(),
+                "搜索任务应处于运行态"
+            );
+        });
     }
 
     /// 验证日志选区存在时会优先填充到搜索关键字，覆盖上一次搜索词。
@@ -2831,7 +2820,7 @@ mod tests {
         let _ = std::fs::remove_file(log_path);
     }
 
-    /// 验证搜索窗口选项切换更新真实搜索状态，而不是旧占位搜索字段。
+    /// 验证搜索对话框选项切换更新真实搜索状态，而不是旧占位搜索字段。
     #[test]
     fn toggles_log_search_options_on_runtime_state() {
         let mut app = test_app();
