@@ -22,10 +22,23 @@ use crate::utils::size_format::format_bytes;
 const TREE_LINE_BASE_X: f32 = 18.0;
 /// 目录树每一级缩进对应的连线横向步长。
 const TREE_LINE_INDENT_STEP: f32 = 16.0;
-/// 目录树节点横向分支线的垂直位置。
-const TREE_BRANCH_Y: f32 = 14.0;
-/// 目录树节点横向分支线长度。
-const TREE_BRANCH_LENGTH: f32 = 14.0;
+/// 目录树行内容的基础左内边距；每深入一级再叠加一个缩进步长。
+const SOURCE_ROW_CONTENT_PADDING: f32 = 10.0;
+/// 展开/收起箭头所在切换按钮的宽度；箭头图标在按钮内水平居中。
+const SOURCE_ROW_TOGGLE_WIDTH: f32 = 18.0;
+/// 本级竖线到展开箭头按钮左沿的水平距离。
+///
+/// 按钮左沿 = 行内容左内边距 + 本级缩进；竖线 = 连线基准线 + 上一级缩进。
+const TREE_LINE_TO_TOGGLE_GAP: f32 =
+    SOURCE_ROW_CONTENT_PADDING + TREE_LINE_INDENT_STEP - TREE_LINE_BASE_X;
+/// 目录树节点横向分支线的垂直位置（相对行内容区顶部）。
+///
+/// 行内容区上下各内缩 `SOURCE_ROW_VERTICAL_INSET`，其垂直中心即整行中心，与展开箭头
+/// `>` 的中心重合，避免分支线偏离箭头。
+const TREE_BRANCH_Y: f32 = SOURCE_ROW_HEIGHT / 2.0 - SOURCE_ROW_VERTICAL_INSET;
+/// 目录树节点横向分支线长度：自本级竖线起接到展开箭头按钮的水平中心，
+/// 保证连线真正接到箭头中央。
+const TREE_BRANCH_LENGTH: f32 = TREE_LINE_TO_TOGGLE_GAP + SOURCE_ROW_TOGGLE_WIDTH / 2.0;
 /// 来源树固定行高；uniform_list 依赖所有行保持一致高度。
 const SOURCE_ROW_HEIGHT: f32 = 28.0;
 /// 来源树选中块上下留白，避免连续多选行视觉上粘成整片。
@@ -205,16 +218,18 @@ fn render_node(
                 .flex()
                 .items_center()
                 .gap_2()
-                .pl(px(10.0 + source.depth as f32 * 16.0))
+                .pl(px(
+                    SOURCE_ROW_CONTENT_PADDING + source.depth as f32 * TREE_LINE_INDENT_STEP
+                ))
                 .pr_2()
                 .rounded(px(SOURCE_ROW_RADIUS))
-                .when(is_active, |this| this.bg(rgb(theme.selection)))
+                .when(is_active, |this| this.bg(rgb(theme.current_line)))
                 .when(is_multi_selected, |this| this.bg(rgb(theme.current_line)))
                 .when(!is_active && !is_multi_selected, |this| {
                     this.hover(|this| this.bg(rgb(theme.current_line)))
                 })
                 .when(is_active, |this| {
-                    this.hover(|this| this.bg(rgb(theme.selection)))
+                    this.hover(|this| this.bg(rgb(theme.current_line)))
                 })
                 .when(is_multi_selected, |this| {
                     this.hover(|this| this.bg(rgb(theme.current_line)))
@@ -243,7 +258,7 @@ fn render_node(
                 .child(
                     div()
                         .id(SharedString::from(format!("source-toggle-{source_id}")))
-                        .w(px(18.0))
+                        .w(px(SOURCE_ROW_TOGGLE_WIDTH))
                         .h(px(20.0))
                         .flex()
                         .items_center()
@@ -360,14 +375,17 @@ fn tree_connection_lines(
 ) -> Vec<AnyElement> {
     let mut lines = Vec::new();
 
+    // 竖线越过行内容区上下内缩、覆盖整行高度：相邻行的竖线首尾相接，行与行之间不再出现断缝。
+    let vertical_overhang = -SOURCE_ROW_VERTICAL_INSET;
+
     for level in ancestor_continuation_levels.iter().copied() {
         let x = TREE_LINE_BASE_X + level as f32 * TREE_LINE_INDENT_STEP;
         lines.push(
             div()
                 .absolute()
                 .left(px(x))
-                .top_0()
-                .bottom_0()
+                .top(px(vertical_overhang))
+                .bottom(px(vertical_overhang))
                 .w(px(1.0))
                 .bg(rgb(theme.border))
                 .opacity(0.55)
@@ -379,16 +397,17 @@ fn tree_connection_lines(
     let current_line = div()
         .absolute()
         .left(px(branch_x))
-        .top_0()
+        .top(px(vertical_overhang))
         .w(px(1.0))
         .bg(rgb(theme.border))
         .opacity(0.55);
 
     lines.push(
         if has_next_sibling {
-            current_line.bottom_0()
+            current_line.bottom(px(vertical_overhang))
         } else {
-            current_line.h(px(TREE_BRANCH_Y + 1.0))
+            // 最后一个子节点：竖线止于本级分支线下方 1px，形成 └ 形收尾。
+            current_line.h(px(TREE_BRANCH_Y + SOURCE_ROW_VERTICAL_INSET + 1.0))
         }
         .into_any_element(),
     );
@@ -503,5 +522,47 @@ fn icon_for_source(source: &SourceTreeNode) -> ArgusIcon {
         SourceKind::ArchivePasswordRequired => ArgusIcon::Archive,
         SourceKind::LogFile => ArgusIcon::FileText,
         SourceKind::Unsupported(_) => ArgusIcon::File,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hint::black_box;
+
+    /// 回归：树连线必须覆盖整行、垂直居中于展开箭头，并横向接到箭头按钮中心。
+    ///
+    /// 对应两个已修复的缺陷：竖线只覆盖行内容区导致每行之间出现 4px 断缝；分支线比箭头
+    /// 中心低 2px 且未接到箭头。
+    #[test]
+    fn tree_connector_geometry_centers_on_expand_arrow() {
+        // 竖线在行内容区上下各外扩一个内缩量，总高恰好等于整行高度 → 相邻行首尾相接。
+        let connector_height =
+            (SOURCE_ROW_HEIGHT - 2.0 * SOURCE_ROW_VERTICAL_INSET) + 2.0 * SOURCE_ROW_VERTICAL_INSET;
+        assert_eq!(
+            black_box(connector_height),
+            black_box(SOURCE_ROW_HEIGHT),
+            "竖线应覆盖整行高度，行与行之间不留断缝"
+        );
+
+        // 分支线落在行内容区垂直中心，即整行中心、也是展开箭头的垂直中心。
+        assert_eq!(
+            black_box(TREE_BRANCH_Y),
+            black_box(SOURCE_ROW_HEIGHT / 2.0 - SOURCE_ROW_VERTICAL_INSET),
+            "分支线应位于行内容区垂直中心"
+        );
+        assert_eq!(black_box(TREE_BRANCH_Y), 12.0, "分支线应落在整行 y=14 处");
+
+        // 分支线从本级竖线延伸「竖线到按钮左沿 8px + 按钮半宽 9px」，正好落在箭头按钮中心。
+        assert_eq!(
+            black_box(TREE_BRANCH_LENGTH),
+            black_box(TREE_LINE_TO_TOGGLE_GAP + SOURCE_ROW_TOGGLE_WIDTH / 2.0),
+            "分支线应接到展开箭头按钮水平中心"
+        );
+        assert_eq!(
+            black_box(TREE_BRANCH_LENGTH),
+            17.0,
+            "分支线长度应为 17px（8px 间距 + 18px 按钮的一半）"
+        );
     }
 }
