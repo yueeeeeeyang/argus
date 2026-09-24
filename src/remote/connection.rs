@@ -1,6 +1,6 @@
 //! 文件职责：维护链接工作区的持久化配置、目录树索引和表单校验规则。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：提供 SSH、SMB、Git、SVN 链接目录、表单校验、过滤索引和受信主机配置。
 
@@ -533,7 +533,7 @@ impl ConnectionConfig {
             &visible_ids,
             is_filtering,
             selected_id,
-            &mut Vec::new(),
+            &[],
             &mut rows,
         );
         rows
@@ -746,7 +746,7 @@ impl ConnectionConfig {
         visible_ids: &BTreeSet<ConnectionNodeId>,
         is_filtering: bool,
         selected_id: Option<ConnectionNodeId>,
-        ancestor_continuation_levels: &mut Vec<usize>,
+        ancestor_continuation_levels: &[usize],
         rows: &mut Vec<ConnectionTreeRow>,
     ) {
         let children = child_index.get(&parent_id).cloned().unwrap_or_default();
@@ -777,11 +777,15 @@ impl ConnectionConfig {
                         has_children,
                         is_selected: selected_id == Some(directory.id),
                         has_next_sibling,
-                        ancestor_continuation_levels: ancestor_continuation_levels.clone(),
+                        ancestor_continuation_levels: ancestor_continuation_levels.to_vec(),
                     });
                     if has_children && (directory.expanded || is_filtering) {
-                        if has_next_sibling {
-                            ancestor_continuation_levels.push(depth);
+                        let mut child_continuation_levels = ancestor_continuation_levels.to_vec();
+                        // 与日志目录树同一口径：只有非根目录才把自身竖线位置（depth - 1）传给
+                        // 子级作为延续线；根目录向下传递会与一级分支线同位重叠，导致分类下
+                        // 最后一个节点竖线穿透分支、无法闭合。
+                        if depth > 0 && has_next_sibling {
+                            child_continuation_levels.push(depth - 1);
                         }
                         self.collect_visible_rows(
                             Some(directory_id),
@@ -790,12 +794,9 @@ impl ConnectionConfig {
                             visible_ids,
                             is_filtering,
                             selected_id,
-                            ancestor_continuation_levels,
+                            &child_continuation_levels,
                             rows,
                         );
-                        if has_next_sibling {
-                            ancestor_continuation_levels.pop();
-                        }
                     }
                 }
                 ConnectionChildRef::Link(link_id) => {
@@ -818,7 +819,7 @@ impl ConnectionConfig {
                         has_children: false,
                         is_selected: selected_id == Some(link.id),
                         has_next_sibling,
-                        ancestor_continuation_levels: ancestor_continuation_levels.clone(),
+                        ancestor_continuation_levels: ancestor_continuation_levels.to_vec(),
                     });
                 }
             }
@@ -1741,6 +1742,59 @@ mod tests {
 
         assert_eq!(directory_row.tooltip, None);
         assert_eq!(link_row.tooltip.as_deref(), Some("deploy@10.0.0.1:22"));
+    }
+
+    /// 验证树连线延续层级与日志目录树同口径：根目录不向一级子节点传递延续线，
+    /// 非根目录有后续兄弟时按自身竖线位置（depth - 1）传递，分类末节点才能闭合。
+    #[test]
+    fn visible_rows_continuation_levels_match_log_tree_semantics() {
+        let mut config = ConnectionConfig::default();
+        let root_a = config.add_directory(None, "环境A").unwrap();
+        config.add_directory(None, "环境B").unwrap();
+        config
+            .add_ssh_link(
+                Some(root_a),
+                "a1",
+                SshLinkConfig {
+                    host: "10.0.0.1".to_string(),
+                    port: 22,
+                    username: "deploy".to_string(),
+                    password: "secret".to_string(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .unwrap();
+        let sub = config.add_directory(Some(root_a), "子目录").unwrap();
+        config
+            .add_ssh_link(
+                Some(sub),
+                "s1",
+                SshLinkConfig {
+                    host: "10.0.0.2".to_string(),
+                    port: 22,
+                    username: "deploy".to_string(),
+                    password: "secret".to_string(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .unwrap();
+        config.add_directory(Some(root_a), "子目录2").unwrap();
+
+        let rows = config.visible_rows("", None);
+        let row = |label: &str| {
+            rows.iter()
+                .find(|row| row.label == label)
+                .unwrap_or_else(|| panic!("应存在 {label} 行"))
+        };
+
+        // 根目录即使有后续兄弟也不向一级子节点传递延续线：
+        // 一级分支线与根级竖线同位，重复传递会让分类下最后一个节点竖线穿透分支。
+        assert!(row("a1").ancestor_continuation_levels.is_empty());
+        assert!(row("子目录").ancestor_continuation_levels.is_empty());
+        // 非根目录有后续兄弟时，按自身竖线位置（depth - 1 = 0）向子级传递延续线。
+        assert_eq!(row("s1").ancestor_continuation_levels, vec![0]);
     }
 
     /// 验证同级目录和链接不能重名。

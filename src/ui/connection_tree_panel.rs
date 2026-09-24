@@ -1,6 +1,6 @@
 //! 文件职责：渲染链接工作区左侧远程链接目录树。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：展示目录与多协议链接、处理选择、过滤、打开会话及链接拖放移动。
 
@@ -24,14 +24,30 @@ const CONNECTION_TREE_FONT_SIZE: f32 = 12.0;
 const CONNECTION_TREE_ICON_SIZE: f32 = 14.0;
 /// 链接树节点选中背景圆角。
 const CONNECTION_ROW_RADIUS: f32 = 5.0;
+/// 链接树选中块上下留白，与行高配合决定连线越界补偿量。
+const CONNECTION_ROW_VERTICAL_INSET: f32 = 2.0;
 /// 链接树连线的首层横坐标，和日志目录树保持一致。
 const CONNECTION_TREE_LINE_BASE_X: f32 = 18.0;
 /// 链接树每一级缩进对应的连线横向步长。
 const CONNECTION_TREE_LINE_INDENT_STEP: f32 = 16.0;
-/// 链接树节点横向分支线的垂直位置。
-const CONNECTION_TREE_BRANCH_Y: f32 = 14.0;
-/// 链接树节点横向分支线长度。
-const CONNECTION_TREE_BRANCH_LENGTH: f32 = 14.0;
+/// 链接树行内容的基础左内边距；每深入一级再叠加一个缩进步长。
+const CONNECTION_ROW_CONTENT_PADDING: f32 = 10.0;
+/// 展开/收起箭头所在切换按钮的宽度；箭头图标在按钮内水平居中。
+const CONNECTION_ROW_TOGGLE_WIDTH: f32 = 18.0;
+/// 本级竖线到展开箭头按钮左沿的水平距离。
+///
+/// 按钮左沿 = 行内容左内边距 + 本级缩进；竖线 = 连线基准线 + 上一级缩进。
+const CONNECTION_TREE_LINE_TO_TOGGLE_GAP: f32 =
+    CONNECTION_ROW_CONTENT_PADDING + CONNECTION_TREE_LINE_INDENT_STEP - CONNECTION_TREE_LINE_BASE_X;
+/// 链接树节点横向分支线的垂直位置（相对行内容区顶部）。
+///
+/// 行内容区上下各内缩 `CONNECTION_ROW_VERTICAL_INSET`，其垂直中心即整行中心，与展开箭头
+/// `>` 的中心重合，避免分支线偏离箭头。
+const CONNECTION_TREE_BRANCH_Y: f32 = CONNECTION_ROW_HEIGHT / 2.0 - CONNECTION_ROW_VERTICAL_INSET;
+/// 链接树节点横向分支线长度：自本级竖线起接到展开箭头按钮的水平中心，
+/// 保证连线真正接到箭头中央。
+const CONNECTION_TREE_BRANCH_LENGTH: f32 =
+    CONNECTION_TREE_LINE_TO_TOGGLE_GAP + CONNECTION_ROW_TOGGLE_WIDTH / 2.0;
 
 /// SSH 链接悬浮提示，用于快速查看远程用户名、主机和端口。
 struct ConnectionLinkTooltip {
@@ -216,7 +232,7 @@ fn render_row(
         .h(px(CONNECTION_ROW_HEIGHT))
         .w_full()
         .px_2()
-        .py(px(2.0))
+        .py(px(CONNECTION_ROW_VERTICAL_INSET))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, _, cx| {
@@ -236,7 +252,8 @@ fn render_row(
                 .flex()
                 .items_center()
                 .gap_2()
-                .pl(px(10.0 + row.depth as f32 * 16.0))
+                .pl(px(CONNECTION_ROW_CONTENT_PADDING
+                    + row.depth as f32 * CONNECTION_TREE_LINE_INDENT_STEP))
                 .pr_2()
                 .rounded(px(CONNECTION_ROW_RADIUS))
                 .cursor_pointer()
@@ -308,7 +325,7 @@ fn render_row(
                 })
                 .child(
                     div()
-                        .w(px(18.0))
+                        .w(px(CONNECTION_ROW_TOGGLE_WIDTH))
                         .h(px(20.0))
                         .flex()
                         .items_center()
@@ -353,7 +370,7 @@ fn render_row(
         )
 }
 
-/// 根据节点层级和兄弟关系渲染链接目录树连线。
+/// 根据节点层级和兄弟关系渲染链接目录树连线，避免最后一个子节点下方残留无连接竖线。
 fn tree_connection_lines(
     depth: usize,
     ancestor_continuation_levels: &[usize],
@@ -362,14 +379,17 @@ fn tree_connection_lines(
 ) -> Vec<AnyElement> {
     let mut lines = Vec::new();
 
+    // 竖线越过行内容区上下内缩、覆盖整行高度：相邻行的竖线首尾相接，行与行之间不再出现断缝。
+    let vertical_overhang = -CONNECTION_ROW_VERTICAL_INSET;
+
     for level in ancestor_continuation_levels.iter().copied() {
         let x = CONNECTION_TREE_LINE_BASE_X + level as f32 * CONNECTION_TREE_LINE_INDENT_STEP;
         lines.push(
             div()
                 .absolute()
                 .left(px(x))
-                .top_0()
-                .bottom_0()
+                .top(px(vertical_overhang))
+                .bottom(px(vertical_overhang))
                 .w(px(1.0))
                 .bg(rgb(theme.border))
                 .opacity(0.55)
@@ -382,16 +402,19 @@ fn tree_connection_lines(
     let current_line = div()
         .absolute()
         .left(px(branch_x))
-        .top_0()
+        .top(px(vertical_overhang))
         .w(px(1.0))
         .bg(rgb(theme.border))
         .opacity(0.55);
 
     lines.push(
         if has_next_sibling {
-            current_line.bottom_0()
+            current_line.bottom(px(vertical_overhang))
         } else {
-            current_line.h(px(CONNECTION_TREE_BRANCH_Y + 1.0))
+            // 最后一个子节点：竖线止于本级分支线下方 1px，形成 └ 形收尾。
+            current_line.h(px(CONNECTION_TREE_BRANCH_Y
+                + CONNECTION_ROW_VERTICAL_INSET
+                + 1.0))
         }
         .into_any_element(),
     );
@@ -409,4 +432,53 @@ fn tree_connection_lines(
     );
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hint::black_box;
+
+    /// 回归：链接树连线必须覆盖整行、垂直居中于展开箭头，并横向接到箭头按钮中心。
+    ///
+    /// 与日志目录树同一实现口径：竖线只覆盖行内容区会让每行之间出现断缝；分支线必须
+    /// 落在箭头垂直中心并接到箭头水平中心。
+    #[test]
+    fn tree_connector_geometry_centers_on_expand_arrow() {
+        // 竖线在行内容区上下各外扩一个内缩量，总高恰好等于整行高度 → 相邻行首尾相接。
+        let connector_height = (CONNECTION_ROW_HEIGHT - 2.0 * CONNECTION_ROW_VERTICAL_INSET)
+            + 2.0 * CONNECTION_ROW_VERTICAL_INSET;
+        assert_eq!(
+            black_box(connector_height),
+            black_box(CONNECTION_ROW_HEIGHT),
+            "竖线应覆盖整行高度，行与行之间不留断缝"
+        );
+
+        // 分支线落在行内容区垂直中心，即整行中心、也是展开箭头的垂直中心。
+        assert_eq!(
+            black_box(CONNECTION_TREE_BRANCH_Y),
+            black_box(CONNECTION_ROW_HEIGHT / 2.0 - CONNECTION_ROW_VERTICAL_INSET),
+            "分支线应位于行内容区垂直中心"
+        );
+        assert_eq!(
+            black_box(CONNECTION_TREE_BRANCH_Y),
+            12.0,
+            "分支线应落在整行 y=14 处"
+        );
+
+        // 分支线从本级竖线延伸「竖线到按钮左沿 8px + 按钮半宽 9px」，正好落在箭头按钮中心。
+        assert_eq!(
+            black_box(CONNECTION_TREE_BRANCH_LENGTH),
+            black_box(CONNECTION_TREE_LINE_TO_TOGGLE_GAP + CONNECTION_ROW_TOGGLE_WIDTH / 2.0),
+            "分支线应接到展开箭头按钮水平中心"
+        );
+        assert_eq!(
+            black_box(CONNECTION_TREE_BRANCH_LENGTH),
+            17.0,
+            "分支线长度应为 17px（8px 间距 + 18px 按钮的一半）"
+        );
+
+        // 行内容左内边距与切换按钮宽度必须与连线几何使用同一组常量。
+        assert_eq!(black_box(CONNECTION_TREE_LINE_TO_TOGGLE_GAP), 8.0);
+    }
 }
