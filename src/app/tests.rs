@@ -1,6 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -8,6 +8,7 @@ use super::*;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::config::JstackThreadFilterRuleKind;
 use crate::config::paths::{isolated_test_dir, temporary_test_dir};
 
 /// 构造隔离真实用户目录的配置管理器。
@@ -798,6 +799,247 @@ fn toggling_jstack_thread_filter_updates_analysis_state() {
     assert_eq!(app.placeholder_notice, "已关闭 Jstack 配置过滤");
 }
 
+/// 验证关闭规则编辑器会把草稿写回配置并刷新应用快照。
+#[test]
+fn closing_jstack_filter_rule_editor_commits_draft() {
+    let mut app = test_app();
+    app.update_jstack_thread_filter_rules(Vec::new());
+    app.jstack_filter_rule_editor_draft = Some(JstackFilterRuleDraft {
+        rule_index: None,
+        kind: JstackThreadFilterRuleKind::ThreadName,
+        input: TextInputState::from_value("Attach Listener".to_string()),
+        discard_on_close: false,
+    });
+
+    app.close_jstack_filter_rule_editor();
+
+    let rules = &app.config.log_display.jstack_thread_filter_rules;
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].pattern, "Attach Listener");
+    assert_eq!(rules[0].kind, JstackThreadFilterRuleKind::ThreadName);
+    assert!(app.jstack_filter_rule_editor_draft.is_none());
+    assert!(!app.is_jstack_filter_rule_editor_open);
+    assert_eq!(app.placeholder_notice, "过滤规则已保存");
+    assert_eq!(
+        app.applied_jstack_thread_filter_rules,
+        app.config.log_display.jstack_thread_filter_rules
+    );
+}
+
+/// 验证关闭规则编辑器时会替换指定索引的已有规则，而不是追加新规则。
+#[test]
+fn closing_jstack_filter_rule_editor_replaces_existing_rule() {
+    let mut app = test_app();
+    app.update_jstack_thread_filter_rules(vec![JstackThreadFilterRule {
+        enabled: false,
+        kind: JstackThreadFilterRuleKind::ThreadName,
+        pattern: "old".to_string(),
+    }]);
+    app.jstack_filter_rule_editor_draft = Some(JstackFilterRuleDraft {
+        rule_index: Some(0),
+        kind: JstackThreadFilterRuleKind::StackSegment,
+        input: TextInputState::from_value("Unsafe.park".to_string()),
+        discard_on_close: false,
+    });
+
+    app.close_jstack_filter_rule_editor();
+
+    let rules = &app.config.log_display.jstack_thread_filter_rules;
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].kind, JstackThreadFilterRuleKind::StackSegment);
+    assert_eq!(rules[0].pattern, "Unsafe.park");
+}
+
+/// 验证取消规则编辑后关闭编辑器不会修改配置。
+#[test]
+fn discarding_jstack_filter_rule_editor_skips_commit() {
+    let mut app = test_app();
+    let rules_before = app.config.log_display.jstack_thread_filter_rules.clone();
+    app.jstack_filter_rule_editor_draft = Some(JstackFilterRuleDraft {
+        rule_index: None,
+        kind: JstackThreadFilterRuleKind::ThreadName,
+        input: TextInputState::from_value("Ghost".to_string()),
+        discard_on_close: false,
+    });
+
+    app.discard_jstack_filter_rule_editor();
+    assert!(
+        app.jstack_filter_rule_editor_draft
+            .as_ref()
+            .expect("草稿应存在")
+            .discard_on_close
+    );
+    app.close_jstack_filter_rule_editor();
+
+    assert_eq!(
+        app.config.log_display.jstack_thread_filter_rules,
+        rules_before
+    );
+    assert_eq!(app.placeholder_notice, "已取消过滤规则编辑");
+}
+
+/// 验证草稿内容为空时关闭编辑器不会保存规则。
+#[test]
+fn closing_jstack_filter_rule_editor_with_empty_pattern_skips_save() {
+    let mut app = test_app();
+    let rules_before = app.config.log_display.jstack_thread_filter_rules.clone();
+    app.jstack_filter_rule_editor_draft = Some(JstackFilterRuleDraft {
+        rule_index: None,
+        kind: JstackThreadFilterRuleKind::StackSegment,
+        input: TextInputState::from_value("   \n\t ".to_string()),
+        discard_on_close: false,
+    });
+
+    app.close_jstack_filter_rule_editor();
+
+    assert_eq!(
+        app.config.log_display.jstack_thread_filter_rules,
+        rules_before
+    );
+    assert_eq!(app.placeholder_notice, "规则内容为空，未保存");
+}
+
+/// 验证切换规则启用状态会持久化并同步命中徽标数据。
+#[test]
+fn toggling_jstack_thread_filter_rule_updates_enabled_state() {
+    let mut app = test_app();
+    let was_enabled = app.config.log_display.jstack_thread_filter_rules[0].enabled;
+
+    app.toggle_jstack_thread_filter_rule(0);
+
+    assert_eq!(
+        app.config.log_display.jstack_thread_filter_rules[0].enabled,
+        !was_enabled
+    );
+    assert_eq!(
+        app.applied_jstack_thread_filter_rules,
+        app.config.log_display.jstack_thread_filter_rules
+    );
+
+    // 越界索引只提示，不改变任何规则。
+    let rules_before = app.config.log_display.jstack_thread_filter_rules.clone();
+    app.toggle_jstack_thread_filter_rule(99);
+    assert_eq!(
+        app.config.log_display.jstack_thread_filter_rules,
+        rules_before
+    );
+    assert_eq!(app.placeholder_notice, "未找到要切换的过滤规则");
+}
+
+/// 验证删除规则会更新配置和命中徽标数据，越界索引安全提示。
+#[test]
+fn deleting_jstack_thread_filter_rule_removes_entry() {
+    let mut app = test_app();
+    let before_count = app.config.log_display.jstack_thread_filter_rules.len();
+
+    app.delete_jstack_thread_filter_rule(0);
+
+    assert_eq!(
+        app.config.log_display.jstack_thread_filter_rules.len(),
+        before_count - 1
+    );
+    assert_eq!(app.placeholder_notice, "过滤规则已删除");
+
+    let rules_before = app.config.log_display.jstack_thread_filter_rules.clone();
+    app.delete_jstack_thread_filter_rule(99);
+    assert_eq!(
+        app.config.log_display.jstack_thread_filter_rules,
+        rules_before
+    );
+    assert_eq!(app.placeholder_notice, "未找到要删除的过滤规则");
+}
+
+/// 验证规则变化时刷新会重建可见行缓存并重新计算命中徽标。
+#[test]
+fn refresh_jstack_thread_filter_rebuilds_only_when_rules_change() {
+    let mut app = app_with_placeholder_sources();
+    let app_log_id = source_id_by_label(&app, "app.log");
+    let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+    let (analysis_id, generation) = app
+        .create_jstack_analysis_tab_state(targets)
+        .expect("应能创建 Jstack 分析 tab");
+    let snapshot = crate::analysis::jstack::parse_jstack_snapshot(
+        SourceId(1),
+        "001.log",
+        "/tmp/001.log",
+        r#""Attach Listener" #1
+   java.lang.Thread.State: RUNNABLE
+"business-worker" #2
+   java.lang.Thread.State: RUNNABLE
+"#,
+    );
+    let result = crate::analysis::jstack::build_analysis_result(vec![snapshot], Vec::new(), 1);
+    app.apply_jstack_analysis_result(analysis_id, generation, result);
+    // 同步应用快照，模拟规则已经应用过的状态。
+    app.applied_jstack_thread_filter_rules =
+        app.config.log_display.jstack_thread_filter_rules.clone();
+
+    // 规则未变化：刷新只重算徽标，不重建可见行缓存。
+    app.jstack_analyses
+        .get_mut(&analysis_id)
+        .expect("应存在分析状态")
+        .visible_row_indices
+        .clear();
+    app.refresh_jstack_thread_filter();
+    assert!(
+        app.jstack_analyses[&analysis_id]
+            .visible_row_indices
+            .is_empty(),
+        "规则未变化时不应重建可见行缓存"
+    );
+
+    // 规则变化：刷新必须重建可见行缓存并同步快照。
+    app.update_jstack_thread_filter_rules(Vec::new());
+    assert!(
+        !app.jstack_analyses[&analysis_id]
+            .visible_row_indices
+            .is_empty(),
+        "规则变化后应重建可见行缓存"
+    );
+    assert_eq!(
+        app.applied_jstack_thread_filter_rules,
+        app.config.log_display.jstack_thread_filter_rules
+    );
+}
+
+/// 验证设置页打开时新完成的分析会刷新规则命中徽标。
+#[test]
+fn applying_jstack_result_refreshes_rule_hit_counts_when_settings_open() {
+    let mut app = app_with_placeholder_sources();
+    let app_log_id = source_id_by_label(&app, "app.log");
+    let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+    let (analysis_id, generation) = app
+        .create_jstack_analysis_tab_state(targets)
+        .expect("应能创建 Jstack 分析 tab");
+    app.is_settings_modal_open = true;
+    // 默认规则第三条为 Attach Listener 线程名规则。
+    let attach_listener_rule_index = app
+        .config
+        .log_display
+        .jstack_thread_filter_rules
+        .iter()
+        .position(|rule| rule.pattern == "Attach Listener")
+        .expect("默认规则应包含 Attach Listener");
+    let snapshot = crate::analysis::jstack::parse_jstack_snapshot(
+        SourceId(1),
+        "001.log",
+        "/tmp/001.log",
+        r#""Attach Listener" #1
+   java.lang.Thread.State: RUNNABLE
+"business-worker" #2
+   java.lang.Thread.State: RUNNABLE
+"#,
+    );
+    let result = crate::analysis::jstack::build_analysis_result(vec![snapshot], Vec::new(), 1);
+
+    app.apply_jstack_analysis_result(analysis_id, generation, result);
+
+    assert_eq!(
+        app.jstack_filter_rule_hit_counts[attach_listener_rule_index], 1,
+        "Attach Listener 线程应命中默认线程名规则"
+    );
+}
+
 /// 验证 Runtime 右键已在多选集合中时，会按来源树可见顺序保留多选输入。
 #[test]
 fn runtime_context_selection_keeps_multi_selection_in_tree_order() {
@@ -1454,6 +1696,85 @@ fn visible_jstack_rows_sort_by_filtered_hit_count() {
     );
 }
 
+/// 验证线程状态筛选全不选时过滤统计仍按全部行计算，与历史口径一致。
+#[test]
+fn jstack_filtered_row_count_survives_empty_active_states() {
+    let snapshot = crate::analysis::jstack::parse_jstack_snapshot(
+        SourceId(1),
+        "001.log",
+        "/tmp/001.log",
+        r#""Attach Listener" #1
+   java.lang.Thread.State: RUNNABLE
+"business-worker" #2
+   java.lang.Thread.State: RUNNABLE
+"#,
+    );
+    let result = crate::analysis::jstack::build_analysis_result(vec![snapshot], Vec::new(), 1);
+    let filter =
+        crate::analysis::jstack::JstackThreadFilter::from_rules(&[JstackThreadFilterRule {
+            enabled: true,
+            kind: JstackThreadFilterRuleKind::ThreadName,
+            pattern: "listener".to_string(),
+        }]);
+    let mut state = JstackAnalysisState {
+        generation: 1,
+        active_states: BTreeSet::new(),
+        is_thread_filter_enabled: true,
+        thread_name_selection: None,
+        thread_name_selection_drag: None,
+        selected_cell_key: None,
+        visible_row_indices: Vec::new(),
+        filtered_row_count: 0,
+        row_scroll: UniformListScrollHandle::new(),
+        task_state: JstackAnalysisTaskState::Ready(result),
+    };
+
+    state.rebuild_visible_row_cache(&filter);
+
+    assert_eq!(state.filtered_row_count, 1);
+    assert!(state.visible_row_indices.is_empty());
+}
+
+/// 验证 Jstack 头部过滤控件固定独占一行，窗口变窄时版式稳定且不溢出内容玻璃板右边缘。
+#[gpui::test]
+fn jstack_header_controls_wrap_within_content_panel(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    app.update(cx, |app, _| {
+        let app_log_id = source_id_by_label(app, "app.log");
+        let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
+        app.create_jstack_analysis_tab_state(targets)
+            .expect("应能创建 Jstack 分析 tab");
+    });
+
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    let wide_controls = cx
+        .debug_bounds("jstack-header-filter-controls")
+        .expect("应渲染头部过滤控件");
+    let wide_panel = cx
+        .debug_bounds("window-content-panel")
+        .expect("应渲染内容玻璃板");
+    assert!(
+        wide_controls.right() <= wide_panel.right() + gpui::px(0.5),
+        "宽窗口下过滤控件应位于玻璃板内：controls={wide_controls:?}, panel={wide_panel:?}"
+    );
+
+    cx.simulate_resize(gpui::size(gpui::px(760.0), gpui::px(900.0)));
+    let narrow_controls = cx
+        .debug_bounds("jstack-header-filter-controls")
+        .expect("应渲染头部过滤控件");
+    let narrow_panel = cx
+        .debug_bounds("window-content-panel")
+        .expect("应渲染内容玻璃板");
+    assert!(
+        (narrow_controls.top() - wide_controls.top()).abs() <= gpui::px(0.5),
+        "过滤控件应固定独占一行，窗口变窄时位置不变：wide={wide_controls:?}, narrow={narrow_controls:?}"
+    );
+    assert!(
+        narrow_controls.right() <= narrow_panel.right() + gpui::px(0.5),
+        "窄窗口下过滤控件不应溢出玻璃板右边缘：controls={narrow_controls:?}, panel={narrow_panel:?}"
+    );
+}
+
 /// 验证线程详情按可见快照收集代表堆栈，不把同一文件内重复出现展开成多条同源记录。
 #[test]
 fn jstack_detail_occurrences_keep_one_stack_per_visible_snapshot() {
@@ -1698,12 +2019,30 @@ fn selecting_settings_section_clears_transient_input_state() {
 fn closing_settings_modal_clears_modal_state() {
     let mut app = test_app();
     app.is_settings_modal_open = true;
-    app.settings_jstack_thread_name_filter_input.is_focused = true;
+    app.jstack_filter_rule_editor_draft = Some(JstackFilterRuleDraft {
+        rule_index: None,
+        kind: JstackThreadFilterRuleKind::ThreadName,
+        input: TextInputState {
+            value: "草稿".to_string(),
+            cursor: 2,
+            selection_anchor: None,
+            marked_range: None,
+            selection_drag: None,
+            is_focused: true,
+        },
+        discard_on_close: false,
+    });
 
     app.close_settings_modal();
 
     assert!(!app.is_settings_modal_open);
-    assert!(!app.settings_jstack_thread_name_filter_input.is_focused);
+    assert!(
+        !app.jstack_filter_rule_editor_draft
+            .as_ref()
+            .expect("草稿应保留")
+            .input
+            .is_focused
+    );
 }
 
 /// 验证同一日志来源重复点击时复用已有标签页。
@@ -2066,8 +2405,18 @@ fn settings_changes_are_persisted_to_config_file() {
     app.adjust_max_archive_depth(1);
     app.toggle_follow_symlinks();
     app.update_settings_quick_keywords("ERROR,WARN,timeout".to_string());
-    app.update_settings_jstack_thread_name_filter("Attach Listener".to_string());
-    app.update_settings_jstack_stack_segment_filter("Unsafe.park\n\nSocket\nread".to_string());
+    app.update_jstack_thread_filter_rules(vec![
+        JstackThreadFilterRule {
+            enabled: true,
+            kind: JstackThreadFilterRuleKind::ThreadName,
+            pattern: "Attach Listener".to_string(),
+        },
+        JstackThreadFilterRule {
+            enabled: false,
+            kind: JstackThreadFilterRuleKind::StackSegment,
+            pattern: "Unsafe.park".to_string(),
+        },
+    ]);
 
     let saved = ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
 
@@ -2077,13 +2426,11 @@ fn settings_changes_are_persisted_to_config_file() {
     assert!(saved.loader.follow_symlinks);
     assert_eq!(saved.log_search.quick_keywords, "ERROR,WARN,timeout");
     assert_eq!(
-        saved.log_display.jstack_thread_name_filters,
-        "Attach Listener"
+        saved.log_display.jstack_thread_filter_rules,
+        app.config.log_display.jstack_thread_filter_rules
     );
-    assert_eq!(
-        saved.log_display.jstack_stack_segment_filters,
-        "Unsafe.park\n\nSocket\nread"
-    );
+    assert!(saved.log_display.jstack_thread_name_filters.is_empty());
+    assert!(saved.log_display.jstack_stack_segment_filters.is_empty());
 }
 
 /// 验证新日志来源加载成功后会替换旧来源，并清理旧日志相关界面状态。

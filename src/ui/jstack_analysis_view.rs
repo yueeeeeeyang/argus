@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Jstack 线程日志分析页签内容。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-25
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：展示线程频率矩阵、状态筛选、分析统计和高性能虚拟滚动列表。
 
@@ -219,9 +219,8 @@ fn render_header(
         .pt(px(8.0))
         .pb(px(7.0))
         .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
+        .flex_col()
+        .gap_2()
         .border_b_1()
         .border_color(rgb(theme.border))
         .child(
@@ -235,8 +234,11 @@ fn render_header(
                     "{file_count} 个文件，{snapshot_count} 个快照，{thread_count} 个线程{filter_summary}，跳过 {skipped_count} 个文件"
                 )),
         )
+        // 过滤控件固定独占一行：分析中文本变长后版式不再跳动，
+        // 助手面板展开或窗口变窄时也不会溢出面板右边缘。
         .child(
             div()
+                .debug_selector(|| "jstack-header-filter-controls".to_string())
                 .flex()
                 .items_center()
                 .gap_2()

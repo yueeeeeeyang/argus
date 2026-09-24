@@ -1,6 +1,6 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析、助手面板及远程连接状态。
 
@@ -52,7 +52,7 @@ use crate::analysis::runtime::{
     build_runtime_slow_sql_rows_for_filter, build_runtime_sql_frequency_rows_for_filter,
     parse_runtime_analysis_filter_criteria,
 };
-use crate::config::{AppConfig, ConfigManager};
+use crate::config::{AppConfig, ConfigManager, JstackThreadFilterRule};
 use crate::highlight::HighlightLanguage;
 use crate::infra::perf::PerfSpan;
 use crate::infra::text_selection::{
@@ -87,7 +87,7 @@ use crate::ui::file_preview_window::FilePreviewWindow;
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
 use crate::ui::main_window;
-use crate::ui::settings_window::JstackStackSegmentFilterEditorWindow;
+use crate::ui::settings_window::JstackFilterRuleEditorWindow;
 use crate::ui::source_picker::SourcePickerWindow;
 use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use gpui::{
@@ -404,21 +404,22 @@ pub(crate) struct ArgusApp {
     pub is_theme_dropdown_open: bool,
     /// 设置模态框“快搜关键字”输入框状态。
     pub settings_quick_keywords_input: TextInputState,
-    /// 设置模态框“Jstack 线程名过滤”输入框状态。
-    pub settings_jstack_thread_name_filter_input: TextInputState,
-    /// 设置模态框“Jstack 线程段过滤”输入框状态。
-    pub settings_jstack_stack_segment_filter_input: TextInputState,
     /// 设置模态框是否处于打开状态。
     pub is_settings_modal_open: bool,
     /// 设置模态框左侧导航当前选中的分类。
     pub selected_settings_section: SettingsSection,
     /// Skill 管理分区最近一次操作结果；设置弹窗遮住主窗口状态栏，反馈必须在分区内展示。
     pub skill_management_message: Option<SkillManagementMessage>,
-    /// Jstack 线程段过滤编辑器是否处于打开状态。
-    pub is_jstack_stack_segment_filter_editor_open: bool,
-    /// Jstack 线程段过滤编辑器窗口句柄，用于从设置页重复点击时置前已有编辑器。
-    pub jstack_stack_segment_filter_editor_handle:
-        Option<WindowHandle<JstackStackSegmentFilterEditorWindow>>,
+    /// Jstack 过滤规则编辑器是否处于打开状态。
+    pub is_jstack_filter_rule_editor_open: bool,
+    /// Jstack 过滤规则编辑器窗口句柄，用于从设置页重复点击时置前已有编辑器。
+    pub jstack_filter_rule_editor_handle: Option<WindowHandle<JstackFilterRuleEditorWindow>>,
+    /// Jstack 过滤规则编辑器草稿；编辑期间只改草稿，保存或关闭窗口时才写回配置。
+    pub jstack_filter_rule_editor_draft: Option<JstackFilterRuleDraft>,
+    /// 每条 Jstack 过滤规则的命中行数，与配置规则列表等长对齐，供设置页徽标展示。
+    pub jstack_filter_rule_hit_counts: Vec<usize>,
+    /// 上次实际应用到可见行缓存的过滤规则快照，用于识别配置是否变化、避免重复重建。
+    pub applied_jstack_thread_filter_rules: Vec<JstackThreadFilterRule>,
     /// 系统“用 Argus 打开”右键菜单注册状态。
     pub open_with_registration_status: RegistrationStatus,
     /// 是否正在执行系统右键菜单注册或卸载任务。
@@ -471,10 +472,6 @@ impl ArgusApp {
             .clamp(LOG_CONTENT_FONT_SIZE_MIN, LOG_CONTENT_FONT_SIZE_MAX);
         let selected_encoding = config.encoding.selected.clone();
         let quick_keywords_input_value = config.log_search.quick_keywords.clone();
-        let jstack_thread_name_filter_input_value =
-            config.log_display.jstack_thread_name_filters.clone();
-        let jstack_stack_segment_filter_input_value =
-            config.log_display.jstack_stack_segment_filters.clone();
         config.appearance.theme_mode = selected_theme_id.clone();
         config.appearance.log_content_font_size = log_content_font_size;
         Self {
@@ -565,17 +562,14 @@ impl ArgusApp {
             selected_theme_id,
             is_theme_dropdown_open: false,
             settings_quick_keywords_input: TextInputState::from_value(quick_keywords_input_value),
-            settings_jstack_thread_name_filter_input: TextInputState::from_value(
-                jstack_thread_name_filter_input_value,
-            ),
-            settings_jstack_stack_segment_filter_input: TextInputState::from_value(
-                jstack_stack_segment_filter_input_value,
-            ),
             is_settings_modal_open: false,
             skill_management_message: None,
             selected_settings_section: SettingsSection::default(),
-            is_jstack_stack_segment_filter_editor_open: false,
-            jstack_stack_segment_filter_editor_handle: None,
+            is_jstack_filter_rule_editor_open: false,
+            jstack_filter_rule_editor_handle: None,
+            jstack_filter_rule_editor_draft: None,
+            jstack_filter_rule_hit_counts: Vec::new(),
+            applied_jstack_thread_filter_rules: Vec::new(),
             open_with_registration_status: RegistrationStatus::Unknown("尚未检查".to_string()),
             is_open_with_registration_busy: false,
             open_with_registration_message: None,
@@ -599,7 +593,6 @@ impl ArgusApp {
                 remote_file_rename_name: cx.focus_handle(),
                 archive_password: cx.focus_handle(),
                 settings_quick_keywords: cx.focus_handle(),
-                settings_jstack_thread_names: cx.focus_handle(),
                 terminal: cx.focus_handle(),
                 jstack_analysis: cx.focus_handle(),
                 runtime_analysis: cx.focus_handle(),

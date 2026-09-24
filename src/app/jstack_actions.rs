@@ -49,10 +49,7 @@ impl ArgusApp {
 
     /// 返回当前设置页配置的 Jstack 线程过滤器。
     pub(crate) fn jstack_thread_filter(&self) -> JstackThreadFilter {
-        JstackThreadFilter::from_raw(
-            &self.config.log_display.jstack_thread_name_filters,
-            &self.config.log_display.jstack_stack_segment_filters,
-        )
+        JstackThreadFilter::from_rules(&self.config.log_display.jstack_thread_filter_rules)
     }
 
     /// 根据当前配置重建所有 Jstack 分析页的可见行缓存。
@@ -554,6 +551,10 @@ impl ArgusApp {
         let skipped_count = result.skipped_count();
         state.task_state = JstackAnalysisTaskState::Ready(result);
         state.rebuild_visible_row_cache(&thread_filter);
+        // 设置页打开时同步刷新规则命中徽标，避免新完成的分析迟迟不反映在规则列表上。
+        if self.is_settings_modal_open {
+            self.refresh_jstack_thread_filter();
+        }
         self.placeholder_notice = format!(
             "Jstack 分析完成：{snapshot_count} 个快照，{thread_count} 个线程，跳过 {skipped_count} 个文件"
         );

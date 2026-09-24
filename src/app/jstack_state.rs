@@ -1,5 +1,6 @@
 //! 文件职责：提取 Jstack 线程日志分析页签状态类型与辅助函数
 //! 创建日期：2026-07-08
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：定义分析任务状态、频率矩阵状态、线程名选区和可见行筛选逻辑
 
@@ -102,58 +103,55 @@ impl JstackAnalysisState {
         };
 
         let should_filter_threads = self.is_thread_filter_enabled && !thread_filter.is_empty();
-        self.filtered_row_count = if should_filter_threads {
-            result
-                .rows
-                .iter()
-                .filter(|row| thread_filter.matches_row(row))
-                .count()
-        } else {
-            0
-        };
-        self.visible_row_indices = visible_jstack_row_indices(
+        let (matched_row_count, visible_row_indices) = compute_visible_jstack_rows(
             result,
             &self.active_states,
             should_filter_threads.then_some(thread_filter),
         );
+        self.filtered_row_count = if should_filter_threads {
+            matched_row_count
+        } else {
+            0
+        };
+        self.visible_row_indices = visible_row_indices;
     }
 }
 
-/// 返回当前 Jstack 筛选条件下需要渲染的结果行索引。
-pub(super) fn visible_jstack_row_indices(
+/// 单遍计算 Jstack 可见行索引和被过滤规则命中的行数。
+///
+/// 说明：逐行只调用一次 `matches_row`，同时服务可见行缓存和标题过滤统计，
+/// 避免线程数较多时重复扫描堆栈文本；排序口径与历史版本保持一致。
+fn compute_visible_jstack_rows(
     result: &JstackAnalysisResult,
     active_states: &BTreeSet<JstackThreadState>,
     thread_filter: Option<&JstackThreadFilter>,
-) -> Vec<usize> {
-    if active_states.is_empty() {
-        return Vec::new();
+) -> (usize, Vec<usize>) {
+    // 不提前返回：状态全不选时可见行自然为空，但过滤统计仍按全部行计算，与历史口径一致。
+    let mut matched_row_count = 0_usize;
+    let mut visible_rows = Vec::new();
+    for (index, row) in result.rows.iter().enumerate() {
+        let is_filtered = thread_filter.is_some_and(|filter| filter.matches_row(row));
+        if is_filtered {
+            matched_row_count += 1;
+        }
+
+        // 按当前状态筛选后的实际命中次数排序，避免隐藏状态的历史出现次数把低命中线程顶到前面。
+        let visible_hit_count = row
+            .cells
+            .iter()
+            .filter(|cell| {
+                cell.count > 0
+                    && cell
+                        .state
+                        .is_some_and(|state| active_states.contains(&state))
+            })
+            .map(|cell| cell.count)
+            .sum::<usize>();
+
+        if !is_filtered && visible_hit_count > 0 {
+            visible_rows.push((index, visible_hit_count));
+        }
     }
-
-    let mut visible_rows = result
-        .rows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| {
-            if thread_filter.is_some_and(|filter| filter.matches_row(row)) {
-                return None;
-            }
-
-            // 按当前状态筛选后的实际命中次数排序，避免隐藏状态的历史出现次数把低命中线程顶到前面。
-            let visible_hit_count = row
-                .cells
-                .iter()
-                .filter(|cell| {
-                    cell.count > 0
-                        && cell
-                            .state
-                            .is_some_and(|state| active_states.contains(&state))
-                })
-                .map(|cell| cell.count)
-                .sum::<usize>();
-
-            (visible_hit_count > 0).then_some((index, visible_hit_count))
-        })
-        .collect::<Vec<_>>();
 
     visible_rows.sort_by(|(left_index, left_count), (right_index, right_count)| {
         right_count.cmp(left_count).then_with(|| {
@@ -167,7 +165,22 @@ pub(super) fn visible_jstack_row_indices(
                 })
         })
     });
-    visible_rows.into_iter().map(|(index, _)| index).collect()
+    (
+        matched_row_count,
+        visible_rows.into_iter().map(|(index, _)| index).collect(),
+    )
+}
+
+/// 返回当前 Jstack 筛选条件下需要渲染的结果行索引。
+///
+/// 说明：生产路径统一走 `compute_visible_jstack_rows` 单遍计算；该入口保留给测试直接断言可见行。
+#[cfg(test)]
+pub(super) fn visible_jstack_row_indices(
+    result: &JstackAnalysisResult,
+    active_states: &BTreeSet<JstackThreadState>,
+    thread_filter: Option<&JstackThreadFilter>,
+) -> Vec<usize> {
+    compute_visible_jstack_rows(result, active_states, thread_filter).1
 }
 
 /// 为线程详情窗口收集当前可见状态下的代表堆栈记录。

@@ -1,6 +1,6 @@
 //! 文件职责：承接系统原生文本输入提交并写回 Argus 自绘输入框状态。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-18
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：把输入法 UTF-16 编辑结果转换后的字符范围应用到来源搜索、日志搜索、来源选择器和设置输入框。
 
@@ -49,10 +49,6 @@ impl ArgusApp {
         // 点击外部区域造成设置输入失焦时，沿用 Enter 与原生文本提交的同一持久化入口。
         let focused_settings_target = if self.settings_quick_keywords_input.is_focused {
             Some(AppTextInputTarget::SettingsQuickKeywords)
-        } else if self.settings_jstack_thread_name_filter_input.is_focused {
-            Some(AppTextInputTarget::SettingsJstackThreadNameFilter)
-        } else if self.settings_jstack_stack_segment_filter_input.is_focused {
-            Some(AppTextInputTarget::SettingsJstackStackSegmentFilter)
         } else {
             None
         };
@@ -61,9 +57,10 @@ impl ArgusApp {
         }
 
         self.settings_quick_keywords_input.clear_focus();
-        self.settings_jstack_thread_name_filter_input.clear_focus();
-        self.settings_jstack_stack_segment_filter_input
-            .clear_focus();
+        // 规则编辑器草稿只跟随窗口关闭提交，失焦仅清理临时焦点状态。
+        if let Some(draft) = self.jstack_filter_rule_editor_draft.as_mut() {
+            draft.input.clear_focus();
+        }
 
         self.log_search.keyword_input.clear_focus();
         self.log_search.directory_input.clear_focus();
@@ -147,22 +144,10 @@ impl ArgusApp {
                     self.commit_settings_text_input(AppTextInputTarget::SettingsQuickKeywords);
                 }
             }
-            AppTextInputTarget::SettingsJstackThreadNameFilter => {
-                self.settings_jstack_thread_name_filter_input
-                    .apply_native_edit(&edit);
-                if edit.marked_range.is_none() {
-                    self.commit_settings_text_input(
-                        AppTextInputTarget::SettingsJstackThreadNameFilter,
-                    );
-                }
-            }
-            AppTextInputTarget::SettingsJstackStackSegmentFilter => {
-                self.settings_jstack_stack_segment_filter_input
-                    .apply_native_edit(&edit);
-                if edit.marked_range.is_none() {
-                    self.commit_settings_text_input(
-                        AppTextInputTarget::SettingsJstackStackSegmentFilter,
-                    );
+            // 规则编辑器原生输入只写草稿，提交统一由关闭窗口路径完成。
+            AppTextInputTarget::SettingsJstackFilterRulePattern => {
+                if let Some(draft) = self.jstack_filter_rule_editor_draft.as_mut() {
+                    draft.input.apply_native_edit(&edit);
                 }
             }
         }
@@ -211,26 +196,19 @@ impl ArgusApp {
             AppTextInputTarget::SettingsQuickKeywords => {
                 self.is_theme_dropdown_open = false;
                 self.settings_quick_keywords_input.is_focused = true;
-                self.settings_jstack_thread_name_filter_input.is_focused = false;
-                self.settings_jstack_thread_name_filter_input.marked_range = None;
-                self.settings_jstack_stack_segment_filter_input.is_focused = false;
-                self.settings_jstack_stack_segment_filter_input.marked_range = None;
+                self.settings_quick_keywords_input.marked_range = None;
+                if let Some(draft) = self.jstack_filter_rule_editor_draft.as_mut() {
+                    draft.input.is_focused = false;
+                    draft.input.marked_range = None;
+                }
             }
-            AppTextInputTarget::SettingsJstackThreadNameFilter => {
+            AppTextInputTarget::SettingsJstackFilterRulePattern => {
                 self.is_theme_dropdown_open = false;
                 self.settings_quick_keywords_input.is_focused = false;
                 self.settings_quick_keywords_input.marked_range = None;
-                self.settings_jstack_thread_name_filter_input.is_focused = true;
-                self.settings_jstack_stack_segment_filter_input.is_focused = false;
-                self.settings_jstack_stack_segment_filter_input.marked_range = None;
-            }
-            AppTextInputTarget::SettingsJstackStackSegmentFilter => {
-                self.is_theme_dropdown_open = false;
-                self.settings_quick_keywords_input.is_focused = false;
-                self.settings_quick_keywords_input.marked_range = None;
-                self.settings_jstack_thread_name_filter_input.is_focused = false;
-                self.settings_jstack_thread_name_filter_input.marked_range = None;
-                self.settings_jstack_stack_segment_filter_input.is_focused = true;
+                if let Some(draft) = self.jstack_filter_rule_editor_draft.as_mut() {
+                    draft.input.is_focused = true;
+                }
             }
         }
     }
@@ -358,8 +336,21 @@ fn clamp_range(range: Range<usize>, text_length: usize) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::{AppTextInputTarget, ArgusApp};
+    use crate::app::{AppTextInputTarget, ArgusApp, JstackFilterRuleDraft, TextInputState};
+    use crate::config::JstackThreadFilterRuleKind;
     use crate::infra::text_selection::NativeTextEdit;
+
+    /// 构造包含空输入草稿的规则编辑器状态，供原生输入测试复用。
+    fn app_with_rule_editor_draft() -> ArgusApp {
+        let mut app = ArgusApp::new();
+        app.jstack_filter_rule_editor_draft = Some(JstackFilterRuleDraft {
+            rule_index: None,
+            kind: JstackThreadFilterRuleKind::ThreadName,
+            input: TextInputState::default(),
+            discard_on_close: false,
+        });
+        app
+    }
 
     /// 验证原生文本提交能写入中文并更新来源树搜索光标。
     #[test]
@@ -384,11 +375,9 @@ mod tests {
     /// 验证设置输入框切换目标后，原生输入不会继续写入旧输入框。
     #[test]
     fn native_text_input_focuses_selected_settings_target() {
-        let mut app = ArgusApp::new();
+        let mut app = app_with_rule_editor_draft();
         app.settings_quick_keywords_input.value = "old".to_string();
         app.settings_quick_keywords_input.cursor = 3;
-        app.settings_jstack_thread_name_filter_input.value.clear();
-        app.settings_jstack_thread_name_filter_input.cursor = 0;
 
         app.apply_native_text_input_edit(
             AppTextInputTarget::SettingsQuickKeywords,
@@ -400,7 +389,7 @@ mod tests {
             },
         );
         app.apply_native_text_input_edit(
-            AppTextInputTarget::SettingsJstackThreadNameFilter,
+            AppTextInputTarget::SettingsJstackFilterRulePattern,
             NativeTextEdit {
                 replacement_range: 0..0,
                 text: "B".to_string(),
@@ -410,9 +399,40 @@ mod tests {
         );
 
         assert_eq!(app.settings_quick_keywords_input.value, "oldA");
-        assert_eq!(app.settings_jstack_thread_name_filter_input.value, "B");
+        let draft = app
+            .jstack_filter_rule_editor_draft
+            .as_ref()
+            .expect("草稿应存在");
+        assert_eq!(draft.input.value, "B");
         assert!(!app.settings_quick_keywords_input.is_focused);
-        assert!(app.settings_jstack_thread_name_filter_input.is_focused);
+        assert!(draft.input.is_focused);
+    }
+
+    /// 验证原生输入只写规则编辑器草稿，不会直接提交到配置。
+    #[test]
+    fn native_text_input_writes_rule_editor_draft_without_committing() {
+        let mut app = app_with_rule_editor_draft();
+        let rules_before = app.config.log_display.jstack_thread_filter_rules.clone();
+
+        app.apply_native_text_input_edit(
+            AppTextInputTarget::SettingsJstackFilterRulePattern,
+            NativeTextEdit {
+                replacement_range: 0..0,
+                text: "Attach Listener".to_string(),
+                selected_range: 15..15,
+                marked_range: None,
+            },
+        );
+
+        let draft = app
+            .jstack_filter_rule_editor_draft
+            .as_ref()
+            .expect("草稿应存在");
+        assert_eq!(draft.input.value, "Attach Listener");
+        assert_eq!(
+            app.config.log_display.jstack_thread_filter_rules,
+            rules_before
+        );
     }
 
     /// 验证点击外部触发的统一失焦不会清空用户输入内容。
@@ -424,12 +444,19 @@ mod tests {
         app.source_tree_search_input.selection_anchor = Some(0);
         app.source_tree_search_input.marked_range = Some(0..2);
         app.source_tree_search_input.is_focused = true;
-        app.settings_jstack_thread_name_filter_input.value = "Attach Listener".to_string();
-        app.settings_jstack_thread_name_filter_input.cursor = 15;
-        app.settings_jstack_thread_name_filter_input
-            .selection_anchor = Some(0);
-        app.settings_jstack_thread_name_filter_input.marked_range = Some(0..5);
-        app.settings_jstack_thread_name_filter_input.is_focused = true;
+        app.jstack_filter_rule_editor_draft = Some(JstackFilterRuleDraft {
+            rule_index: Some(1),
+            kind: JstackThreadFilterRuleKind::StackSegment,
+            input: TextInputState {
+                value: "Attach Listener".to_string(),
+                cursor: 15,
+                selection_anchor: Some(0),
+                marked_range: Some(0..5),
+                selection_drag: None,
+                is_focused: true,
+            },
+            discard_on_close: false,
+        });
         app.log_search.keyword_input.value = "中文".to_string();
         app.log_search.keyword_input.cursor = 2;
         app.log_search.keyword_input.is_focused = true;
@@ -437,25 +464,18 @@ mod tests {
         app.clear_all_text_input_focus();
 
         assert_eq!(app.source_tree_search_input.value, "错误");
-        assert_eq!(
-            app.settings_jstack_thread_name_filter_input.value,
-            "Attach Listener"
-        );
+        let draft = app
+            .jstack_filter_rule_editor_draft
+            .as_ref()
+            .expect("草稿应保留");
+        assert_eq!(draft.input.value, "Attach Listener");
         assert_eq!(app.log_search.keyword_input.value, "中文");
         assert!(!app.source_tree_search_input.is_focused);
-        assert!(!app.settings_jstack_thread_name_filter_input.is_focused);
+        assert!(!draft.input.is_focused);
         assert!(!app.log_search.keyword_input.is_focused);
         assert!(app.source_tree_search_input.selection_anchor.is_none());
-        assert!(
-            app.settings_jstack_thread_name_filter_input
-                .selection_anchor
-                .is_none()
-        );
+        assert!(draft.input.selection_anchor.is_none());
         assert!(app.source_tree_search_input.marked_range.is_none());
-        assert!(
-            app.settings_jstack_thread_name_filter_input
-                .marked_range
-                .is_none()
-        );
+        assert!(draft.input.marked_range.is_none());
     }
 }

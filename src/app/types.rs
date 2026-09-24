@@ -1,11 +1,12 @@
 //! 文件职责：提取应用通用类型定义。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：定义工作区、设置分类、标签页、文本输入目标和占位数据等跨功能域共享类型。
 
 use gpui::FocusHandle;
 
+use crate::config::JstackThreadFilterRuleKind;
 use crate::loader::SourceId;
 
 // 从基础设施模块重导出，应用与 UI 通过同一状态类型处理文本输入。
@@ -188,10 +189,8 @@ pub(crate) enum AppTextInputTarget {
     },
     /// 设置模态框快搜关键字输入框。
     SettingsQuickKeywords,
-    /// 设置模态框 Jstack 线程名过滤输入框。
-    SettingsJstackThreadNameFilter,
-    /// 设置模态框 Jstack 完整线程段过滤输入框。
-    SettingsJstackStackSegmentFilter,
+    /// Jstack 过滤规则编辑器内容输入框；编辑只写入草稿，关闭窗口时才提交配置。
+    SettingsJstackFilterRulePattern,
 }
 
 /// 主窗口内输入框真实焦点句柄集合。
@@ -211,8 +210,6 @@ pub(crate) struct AppInputFocusHandles {
     pub archive_password: FocusHandle,
     /// 设置模态框快搜关键字输入框焦点。
     pub settings_quick_keywords: FocusHandle,
-    /// 设置模态框 Jstack 线程名过滤输入框焦点。
-    pub settings_jstack_thread_names: FocusHandle,
     /// 右侧终端面板焦点。
     pub terminal: FocusHandle,
     /// Jstack 分析页焦点，用于线程名拖选后稳定接收复制快捷键。
@@ -227,4 +224,17 @@ pub(crate) struct AppInputFocusHandles {
     pub runtime_filter_start_time: FocusHandle,
     /// Runtime 结束时间过滤输入框焦点。
     pub runtime_filter_end_time: FocusHandle,
+}
+
+/// 过滤规则编辑器草稿；编辑期间只改草稿，保存或关闭窗口时才写回配置。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct JstackFilterRuleDraft {
+    /// 编辑目标在配置规则列表中的索引；None 表示新建规则。
+    pub rule_index: Option<usize>,
+    /// 草稿匹配方式。
+    pub kind: JstackThreadFilterRuleKind,
+    /// 草稿内容输入状态。
+    pub input: TextInputState,
+    /// 取消编辑时置 true，窗口关闭路径据此跳过提交。
+    pub discard_on_close: bool,
 }

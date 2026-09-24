@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -130,8 +130,8 @@ impl Default for ConfigManager {
 mod tests {
     use super::*;
     use crate::config::app_config::{
-        AppearanceConfig, DEFAULT_JSTACK_STACK_SEGMENT_FILTERS, DEFAULT_JSTACK_THREAD_NAME_FILTERS,
-        EncodingConfig, LoaderConfig, LogDisplayConfig, LogSearchConfig,
+        AppearanceConfig, EncodingConfig, JstackThreadFilterRule, JstackThreadFilterRuleKind,
+        LoaderConfig, LogDisplayConfig, LogSearchConfig,
     };
     use crate::config::paths::{argus_config_dir_from_home, isolated_test_dir, user_home_dir};
     use crate::remote::connection::{
@@ -142,6 +142,15 @@ mod tests {
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
     fn test_settings_path(name: &str) -> PathBuf {
         isolated_test_dir(&format!("config-manager-{name}")).join("settings.toml")
+    }
+
+    /// 构造一条启用的线程名过滤规则。
+    fn thread_name_rule(pattern: &str) -> JstackThreadFilterRule {
+        JstackThreadFilterRule {
+            enabled: true,
+            kind: JstackThreadFilterRuleKind::ThreadName,
+            pattern: pattern.to_string(),
+        }
     }
 
     /// 验证默认配置管理器始终绑定 `.argus_test`，不会读取当前用户的模型配置。
@@ -174,34 +183,63 @@ mod tests {
         assert_eq!(config.appearance.theme_mode, "dark.toml");
         assert_eq!(config.loader.max_archive_depth, 2);
         assert_eq!(
-            config.log_display.jstack_thread_name_filters,
-            DEFAULT_JSTACK_THREAD_NAME_FILTERS
+            config.log_display.jstack_thread_filter_rules,
+            LogDisplayConfig::default().jstack_thread_filter_rules
         );
-        assert_eq!(
-            config.log_display.jstack_stack_segment_filters,
-            DEFAULT_JSTACK_STACK_SEGMENT_FILTERS
-        );
+        assert!(config.log_display.jstack_thread_name_filters.is_empty());
+        assert!(config.log_display.jstack_stack_segment_filters.is_empty());
     }
 
-    /// 验证旧配置缺少 Jstack 过滤字段时会补齐默认过滤，避免升级后设置页出现空值。
+    /// 验证旧配置缺少 Jstack 过滤规则字段时按空规则列表读取，序列化默认值留给 `Default` 实现。
     #[test]
-    fn missing_log_display_filter_fields_load_default_filters() {
+    fn missing_log_display_filter_fields_load_empty_rules() {
         let path = test_settings_path("missing-log-display-fields");
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("测试目录应可创建");
+            fs::create_dir_all(parent).expect("测试旧配置应可写入");
         }
         fs::write(&path, "[log_display]\n").expect("测试旧配置应可写入");
 
         let config = ConfigManager::load_from_path(&path).expect("旧配置应可使用字段默认值读取");
 
-        assert_eq!(
-            config.log_display.jstack_thread_name_filters,
-            DEFAULT_JSTACK_THREAD_NAME_FILTERS
-        );
-        assert_eq!(
-            config.log_display.jstack_stack_segment_filters,
-            DEFAULT_JSTACK_STACK_SEGMENT_FILTERS
-        );
+        assert!(config.log_display.jstack_thread_filter_rules.is_empty());
+        assert!(config.log_display.jstack_thread_name_filters.is_empty());
+        assert!(config.log_display.jstack_stack_segment_filters.is_empty());
+    }
+
+    /// 验证旧版自由文本过滤配置在加载时迁移为规则列表，保存后旧字段不再写出。
+    #[test]
+    fn legacy_jstack_filters_migrate_to_rules_and_drop_legacy_fields() {
+        let path = test_settings_path("legacy-jstack-filters");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("迁移测试目录应可创建");
+        }
+        fs::write(
+            &path,
+            r#"
+[log_display]
+jstack_thread_name_filters = "Attach Listener,Signal Dispatcher"
+jstack_stack_segment_filters = "Unsafe.park||SocketInputStream\\nread"
+"#,
+        )
+        .expect("旧版过滤配置应可写入");
+
+        let config = ConfigManager::load_from_path(&path).expect("旧版过滤配置应可读取");
+        let rules = &config.log_display.jstack_thread_filter_rules;
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[0].kind, JstackThreadFilterRuleKind::ThreadName);
+        assert_eq!(rules[0].pattern, "Attach Listener");
+        assert_eq!(rules[1].pattern, "Signal Dispatcher");
+        assert_eq!(rules[2].kind, JstackThreadFilterRuleKind::StackSegment);
+        assert_eq!(rules[2].pattern, "Unsafe.park");
+        assert_eq!(rules[3].pattern, "SocketInputStream\nread");
+        assert!(config.log_display.jstack_thread_name_filters.is_empty());
+        assert!(config.log_display.jstack_stack_segment_filters.is_empty());
+
+        ConfigManager::save_to_path(&path, &config).expect("迁移后的配置应可保存");
+        let saved = fs::read_to_string(&path).expect("应能读取迁移后的配置");
+        assert!(!saved.contains("jstack_thread_name_filters"));
+        assert!(!saved.contains("jstack_stack_segment_filters"));
+        assert!(saved.contains("jstack_thread_filter_rules"));
     }
 
     /// 验证协议化连接配置仍能读取旧版本保存的 SSH 链接字段。
@@ -270,8 +308,16 @@ private_key_passphrase = " phrase "
                 recent_keywords: Vec::new(),
             },
             log_display: LogDisplayConfig {
-                jstack_thread_name_filters: "Attach Listener,Signal Dispatcher".to_string(),
-                jstack_stack_segment_filters: "Unsafe.park\n\nSocketInputStream\\nread".to_string(),
+                jstack_thread_filter_rules: vec![
+                    thread_name_rule("Attach Listener"),
+                    JstackThreadFilterRule {
+                        enabled: false,
+                        kind: JstackThreadFilterRuleKind::StackSegment,
+                        pattern: "Unsafe.park\n\nSocketInputStream\\nread".to_string(),
+                    },
+                ],
+                jstack_thread_name_filters: String::new(),
+                jstack_stack_segment_filters: String::new(),
             },
             connections: ConnectionConfig {
                 next_id: 4,
@@ -336,13 +382,11 @@ private_key_passphrase = " phrase "
         assert!(loaded.loader.follow_symlinks);
         assert_eq!(loaded.log_search.quick_keywords, "ERROR,WARN");
         assert_eq!(
-            loaded.log_display.jstack_thread_name_filters,
-            "Attach Listener,Signal Dispatcher"
+            loaded.log_display.jstack_thread_filter_rules,
+            config.log_display.jstack_thread_filter_rules
         );
-        assert_eq!(
-            loaded.log_display.jstack_stack_segment_filters,
-            "Unsafe.park\n\nSocketInputStream\\nread"
-        );
+        assert!(loaded.log_display.jstack_thread_name_filters.is_empty());
+        assert!(loaded.log_display.jstack_stack_segment_filters.is_empty());
         assert_eq!(loaded.connections.directories[0].name, "生产环境");
         let ssh = loaded.connections.links[0].ssh.as_ref().unwrap();
         assert_eq!(ssh.password, "secret");
