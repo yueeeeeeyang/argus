@@ -1,6 +1,6 @@
 //! 文件职责：渲染可写远程文件后端共用的应用内模态弹窗。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：提供远程文件重命名和删除二次确认交互。
 
@@ -24,12 +24,14 @@ use crate::ui::input_native::app_native_input;
 
 /// 重命名弹窗宽度。
 const REMOTE_FILE_RENAME_DIALOG_WIDTH: f32 = 560.0;
-/// 重命名弹窗高度。
-const REMOTE_FILE_RENAME_DIALOG_HEIGHT: f32 = 214.0;
+/// 重命名弹窗高度；内容贴齐后仅保留底部内边距，不再预留整片空白。
+const REMOTE_FILE_RENAME_DIALOG_HEIGHT: f32 = 184.0;
+/// 重命名弹窗在校验失败、追加错误行时的高度。
+const REMOTE_FILE_RENAME_DIALOG_HEIGHT_WITH_ERROR: f32 = 212.0;
 /// 删除确认弹窗宽度。
 const REMOTE_FILE_DELETE_DIALOG_WIDTH: f32 = 500.0;
-/// 删除确认弹窗高度；与连接目录表单使用一致的紧凑布局密度。
-const REMOTE_FILE_DELETE_DIALOG_HEIGHT: f32 = 190.0;
+/// 删除确认弹窗高度；描述按两行文本固定槽位，按钮到边框只保留 16px 底部内边距。
+const REMOTE_FILE_DELETE_DIALOG_HEIGHT: f32 = 148.0;
 /// 删除确认弹窗标题栏高度，与新增目录弹窗一致。
 const REMOTE_FILE_DELETE_HEADER_HEIGHT: f32 = 56.0;
 
@@ -41,18 +43,26 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
     };
 
     match dialog {
-        RemoteFileDialogState::Rename(dialog) => render_modal_dialog(
-            ModalDialog {
-                overlay_id: "remote-file-rename-dialog-overlay",
-                container_id: "remote-file-rename-dialog-container",
-                width: REMOTE_FILE_RENAME_DIALOG_WIDTH,
-                height: REMOTE_FILE_RENAME_DIALOG_HEIGHT,
-                content: render_rename_dialog(app, dialog, &theme, cx).into_any_element(),
-            },
-            theme,
-            cx,
-        )
-        .into_any_element(),
+        RemoteFileDialogState::Rename(dialog) => {
+            // 校验失败追加错误行时弹窗同步加高，常态下按钮下方只保留底部内边距。
+            let height = if dialog.error_message.is_some() {
+                REMOTE_FILE_RENAME_DIALOG_HEIGHT_WITH_ERROR
+            } else {
+                REMOTE_FILE_RENAME_DIALOG_HEIGHT
+            };
+            render_modal_dialog(
+                ModalDialog {
+                    overlay_id: "remote-file-rename-dialog-overlay",
+                    container_id: "remote-file-rename-dialog-container",
+                    width: REMOTE_FILE_RENAME_DIALOG_WIDTH,
+                    height,
+                    content: render_rename_dialog(app, dialog, &theme, cx).into_any_element(),
+                },
+                theme,
+                cx,
+            )
+            .into_any_element()
+        }
         RemoteFileDialogState::ConfirmDelete(prompt) => render_modal_dialog(
             ModalDialog {
                 overlay_id: "remote-file-delete-dialog-overlay",
@@ -94,7 +104,10 @@ fn render_rename_dialog(
         .flex()
         .flex_col()
         .rounded_lg()
+        .overflow_hidden()
         .bg(rgb(theme.content))
+        .border_1()
+        .border_color(rgb(theme.border))
         .child(dialog_header(
             "重命名",
             ArgusIcon::Rename,
@@ -233,13 +246,14 @@ fn render_delete_dialog(
         .child(
             div()
                 .px_5()
-                .pb_5()
+                .pb_4()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .text_size(px(13.0))
                 .text_color(rgb(theme.foreground))
-                .child(description)
+                // 描述固定两行槽位：文件名单行或双行显示时，按钮到边框的距离保持 16px 一致。
+                .child(div().h(px(32.0)).child(description))
                 .child(
                     div()
                         .flex()

@@ -71,7 +71,6 @@ pub(crate) fn render(
         .flex_col()
         .bg(rgb(theme.content))
         .child(render_toolbar(app, session, &theme, cx))
-        .child(render_status_line(session, &theme))
         .child(render_table_header(
             session.id,
             sort_field,
@@ -90,6 +89,8 @@ pub(crate) fn render(
                     render_file_list(session, entries, cx).into_any_element()
                 }),
         )
+        // 状态信息固定在内容面板底部，不再占用文件列表上方空间。
+        .child(render_status_line(session, &theme))
         .into_any_element()
 }
 
@@ -465,6 +466,8 @@ fn render_status_line(session: &RemoteFileSessionState, theme: &AppTheme) -> imp
         .items_center()
         .justify_between()
         .px_3()
+        .border_t_1()
+        .border_color(rgb(theme.border))
         .text_size(px(12.0))
         .text_color(rgb(theme.foreground_muted))
         .child(
