@@ -1424,7 +1424,7 @@ fn window_action_button(
         .text_color(rgb(theme.foreground))
         .when(is_primary, |this| this.font_weight(FontWeight::SEMIBOLD))
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(theme.selection)))
+        .hover(|this| this.bg(rgb(theme.current_line)))
         .on_click(on_click)
         .child(connection_button_icon(icon, icon_color, 13.0))
         .child(connection_button_label(label))
@@ -1840,7 +1840,7 @@ fn action_button(
     on_click: impl Fn(&mut ArgusApp, &mut Context<ArgusApp>) + 'static,
 ) -> impl IntoElement {
     let background = if is_primary {
-        theme.selection
+        theme.current_line
     } else {
         theme.content
     };

@@ -640,15 +640,11 @@ fn render_file_row(
         RemoteFileEntryKind::Other => ArgusIcon::FileText,
     };
     let background = if is_selected {
-        theme.selection
+        theme.current_line
     } else {
         theme.content
     };
-    let hover_background = if is_selected {
-        theme.selection
-    } else {
-        theme.current_line
-    };
+    let hover_background = theme.current_line;
 
     div()
         .id(SharedString::from(format!(

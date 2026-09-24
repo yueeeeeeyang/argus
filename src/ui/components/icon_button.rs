@@ -136,12 +136,8 @@ fn render_icon_button_with_shape(
         IconButtonSize::Small => (28.0, 16.0),
         IconButtonSize::Tiny => (24.0, 14.0),
     };
-    let selected_background = theme.selection;
-    let hover_background = if is_selected {
-        theme.selection
-    } else {
-        theme.current_line
-    };
+    let selected_background = theme.current_line;
+    let hover_background = theme.current_line;
     let foreground = if is_selected {
         theme.foreground
     } else {

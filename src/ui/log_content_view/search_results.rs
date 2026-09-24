@@ -293,7 +293,7 @@ pub(crate) fn render_search_result_group_row(
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgb(theme.foreground))
         .bg(rgb(theme.current_line))
-        .hover(|this| this.bg(rgb(theme.selection)))
+        .hover(|this| this.bg(rgb(theme.current_line)))
         .cursor_pointer()
         .child(render_icon(
             if is_collapsed {
@@ -349,7 +349,7 @@ pub(crate) fn render_search_result_row(
 ) -> impl IntoElement {
     let is_active = app.log_search.active_result_index == Some(index);
     let hover_background = if is_active {
-        theme.selection
+        theme.current_line
     } else {
         theme.content
     };
@@ -394,7 +394,7 @@ pub(crate) fn render_search_result_row(
         .whitespace_nowrap()
         .text_size(px(12.0))
         .cursor_pointer()
-        .when(is_active, |this| this.bg(rgb(theme.selection)))
+        .when(is_active, |this| this.bg(rgb(theme.current_line)))
         .hover(move |this| this.bg(rgb(hover_background)))
         .child(
             div()

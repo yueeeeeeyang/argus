@@ -224,7 +224,7 @@ fn text_button(
     } else {
         theme.content
     };
-    let hover_background = theme.selection;
+    let hover_background = theme.current_line;
 
     div()
         .h(px(30.0))

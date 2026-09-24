@@ -13,10 +13,83 @@ use crate::ui::{
     settings_window, source_panel, source_picker, source_resizer,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, ClickEvent, Context, ExternalPaths, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window, div, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, Context, ExternalPaths,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window, div, hsla,
+    point, prelude::*, px, rgb,
 };
 use std::time::Duration;
+
+/// 内容玻璃板与窗口边框/侧栏之间的间距（像素）。
+const WINDOW_CONTENT_INSET: f32 = 8.0;
+/// 内容玻璃板圆角半径（像素）。
+const WINDOW_CONTENT_RADIUS: f32 = 6.0;
+/// 内容玻璃板外描边在板面之外 0.5px，而父内容行容器会按自身边界裁剪，
+/// 因此顶边需要留出等宽余量，否则上边框亮线会被切掉（其余三边已有 8px 间距）。
+pub(crate) const WINDOW_CONTENT_RING_ALLOWANCE: f32 = 0.5;
+/// 玻璃板内部留白（像素）；保持与外侧一致的 8px 视觉节奏，且不小于圆角半径，
+/// 保证内容不会盖住圆角。
+///
+/// GPUI 的内容裁剪只支持矩形，圆角只能靠"子元素够不到四角"来保持可见。
+const WINDOW_CONTENT_PADDING: f32 = 8.0;
+/// 编译期守住"内部留白 ≥ 圆角半径"：GPUI 无法裁剪圆角，比例失守就会露馅。
+const _: () = assert!(WINDOW_CONTENT_PADDING >= WINDOW_CONTENT_RADIUS);
+/// 玻璃板主投影向下偏移（像素）。
+const WINDOW_CONTENT_SHADOW_PRIMARY_OFFSET_Y: f32 = 2.0;
+/// 玻璃板主投影模糊半径（像素）。
+const WINDOW_CONTENT_SHADOW_PRIMARY_BLUR: f32 = 4.0;
+/// 玻璃板次投影向下偏移（像素）；贴近板面，补足主投影近处的过渡。
+const WINDOW_CONTENT_SHADOW_SECONDARY_OFFSET_Y: f32 = 1.0;
+/// 玻璃板次投影模糊半径（像素）。
+const WINDOW_CONTENT_SHADOW_SECONDARY_BLUR: f32 = 2.0;
+/// 玻璃板投影不透明度；投影使用中性黑，与主题配色无关。
+const WINDOW_CONTENT_SHADOW_OPACITY: f32 = 0.30;
+/// 玻璃板边缘描边宽度（像素）；用向外扩散、零模糊的投影实现外描边。
+const WINDOW_CONTENT_EDGE_WIDTH: f32 = 0.5;
+/// 玻璃板边缘描边不透明度；描边使用中性白，在深色背景上勾出板面轮廓。
+const WINDOW_CONTENT_EDGE_OPACITY: f32 = 0.16;
+/// 玻璃板顶部高光向上偏移（像素）；用零模糊投影在板面顶边形成一条亮线。
+const WINDOW_CONTENT_TOP_HIGHLIGHT_OFFSET_Y: f32 = -0.5;
+/// 玻璃板顶部高光不透明度；高光使用中性白，模拟玻璃边缘受光。
+const WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY: f32 = 0.06;
+
+/// 构造内容玻璃板的凸起阴影层。
+///
+/// 数值参考 opencode v2 客户端内容面板的 `--v2-elevation-raised`（深色主题取值）：
+/// 两层向下投影把板面从窗口背景上抬起，0.5px 白色外描边勾出板面轮廓，
+/// 顶部 0.5px 白色亮线模拟玻璃边缘受光。阴影颜色为中性黑/白，不依赖主题配色；
+/// 顺序与 CSS 阴影列表一致，越靠后绘制的层级越靠上。
+fn window_content_shadows() -> Vec<BoxShadow> {
+    let shadow_color = hsla(0.0, 0.0, 0.0, WINDOW_CONTENT_SHADOW_OPACITY);
+    let edge_color = hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_EDGE_OPACITY);
+    let top_highlight_color = hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY);
+
+    vec![
+        BoxShadow {
+            color: shadow_color,
+            offset: point(px(0.0), px(WINDOW_CONTENT_SHADOW_PRIMARY_OFFSET_Y)),
+            blur_radius: px(WINDOW_CONTENT_SHADOW_PRIMARY_BLUR),
+            spread_radius: px(0.0),
+        },
+        BoxShadow {
+            color: shadow_color,
+            offset: point(px(0.0), px(WINDOW_CONTENT_SHADOW_SECONDARY_OFFSET_Y)),
+            blur_radius: px(WINDOW_CONTENT_SHADOW_SECONDARY_BLUR),
+            spread_radius: px(0.0),
+        },
+        BoxShadow {
+            color: edge_color,
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(WINDOW_CONTENT_EDGE_WIDTH),
+        },
+        BoxShadow {
+            color: top_highlight_color,
+            offset: point(px(0.0), px(WINDOW_CONTENT_TOP_HIGHLIGHT_OFFSET_Y)),
+            blur_radius: px(0.0),
+            spread_radius: px(0.0),
+        },
+    ]
+}
 
 /// 渲染 Argus 根布局。
 ///
@@ -108,9 +181,35 @@ pub(crate) fn render(
                 .flex()
                 .flex_1()
                 .overflow_hidden()
-                .bg(rgb(theme.side_bar))
+                .bg(rgb(theme.background))
                 .child(animated_source_panel(app, cx))
-                .child(log_content_view::render(app, window, cx))
+                // 内容区以玻璃板形态浮在窗口背景上，分两级：
+                // 1）透明留白容器负责与窗口左右边框、底边和侧栏之间 8px 的窗口背景间距；
+                //    顶边只留 0.5px 外描边余量——标题栏（44px）已包含标签下方的 8px 留白，
+                //    与 opencode v2 一致，同时保证上边框亮线不被裁剪；
+                // 2）玻璃板自身绘制圆角底色，并用内部留白把内容挡在四角之外
+                //    （GPUI 的内容裁剪只支持矩形，子元素会盖住圆角）。
+                .child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .pt(px(WINDOW_CONTENT_RING_ALLOWANCE))
+                        .pl(px(WINDOW_CONTENT_INSET))
+                        .pr(px(WINDOW_CONTENT_INSET))
+                        .pb(px(WINDOW_CONTENT_INSET))
+                        .child(
+                            div()
+                                .size_full()
+                                .p(px(WINDOW_CONTENT_PADDING))
+                                .rounded(px(WINDOW_CONTENT_RADIUS))
+                                .bg(rgb(theme.content))
+                                // 凸起质感：多层阴影把板面从窗口背景上抬起，并用 0.5px 亮色
+                                // 外描边与顶部亮线勾出玻璃边缘（见 `window_content_shadows`）。
+                                .shadow(window_content_shadows())
+                                .debug_selector(|| "window-content-panel".to_string())
+                                .child(log_content_view::render(app, window, cx)),
+                        ),
+                )
                 .child(animated_assistant_panel(app, window, cx)),
         )
         .when(!app.is_source_panel_collapsed, |this| {
@@ -275,4 +374,51 @@ fn animated_source_panel(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyEleme
             },
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证玻璃板阴影沿用 opencode v2 内容面板 `--v2-elevation-raised`（深色）的配方：
+    /// 两层向下黑色投影 + 0.5px 白色外描边 + 顶部 0.5px 白色亮线，共四层且顺序固定。
+    #[test]
+    fn window_content_shadows_match_reference_elevation() {
+        let shadows = window_content_shadows();
+        assert_eq!(shadows.len(), 4, "阴影应由两层投影、外描边和顶部高光组成");
+
+        let primary = &shadows[0];
+        assert_eq!(primary.offset, point(px(0.0), px(2.0)));
+        assert_eq!(primary.blur_radius, px(4.0));
+        assert_eq!(primary.spread_radius, px(0.0));
+
+        let secondary = &shadows[1];
+        assert_eq!(secondary.offset, point(px(0.0), px(1.0)));
+        assert_eq!(secondary.blur_radius, px(2.0));
+        assert_eq!(secondary.spread_radius, px(0.0));
+
+        let edge = &shadows[2];
+        assert_eq!(edge.offset, point(px(0.0), px(0.0)));
+        assert_eq!(edge.blur_radius, px(0.0));
+        assert_eq!(edge.spread_radius, px(0.5), "外描边依靠 0.5px 扩散实现");
+
+        let top_highlight = &shadows[3];
+        assert_eq!(top_highlight.offset, point(px(0.0), px(-0.5)));
+        assert_eq!(top_highlight.blur_radius, px(0.0));
+        assert_eq!(top_highlight.spread_radius, px(0.0));
+
+        // 投影为中性黑，描边与顶部高光为中性白，且层级越靠上不透明度越低。
+        let shadow_color = hsla(0.0, 0.0, 0.0, WINDOW_CONTENT_SHADOW_OPACITY);
+        assert_eq!(shadows[0].color, shadow_color);
+        assert_eq!(shadows[1].color, shadow_color);
+        assert_eq!(
+            shadows[2].color,
+            hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_EDGE_OPACITY)
+        );
+        assert_eq!(
+            shadows[3].color,
+            hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY)
+        );
+        assert!(shadows[3].color.a < shadows[2].color.a);
+    }
 }

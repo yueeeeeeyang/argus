@@ -343,7 +343,7 @@ fn delete_action_button(
         .text_color(rgb(theme.foreground))
         .when(is_primary, |this| this.font_weight(FontWeight::SEMIBOLD))
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(theme.selection)))
+        .hover(|this| this.bg(rgb(theme.current_line)))
         .child(render_icon(icon, icon_color, 13.0))
         .child(label)
         .on_mouse_down(
@@ -408,7 +408,7 @@ fn text_button(
         theme.content
     };
     let border = theme.border;
-    let hover_background = theme.selection;
+    let hover_background = theme.current_line;
 
     div()
         .h(px(32.0))

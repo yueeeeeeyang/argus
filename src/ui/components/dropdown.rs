@@ -155,7 +155,7 @@ pub(crate) fn render_dropdown(
                             .items_center()
                             .cursor_pointer()
                             .bg(rgb(if is_selected {
-                                theme.selection
+                                theme.current_line
                             } else {
                                 theme.content
                             }))

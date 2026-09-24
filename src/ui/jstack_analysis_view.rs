@@ -275,11 +275,7 @@ fn render_thread_filter_toggle(
         .gap_1()
         .rounded_sm()
         .cursor_pointer()
-        .bg(rgb(if is_enabled {
-            theme.selection
-        } else {
-            theme.current_line
-        }))
+        .bg(rgb(theme.current_line))
         .text_size(px(12.0))
         .line_height(px(24.0))
         .text_color(rgb(if is_enabled {
@@ -363,11 +359,7 @@ fn render_state_filter_item(
         .px_2()
         .rounded_sm()
         .cursor_pointer()
-        .bg(rgb(if is_active {
-            theme.selection
-        } else {
-            theme.current_line
-        }))
+        .bg(rgb(theme.current_line))
         .text_size(px(12.0))
         .line_height(px(24.0))
         .text_color(rgb(if is_active {

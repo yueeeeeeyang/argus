@@ -1752,7 +1752,7 @@ fn render_assistant_mention_picker(
                     .gap_2()
                     .cursor_pointer()
                     .when(row_index == highlighted_index, |this| {
-                        this.bg(rgb(theme.selection))
+                        this.bg(rgb(theme.current_line))
                     })
                     .hover(|this| this.bg(rgb(theme.current_line)))
                     .child(render_icon(

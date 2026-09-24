@@ -392,7 +392,7 @@ fn render_locations(
                 } else {
                     theme.foreground_muted
                 }))
-                .when(is_selected, |this| this.bg(rgb(theme.selection)))
+                .when(is_selected, |this| this.bg(rgb(theme.current_line)))
                 .hover(|this| this.bg(rgb(theme.current_line)))
                 .cursor_pointer()
                 .child(render_icon(ArgusIcon::Folder, theme.foreground_muted, 14.0))
@@ -830,7 +830,7 @@ fn render_entry_row(
                 } else {
                     theme.foreground_muted
                 }))
-                .when(is_selected, |this| this.bg(rgb(theme.selection)))
+                .when(is_selected, |this| this.bg(rgb(theme.current_line)))
                 .hover(|this| this.bg(rgb(theme.current_line)))
                 .cursor_pointer()
                 .child(render_icon(icon, theme.foreground_muted, 15.0))
@@ -1135,7 +1135,7 @@ where
         .line_height(px(30.0))
         .text_color(rgb(theme.foreground))
         .bg(rgb(theme.current_line))
-        .hover(|this| this.bg(rgb(theme.selection)))
+        .hover(|this| this.bg(rgb(theme.current_line)))
         .cursor_pointer()
         .on_click(on_click)
         .child(button_icon(icon, theme.foreground_muted, 13.0))
@@ -1167,11 +1167,7 @@ where
         .line_height(px(30.0))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(theme.foreground))
-        .bg(rgb(if is_enabled {
-            theme.selection
-        } else {
-            theme.current_line
-        }))
+        .bg(rgb(theme.current_line))
         .when(is_enabled, move |this| {
             this.cursor_pointer()
                 .hover(|this| this.opacity(0.9))

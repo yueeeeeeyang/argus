@@ -104,17 +104,17 @@ impl AppTheme {
     /// 构造深色主题紧急兜底令牌；正常路径应优先读取 `themes/dark.toml`。
     pub(crate) fn dark() -> Self {
         Self {
-            background: 0x1e1e1e,
-            title_bar: 0x333333,
+            background: 0x080808,
+            title_bar: 0x080808,
             activity_bar: 0x252526,
-            side_bar: 0x252526,
-            content: 0x1e1e1e,
+            side_bar: 0x080808,
+            content: 0x161616,
             status_bar: 0x202020,
             foreground: 0xd4d4d4,
             foreground_muted: 0x858585,
             border: 0x3c3c3c,
             selection: 0x264f78,
-            current_line: 0x2a2d2e,
+            current_line: 0x212121,
             debug: 0xb5cea8,
             info: 0x75beff,
             warning: 0xcca700,

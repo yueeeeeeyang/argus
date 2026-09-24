@@ -261,7 +261,7 @@ fn render_month_nav_button(
         .justify_center()
         .rounded_sm()
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(theme.selection)))
+        .hover(|this| this.bg(rgb(theme.current_line)))
         .child(render_icon(icon, theme.foreground, 13.0))
         .on_click(on_click)
 }
@@ -323,7 +323,7 @@ fn render_calendar_day(
     let background = if day.is_selected {
         theme.info
     } else if day.is_today {
-        theme.selection
+        theme.current_line
     } else {
         theme.content
     };
@@ -364,7 +364,7 @@ fn render_calendar_day(
             this.bg(rgb(if day.is_selected {
                 theme.info
             } else {
-                theme.selection
+                theme.current_line
             }))
         })
         .child(format!("{date_day}"))
@@ -480,7 +480,7 @@ fn render_time_step_button(
         .rounded_sm()
         .cursor_pointer()
         .bg(rgb(theme.content))
-        .hover(|this| this.bg(rgb(theme.selection)))
+        .hover(|this| this.bg(rgb(theme.current_line)))
         .child(render_icon(icon, theme.foreground, 11.0))
         .on_click(on_click)
 }

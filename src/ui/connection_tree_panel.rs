@@ -252,7 +252,7 @@ fn render_row(
                 .text_size(px(CONNECTION_TREE_FONT_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme.foreground))
-                .when(row.is_selected, |this| this.bg(rgb(theme.selection)))
+                .when(row.is_selected, |this| this.bg(rgb(theme.current_line)))
                 .when(!row.is_selected, |this| {
                     this.hover(|this| this.bg(rgb(theme.current_line)))
                 })

@@ -123,12 +123,10 @@ pub(crate) fn render(
     let theme = app.theme.clone();
 
     div()
-        .flex_1()
-        .h_full()
+        .size_full()
         .flex()
         .flex_col()
         .overflow_hidden()
-        .bg(rgb(theme.content))
         .child(
             div()
                 .flex_1()

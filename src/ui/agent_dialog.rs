@@ -240,7 +240,7 @@ impl Render for AgentLaunchDialog {
                         .bg(rgb(theme.current_line))
                         .when(can_switch, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(rgb(theme.selection)))
+                                .hover(|this| this.bg(rgb(theme.current_line)))
                         })
                         .child(
                             div()
@@ -588,9 +588,9 @@ fn dialog_button(
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(if primary {
-            theme.selection
-        } else {
             theme.current_line
+        } else {
+            theme.content
         }))
         .opacity(if enabled { 1.0 } else { 0.45 })
         .text_size(px(12.0))

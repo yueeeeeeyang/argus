@@ -8,11 +8,6 @@ use crate::ui::components::icon::ArgusIcon;
 use gpui::{AssetSource, SharedString};
 use std::borrow::Cow;
 
-/// 左侧激活标签凹弧连接件 SVG，使用 currentColor 继承标题栏颜色。
-const TAB_CONNECTOR_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6" viewBox="0 0 6 6"><path d="M0 0H6C6 3.314 3.314 6 0 6V0Z" fill="currentColor"/></svg>"#;
-/// 右侧激活标签凹弧连接件 SVG，使用 currentColor 继承标题栏颜色。
-const TAB_CONNECTOR_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6" viewBox="0 0 6 6"><path d="M0 0C0 3.314 2.686 6 6 6V0H0Z" fill="currentColor"/></svg>"#;
-
 /// Argus 内存资产源，当前只负责提供 Lucide SVG 图标。
 #[derive(Debug, Default)]
 pub(crate) struct ArgusAssetSource;
@@ -32,16 +27,6 @@ impl AssetSource for ArgusAssetSource {
     ///
     /// 返回值：匹配图标时返回完整 SVG 字节；未知路径返回 `None`，不抛出业务异常。
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        match path {
-            "chrome/tab-connector-left.svg" => {
-                return Ok(Some(Cow::Borrowed(TAB_CONNECTOR_LEFT_SVG.as_bytes())));
-            }
-            "chrome/tab-connector-right.svg" => {
-                return Ok(Some(Cow::Borrowed(TAB_CONNECTOR_RIGHT_SVG.as_bytes())));
-            }
-            _ => {}
-        }
-
         let Some(icon) = ArgusIcon::from_path(path) else {
             return Ok(None);
         };

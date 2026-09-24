@@ -50,8 +50,10 @@ pub(crate) enum ArgusIcon {
     WindowMaximize,
     /// Windows 主窗口从最大化状态还原。
     WindowRestore,
-    /// 布局切换。
-    Layout,
+    /// 展开主窗口左侧来源面板。
+    PanelLeftOpen,
+    /// 收起主窗口左侧来源面板。
+    PanelLeftClose,
     /// 展开主窗口右侧 Agent 助手面板。
     PanelRightOpen,
     /// 收起主窗口右侧 Agent 助手面板。
@@ -142,7 +144,8 @@ impl ArgusIcon {
             Self::Stop,
             Self::WindowMaximize,
             Self::WindowRestore,
-            Self::Layout,
+            Self::PanelLeftOpen,
+            Self::PanelLeftClose,
             Self::PanelRightOpen,
             Self::PanelRightClose,
             Self::More,
@@ -206,7 +209,8 @@ impl ArgusIcon {
             Self::Stop => "icons/stop.svg",
             Self::WindowMaximize => "icons/window-maximize.svg",
             Self::WindowRestore => "icons/window-restore.svg",
-            Self::Layout => "icons/layout.svg",
+            Self::PanelLeftOpen => "icons/panel-left-open.svg",
+            Self::PanelLeftClose => "icons/panel-left-close.svg",
             Self::PanelRightOpen => "icons/panel-right-open.svg",
             Self::PanelRightClose => "icons/panel-right-close.svg",
             Self::More => "icons/more.svg",
@@ -245,6 +249,24 @@ impl ArgusIcon {
     /// 返回资产目录列表使用的文件名。
     pub(crate) fn file_name(self) -> &'static str {
         self.path().trim_start_matches("icons/")
+    }
+
+    /// 返回左侧来源面板开关按钮图标：面板收起时显示展开图标，展开时显示收起图标。
+    pub(crate) fn source_panel_toggle(is_collapsed: bool) -> Self {
+        if is_collapsed {
+            Self::PanelLeftOpen
+        } else {
+            Self::PanelLeftClose
+        }
+    }
+
+    /// 返回右侧 Agent 助手面板开关按钮图标：面板收起时显示展开图标，展开时显示收起图标。
+    pub(crate) fn assistant_panel_toggle(is_collapsed: bool) -> Self {
+        if is_collapsed {
+            Self::PanelRightOpen
+        } else {
+            Self::PanelRightClose
+        }
     }
 
     /// 将 icondata 的路径片段包装为完整 SVG 文档。
@@ -287,7 +309,8 @@ impl ArgusIcon {
             Self::Stop => icondata::LuSquare,
             Self::WindowMaximize => icondata::LuSquare,
             Self::WindowRestore => icondata::LuCopy,
-            Self::Layout => icondata::LuPanelLeft,
+            Self::PanelLeftOpen => icondata::LuPanelLeftOpen,
+            Self::PanelLeftClose => icondata::LuPanelLeftClose,
             Self::PanelRightOpen => icondata::LuPanelRightOpen,
             Self::PanelRightClose => icondata::LuPanelRightClose,
             Self::More => icondata::LuEllipsis,
@@ -337,4 +360,46 @@ pub(crate) fn render_icon(icon: ArgusIcon, color: u32, size: f32) -> impl IntoEl
         .path(icon.path())
         .size(px(size))
         .text_color(rgb(color))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// 验证图标清单没有重复资产路径，避免资产源按路径反查时命中错误图标。
+    #[test]
+    fn icon_asset_paths_are_unique() {
+        let mut paths = HashSet::new();
+        for icon in ArgusIcon::all() {
+            assert!(
+                paths.insert(icon.path()),
+                "图标资产路径重复：{}",
+                icon.path()
+            );
+        }
+    }
+
+    /// 验证左右面板开关在展开与收起状态分别使用不同图标。
+    #[test]
+    fn panel_toggles_use_distinct_icons_per_state() {
+        assert_eq!(
+            ArgusIcon::source_panel_toggle(true),
+            ArgusIcon::PanelLeftOpen
+        );
+        assert_eq!(
+            ArgusIcon::source_panel_toggle(false),
+            ArgusIcon::PanelLeftClose
+        );
+        assert_eq!(
+            ArgusIcon::assistant_panel_toggle(true),
+            ArgusIcon::PanelRightOpen
+        );
+        assert_eq!(
+            ArgusIcon::assistant_panel_toggle(false),
+            ArgusIcon::PanelRightClose
+        );
+        assert_ne!(ArgusIcon::PanelLeftOpen, ArgusIcon::PanelLeftClose);
+        assert_ne!(ArgusIcon::PanelRightOpen, ArgusIcon::PanelRightClose);
+    }
 }

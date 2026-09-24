@@ -468,6 +468,7 @@ mod tests {
 
         assert_eq!(theme.background, AppTheme::dark().background);
         assert_eq!(theme.title_bar, AppTheme::dark().title_bar);
+        assert_eq!(theme.content, AppTheme::dark().content);
         assert_eq!(theme.modal_overlay, AppTheme::dark().modal_overlay);
         assert_eq!(theme.syntax.comment, AppTheme::dark().syntax.comment);
     }

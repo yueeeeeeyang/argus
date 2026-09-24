@@ -9,17 +9,17 @@ mode = "dark"
 description = "Argus 默认深色主题，颜色值来自当前已调校的界面实现。"
 
 [colors]
-background = "#1e1e1e"
-title_bar = "#333333"
+background = "#080808"
+title_bar = "#080808"
 activity_bar = "#252526"
-side_bar = "#252526"
-content = "#1e1e1e"
+side_bar = "#080808"
+content = "#161616"
 status_bar = "#202020"
 foreground = "#d4d4d4"
 foreground_muted = "#858585"
 border = "#3c3c3c"
 selection = "#264f78"
-current_line = "#2a2d2e"
+current_line = "#212121"
 modal_overlay = "#1e1e1eb8"
 
 [log_levels]

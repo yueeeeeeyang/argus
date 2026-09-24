@@ -194,9 +194,9 @@ fn approval_action_button(
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(if primary {
-            theme.selection
-        } else {
             theme.current_line
+        } else {
+            theme.content
         }))
         .text_size(px(11.0))
         .cursor_pointer()

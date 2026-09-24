@@ -601,7 +601,7 @@ fn settings_navigation_item(
         .rounded_sm()
         .cursor_pointer()
         .bg(rgb(if is_selected {
-            theme.selection
+            theme.current_line
         } else {
             theme.side_bar
         }))
@@ -754,7 +754,7 @@ fn render_ai_model_section(
                             .rounded_sm()
                             .bg(rgb(theme.current_line))
                             .cursor_pointer()
-                            .hover(move |this| this.bg(rgb(row_theme.selection)))
+                            .hover(move |this| this.bg(rgb(row_theme.current_line)))
                             .child(
                                 div()
                                     .min_w(px(0.0))
@@ -844,7 +844,7 @@ fn render_ai_log_profiles_section(
                             .rounded_sm()
                             .bg(rgb(theme.current_line))
                             .cursor_pointer()
-                            .hover(move |this| this.bg(rgb(row_theme.selection)))
+                            .hover(move |this| this.bg(rgb(row_theme.current_line)))
                             .child(
                                 div()
                                     .min_w(px(0.0))
@@ -1122,7 +1122,7 @@ fn ai_settings_entry_control(
                 .text_size(px(12.0))
                 .text_color(rgb(theme.foreground))
                 .cursor_pointer()
-                .hover(move |this| this.bg(rgb(button_theme.selection)))
+                .hover(move |this| this.bg(rgb(button_theme.current_line)))
                 .child(render_icon(icon, theme.foreground_muted, 13.0))
                 .child(button_label)
                 .on_click(move |_, _, cx| {
@@ -1375,7 +1375,7 @@ fn render_theme_dropdown_menu(
                 .items_center()
                 .cursor_pointer()
                 .bg(rgb(if is_selected {
-                    row_theme.selection
+                    row_theme.current_line
                 } else {
                     row_theme.content
                 }))
@@ -2077,7 +2077,7 @@ fn registration_action_button(
         }))
         .when(!is_disabled, |this| {
             this.cursor_pointer()
-                .hover(move |this| this.bg(rgb(button_theme.selection)))
+                .hover(move |this| this.bg(rgb(button_theme.current_line)))
         })
         .child(render_icon(
             icon,

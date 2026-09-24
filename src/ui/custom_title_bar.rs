@@ -16,11 +16,11 @@ use crate::ui::tab_bar;
 use gpui::WindowControlArea;
 use gpui::{Context, IntoElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px, rgb};
 
-/// 自定义标题栏高度，保持紧凑 Obsidian 风格。
+/// 自定义标题栏高度，对齐 opencode v2 客户端标题栏（44px 内容带：28px 标签上下各 8px）。
 ///
 /// 公开供依赖标题栏高度的计算（如搜索结果面板保留高度）派生使用，避免各自维护
 /// 易漂移的字面量。
-pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.0;
+pub(crate) const TITLE_BAR_HEIGHT: f32 = 44.0;
 /// 原生交通灯及其周围不可接管连续点击的横向安全宽度。
 ///
 /// 该值覆盖窗口左侧内边距、交通灯实际按钮和视觉占位，供原生事件命中判断复用。
@@ -34,8 +34,8 @@ const WINDOWS_WINDOW_CONTROL_BUTTON_WIDTH: f32 = 20.0;
 /// Windows 左侧窗口操作按钮组宽度，与 macOS 原生交通灯布局占位一致。
 #[cfg(target_os = "windows")]
 const WINDOWS_WINDOW_CONTROLS_WIDTH: f32 = 76.0;
-/// 标签页与来源侧栏分割线之间的视觉留白。
-const TAB_LEFT_GAP: f32 = 16.0;
+/// 标签页与来源侧栏分割线之间的视觉留白；与内容玻璃板内边距一致，保证左侧对齐。
+const TAB_LEFT_GAP: f32 = 8.0;
 /// 标签栏右侧固定按钮与窗口右边缘的间距。
 const TAB_RIGHT_GAP: f32 = 12.0;
 /// 标题栏非激活按钮 hover 背景的视觉垂直校正值。
@@ -179,12 +179,6 @@ fn title_control_group(
         return collapsed_title_control_group(is_window_maximized, theme, cx).into_any_element();
     }
 
-    let source_panel_action = if app.is_source_panel_collapsed {
-        "展开左侧菜单"
-    } else {
-        "收起左侧菜单"
-    };
-
     div()
         .h_full()
         .flex()
@@ -210,9 +204,9 @@ fn title_control_group(
         .child(settings_button(app, theme, cx))
         .child(title_action_button(
             "title-source-toggle",
-            ArgusIcon::Layout,
-            source_panel_action,
-            app.is_source_panel_collapsed,
+            ArgusIcon::source_panel_toggle(false),
+            "收起左侧菜单",
+            false,
             theme,
             cx,
         ))
@@ -233,7 +227,7 @@ fn collapsed_title_control_group(
         .child(platform_window_controls(is_window_maximized, theme))
         .child(title_action_button(
             "title-source-expand",
-            ArgusIcon::Layout,
+            ArgusIcon::source_panel_toggle(true),
             "展开左侧菜单",
             false,
             theme,
