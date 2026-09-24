@@ -1,6 +1,6 @@
 //! 文件职责：渲染 SFTP、SMB、Git、SVN 通用远程文件管理标签页。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：展示通用远程目录、仓库版本控件、协议能力工具栏和虚拟化文件列表。
 
@@ -491,7 +491,7 @@ fn render_table_header(
         .items_center()
         .border_b_1()
         .border_color(rgb(theme.border))
-        .bg(rgb(theme.side_bar))
+        .bg(rgb(theme.content))
         .text_size(px(12.0))
         .text_color(rgb(theme.foreground_muted))
         .child(header_cell(

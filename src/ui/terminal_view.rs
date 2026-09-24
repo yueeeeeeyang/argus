@@ -1,6 +1,6 @@
 //! 文件职责：渲染 SSH 终端标签页的右侧内容面板。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：展示连接状态、远程终端输出，并将键盘输入转发给终端会话。
 
@@ -10,8 +10,8 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, FontWeight, HighlightStyle,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollWheelEvent, SharedString, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*,
-    px, rgb,
+    ScrollWheelEvent, SharedString, StyledText, TextRun, UnderlineStyle, Window, canvas, div,
+    prelude::*, px, rgb,
 };
 
 use crate::app::ArgusApp;
@@ -23,7 +23,7 @@ use crate::remote::terminal::{
 use crate::theme::AppTheme;
 
 /// 终端正文行高。
-const TERMINAL_LINE_HEIGHT: f32 = 18.0;
+pub(crate) const TERMINAL_LINE_HEIGHT: f32 = 18.0;
 /// 终端正文字号。
 const TERMINAL_FONT_SIZE: f32 = 12.0;
 /// 终端正文水平内边距，给光标和边缘保留轻微呼吸感。
@@ -145,7 +145,7 @@ fn render_terminal_body(
         .flex_1()
         .min_h(px(0.0))
         .overflow_hidden()
-        .bg(rgb(theme.background))
+        .bg(rgb(theme.content))
         .cursor(CursorStyle::IBeam)
         .track_scroll(&viewport_handle)
         .on_scroll_wheel(cx.listener(move |app, event: &ScrollWheelEvent, _, cx| {
@@ -253,10 +253,51 @@ fn render_terminal_body(
                 cx,
             ))
         })
+        .child(render_terminal_selection_autoscroll_sensor(session_id, cx))
+}
+
+/// 渲染终端拖拽选择自动滚动传感器。
+///
+/// 说明：与日志视图同一范式——正文元素的 `on_mouse_move` 在指针拖出视口后不再触发，
+/// 这里通过 canvas 注册窗口级监听，让拖拽选择越过视口顶/底边缘时仍能持续记录指针位置
+/// 并驱动自动滚动；canvas 不参与命中测试，不影响正文和滚动条的鼠标事件。
+fn render_terminal_selection_autoscroll_sensor(
+    session_id: usize,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    let entity = cx.entity();
+    canvas(
+        |_, _, _| (),
+        move |_, _, window: &mut Window, _| {
+            window.on_mouse_event({
+                let entity = entity.clone();
+                move |event: &MouseMoveEvent, phase, window, cx| {
+                    if !phase.bubble() || !event.dragging() {
+                        return;
+                    }
+                    let entity_id = entity.entity_id();
+                    let started = entity.update(cx, |app, app_cx| {
+                        app.track_terminal_selection_autoscroll_pointer(
+                            session_id,
+                            event.position,
+                            window,
+                            app_cx,
+                        )
+                    });
+                    if started {
+                        cx.notify(entity_id);
+                    }
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 /// 根据当前窗口字体环境测量终端等宽单元格。
-fn terminal_metrics(window: &mut Window) -> TerminalMetrics {
+pub(crate) fn terminal_metrics(window: &mut Window) -> TerminalMetrics {
     let mut text_style = window.text_style();
     text_style.font_family = ARGUS_LOG_FONT_FAMILY.into();
     text_style.font_size = px(TERMINAL_FONT_SIZE).into();
@@ -282,7 +323,7 @@ fn terminal_metrics(window: &mut Window) -> TerminalMetrics {
 
 /// 终端单元格测量结果。
 #[derive(Clone, Copy)]
-struct TerminalMetrics {
+pub(crate) struct TerminalMetrics {
     /// 单个终端列宽。
     cell_width: Pixels,
     /// 单行高度。
@@ -621,7 +662,7 @@ fn render_terminal_scrollbar(
 }
 
 /// 把鼠标位置转换为当前终端屏幕行列。
-fn terminal_position_from_pointer(
+pub(crate) fn terminal_position_from_pointer(
     app: &ArgusApp,
     session_id: usize,
     position: gpui::Point<Pixels>,

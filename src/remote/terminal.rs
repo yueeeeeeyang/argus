@@ -1,6 +1,6 @@
 //! 文件职责：封装 SSH 终端会话、主机指纹校验、终端输出解析和按键字节映射。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：使用内嵌 ssh2 通道建立远程 shell，并把后台输出安全回传给 GPUI 状态。
 
@@ -348,6 +348,10 @@ impl TerminalSessionState {
         self.max_scrollback_offset = max_offset;
     }
 
+    /// 返回当前可回看的最大 scrollback 偏移；自动滚动边界判断使用该轻量入口，避免逐帧构建屏幕快照。
+    pub(crate) fn max_scrollback_offset(&self) -> usize {
+        self.max_scrollback_offset
+    }
     /// 把外部传入的行列坐标限制在当前屏幕范围内。
     fn clamp_grid_position(&self, position: TerminalGridPosition) -> TerminalGridPosition {
         TerminalGridPosition {
@@ -419,6 +423,15 @@ pub(crate) struct TerminalGridPosition {
     pub row: u16,
     /// 0 基终端列号；作为选区终点时可等于终端列数。
     pub col: u16,
+}
+
+/// 终端拖拽选择的自动滚动状态，记录拖拽中的会话和最近的指针位置。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TerminalSelectionAutoscroll {
+    /// 拖拽选择所在的终端会话 ID。
+    pub session_id: usize,
+    /// 最近一次记录的指针位置（窗口坐标）。
+    pub pointer: gpui::Point<gpui::Pixels>,
 }
 
 /// 终端文本选区，由锚点和当前焦点行列组成。

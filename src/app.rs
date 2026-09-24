@@ -75,7 +75,7 @@ use crate::reader::log_file_reader::{
 };
 use crate::remote::connection::ConnectionNodeId;
 use crate::remote::remote_file::RemoteFileSessionState;
-use crate::remote::terminal::TerminalSessionState;
+use crate::remote::terminal::{TerminalSelectionAutoscroll, TerminalSessionState};
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::agent_dialog::AgentLaunchDialog;
 use crate::ui::agent_window::AgentWindow;
@@ -200,7 +200,7 @@ fn input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize
 /// GPUI 在 `titlebar: Some` 时会强制添加关闭/缩放按钮（红绿灯），而 `titlebar: None`
 /// 又会忽略 `is_resizable` 导致窗口不可缩放。这里把红绿灯定位到窗口可视区外，既保留
 /// 可缩放能力，又不显示系统按钮，关闭操作改由标题栏右侧的自定义关闭按钮承担。
-/// 线程详情窗口与文件预览窗口共用此配置。
+/// 目前仅 Agent 窗口使用此配置；线程详情窗口与文件预览窗口改用与主窗口一致的原生红绿灯。
 pub(crate) fn frameless_resizable_titlebar() -> TitlebarOptions {
     TitlebarOptions {
         title: None,
@@ -354,6 +354,10 @@ pub(crate) struct ArgusApp {
     pub terminal_sessions: HashMap<usize, TerminalSessionState>,
     /// 下一个 SSH 终端会话 ID。
     pub next_terminal_session_id: usize,
+    /// 终端拖拽选择的自动滚动状态。
+    pub terminal_selection_autoscroll: Option<TerminalSelectionAutoscroll>,
+    /// 终端拖拽选择自动滚动逐帧循环是否已注册，避免重复注册。
+    pub terminal_selection_autoscroll_loop_active: bool,
     /// 远程文件管理会话状态表。
     pub remote_file_sessions: HashMap<usize, RemoteFileSessionState>,
     /// 下一个远程文件管理会话 ID。
@@ -533,6 +537,8 @@ impl ArgusApp {
             next_runtime_analysis_id: 1,
             terminal_sessions: HashMap::new(),
             next_terminal_session_id: 1,
+            terminal_selection_autoscroll: None,
+            terminal_selection_autoscroll_loop_active: false,
             remote_file_sessions: HashMap::new(),
             next_remote_file_session_id: 1,
             remote_file_dialog: None,
