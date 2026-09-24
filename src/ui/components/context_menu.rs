@@ -149,6 +149,11 @@ pub(crate) enum MenuAction {
         /// 终端会话 ID。
         terminal_session_id: usize,
     },
+    /// 从 SSH 链接树节点直接打开 SFTP 文件管理标签页。
+    OpenSftpFileManagerFromLink {
+        /// 目标 SSH 链接节点 ID。
+        link_id: ConnectionNodeId,
+    },
     /// 下载远程文件管理中当前选中的普通文件。
     DownloadRemoteFileSelection {
         /// 远程文件会话 ID。
@@ -205,6 +210,9 @@ impl MenuAction {
             Self::OpenSftpFileManager {
                 terminal_session_id,
             } => format!("open-remote-file-manager-{terminal_session_id}"),
+            Self::OpenSftpFileManagerFromLink { link_id } => {
+                format!("open-remote-file-manager-from-link-{link_id}")
+            }
             Self::DownloadRemoteFileSelection { session_id } => {
                 format!("download-remote-file-selection-{session_id}")
             }

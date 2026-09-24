@@ -1,6 +1,7 @@
 //! 文件职责：提取右键上下文菜单和下拉菜单的打开、条目构建与动作分发方法到独立子模块。
 
 use super::*;
+use crate::remote::connection::ConnectionLinkKind;
 
 impl ArgusApp {
     /// 在指定窗口坐标打开标签页右键菜单。
@@ -141,16 +142,39 @@ impl ArgusApp {
                 entries
             }
             ActiveMenuKind::ConnectionTree { node_id } => {
-                let (edit_label, delete_label) = if self.config.connections.is_directory(node_id) {
-                    ("编辑目录", "删除目录")
+                if self.config.connections.is_directory(node_id) {
+                    // 目录菜单直接提供四种协议的新建入口；父目录由右键选中的节点推导。
+                    vec![
+                        MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink),
+                        MenuEntry::new("新建 SMB 链接", MenuAction::NewSmbConnectionLink),
+                        MenuEntry::new("新建 Git 链接", MenuAction::NewGitConnectionLink),
+                        MenuEntry::new("新建 SVN 链接", MenuAction::NewSvnConnectionLink),
+                        MenuEntry::new("编辑目录", MenuAction::EditConnectionNode { node_id }),
+                        MenuEntry::new("删除目录", MenuAction::DeleteConnectionNode { node_id })
+                            .danger(),
+                    ]
                 } else {
-                    ("编辑链接", "删除链接")
-                };
-                vec![
-                    MenuEntry::new(edit_label, MenuAction::EditConnectionNode { node_id }),
-                    MenuEntry::new(delete_label, MenuAction::DeleteConnectionNode { node_id })
-                        .danger(),
-                ]
+                    // 与树渲染同一口径：无协议信息的旧配置按 SSH 处理。
+                    let is_ssh_link = self.config.connections.link(node_id).is_some_and(|link| {
+                        matches!(link.protocol(), Some(ConnectionLinkKind::Ssh) | None)
+                    });
+                    let mut entries = Vec::new();
+                    if is_ssh_link {
+                        entries.push(MenuEntry::new(
+                            "文件管理",
+                            MenuAction::OpenSftpFileManagerFromLink { link_id: node_id },
+                        ));
+                    }
+                    entries.push(MenuEntry::new(
+                        "编辑链接",
+                        MenuAction::EditConnectionNode { node_id },
+                    ));
+                    entries.push(
+                        MenuEntry::new("删除链接", MenuAction::DeleteConnectionNode { node_id })
+                            .danger(),
+                    );
+                    entries
+                }
             }
             ActiveMenuKind::ConnectionLinkCreate => vec![
                 MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink),
@@ -254,6 +278,9 @@ impl ArgusApp {
             MenuAction::OpenSftpFileManager { .. } => {
                 self.placeholder_notice = "文件管理需要从界面菜单触发".to_string();
             }
+            MenuAction::OpenSftpFileManagerFromLink { .. } => {
+                self.placeholder_notice = "文件管理需要从界面菜单触发".to_string();
+            }
             MenuAction::DownloadRemoteFileSelection { .. } => {
                 self.placeholder_notice = "文件下载需要从界面菜单触发".to_string();
             }
@@ -334,6 +361,10 @@ impl ArgusApp {
                 terminal_session_id,
             } => {
                 self.open_sftp_file_manager_from_terminal(terminal_session_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::OpenSftpFileManagerFromLink { link_id } => {
+                self.open_sftp_file_manager_from_link(link_id, cx);
                 self.close_active_menu();
             }
             MenuAction::DownloadRemoteFileSelection { session_id } => {

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use crate::config::JstackThreadFilterRuleKind;
 use crate::config::paths::{isolated_test_dir, temporary_test_dir};
+use crate::remote::connection::ConnectionLinkKind;
 
 /// 构造隔离真实用户目录的配置管理器。
 fn isolated_config_manager() -> ConfigManager {
@@ -288,6 +289,114 @@ fn connection_link_create_menu_shows_four_protocols() {
     assert!(actions.contains(&MenuAction::NewSmbConnectionLink));
     assert!(actions.contains(&MenuAction::NewGitConnectionLink));
     assert!(actions.contains(&MenuAction::NewSvnConnectionLink));
+}
+
+/// 验证目录右键菜单提供四种协议的新建入口以及编辑、删除目录动作。
+#[test]
+fn connection_tree_directory_menu_shows_create_entries() {
+    let mut app = test_app();
+    let directory_id = app
+        .config
+        .connections
+        .add_directory(None, "生产环境")
+        .unwrap();
+
+    app.open_connection_tree_context_menu(directory_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+
+    let actions = app
+        .active_menu_entries()
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect::<Vec<_>>();
+    assert_eq!(app.selected_connection_node_id, Some(directory_id));
+    assert!(actions.contains(&MenuAction::NewSshConnectionLink));
+    assert!(actions.contains(&MenuAction::NewSmbConnectionLink));
+    assert!(actions.contains(&MenuAction::NewGitConnectionLink));
+    assert!(actions.contains(&MenuAction::NewSvnConnectionLink));
+    assert!(actions.contains(&MenuAction::EditConnectionNode {
+        node_id: directory_id
+    }));
+    assert!(actions.contains(&MenuAction::DeleteConnectionNode {
+        node_id: directory_id
+    }));
+}
+
+/// 验证 SSH 链接右键菜单提供文件管理入口，其他协议链接不展示。
+#[test]
+fn connection_tree_link_menu_shows_file_manager_only_for_ssh() {
+    let mut app = test_app();
+    let ssh_link_id = add_test_ssh_link(&mut app);
+
+    app.open_connection_tree_context_menu(ssh_link_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+    let actions = app
+        .active_menu_entries()
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect::<Vec<_>>();
+    assert!(actions.contains(&MenuAction::OpenSftpFileManagerFromLink {
+        link_id: ssh_link_id
+    }));
+
+    let smb_link_id = app
+        .config
+        .connections
+        .add_smb_link(
+            None,
+            "共享日志",
+            crate::remote::connection::SmbLinkConfig {
+                host: "10.0.0.2".to_string(),
+                port: 445,
+                share: "logs".to_string(),
+                initial_dir: "/".to_string(),
+                domain: None,
+                username: "smbuser".to_string(),
+                password: "secret".to_string(),
+            },
+        )
+        .unwrap();
+    app.open_connection_tree_context_menu(smb_link_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+    let actions = app
+        .active_menu_entries()
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect::<Vec<_>>();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, MenuAction::OpenSftpFileManagerFromLink { .. })),
+        "SMB 链接菜单不应展示 SFTP 文件管理入口"
+    );
+}
+
+/// 验证目录右键新建链接会以右键选中的目录作为父目录打开新增对话框。
+#[gpui::test]
+fn connection_tree_directory_menu_create_dialog_uses_right_clicked_parent(
+    cx: &mut gpui::TestAppContext,
+) {
+    let app = cx.new(|_| test_app());
+    app.update(cx, |app, app_cx| {
+        let directory_id = app
+            .config
+            .connections
+            .add_directory(None, "生产环境")
+            .unwrap();
+        app.open_connection_tree_context_menu(
+            directory_id,
+            gpui::point(gpui::px(1.0), gpui::px(1.0)),
+        );
+
+        app.handle_menu_action_with_context(MenuAction::NewSshConnectionLink, app_cx);
+
+        assert!(app.active_menu.is_none());
+        let modal = app
+            .connection_link_modal
+            .as_ref()
+            .expect("应打开新增链接模态框");
+        modal.read_with(app_cx, |modal_state, _| {
+            assert_eq!(modal_state.link_kind(), ConnectionLinkKind::Ssh);
+            assert_eq!(modal_state.form_parent_id(), Some(directory_id));
+        });
+    });
 }
 
 /// 验证点击链接树空白区域会同时取消节点选中并关闭残留菜单。

@@ -123,6 +123,15 @@ impl ArgusApp {
         self.create_remote_file_manager_session(link_id, RemoteFileBackend::Sftp, cx);
     }
 
+    /// 从 SSH 链接树节点直接打开一个新的 SFTP 文件管理标签页。
+    pub(crate) fn open_sftp_file_manager_from_link(
+        &mut self,
+        link_id: crate::remote::connection::ConnectionNodeId,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_remote_file_manager_session(link_id, RemoteFileBackend::Sftp, cx);
+    }
+
     /// 从 SMB 链接树节点打开一个新的 SMB 文件管理标签页。
     pub(crate) fn open_smb_file_manager_from_link(
         &mut self,

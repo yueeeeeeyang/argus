@@ -368,6 +368,12 @@ impl ConnectionLinkWindow {
         self.form.link_kind
     }
 
+    /// 返回当前表单父目录，供菜单新建链路断言父目录推导。
+    #[cfg(test)]
+    pub(crate) fn form_parent_id(&self) -> Option<crate::remote::connection::ConnectionNodeId> {
+        self.form.parent_id
+    }
+
     /// 根据当前协议、URL 与校验状态返回模态框应使用的内容高度。
     ///
     /// Git/SVN 会随 URL 传输方式增减密码或私钥字段，因此不能按协议使用一个
