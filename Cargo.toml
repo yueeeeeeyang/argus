@@ -6,7 +6,7 @@
 
 [package]
 name = "argus"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 publish = false
 description = "Argus 高性能日志查看与分析桌面客户端"
