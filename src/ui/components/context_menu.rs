@@ -149,6 +149,16 @@ pub(crate) enum MenuAction {
         /// 终端会话 ID。
         terminal_session_id: usize,
     },
+    /// 复制指定 SSH 终端的当前选区。
+    CopyTerminalSelection {
+        /// 终端会话 ID。
+        session_id: usize,
+    },
+    /// 向指定 SSH 终端粘贴剪贴板文本。
+    PasteTerminalClipboard {
+        /// 终端会话 ID。
+        session_id: usize,
+    },
     /// 从 SSH 链接树节点直接打开 SFTP 文件管理标签页。
     OpenSftpFileManagerFromLink {
         /// 目标 SSH 链接节点 ID。
@@ -210,6 +220,12 @@ impl MenuAction {
             Self::OpenSftpFileManager {
                 terminal_session_id,
             } => format!("open-remote-file-manager-{terminal_session_id}"),
+            Self::CopyTerminalSelection { session_id } => {
+                format!("copy-terminal-selection-{session_id}")
+            }
+            Self::PasteTerminalClipboard { session_id } => {
+                format!("paste-terminal-clipboard-{session_id}")
+            }
             Self::OpenSftpFileManagerFromLink { link_id } => {
                 format!("open-remote-file-manager-from-link-{link_id}")
             }

@@ -250,7 +250,7 @@ fn source_tree_context_menu_shows_analysis_actions_for_supported_sources() {
     ));
 }
 
-/// 验证 SSH 终端正文右键菜单展示文件管理入口。
+/// 验证 SSH 终端正文右键菜单展示粘贴和文件管理入口。
 #[test]
 fn terminal_context_menu_shows_file_manager_action() {
     let mut app = test_app();
@@ -264,13 +264,79 @@ fn terminal_context_menu_shows_file_manager_action() {
         Some(ActiveMenuKind::TerminalContext { session_id }) if *session_id == 7
     ));
     let entries = app.active_menu_entries();
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), 2);
     assert!(matches!(
         entries[0].action,
+        MenuAction::PasteTerminalClipboard { session_id } if session_id == 7
+    ));
+    assert!(matches!(
+        entries[1].action,
         MenuAction::OpenSftpFileManager {
             terminal_session_id
         } if terminal_session_id == 7
     ));
+}
+
+/// 验证终端右键菜单在有选区时展示复制入口，无选区时隐藏。
+#[test]
+fn terminal_context_menu_shows_copy_only_with_selection() {
+    let mut app = test_app();
+    let link_id = add_test_ssh_link(&mut app);
+    insert_test_terminal_session(&mut app, 7, link_id);
+
+    app.open_terminal_context_menu(7, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+    let actions = app
+        .active_menu_entries()
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect::<Vec<_>>();
+    assert!(!actions.contains(&MenuAction::CopyTerminalSelection { session_id: 7 }));
+    assert!(actions.contains(&MenuAction::PasteTerminalClipboard { session_id: 7 }));
+
+    {
+        let session = app
+            .terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话");
+        session.process_output(b"hello world");
+        session.begin_selection(crate::remote::terminal::TerminalGridPosition { row: 0, col: 0 });
+        session.update_selection(crate::remote::terminal::TerminalGridPosition { row: 0, col: 5 });
+    }
+    app.open_terminal_context_menu(7, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+    let actions = app
+        .active_menu_entries()
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect::<Vec<_>>();
+    assert!(actions.contains(&MenuAction::CopyTerminalSelection { session_id: 7 }));
+}
+
+/// 验证终端粘贴会把剪贴板文本按终端回车语义发送给远程 shell。
+#[gpui::test]
+fn terminal_paste_sends_clipboard_with_normalized_newlines(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    app.update(cx, |app, app_cx| {
+        let link_id = add_test_ssh_link(app);
+        let link = app
+            .config
+            .connections
+            .link(link_id)
+            .expect("应存在测试链接")
+            .clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut session =
+            crate::remote::terminal::TerminalSessionState::connecting(7, &link, sender);
+        session.status = crate::remote::terminal::TerminalStatus::Connected;
+        app.terminal_sessions.insert(7, session);
+
+        app_cx.write_to_clipboard(gpui::ClipboardItem::new_string("ls\r\npwd\n".to_string()));
+        app.paste_terminal_clipboard(7, app_cx);
+
+        let Ok(crate::remote::terminal::TerminalCommand::Input(bytes)) = receiver.try_recv() else {
+            panic!("粘贴应向远程 shell 发送输入字节");
+        };
+        assert_eq!(bytes, b"ls\rpwd\r");
+    });
 }
 
 /// 验证新增链接菜单同时展示 SSH、SMB、Git 和 SVN 四种协议入口。

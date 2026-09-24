@@ -47,6 +47,10 @@ impl ArgusApp {
                     self.select_all_terminal(session_id);
                     return;
                 }
+                "v" => {
+                    self.paste_terminal_clipboard(session_id, cx);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -141,6 +145,26 @@ impl ArgusApp {
         let app_context: &gpui::App = (*cx).borrow();
         app_context.write_to_clipboard(ClipboardItem::new_string(selected_text));
         self.placeholder_notice = "已复制终端选区".to_string();
+    }
+
+    /// 返回指定终端是否有可复制的非空选区，用于右键菜单显隐复制入口。
+    pub(crate) fn can_copy_terminal_selection(&self, session_id: usize) -> bool {
+        self.terminal_sessions
+            .get(&session_id)
+            .is_some_and(|session| session.selected_text().is_some())
+    }
+
+    /// 把剪贴板文本粘贴到指定终端；换行统一归一化为回车，符合终端行提交语义。
+    pub(crate) fn paste_terminal_clipboard(&mut self, session_id: usize, cx: &mut Context<Self>) {
+        let app_context: &gpui::App = (*cx).borrow();
+        let clipboard_text = app_context
+            .read_from_clipboard()
+            .and_then(|item| item.text());
+        let Some(text) = clipboard_text.filter(|text| !text.is_empty()) else {
+            self.placeholder_notice = "剪贴板为空，无法粘贴".to_string();
+            return;
+        };
+        self.send_terminal_input(session_id, terminal_paste_bytes(&text));
     }
 
     /// 平台全选快捷键：选择当前可见终端屏幕。
@@ -555,6 +579,11 @@ fn terminal_autoscroll_at_boundary(
         || (vertical_intensity > 0.0 && current_offset == 0)
 }
 
+/// 把粘贴文本的换行统一归一化为终端回车字节；多行文本粘贴后仍按行提交，与手动输入一致。
+fn terminal_paste_bytes(text: &str) -> Vec<u8> {
+    text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+}
+
 /// 调度终端拖拽选择自动滚动的下一帧；拖拽结束、指针离开边缘区或滚到边界时循环自动停止。
 fn schedule_terminal_selection_autoscroll_frame(entity: Entity<ArgusApp>, window: &mut Window) {
     window.on_next_frame(move |window, cx| {
@@ -593,5 +622,14 @@ mod tests {
         assert!(terminal_autoscroll_at_boundary(1.0, 0, 5));
         assert!(!terminal_autoscroll_at_boundary(1.0, 1, 5));
         assert!(!terminal_autoscroll_at_boundary(0.0, 0, 5));
+    }
+
+    /// 验证粘贴文本的换行统一归一化为终端回车，CRLF/LF 混排都能正确处理。
+    #[test]
+    fn terminal_paste_bytes_normalizes_newlines() {
+        assert_eq!(terminal_paste_bytes("ls\r\npwd\n"), b"ls\rpwd\r");
+        assert_eq!(terminal_paste_bytes("single"), b"single");
+        assert_eq!(terminal_paste_bytes("a\rb\n"), b"a\rb\r");
+        assert!(terminal_paste_bytes("").is_empty());
     }
 }

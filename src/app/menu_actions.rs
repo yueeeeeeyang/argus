@@ -182,12 +182,26 @@ impl ArgusApp {
                 MenuEntry::new("新建 Git 链接", MenuAction::NewGitConnectionLink),
                 MenuEntry::new("新建 SVN 链接", MenuAction::NewSvnConnectionLink),
             ],
-            ActiveMenuKind::TerminalContext { session_id } => vec![MenuEntry::new(
-                "文件管理",
-                MenuAction::OpenSftpFileManager {
-                    terminal_session_id: session_id,
-                },
-            )],
+            ActiveMenuKind::TerminalContext { session_id } => {
+                let mut entries = Vec::new();
+                if self.can_copy_terminal_selection(session_id) {
+                    entries.push(MenuEntry::new(
+                        "复制",
+                        MenuAction::CopyTerminalSelection { session_id },
+                    ));
+                }
+                entries.push(MenuEntry::new(
+                    "粘贴",
+                    MenuAction::PasteTerminalClipboard { session_id },
+                ));
+                entries.push(MenuEntry::new(
+                    "文件管理",
+                    MenuAction::OpenSftpFileManager {
+                        terminal_session_id: session_id,
+                    },
+                ));
+                entries
+            }
             ActiveMenuKind::RemoteFileEntry { session_id } => {
                 let mut entries = Vec::new();
                 if self.can_preview_remote_file_selection(session_id) {
@@ -278,6 +292,12 @@ impl ArgusApp {
             MenuAction::OpenSftpFileManager { .. } => {
                 self.placeholder_notice = "文件管理需要从界面菜单触发".to_string();
             }
+            MenuAction::CopyTerminalSelection { .. } => {
+                self.placeholder_notice = "复制需要从界面菜单触发".to_string();
+            }
+            MenuAction::PasteTerminalClipboard { .. } => {
+                self.placeholder_notice = "粘贴需要从界面菜单触发".to_string();
+            }
             MenuAction::OpenSftpFileManagerFromLink { .. } => {
                 self.placeholder_notice = "文件管理需要从界面菜单触发".to_string();
             }
@@ -361,6 +381,14 @@ impl ArgusApp {
                 terminal_session_id,
             } => {
                 self.open_sftp_file_manager_from_terminal(terminal_session_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::CopyTerminalSelection { session_id } => {
+                self.copy_terminal_selection(session_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::PasteTerminalClipboard { session_id } => {
+                self.paste_terminal_clipboard(session_id, cx);
                 self.close_active_menu();
             }
             MenuAction::OpenSftpFileManagerFromLink { link_id } => {
