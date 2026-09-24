@@ -1,6 +1,6 @@
 //! 文件职责：渲染日志分析工作区的主内容区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-06-16
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：按行虚拟渲染日志正文和 Jstack 分析页，大日志只读取当前可见页，避免整份日志进入 UI 文本节点。
 
@@ -49,8 +49,10 @@ const LOG_LINE_MARKER_RIGHT: f32 = 5.0;
 const DEFAULT_VISIBLE_ROWS: usize = 80;
 /// 自绘滚动条宽度。
 const LOG_SCROLLBAR_WIDTH: f32 = 5.0;
-/// 自绘滚动条边距。
+/// 自绘滚动条轨道起点一侧的边距；轨道末端按对向滑块占用宽度预留，见 `scrollbar_metrics`。
 const LOG_SCROLLBAR_PADDING: f32 = 4.0;
+/// 自绘滚动条贴合面板边框一侧的留白（像素）；为 0 时滚动条紧贴内容区边缘。
+const LOG_SCROLLBAR_EDGE_INSET: f32 = 0.0;
 /// 自绘滚动条最小滑块长度。
 const LOG_SCROLLBAR_MIN_THUMB: f32 = 32.0;
 /// 搜索结果面板固定行高。
@@ -414,6 +416,22 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ranges, vec![0..5, 5..9, 9..15]);
+    }
+
+    /// 验证横竖滚动条同时出现时，轨道末端为对向滑块预留宽度，两个滑块不在角落重叠。
+    #[test]
+    fn scrollbar_track_end_clears_cross_axis_thumb() {
+        let viewport = px(400.0);
+        let metrics = scrollbar_metrics(viewport, px(2000.0), px(800.0), true, px(60.0))
+            .expect("内容超出视口时应计算滚动条");
+
+        let track_end = metrics.track_start + metrics.track_length;
+        let thumb_end_max = track_end;
+        let cross_axis_thumb_start = viewport - px(LOG_SCROLLBAR_WIDTH + LOG_SCROLLBAR_EDGE_INSET);
+        assert!(
+            thumb_end_max <= cross_axis_thumb_start + px(0.01),
+            "滑块最远端不应进入对向滚动条区域：thumb_end={thumb_end_max:?}, cross_start={cross_axis_thumb_start:?}"
+        );
     }
 
     /// 验证搜索跳转行背景不再复用文本选区色，避免选中当前行时视觉混淆。

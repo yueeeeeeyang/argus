@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义标题栏中的日志标签区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：展示可切换标签、右键菜单和多标签溢出下拉入口。
 
@@ -41,14 +41,15 @@ const TAB_MAX_WIDTH: f32 = 230.0;
 const TAB_OVERFLOW_BUTTON_WIDTH: f32 = 32.0;
 /// Agent 助手面板开关占位宽度；固定放在全部标签按钮右侧。
 const TAB_ASSISTANT_BUTTON_WIDTH: f32 = 32.0;
-/// 标签页和右侧下拉按钮之间的最小间距；更多空间优先让标签页使用。
-const TITLE_RIGHT_DRAG_MIN_WIDTH: f32 = 64.0;
+/// 标签区与右侧下拉按钮之间的固定间距；同时也是标题栏拖拽空白的最小宽度。
+const TAB_OVERFLOW_BUTTON_GAP: f32 = 8.0;
 /// 标题栏中标签栏左侧外部留白，对应 `custom_title_bar` 中的间距（与玻璃板内边距一致）。
 const TAB_EXTERNAL_LEFT_GAP: f32 = 8.0;
 /// 标题栏右侧固定按钮与窗口右边缘的间距，对应 `custom_title_bar` 中的间距。
 const TAB_EXTERNAL_RIGHT_GAP: f32 = 12.0;
-/// 来源侧栏折叠时标题栏左侧控制区的估算宽度。
-const COMPACT_LEFT_CONTROLS_WIDTH: f32 = 232.0;
+/// 来源侧栏折叠时，紧凑标题栏在标签栏左侧占用的宽度：
+/// 栏内左内边距 12 + 窗口控制占位 76 + 间距 8 + 展开按钮 28 + 组件间距 8。
+const COMPACT_LEFT_CONTROLS_WIDTH: f32 = 12.0 + 76.0 + 8.0 + 28.0 + 8.0;
 /// 关闭按钮固定占位宽度，避免 hover 时插入按钮撑宽标签。
 const TAB_CLOSE_SLOT_WIDTH: f32 = 18.0;
 /// 标签关闭按钮命中区尺寸，比通用标题栏按钮更紧凑。
@@ -145,6 +146,8 @@ pub(crate) fn render(
                         .collect::<Vec<_>>(),
                 ),
         )
+        // 拖拽空白兼作标签区与右侧下拉按钮之间的最小间距：标签未铺满时它吸收剩余宽度，
+        // 下拉按钮与助手面板按钮因此始终固定在标题栏右侧。
         .child(tab_drag_area(cx))
         .child(render_overflow_button(overflow_selected, &theme, cx))
         .child(render_assistant_panel_button(app, &theme, cx))
@@ -185,7 +188,7 @@ pub(crate) fn calculate_tab_layout(
     let tab_area_width = (available_width
         - TAB_OVERFLOW_BUTTON_WIDTH
         - TAB_ASSISTANT_BUTTON_WIDTH
-        - TITLE_RIGHT_DRAG_MIN_WIDTH)
+        - TAB_OVERFLOW_BUTTON_GAP)
         .max(TAB_EMERGENCY_MIN_WIDTH);
     let ideal_widths = tabs
         .iter()
@@ -194,6 +197,8 @@ pub(crate) fn calculate_tab_layout(
     let ideal_total_width: f32 = ideal_widths.iter().sum::<f32>() + tab_gaps_width(tab_count);
 
     if ideal_total_width <= tab_area_width {
+        // 标签可全部展示时按内容宽度渲染，不再均分剩余宽度铺满标签区：
+        // 剩余空间由渲染层的拖拽空白（flex_1）吸收，右侧下拉按钮仍固定在标题栏右侧。
         return TabBarLayout {
             visible_range: 0..tab_count,
             visible_widths: ideal_widths,
@@ -444,7 +449,7 @@ fn tab_drag_area(cx: &mut Context<ArgusApp>) -> impl IntoElement {
         .id("tab-bar-drag-area")
         .debug_selector(|| "tab-bar-drag-area".to_string())
         .h_full()
-        .min_w(px(TITLE_RIGHT_DRAG_MIN_WIDTH))
+        .min_w(px(TAB_OVERFLOW_BUTTON_GAP))
         .flex_1();
     // Windows 需要普通客户区事件来调用显式 HWND 拖动；其余平台保留 GPUI 控制区语义。
     #[cfg(not(target_os = "windows"))]
@@ -475,6 +480,7 @@ fn render_overflow_button(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     div()
+        .debug_selector(|| "tab-overflow-slot".to_string())
         .w(px(TAB_OVERFLOW_BUTTON_WIDTH))
         .h_full()
         .flex_none()
@@ -589,7 +595,7 @@ mod tests {
             "标签边界不应覆盖空白拖拽区：tab={tab_bounds:?}, drag={drag_bounds:?}"
         );
         assert!(
-            drag_bounds.size.width >= px(TITLE_RIGHT_DRAG_MIN_WIDTH),
+            drag_bounds.size.width >= px(TAB_OVERFLOW_BUTTON_GAP),
             "标题栏应保留稳定可命中的拖拽宽度：drag={drag_bounds:?}"
         );
 
@@ -620,6 +626,41 @@ mod tests {
                 kind: TabKind::Empty,
             })
             .collect()
+    }
+
+    /// 验证标签未铺满时拖拽空白吸收剩余宽度，标签与下拉按钮之间保持至少 8px 间距，
+    /// 且下拉按钮仍固定在标题栏右侧。
+    #[gpui::test]
+    fn overflow_button_keeps_minimum_gap_after_tabs(cx: &mut TestAppContext) {
+        let (_app, cx) = cx.add_window_view(|_, _| visual_test_app());
+        let tab_bounds = cx.debug_bounds("tab-1").expect("应渲染默认标签");
+        let overflow_bounds = cx
+            .debug_bounds("tab-overflow-slot")
+            .expect("应渲染标签下拉按钮");
+        let drag_bounds = cx
+            .debug_bounds("tab-bar-drag-area")
+            .expect("应渲染标签栏空白拖拽区");
+        let window_bounds = cx.update(|window, _| window.bounds());
+
+        let gap = overflow_bounds.left() - tab_bounds.right();
+        assert!(
+            gap >= px(TAB_OVERFLOW_BUTTON_GAP - 0.6),
+            "标签与下拉按钮之间应保持至少 {TAB_OVERFLOW_BUTTON_GAP}px 间距：tab={tab_bounds:?}, overflow={overflow_bounds:?}"
+        );
+        assert!(
+            drag_bounds.left() >= tab_bounds.right()
+                && drag_bounds.right() <= overflow_bounds.left(),
+            "拖拽空白应位于标签与下拉按钮之间：drag={drag_bounds:?}"
+        );
+        assert!(
+            (overflow_bounds.right()
+                - (window_bounds.right()
+                    - px(TAB_EXTERNAL_RIGHT_GAP)
+                    - px(TAB_ASSISTANT_BUTTON_WIDTH)))
+            .abs()
+                <= px(0.6),
+            "下拉按钮应固定在标题栏右侧：overflow={overflow_bounds:?}, window={window_bounds:?}"
+        );
     }
 
     /// 验证标签块左边缘与内容玻璃板左边缘对齐，且玻璃板保持固定内边距。
@@ -687,7 +728,7 @@ mod tests {
         );
     }
 
-    /// 验证少量标签可以全部直接展示。
+    /// 验证少量标签可以全部直接展示，且按内容宽度渲染而非铺满标签区。
     #[test]
     fn tab_layout_shows_all_tabs_when_space_is_enough() {
         let tabs = tabs_from_titles(&["app.log", "设置", "memory.log"]);
@@ -695,9 +736,18 @@ mod tests {
 
         assert_eq!(layout.visible_range, 0..3);
         assert!(!layout.has_overflow);
-        assert_eq!(layout.visible_widths.len(), 3);
-        assert!(layout.visible_widths[0] < 120.0);
-        assert!(layout.tabs_width < 360.0);
+        // 空间充足时标签保持按标题估算的内容宽度，剩余空间交给拖拽空白。
+        let expected_widths = tabs
+            .iter()
+            .map(|tab| ideal_tab_width(&tab.title))
+            .collect::<Vec<_>>();
+        assert_eq!(layout.visible_widths, expected_widths);
+        let expected_total = expected_widths.iter().sum::<f32>() + tab_gaps_width(3);
+        assert!(
+            (layout.tabs_width - expected_total).abs() <= 0.5,
+            "标签总宽应等于内容宽度之和：{}",
+            layout.tabs_width
+        );
     }
 
     /// 验证大量标签只渲染包含激活项的可见窗口。
@@ -714,7 +764,11 @@ mod tests {
         assert!(layout.visible_range.contains(&12));
         assert!(layout.visible_range.len() <= 4);
         assert!(
-            layout.tabs_width + TAB_OVERFLOW_BUTTON_WIDTH + TITLE_RIGHT_DRAG_MIN_WIDTH <= 360.0
+            layout.tabs_width
+                + TAB_OVERFLOW_BUTTON_GAP
+                + TAB_OVERFLOW_BUTTON_WIDTH
+                + TAB_OVERFLOW_BUTTON_GAP
+                <= 360.0
         );
     }
 
@@ -731,7 +785,11 @@ mod tests {
         assert!(layout.visible_range.contains(&9));
         assert_eq!(layout.visible_range.end, 10);
         assert!(
-            layout.tabs_width + TAB_OVERFLOW_BUTTON_WIDTH + TITLE_RIGHT_DRAG_MIN_WIDTH <= 320.0
+            layout.tabs_width
+                + TAB_OVERFLOW_BUTTON_GAP
+                + TAB_OVERFLOW_BUTTON_WIDTH
+                + TAB_OVERFLOW_BUTTON_GAP
+                <= 320.0
         );
     }
 

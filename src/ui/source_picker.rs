@@ -553,7 +553,8 @@ fn render_entry_area(
         .flex_col()
         .mx_4()
         .rounded_sm()
-        .bg(rgb(theme.background))
+        // 与背后的模态框面板同色，避免文件列表在面板上形成额外色块。
+        .bg(rgb(theme.content))
         .when(snapshot.source_picker.is_loading, |this| {
             this.child(render_loading_state(theme))
         })

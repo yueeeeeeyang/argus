@@ -32,8 +32,11 @@ pub(crate) struct ModalFrame {
     pub content_offset: Point<Pixels>,
 }
 
-/// 模态框内部内容与圆角外壳之间的安全内边距，避免子元素背景覆盖圆角。
-const MODAL_CONTENT_INSET: f32 = 6.0;
+/// 模态框内部内容与圆角外壳之间的安全内边距。
+///
+/// 取 0：内容根节点自身带圆角与灰色边框，内缩会在灰色边框线之外再露出一圈
+/// 深色带，让边框看起来不是模态框的最外层。内容必须自带圆角，避免方角盖住外壳圆角。
+const MODAL_CONTENT_INSET: f32 = 0.0;
 
 /// 渲染通用模态遮罩与容器。
 ///

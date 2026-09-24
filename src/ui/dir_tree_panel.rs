@@ -51,6 +51,8 @@ const SOURCE_TREE_FONT_SIZE: f32 = 12.0;
 const SOURCE_TREE_ICON_SIZE: f32 = 14.0;
 /// 自定义滚动条宽度。
 const SCROLLBAR_THUMB_WIDTH: f32 = 4.0;
+/// 自定义滚动条滑块距侧栏右边缘的留白。
+const SCROLLBAR_RIGHT_INSET: f32 = 1.0;
 /// 自定义滚动条最小高度。
 const SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 36.0;
 
@@ -458,7 +460,7 @@ fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElem
         .id("source-tree-scrollbar")
         .absolute()
         .top(thumb_top)
-        .right(px(3.0))
+        .right(px(SCROLLBAR_RIGHT_INSET))
         .w(px(SCROLLBAR_THUMB_WIDTH))
         .h(thumb_height)
         .rounded_lg()

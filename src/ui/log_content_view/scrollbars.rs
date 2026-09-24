@@ -136,7 +136,9 @@ pub(crate) fn scrollbar_metrics(
     } else {
         px(LOG_SCROLLBAR_PADDING)
     };
-    let reserved = track_start + px(LOG_SCROLLBAR_PADDING);
+    // 轨道末端按对向滚动条滑块的贴边占用宽度预留，避免两个滑块滚到尽头时在角落重叠。
+    let track_end_inset = LOG_SCROLLBAR_WIDTH + LOG_SCROLLBAR_EDGE_INSET;
+    let reserved = track_start + px(track_end_inset);
     let track_length = (viewport_len - reserved).max(px(1.0));
     let min_thumb = px(LOG_SCROLLBAR_MIN_THUMB).min(track_length);
     let thumb_length = (viewport_len * (viewport_len / content_len)).clamp(min_thumb, track_length);
@@ -180,13 +182,13 @@ pub(crate) fn render_scrollbar_thumb(
     thumb = if is_horizontal {
         thumb
             .left(metrics.thumb_start)
-            .bottom(px(LOG_SCROLLBAR_PADDING))
+            .bottom(px(LOG_SCROLLBAR_EDGE_INSET))
             .w(metrics.thumb_length)
             .h(px(LOG_SCROLLBAR_WIDTH))
     } else {
         thumb
             .top(metrics.thumb_start)
-            .right(px(LOG_SCROLLBAR_PADDING))
+            .right(px(LOG_SCROLLBAR_EDGE_INSET))
             .w(px(LOG_SCROLLBAR_WIDTH))
             .h(metrics.thumb_length)
     };

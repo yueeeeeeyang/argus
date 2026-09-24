@@ -343,6 +343,8 @@ fn render_window_content(
         .gap_3()
         .p_4()
         .relative()
+        // 模态框外壳不再留内缩，内容根节点需自带圆角，避免方角盖住灰色边框的圆角。
+        .rounded_lg()
         .bg(rgb(theme.content))
         .font_family(ARGUS_UI_FONT_FAMILY)
         .text_color(rgb(theme.foreground))
