@@ -200,14 +200,29 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .size_full()
-                                .p(px(WINDOW_CONTENT_PADDING))
                                 .rounded(px(WINDOW_CONTENT_RADIUS))
                                 .bg(rgb(theme.content))
                                 // 凸起质感：多层阴影把板面从窗口背景上抬起，并用 0.5px 亮色
                                 // 外描边与顶部亮线勾出玻璃边缘（见 `window_content_shadows`）。
                                 .shadow(window_content_shadows())
                                 .debug_selector(|| "window-content-panel".to_string())
-                                .child(log_content_view::render(app, window, cx)),
+                                .flex()
+                                .flex_col()
+                                // 主内容区保留 8px 内部留白，保证内容不盖住玻璃板圆角。
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_h(px(0.0))
+                                        .p(px(WINDOW_CONTENT_PADDING))
+                                        .child(log_content_view::render(app, window, cx)),
+                                )
+                                // 搜索结果面板与内容面板完全贴合：不再保留玻璃板内边距，
+                                // 面板底角圆角与玻璃板一致。
+                                .when(app.should_show_log_search_results(), |this| {
+                                    this.child(log_content_view::render_search_results_panel(
+                                        app, &theme, cx,
+                                    ))
+                                }),
                         ),
                 )
                 .child(animated_assistant_panel(app, window, cx)),

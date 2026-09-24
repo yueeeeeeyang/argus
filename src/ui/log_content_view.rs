@@ -124,23 +124,16 @@ pub(crate) fn render(
 ) -> impl IntoElement {
     let theme = app.theme.clone();
 
-    div()
-        .size_full()
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .child(
-            div()
-                .flex_1()
-                .min_h(px(0.0))
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .child(render_content_body(app, &theme, window, cx)),
-        )
-        .when(app.should_show_log_search_results(), |this| {
-            this.child(render_search_results_panel(app, &theme, cx))
-        })
+    // 搜索结果面板改由 `main_window` 作为玻璃板直挂子元素渲染，与内容面板完全贴合。
+    div().size_full().flex().flex_col().overflow_hidden().child(
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(render_content_body(app, &theme, window, cx)),
+    )
 }
 
 /// 根据当前内容状态渲染主体区域。

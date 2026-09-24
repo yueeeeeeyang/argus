@@ -48,6 +48,10 @@ pub(crate) fn render_search_results_panel(
         .border_t_1()
         .border_color(rgb(theme.border))
         .bg(rgb(theme.status_bar))
+        // 面板作为玻璃板直挂子元素完全贴合底部，底角圆角与玻璃板一致。
+        .rounded_bl(px(crate::ui::main_window::WINDOW_CONTENT_RADIUS))
+        .rounded_br(px(crate::ui::main_window::WINDOW_CONTENT_RADIUS))
+        .overflow_hidden()
         .occlude()
         .on_mouse_up(
             MouseButton::Right,
