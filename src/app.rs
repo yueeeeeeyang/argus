@@ -80,6 +80,7 @@ use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::agent_dialog::AgentLaunchDialog;
 use crate::ui::agent_window::AgentWindow;
 use crate::ui::ai_settings_editor::AiSettingsEditor;
+use crate::ui::assistant_float_window::AssistantFloatWindow;
 use crate::ui::assistant_panel::AssistantPanel;
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
@@ -320,6 +321,15 @@ pub(crate) struct ArgusApp {
     pub assistant_panel_animation_from_width: f32,
     /// 助手面板动画目标宽度。
     pub assistant_panel_animation_to_width: f32,
+    /// Agent 助手面板展示模式：内嵌或浮动窗口。
+    pub assistant_panel_mode: AssistantPanelMode,
+    /// 浮动助手窗口句柄；None 表示当前未浮动。
+    pub assistant_float_window: Option<WindowHandle<AssistantFloatWindow>>,
+    /// 最近一次同步给浮动窗口的主窗口帧（x, y, w, h），避免每帧重复写原生窗口。
+    pub assistant_float_synced_frame: Option<(f32, f32, f32, f32)>,
+    /// 浮动窗口是否已通过 macOS 父子窗口关联跟随主窗口；
+    /// 为 true 时位置跟随由 AppKit 原生完成，帧同步只处理尺寸变化。
+    pub assistant_float_native_follow: bool,
     /// 来源树真实内容版本；选中、展开和筛选等纯界面操作不会递增。
     pub source_content_revision: u64,
     /// AI 模型与日志类型配置编辑器模态框。
@@ -520,6 +530,10 @@ impl ArgusApp {
             assistant_panel_animation_generation: 0,
             assistant_panel_animation_from_width: 0.0,
             assistant_panel_animation_to_width: 0.0,
+            assistant_panel_mode: AssistantPanelMode::Docked,
+            assistant_float_window: None,
+            assistant_float_synced_frame: None,
+            assistant_float_native_follow: false,
             source_content_revision: 0,
             ai_settings_editor_modal: None,
             log_read_states: HashMap::new(),

@@ -212,6 +212,8 @@ pub(crate) struct AssistantPanel {
     input_scroll_state: TextareaScrollState,
     /// 输入焦点句柄。
     input_focus: FocusHandle,
+    /// 面板根焦点句柄，点击输入框以外区域时承接焦点，让输入框真正失焦。
+    root_focus: FocusHandle,
     /// 当前状态。
     status: AssistantPanelStatus,
     /// 最近一次可展示错误。
@@ -255,7 +257,7 @@ impl AssistantPanel {
         });
         let welcome = AssistantPanelMessage::Trace(AgentTraceEntry::new(
             AgentTraceKind::Status,
-            "Agent 助手",
+            "日志助手",
             "输入问题后固化当前工作区清单，并按需调用工作目录内的只读工具；非白名单命令需要你确认。",
         ));
         let mut panel = Self {
@@ -283,6 +285,7 @@ impl AssistantPanel {
             input_scroll: ScrollHandle::new(),
             input_scroll_state: TextareaScrollState::new(),
             input_focus: cx.focus_handle(),
+            root_focus: cx.focus_handle(),
             status: AssistantPanelStatus::Idle,
             error: None,
             budget: AgentBudgetSnapshot::default(),
@@ -1246,6 +1249,15 @@ impl AssistantPanel {
         }
     }
 
+    /// 主窗口获得点击时清除输入框焦点状态；返回焦点状态是否发生变化。
+    ///
+    /// 主窗口成为 key 后浮动窗口输入自然失焦，这里同步清掉驱动高亮边框的应用状态。
+    pub(crate) fn clear_composer_focus(&mut self) -> bool {
+        let was_focused = self.input.is_focused;
+        self.input.is_focused = false;
+        was_focused
+    }
+
     /// 展开或收起指定工具轨迹组。
     fn toggle_tool_group(&mut self, index: usize) {
         let messages = Arc::make_mut(&mut self.messages);
@@ -1377,7 +1389,7 @@ impl Render for AssistantPanel {
                 .items_center()
                 .justify_center()
                 .overflow_hidden()
-                .bg(rgb(theme.side_bar))
+                .bg(rgb(theme.content))
                 .font_family(ARGUS_UI_FONT_FAMILY)
                 .child(
                     div()
@@ -1390,7 +1402,7 @@ impl Render for AssistantPanel {
                         .mt_2()
                         .text_size(px(11.0))
                         .text_color(rgb(theme.foreground_muted))
-                        .child("Agent 助手会话随日志加载自动创建，加载完成后即可提问。"),
+                        .child("日志助手会话随日志加载自动创建，加载完成后即可提问。"),
                 );
         }
         let entity = cx.entity();
@@ -1443,6 +1455,7 @@ impl Render for AssistantPanel {
         let mention_entity = entity.clone();
         let settings_app = self.app.clone();
         let jump_entity = entity.clone();
+        let blur_entity = entity.clone();
         let show_jump = !self.is_following_latest;
 
         div()
@@ -1452,9 +1465,19 @@ impl Render for AssistantPanel {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // 与日志来源树使用相同侧栏色块，不再通过左边框分割主内容和 Agent 区域。
-            .bg(rgb(theme.side_bar))
+            // 直接落在内容面板底色上，不再使用更深的侧栏色块。
+            .bg(rgb(theme.content))
             .font_family(ARGUS_UI_FONT_FAMILY)
+            // 点击输入框以外的面板区域时输入框失焦：高亮边框与光标同步消失。
+            .on_click(move |_, window, app_cx| {
+                blur_entity.update(app_cx, |panel, panel_cx| {
+                    if panel.input.is_focused {
+                        panel.input.is_focused = false;
+                        panel.root_focus.focus(window);
+                        panel_cx.notify();
+                    }
+                });
+            })
             .child(
                 div()
                     .h(px(48.0))
@@ -1472,7 +1495,7 @@ impl Render for AssistantPanel {
                                 div()
                                     .text_size(px(12.0))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Agent 助手"),
+                                    .child("日志助手"),
                             )
                             .child(
                                 div()
@@ -1646,6 +1669,9 @@ impl Render for AssistantPanel {
                                     app_cx.stop_propagation();
                                     click_entity.update(app_cx, |panel, panel_cx| {
                                         panel.input.is_focused = true;
+                                        // 浮动窗口首次点击时窗口可能尚未激活，先激活再聚焦，
+                                        // 保证第一次点击就能出现光标。
+                                        window.activate_window();
                                         panel.input_focus.focus(window);
                                         panel_cx.notify();
                                     });

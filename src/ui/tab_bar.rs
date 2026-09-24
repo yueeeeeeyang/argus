@@ -525,16 +525,16 @@ fn render_assistant_panel_button(
             // 展开与收起使用成对的面板图标，与左侧来源树开关保持一致的语义区分。
             ArgusIcon::assistant_panel_toggle(is_collapsed),
             if is_collapsed {
-                "展开 Agent 助手"
+                "展开日志助手"
             } else {
-                "收起 Agent 助手"
+                "收起日志助手"
             },
             false,
             IconButtonSize::Small,
             theme,
-            cx.listener(|app, _, _, cx| {
+            cx.listener(|app, _, window, cx| {
                 cx.stop_propagation();
-                app.toggle_assistant_panel(cx);
+                app.toggle_assistant_panel(Some(window), cx);
                 cx.notify();
             }),
         ))

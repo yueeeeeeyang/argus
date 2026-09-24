@@ -57,6 +57,27 @@ pub(crate) fn start_window_drag(window: &Window) {
     window.start_window_move();
 }
 
+/// 注册窗口到连续点击监视器：macOS 上取消 AppKit 对重复按下的默认缩放分发，
+/// 仅保留应用内拖拽空白处的双击缩放；非 macOS 平台无需处理。
+#[cfg(target_os = "macos")]
+pub(crate) fn register_repeated_click_guard(window: &Window, native_control_safe_width: f32) {
+    macos::register_repeated_click_guard(window, native_control_safe_width);
+}
+
+/// 非 macOS 平台没有标题栏默认缩放问题，注册为空操作。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn register_repeated_click_guard(_window: &Window, _native_control_safe_width: f32) {}
+
+/// 窗口关闭前清除其连续点击监视槽位，避免悬空原生指针被复用后误拦事件。
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_repeated_click_guard(window: &Window) {
+    macos::clear_repeated_click_guard(window);
+}
+
+/// 非 macOS 平台为空操作。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn clear_repeated_click_guard(_window: &Window) {}
+
 #[cfg(target_os = "windows")]
 mod windows {
     use gpui::Window;
@@ -120,6 +141,12 @@ mod macos {
     static MAIN_NATIVE_WINDOW: AtomicPtr<Object> = AtomicPtr::new(ptr::null_mut());
     /// 当前 Argus 主窗口 GPUI 内容视图，由进程级事件监视器直接接收第二次按下。
     static MAIN_NATIVE_VIEW: AtomicPtr<Object> = AtomicPtr::new(ptr::null_mut());
+    /// 当前浮动助手窗口原生对象；为空表示浮动窗口未注册。
+    static FLOAT_NATIVE_WINDOW: AtomicPtr<Object> = AtomicPtr::new(ptr::null_mut());
+    /// 当前浮动助手窗口 GPUI 内容视图。
+    static FLOAT_NATIVE_VIEW: AtomicPtr<Object> = AtomicPtr::new(ptr::null_mut());
+    /// 浮动窗口左侧原生按钮安全宽度的 IEEE 754 位表示。
+    static FLOAT_SAFE_WIDTH_BITS: AtomicU32 = AtomicU32::new(0);
     /// 自定义标题栏高度的 IEEE 754 位表示，由事件监视器无锁读取。
     static TITLEBAR_HEIGHT_BITS: AtomicU32 = AtomicU32::new(0);
     /// 左侧原生窗口按钮安全宽度的 IEEE 754 位表示。
@@ -244,6 +271,54 @@ mod macos {
         Ok(())
     }
 
+    /// 注册一个需要连续点击监视的浮动窗口；安全区取窗口左侧原生按钮占位宽度。
+    pub(super) fn register_repeated_click_guard(window: &Window, native_control_safe_width: f32) {
+        let Ok(native_view) = native_view(window) else {
+            return;
+        };
+        unsafe {
+            let send_object_message: unsafe extern "C" fn(*mut Object, Sel) -> *mut Object =
+                mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let native_window =
+                send_object_message(native_view, sel_registerName(c"window".as_ptr()));
+            if native_window.is_null() {
+                return;
+            }
+            FLOAT_NATIVE_WINDOW.store(native_window, Ordering::Release);
+            FLOAT_NATIVE_VIEW.store(native_view, Ordering::Release);
+            FLOAT_SAFE_WIDTH_BITS.store(native_control_safe_width.to_bits(), Ordering::Release);
+            // 监视器全进程只装一次；主窗口未配置时由浮动窗口触发安装。
+            if IS_REPEATED_CLICK_MONITOR_INSTALLED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+                && let Err(error) = install_repeated_click_monitor()
+            {
+                IS_REPEATED_CLICK_MONITOR_INSTALLED.store(false, Ordering::Release);
+                eprintln!("安装连续点击监视器失败：{error}");
+            }
+        }
+    }
+
+    /// 浮动窗口关闭时清除其连续点击监视槽位，避免悬空的原生指针被复用后误拦事件。
+    pub(super) fn clear_repeated_click_guard(window: &Window) {
+        let Ok(native_view) = native_view(window) else {
+            return;
+        };
+        unsafe {
+            let send_object_message: unsafe extern "C" fn(*mut Object, Sel) -> *mut Object =
+                mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let native_window =
+                send_object_message(native_view, sel_registerName(c"window".as_ptr()));
+            if !native_window.is_null()
+                && native_window == FLOAT_NATIVE_WINDOW.load(Ordering::Acquire)
+            {
+                FLOAT_NATIVE_WINDOW.store(ptr::null_mut(), Ordering::Release);
+                FLOAT_NATIVE_VIEW.store(ptr::null_mut(), Ordering::Release);
+                FLOAT_SAFE_WIDTH_BITS.store(0, Ordering::Release);
+            }
+        }
+    }
+
     /// 安装仅监听左键按下的本地事件监视器，取消主窗口重复按下的 AppKit 默认分发。
     unsafe fn install_repeated_click_monitor() -> Result<(), String> {
         unsafe {
@@ -255,8 +330,23 @@ mod macos {
                 let send_object_message: unsafe extern "C" fn(*mut Object, Sel) -> *mut Object =
                     mem::transmute(objc_msgSend as unsafe extern "C" fn());
                 let event_window = send_object_message(event, sel_registerName(c"window".as_ptr()));
-                let target_window = MAIN_NATIVE_WINDOW.load(Ordering::Acquire);
-                if event_window != target_window || target_window.is_null() {
+                // 主窗口与浮动助手窗口共用同一连续点击监视：命中哪个窗口就按哪个窗口的
+                // 安全区和视图处理，其余窗口的事件直接放行。
+                let (target_view, safe_width_bits) =
+                    if event_window == MAIN_NATIVE_WINDOW.load(Ordering::Acquire) {
+                        (
+                            MAIN_NATIVE_VIEW.load(Ordering::Acquire),
+                            NATIVE_CONTROL_SAFE_WIDTH_BITS.load(Ordering::Acquire),
+                        )
+                    } else if event_window == FLOAT_NATIVE_WINDOW.load(Ordering::Acquire) {
+                        (
+                            FLOAT_NATIVE_VIEW.load(Ordering::Acquire),
+                            FLOAT_SAFE_WIDTH_BITS.load(Ordering::Acquire),
+                        )
+                    } else {
+                        return event;
+                    };
+                if event_window.is_null() {
                     return event;
                 }
 
@@ -264,7 +354,6 @@ mod macos {
                     mem::transmute(objc_msgSend as unsafe extern "C" fn());
                 let click_count =
                     send_integer_message(event, sel_registerName(c"clickCount".as_ptr()));
-                let target_view = MAIN_NATIVE_VIEW.load(Ordering::Acquire);
                 if target_view.is_null() {
                     return event;
                 }
@@ -277,9 +366,7 @@ mod macos {
                     view_height: bounds.size.height,
                     titlebar_height: f32::from_bits(TITLEBAR_HEIGHT_BITS.load(Ordering::Acquire))
                         as f64,
-                    native_control_safe_width: f32::from_bits(
-                        NATIVE_CONTROL_SAFE_WIDTH_BITS.load(Ordering::Acquire),
-                    ) as f64,
+                    native_control_safe_width: f32::from_bits(safe_width_bits) as f64,
                 };
                 if !should_intercept_repeated_titlebar_click(click_count, hit_test) {
                     return event;

@@ -106,12 +106,22 @@ pub(crate) fn render(
 ) -> impl IntoElement {
     let _span = PerfSpan::new("main_window_render");
     app.sync_window_appearance_theme(window);
+    // 主窗口移动/缩放都会触发重绘，在这里同步浮动助手窗口位置以实时跟随。
+    app.sync_assistant_float_window(window, cx);
     if !app.has_registered_workspace_close_guard {
         // 主窗口关闭时删除当前物化工作目录；崩溃或强杀的场景由下次启动清扫兜底。
         let entity = cx.entity();
         window.on_window_should_close(cx, move |_, app_cx| {
-            if let Some(root) = entity.read(app_cx).source_workspace_root.clone() {
+            let app = entity.read(app_cx);
+            if let Some(root) = app.source_workspace_root.clone() {
                 crate::loader::workspace::delete_workspace_best_effort(root);
+            }
+            // 主窗口关闭时一并销毁浮动助手窗口，避免残留独立窗口；
+            // 实体读取借用期间不同步调用原生窗口操作，延迟到事件循环空闲时执行。
+            if let Some(float_window) = app.assistant_float_window {
+                app_cx.defer(move |cx| {
+                    let _ = float_window.update(cx, |_, window, _| window.remove_window());
+                });
             }
             true
         });
@@ -136,6 +146,7 @@ pub(crate) fn render(
         .on_click(cx.listener(move |app, _event: &ClickEvent, window, cx| {
             root_focus_for_click.focus(window);
             app.clear_all_text_input_focus();
+            app.clear_assistant_composer_focus(cx);
             cx.notify();
         }))
         .on_mouse_down(

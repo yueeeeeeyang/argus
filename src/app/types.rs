@@ -238,3 +238,13 @@ pub(crate) struct JstackFilterRuleDraft {
     /// 取消编辑时置 true，窗口关闭路径据此跳过提交。
     pub discard_on_close: bool,
 }
+
+/// Agent 助手面板展示模式。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AssistantPanelMode {
+    /// 内嵌在主窗口右侧。
+    #[default]
+    Docked,
+    /// 独立浮动窗口展开，跟随主窗口。
+    Floating,
+}
