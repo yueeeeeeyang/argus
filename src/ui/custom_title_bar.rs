@@ -1,6 +1,6 @@
 //! 文件职责：渲染替代系统默认标题栏的 Obsidian 风格自定义标题栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：适配原生 macOS 交通灯、Windows 窗口控制按钮，并展示操作组和当前标签。
 
@@ -237,7 +237,10 @@ fn collapsed_title_control_group(
 
 /// macOS 使用原生交通灯，只渲染等宽安全占位区。
 #[cfg(target_os = "macos")]
-fn platform_window_controls(_is_window_maximized: bool, _theme: &AppTheme) -> impl IntoElement {
+pub(crate) fn platform_window_controls(
+    _is_window_maximized: bool,
+    _theme: &AppTheme,
+) -> impl IntoElement {
     div().w(px(NATIVE_TRAFFIC_LIGHT_SPACER_WIDTH)).h_full()
 }
 
@@ -246,7 +249,10 @@ fn platform_window_controls(_is_window_maximized: bool, _theme: &AppTheme) -> im
 /// 按钮组与 macOS 交通灯使用相同布局宽度，并采用普通客户区点击回调；这样不依赖当前
 /// GPUI Windows 后端未能稳定触发的非客户区 `WindowControlArea` 分发。
 #[cfg(target_os = "windows")]
-fn platform_window_controls(is_window_maximized: bool, theme: &AppTheme) -> impl IntoElement {
+pub(crate) fn platform_window_controls(
+    is_window_maximized: bool,
+    theme: &AppTheme,
+) -> impl IntoElement {
     let maximize_icon = if is_window_maximized {
         ArgusIcon::WindowRestore
     } else {
@@ -285,7 +291,10 @@ fn platform_window_controls(is_window_maximized: bool, theme: &AppTheme) -> impl
 
 /// Linux/BSD 由桌面环境负责窗口操作，不额外占用标题栏左侧空间。
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_window_controls(_is_window_maximized: bool, _theme: &AppTheme) -> impl IntoElement {
+pub(crate) fn platform_window_controls(
+    _is_window_maximized: bool,
+    _theme: &AppTheme,
+) -> impl IntoElement {
     div()
 }
 

@@ -447,8 +447,10 @@ pub(crate) fn merge_log_line_highlights(
     highlights
 }
 
-/// 保持旧单元测试可读性的二元合并入口。
-#[cfg(test)]
+/// 合并语法高亮与选区高亮的二元入口，供日志单元测试和文件预览窗口共用。
+///
+/// 说明：文件预览与日志正文对所有高亮令牌使用同一套颜色映射，预览复用本函数
+/// 不会改变既有展示效果，同时保持"选区背景优先、语法色保留"的合并规则只有一份实现。
 pub(crate) fn merge_syntax_and_selection_highlights(
     syntax_spans: Vec<HighlightSpan>,
     selection_range: Option<Range<usize>>,

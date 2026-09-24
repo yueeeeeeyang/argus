@@ -1,6 +1,6 @@
 //! 文件职责：组合 Argus 主窗口的整体布局。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：渲染标题栏、来源侧栏、日志内容区、右侧 Agent 助手、AI 分析弹窗和设置模态框。
 
@@ -20,9 +20,9 @@ use gpui::{
 use std::time::Duration;
 
 /// 内容玻璃板与窗口边框/侧栏之间的间距（像素）。
-const WINDOW_CONTENT_INSET: f32 = 8.0;
+pub(crate) const WINDOW_CONTENT_INSET: f32 = 8.0;
 /// 内容玻璃板圆角半径（像素）。
-const WINDOW_CONTENT_RADIUS: f32 = 6.0;
+pub(crate) const WINDOW_CONTENT_RADIUS: f32 = 6.0;
 /// 内容玻璃板外描边在板面之外 0.5px，而父内容行容器会按自身边界裁剪，
 /// 因此顶边需要留出等宽余量，否则上边框亮线会被切掉（其余三边已有 8px 间距）。
 pub(crate) const WINDOW_CONTENT_RING_ALLOWANCE: f32 = 0.5;
@@ -30,7 +30,7 @@ pub(crate) const WINDOW_CONTENT_RING_ALLOWANCE: f32 = 0.5;
 /// 保证内容不会盖住圆角。
 ///
 /// GPUI 的内容裁剪只支持矩形，圆角只能靠"子元素够不到四角"来保持可见。
-const WINDOW_CONTENT_PADDING: f32 = 8.0;
+pub(crate) const WINDOW_CONTENT_PADDING: f32 = 8.0;
 /// 编译期守住"内部留白 ≥ 圆角半径"：GPUI 无法裁剪圆角，比例失守就会露馅。
 const _: () = assert!(WINDOW_CONTENT_PADDING >= WINDOW_CONTENT_RADIUS);
 /// 玻璃板主投影向下偏移（像素）。
@@ -58,7 +58,7 @@ const WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY: f32 = 0.06;
 /// 两层向下投影把板面从窗口背景上抬起，0.5px 白色外描边勾出板面轮廓，
 /// 顶部 0.5px 白色亮线模拟玻璃边缘受光。阴影颜色为中性黑/白，不依赖主题配色；
 /// 顺序与 CSS 阴影列表一致，越靠后绘制的层级越靠上。
-fn window_content_shadows() -> Vec<BoxShadow> {
+pub(crate) fn window_content_shadows() -> Vec<BoxShadow> {
     let shadow_color = hsla(0.0, 0.0, 0.0, WINDOW_CONTENT_SHADOW_OPACITY);
     let edge_color = hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_EDGE_OPACITY);
     let top_highlight_color = hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY);

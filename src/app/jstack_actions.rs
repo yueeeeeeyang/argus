@@ -160,7 +160,13 @@ impl ArgusApp {
             cx,
         );
         let window_options = WindowOptions {
-            titlebar: Some(frameless_resizable_titlebar()),
+            // 与主窗口一致的原生红绿灯标题栏：关闭/最小化/最大化由系统按钮承担，
+            // 详情窗口内不再提供自定义关闭按钮。
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(20.0), px(14.0))),
+            }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(
                 px(JSTACK_THREAD_DETAIL_WINDOW_MIN_WIDTH),
@@ -213,7 +219,13 @@ impl ArgusApp {
             cx,
         );
         let window_options = WindowOptions {
-            titlebar: Some(frameless_resizable_titlebar()),
+            // 与主窗口一致的原生红绿灯标题栏：关闭/最小化/最大化由系统按钮承担，
+            // 预览窗口内不再提供自定义关闭按钮。
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(20.0), px(14.0))),
+            }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(
                 px(FILE_PREVIEW_WINDOW_MIN_WIDTH),

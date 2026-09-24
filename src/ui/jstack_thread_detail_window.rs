@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Jstack 线程详情独立窗口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-06-25
+//! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
 //! 主要功能：在无系统标题栏窗口中展示线程完整堆栈，并支持在不同快照间切换同名线程。
 
@@ -17,13 +17,20 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, slice_character_range, word_range_at,
 };
+use crate::platform::custom_titlebar;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
-use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::scrollbar::{
     ScrollbarMetrics, scrollbar_metrics, scrollbar_scroll_for_drag,
 };
+use crate::ui::custom_title_bar::{TITLE_BAR_HEIGHT, platform_window_controls};
 use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
+use crate::ui::main_window::{
+    WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS,
+    WINDOW_CONTENT_RING_ALLOWANCE, window_content_shadows,
+};
+#[cfg(not(target_os = "windows"))]
+use gpui::WindowControlArea;
 use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -31,8 +38,6 @@ use gpui::{
     prelude::*, px, rgb,
 };
 
-/// 详情窗口顶部标题栏高度。
-const DETAIL_TITLE_BAR_HEIGHT: f32 = 40.0;
 /// 详情窗口线程摘要区域高度。
 const DETAIL_SUMMARY_HEIGHT: f32 = 56.0;
 /// 详情窗口内容滚动条宽度。
@@ -457,7 +462,7 @@ impl JstackThreadDetailWindow {
 }
 
 impl Render for JstackThreadDetailWindow {
-    /// 渲染线程详情窗口主体。
+    /// 渲染线程详情窗口主体：黑色背板 + 与主窗口一致的圆角玻璃板内容区。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active_occurrence = self.active_occurrence().cloned();
@@ -470,9 +475,10 @@ impl Render for JstackThreadDetailWindow {
         div()
             .id("jstack-thread-detail-window-root")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
-            .bg(rgb(theme.content))
+            .bg(rgb(theme.background))
             .font_family(ARGUS_UI_FONT_FAMILY)
             .text_color(rgb(theme.foreground))
             .occlude()
@@ -493,52 +499,102 @@ impl Render for JstackThreadDetailWindow {
                     cx.notify();
                 }
             }))
-            .child(render_detail_title_bar(&theme, &self.detail.thread_name))
-            .child(render_detail_body(
+            .child(render_detail_title_bar(
                 &theme,
-                &self.detail,
-                active_occurrence,
-                self.active_index,
-                self.highlighted_line,
-                self.stack_selection.as_ref(),
-                &self.stack_scroll,
+                &self.detail.thread_name,
                 window,
-                cx,
             ))
+            .child(
+                // 与文件预览窗口同一套玻璃板结构：8px 窗口间距 + 圆角底板 + 多层投影，
+                // 内部 8px 留白保证内容不盖住圆角（GPUI 裁剪只支持矩形）。
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .pt(px(WINDOW_CONTENT_RING_ALLOWANCE))
+                    .pl(px(WINDOW_CONTENT_INSET))
+                    .pr(px(WINDOW_CONTENT_INSET))
+                    // 面板底边与窗口下缘之间收窄到 6px 窗口间距。
+                    .pb(px(6.0))
+                    .child(
+                        div()
+                            .size_full()
+                            .p(px(WINDOW_CONTENT_PADDING))
+                            .rounded(px(WINDOW_CONTENT_RADIUS))
+                            .bg(rgb(theme.content))
+                            .shadow(window_content_shadows())
+                            .child(div().size_full().flex().flex_col().overflow_hidden().child(
+                                render_detail_body(
+                                    &theme,
+                                    &self.detail,
+                                    active_occurrence,
+                                    self.active_index,
+                                    self.highlighted_line,
+                                    self.stack_selection.as_ref(),
+                                    &self.stack_scroll,
+                                    window,
+                                    cx,
+                                ),
+                            )),
+                    ),
+            )
     }
 }
 
-/// 渲染窗口顶部标题和关闭按钮；标题仅显示线程名，过长截断。
-fn render_detail_title_bar(theme: &AppTheme, thread_name: &str) -> impl IntoElement + use<> {
-    let close_theme = theme.clone();
+/// 渲染详情窗口标题栏：平台窗口控件（macOS 原生红绿灯占位）、线程名、拖拽空白。
+///
+/// 关闭/最小化/最大化由系统红绿灯承担，不再提供右侧自定义关闭按钮；
+/// 标题栏骨架（高度、底色、拖拽与双击缩放）与主窗口自定义标题栏、文件预览窗口保持一致。
+fn render_detail_title_bar(
+    theme: &AppTheme,
+    thread_name: &str,
+    window: &Window,
+) -> impl IntoElement {
+    let is_maximized = window.is_maximized();
+
     div()
-        .h(px(DETAIL_TITLE_BAR_HEIGHT))
-        .px_5()
+        .id("jstack-detail-title-bar")
+        .h(px(TITLE_BAR_HEIGHT))
+        .w_full()
+        .flex_none()
         .flex()
         .items_center()
-        .justify_between()
+        .bg(rgb(theme.title_bar))
+        .occlude()
+        .child(platform_window_controls(is_maximized, theme))
         .child(
+            // 与标题栏按钮组保持同一节奏，避开红绿灯右缘；标题栏只保留线程名称。
             div()
+                .pl(px(8.0))
                 .flex_1()
                 .min_w(px(0.0))
-                .text_size(px(14.0))
+                .text_size(px(13.0))
                 .line_height(px(18.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(theme.foreground))
                 .truncate()
                 .child(thread_name.to_string()),
         )
-        .child(render_icon_button(
-            "jstack-thread-detail-close",
-            ArgusIcon::Close,
-            "关闭",
-            false,
-            IconButtonSize::Small,
-            &close_theme,
-            move |_, window, _| {
-                window.remove_window();
-            },
-        ))
+        .child(detail_title_drag_area())
+}
+
+/// 渲染详情标题栏的拖拽空白，支持拖动窗口与双击最大化；范式同主窗口标签栏拖拽区。
+fn detail_title_drag_area() -> impl IntoElement {
+    let drag_area = div().id("jstack-detail-title-drag-area").h_full().flex_1();
+    // Windows 需要普通客户区事件调用显式窗口操作；其余平台保留 GPUI 控制区语义。
+    #[cfg(not(target_os = "windows"))]
+    let drag_area = drag_area.window_control_area(WindowControlArea::Drag);
+
+    drag_area.on_mouse_down(
+        MouseButton::Left,
+        move |event: &MouseDownEvent, window, cx| {
+            match event.click_count {
+                1 => custom_titlebar::start_window_drag(window),
+                2 => window.zoom_window(),
+                _ => {}
+            }
+            cx.stop_propagation();
+        },
+    )
 }
 
 /// 渲染详情主体区域，包括快照切换栏、元信息和完整堆栈。
@@ -736,7 +792,7 @@ fn render_stack_content(
         .flex_1()
         .min_h(px(0.0))
         .overflow_hidden()
-        .bg(rgb(theme.background))
+        .bg(rgb(theme.content))
         .child(
             div()
                 .id("jstack-thread-detail-stack-scroll")
@@ -1091,15 +1147,16 @@ fn render_stack_line(
         .hover(move |row| row.bg(rgb(theme.current_line)))
         .cursor_pointer()
         .child(
+            // 行号栏与文件预览窗口同一风格：内容底色、无右侧分隔线。
             div()
                 .w(px(DETAIL_LINE_NUMBER_WIDTH))
                 .h_full()
-                .pr_2()
+                .flex_none()
+                .pr_3()
                 .flex()
                 .items_center()
                 .justify_end()
-                .border_r_1()
-                .border_color(rgb(theme.border))
+                .bg(rgb(theme.content))
                 .text_color(rgb(theme.foreground_muted))
                 .child((line_index + 1).to_string()),
         )
