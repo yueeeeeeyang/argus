@@ -28,7 +28,8 @@ use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 use crate::ui::input_native::app_native_input;
 use crate::ui::main_window::{
-    WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS, window_content_shadows,
+    WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS,
+    WINDOW_CONTENT_RING_ALLOWANCE, window_content_shadows,
 };
 use crate::utils::path::{display_name, display_path};
 use crate::utils::size_format::format_bytes;
@@ -270,30 +271,41 @@ fn render_window_content(
                 .child(render_locations(snapshot, &theme, app_handle)),
         )
         .child(
-            // 右侧浏览区：与主窗口同一套玻璃板结构，8px 间距 + 圆角底板 + 多层投影。
+            // 右侧列与预览窗口同构：关闭按钮标题栏在背板上，玻璃板只承载浏览内容，
+            // 避免标题栏在玻璃板内再叠一层上下留白。
             div()
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
-                .p(px(WINDOW_CONTENT_INSET))
+                .flex()
+                .flex_col()
+                .child(render_browser_title_bar(&theme, &close_app))
                 .child(
                     div()
-                        .size_full()
-                        .p(px(WINDOW_CONTENT_PADDING))
-                        .rounded(px(WINDOW_CONTENT_RADIUS))
-                        .bg(rgb(theme.content))
-                        .shadow(window_content_shadows())
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .child(render_browser_title_bar(&theme, &close_app))
-                        .child(render_browser(
-                            snapshot,
-                            &theme,
-                            app_handle,
-                            path_focus_handle,
-                            cx,
-                        )),
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .pt(px(WINDOW_CONTENT_RING_ALLOWANCE))
+                        .pl(px(WINDOW_CONTENT_INSET))
+                        .pr(px(WINDOW_CONTENT_INSET))
+                        .pb(px(WINDOW_CONTENT_INSET))
+                        .child(
+                            div()
+                                .size_full()
+                                .p(px(WINDOW_CONTENT_PADDING))
+                                .rounded(px(WINDOW_CONTENT_RADIUS))
+                                .bg(rgb(theme.content))
+                                .shadow(window_content_shadows())
+                                .flex()
+                                .flex_col()
+                                .overflow_hidden()
+                                .child(render_browser(
+                                    snapshot,
+                                    &theme,
+                                    app_handle,
+                                    path_focus_handle,
+                                    cx,
+                                )),
+                        ),
                 ),
         )
 }
@@ -339,7 +351,6 @@ fn render_browser_title_bar(
         .flex()
         .items_center()
         .justify_end()
-        .bg(rgb(theme.content))
         .child(render_icon_button(
             "source-picker-window-close",
             ArgusIcon::Close,
