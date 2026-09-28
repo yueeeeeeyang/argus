@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义跨平台日志来源选择器模态框。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-07-14
+//! 修改日期：2026-09-25
 //! 作者：Argus 开发团队
 //! 主要功能：提供主窗口模态框中的目录浏览、目录/文件/压缩包多选和确认加载入口。
 
@@ -27,6 +27,9 @@ use crate::ui::components::input::{
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 use crate::ui::input_native::app_native_input;
+use crate::ui::main_window::{
+    WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS, window_content_shadows,
+};
 use crate::utils::path::{display_name, display_path};
 use crate::utils::size_format::format_bytes;
 use crate::utils::time_format::format_modified_time;
@@ -240,7 +243,8 @@ fn render_window_content(
         .flex()
         .rounded_lg()
         .overflow_hidden()
-        .bg(rgb(theme.content))
+        // 与主窗口一致的黑色背板，右侧浏览区以玻璃板浮于其上。
+        .bg(rgb(theme.background))
         .border_1()
         .border_color(rgb(theme.border))
         .font_family(ARGUS_UI_FONT_FAMILY)
@@ -266,21 +270,31 @@ fn render_window_content(
                 .child(render_locations(snapshot, &theme, app_handle)),
         )
         .child(
+            // 右侧浏览区：与主窗口同一套玻璃板结构，8px 间距 + 圆角底板 + 多层投影。
             div()
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
-                .flex()
-                .flex_col()
-                .bg(rgb(theme.content))
-                .child(render_browser_title_bar(&theme, &close_app))
-                .child(render_browser(
-                    snapshot,
-                    &theme,
-                    app_handle,
-                    path_focus_handle,
-                    cx,
-                )),
+                .p(px(WINDOW_CONTENT_INSET))
+                .child(
+                    div()
+                        .size_full()
+                        .p(px(WINDOW_CONTENT_PADDING))
+                        .rounded(px(WINDOW_CONTENT_RADIUS))
+                        .bg(rgb(theme.content))
+                        .shadow(window_content_shadows())
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(render_browser_title_bar(&theme, &close_app))
+                        .child(render_browser(
+                            snapshot,
+                            &theme,
+                            app_handle,
+                            path_focus_handle,
+                            cx,
+                        )),
+                ),
         )
 }
 
@@ -321,7 +335,7 @@ fn render_browser_title_bar(
     div()
         .h(px(SOURCE_PICKER_HEADER_HEIGHT))
         .flex_none()
-        .px_5()
+        .px_3()
         .flex()
         .items_center()
         .justify_end()

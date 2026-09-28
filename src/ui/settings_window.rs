@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Argus 主窗口设置模态框和独立设置编辑器。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-09-24
+//! 修改日期：2026-09-25
 //! 作者：Argus 开发团队
 //! 主要功能：以主窗口模态框展示分类设置，并提供智能分析、系统提示词和 Jstack 过滤规则编辑入口。
 
@@ -30,6 +30,9 @@ use crate::ui::components::input::{
 };
 use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 use crate::ui::input_native::app_native_input;
+use crate::ui::main_window::{
+    WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS, window_content_shadows,
+};
 
 /// 设置行右侧内边距，用于让浮层菜单和选择框左边缘对齐。
 const SETTINGS_ROW_HORIZONTAL_PADDING: f32 = 12.0;
@@ -377,7 +380,8 @@ fn render_settings_modal_content(
         .flex()
         .rounded_lg()
         .overflow_hidden()
-        .bg(rgb(theme.content))
+        // 与主窗口一致的黑色背板，右侧设置内容区以玻璃板浮于其上。
+        .bg(rgb(theme.background))
         .border_1()
         .border_color(rgb(theme.border))
         .font_family(ARGUS_UI_FONT_FAMILY)
@@ -404,55 +408,66 @@ fn render_settings_modal_content(
         })
         .child(render_settings_sidebar(snapshot, app_handle, &theme))
         .child(
+            // 右侧设置内容区：与主窗口同一套玻璃板结构，8px 间距 + 圆角底板 + 多层投影。
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                .flex()
-                .flex_col()
-                .bg(rgb(theme.content))
+                .h_full()
+                .p(px(WINDOW_CONTENT_INSET))
                 .child(
                     div()
-                        .h(px(56.0))
-                        .px_5()
+                        .size_full()
+                        .p(px(WINDOW_CONTENT_PADDING))
+                        .rounded(px(WINDOW_CONTENT_RADIUS))
+                        .bg(rgb(theme.content))
+                        .shadow(window_content_shadows())
                         .flex()
-                        .items_center()
-                        .justify_between()
-                        .occlude()
+                        .flex_col()
+                        .overflow_hidden()
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .line_height(px(18.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(snapshot.selected_section.label()),
+                                .h(px(56.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .occlude()
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .line_height(px(18.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(snapshot.selected_section.label()),
+                                )
+                                .child(render_icon_button(
+                                    "settings-modal-close",
+                                    ArgusIcon::Close,
+                                    "关闭设置",
+                                    false,
+                                    IconButtonSize::Small,
+                                    &theme,
+                                    move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        update_settings_app(&close_app, cx, |app, _| {
+                                            app.close_settings_modal()
+                                        });
+                                    },
+                                )),
                         )
-                        .child(render_icon_button(
-                            "settings-modal-close",
-                            ArgusIcon::Close,
-                            "关闭设置",
-                            false,
-                            IconButtonSize::Small,
-                            &theme,
-                            move |_, _, cx| {
-                                cx.stop_propagation();
-                                update_settings_app(&close_app, cx, |app, _| {
-                                    app.close_settings_modal()
-                                });
-                            },
-                        )),
-                )
-                .child(
-                    div()
-                        .id("settings-modal-content-scroll")
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .scrollbar_width(px(SETTINGS_MODAL_SCROLLBAR_WIDTH))
-                        .p_5()
-                        .child(render_selected_settings_section(
-                            snapshot,
-                            app_handle,
-                            input_focus_handles,
-                            &theme,
-                        )),
+                        .child(
+                            div()
+                                .id("settings-modal-content-scroll")
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .scrollbar_width(px(SETTINGS_MODAL_SCROLLBAR_WIDTH))
+                                .p_3()
+                                .child(render_selected_settings_section(
+                                    snapshot,
+                                    app_handle,
+                                    input_focus_handles,
+                                    &theme,
+                                )),
+                        ),
                 ),
         )
 }
