@@ -526,6 +526,32 @@ fn render_settings_sidebar(
                 .child(
                     div()
                         .mt_3()
+                        .child(settings_navigation_group_label("日志", theme)),
+                )
+                .child(settings_navigation_item(
+                    SettingsSection::LogDisplay,
+                    ArgusIcon::Logs,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
+                .child(settings_navigation_item(
+                    SettingsSection::LogSearch,
+                    ArgusIcon::Search,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
+                .child(settings_navigation_item(
+                    SettingsSection::LogLoading,
+                    ArgusIcon::FolderPlus,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
+                .child(
+                    div()
+                        .mt_3()
                         .child(settings_navigation_group_label("智能分析", theme)),
                 )
                 .child(settings_navigation_item(
@@ -552,32 +578,6 @@ fn render_settings_sidebar(
                 .child(settings_navigation_item(
                     SettingsSection::AiSkills,
                     ArgusIcon::Upload,
-                    snapshot.selected_section,
-                    app_handle,
-                    theme,
-                ))
-                .child(
-                    div()
-                        .mt_3()
-                        .child(settings_navigation_group_label("日志", theme)),
-                )
-                .child(settings_navigation_item(
-                    SettingsSection::LogDisplay,
-                    ArgusIcon::Logs,
-                    snapshot.selected_section,
-                    app_handle,
-                    theme,
-                ))
-                .child(settings_navigation_item(
-                    SettingsSection::LogSearch,
-                    ArgusIcon::Search,
-                    snapshot.selected_section,
-                    app_handle,
-                    theme,
-                ))
-                .child(settings_navigation_item(
-                    SettingsSection::LogLoading,
-                    ArgusIcon::FolderPlus,
                     snapshot.selected_section,
                     app_handle,
                     theme,
