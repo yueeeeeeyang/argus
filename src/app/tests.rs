@@ -3197,6 +3197,85 @@ fn applying_source_load_result_clears_progress(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// 验证加载单个文件来源时左侧目录树默认收起并直接打开文件，目录来源保持展开。
+#[gpui::test]
+fn single_file_load_collapses_source_panel(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+
+    app.update(cx, |app, app_cx| {
+        let mut single_file_registry = crate::loader::SourceRegistry::new();
+        let file_id = single_file_registry.allocate_id();
+        single_file_registry.insert_node(crate::loader::SourceTreeNode {
+            id: file_id,
+            parent_id: None,
+            depth: 0,
+            label: "app.log".into(),
+            kind: SourceKind::LogFile,
+            location: crate::loader::SourceLocation::LocalPath(PathBuf::from("app.log")),
+            metadata: crate::loader::SourceMetadata::default(),
+            selected: false,
+            expanded: false,
+        });
+        single_file_registry.rebuild_all_indices();
+
+        app.source_load_generation = 1;
+        app.apply_source_load_result(
+            1,
+            Ok((
+                crate::loader::MaterializedWorkspace {
+                    root: PathBuf::from("/tmp/argus-test-single-file"),
+                    roots: Vec::new(),
+                    password_pending: Vec::new(),
+                    warnings: Vec::new(),
+                    materialized_files: 1,
+                },
+                crate::loader::SourceTreeScanResult {
+                    registry: single_file_registry,
+                    warnings: Vec::new(),
+                },
+            )),
+            app_cx,
+        );
+        assert!(app.is_source_panel_collapsed, "单文件来源应默认收起目录树");
+        assert!(
+            matches!(
+                app.active_tab().map(|tab| &tab.kind),
+                Some(TabKind::LogSource { source_id, .. }) if *source_id == file_id
+            ),
+            "单文件来源应直接打开文件"
+        );
+        assert!(
+            matches!(
+                app.log_read_state(file_id),
+                Some(LogOpenState::Loading { .. })
+            ),
+            "单文件来源应自动触发后台读取，不再停留在等待读取状态"
+        );
+
+        // 目录来源：保持目录树展开。
+        app.is_source_panel_collapsed = false;
+        app.source_load_generation = 2;
+        app.apply_source_load_result(
+            2,
+            Ok((
+                crate::loader::MaterializedWorkspace {
+                    root: PathBuf::from("/tmp/argus-test-dir-source"),
+                    roots: Vec::new(),
+                    password_pending: Vec::new(),
+                    warnings: Vec::new(),
+                    materialized_files: 2,
+                },
+                crate::loader::SourceTreeScanResult {
+                    registry: placeholder_source_registry(),
+                    warnings: Vec::new(),
+                },
+            )),
+            app_cx,
+        );
+        assert!(!app.is_source_panel_collapsed, "目录来源应保持目录树展开");
+    });
+}
+
 /// 验证点击待密码解锁的压缩包节点不展开，而是弹出密码输入框并记录子树重试动作。
 #[gpui::test]
 fn toggling_password_required_archive_opens_password_prompt(cx: &mut gpui::TestAppContext) {

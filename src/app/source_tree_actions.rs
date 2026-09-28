@@ -350,6 +350,31 @@ impl ArgusApp {
         true
     }
 
+    /// 单文件来源没有目录层级：左侧目录树默认收起，直接打开该文件并触发后台读取，
+    /// 不再要求二次点击。
+    fn apply_single_file_load_defaults(&mut self, cx: &mut Context<Self>) {
+        let root_ids = self.source_registry.root_ids();
+        let single_file_root = if root_ids.len() == 1 {
+            root_ids.first().copied()
+        } else {
+            None
+        };
+        let single_file_root = single_file_root.filter(|root_id| {
+            self.source_registry
+                .node(*root_id)
+                .is_some_and(|node| matches!(node.kind, SourceKind::LogFile))
+        });
+        let Some(root_id) = single_file_root else {
+            return;
+        };
+        if !self.is_source_panel_collapsed {
+            self.is_source_panel_collapsed = true;
+            self.sync_source_panel_animation_to_current_width();
+        }
+        self.select_source(root_id);
+        self.request_open_log_content(root_id, cx);
+    }
+
     /// 应用后台完整加载结果；过期 generation（已被更新的加载请求取消）直接丢弃。
     pub(crate) fn apply_source_load_result(
         &mut self,
@@ -372,6 +397,7 @@ impl ArgusApp {
                 // 物化警告并入加载报告，让用户在完成提示中看到跳过和降级项。
                 scan_result.warnings.append(&mut workspace.warnings);
                 if self.apply_load_report(scan_result) {
+                    self.apply_single_file_load_defaults(cx);
                     self.placeholder_notice = format!(
                         "{}，已物化 {} 个文件到工作目录",
                         self.placeholder_notice, workspace.materialized_files

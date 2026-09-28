@@ -570,17 +570,19 @@ impl WorkspaceMaterializer<'_> {
 
     /// 物化单个来源根为一个顶层目录；失败回滚该根的半成品，密码未授权转为密码占位。
     ///
-    /// 可展开压缩包若只包含一个文件，产物直接提升为工作目录顶层的文件根，
-    /// 不再套一层标签目录。
+    /// 普通单文件来源与只含单文件的可展开压缩包，产物直接提升为工作目录顶层的文件根，
+    /// 来源树直接展示文件本身，不再套一层同名标签目录。
     fn materialize_root(&mut self, path: &Path) -> Result<(), MaterializeRootError> {
         let base_label = display_label_for_path(path);
         let label = self.unique_top_label(&base_label);
         let label_dir = self.root.join(&label);
-        let is_extractable_archive =
-            detect_archive_format(path).is_some_and(|format| format.is_supported());
+        let archive = detect_archive_format(path);
+        let is_extractable_archive = archive.is_some_and(|format| format.is_supported());
+        // 目录来源即使只含一个文件也保留目录层级；单文件与单文件压缩包做顶层提升。
+        let promotes_single_file = is_extractable_archive || (archive.is_none() && path.is_file());
         match self.materialize_root_into(path, &label_dir) {
             Ok(()) => {
-                let root_path = if is_extractable_archive {
+                let root_path = if promotes_single_file {
                     self.promote_single_file_root(&label, &label_dir)
                 } else {
                     label_dir
@@ -1659,7 +1661,7 @@ mod tests {
         assert_eq!(sanitize_label("..."), "source");
     }
 
-    /// 验证普通文件复制为 `<标签>/<文件名>` 且内容一致。
+    /// 验证普通单文件直接提升为工作目录顶层文件根，不再套标签目录。
     #[test]
     fn materialize_plain_file_copies_content() {
         let dir = isolated_test_dir("workspace-plain");
@@ -1674,12 +1676,39 @@ mod tests {
         )
         .expect("普通文件物化应成功");
 
-        let materialized = workspace.root.join("app/app.log");
+        let materialized = workspace.root.join("app.log");
         assert_eq!(
             fs::read_to_string(&materialized).expect("应读取物化文件"),
             "line1\nline2\n"
         );
+        assert!(
+            !workspace.root.join("app").exists(),
+            "单文件来源不应保留标签目录"
+        );
         assert_eq!(workspace.materialized_files, 1);
+    }
+
+    /// 验证目录来源即使只含一个文件也保留目录层级，不做顶层提升。
+    #[test]
+    fn materialize_single_file_directory_keeps_directory_root() {
+        let dir = isolated_test_dir("workspace-single-file-dir");
+        let source_dir = dir.join("logs");
+        write_test_file(&source_dir, "only.log", "x");
+
+        let workspace = materialize_sources(
+            &[source_dir],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("目录物化应成功");
+
+        assert!(workspace.root.join("logs/only.log").is_file());
+        assert!(
+            !workspace.root.join("only.log").exists(),
+            "目录来源的单文件不应提升到工作目录顶层"
+        );
     }
 
     /// 验证目录递归复制保留结构并跳过符号链接。
@@ -2215,7 +2244,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// 验证两个同名来源根的顶层目录会自动消歧。
+    /// 验证两个同名单文件来源提升为顶层文件根后按序号消歧。
     #[test]
     fn duplicate_root_labels_are_disambiguated() {
         let dir = isolated_test_dir("workspace-dupe");
@@ -2233,7 +2262,8 @@ mod tests {
         )
         .expect("同名来源物化应成功");
 
-        assert!(workspace.root.join("app/app.log").exists());
-        assert!(workspace.root.join("app (2)/app.log").exists());
+        // 单文件来源提升到顶层后在扩展名前追加序号消歧，不再各套一层标签目录。
+        assert!(workspace.root.join("app.log").exists());
+        assert!(workspace.root.join("app (2).log").exists());
     }
 }
