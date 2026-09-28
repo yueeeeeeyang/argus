@@ -1,6 +1,6 @@
 //! 文件职责：提供独立浮动窗口的原生帧读写能力。
 //! 创建日期：2026-09-24
-//! 修改日期：2026-09-24
+//! 修改日期：2026-09-28
 //! 作者：Argus 开发团队
 //! 主要功能：在 macOS 上读取窗口与所在屏幕的全局帧，并把窗口移动缩放到指定全局帧；其余平台回退为不可用。
 
@@ -177,8 +177,16 @@ mod macos {
     }
 
     /// 从 GPUI 窗口的 raw-window-handle 中取得当前 macOS `NSWindow` 指针。
+    ///
+    /// 说明：GPUI 测试平台的 `window_handle()` 直接 `unimplemented!` panic 而非返回错误，
+    /// 这里用 `catch_unwind` 兜底，让测试窗口优雅回退为 None（内嵌布局），
+    /// 真实平台路径不产生任何异常开销。
     pub(super) fn native_window(window: &Window) -> Option<*mut AnyObject> {
-        let window_handle = HasWindowHandle::window_handle(window).ok()?;
+        let window_handle = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            HasWindowHandle::window_handle(window)
+        }))
+        .ok()?
+        .ok()?;
         match window_handle.as_raw() {
             RawWindowHandle::AppKit(handle) => {
                 let native_view = handle.ns_view.as_ptr().cast::<AnyObject>();

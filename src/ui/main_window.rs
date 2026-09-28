@@ -1,10 +1,10 @@
 //! 文件职责：组合 Argus 主窗口的整体布局。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-24
+//! 修改日期：2026-09-28
 //! 作者：Argus 开发团队
 //! 主要功能：渲染标题栏、来源侧栏、日志内容区、右侧 Agent 助手、AI 分析弹窗和设置模态框。
 
-use crate::app::ArgusApp;
+use crate::app::{ArgusApp, AssistantPanelMode};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::ui::{
@@ -302,6 +302,7 @@ fn animated_assistant_panel(
     let dynamic_max = app.assistant_panel_max_width_for_window(window_width);
     let from_width = app.assistant_panel_animation_from_width.min(dynamic_max);
     let to_width = app.assistant_panel_animation_to_width.min(dynamic_max);
+    let theme = app.theme.clone();
     let panel = div()
         .id("animated-assistant-panel")
         .relative()
@@ -309,9 +310,35 @@ fn animated_assistant_panel(
         .flex_none()
         .overflow_hidden()
         .flex()
-        .when_some(app.assistant_panel.clone(), |this, panel| {
-            this.child(div().flex_1().min_w(px(0.0)).h_full().child(panel))
-        })
+        // 浮动模式下面板实体只由浮动窗口渲染：若内嵌槽位（宽 0）继续渲染同一实体，
+        // 两个窗口会互相覆盖共享的列表测量态与滚动偏移，滚动条在两侧来回闪现。
+        .when_some(
+            app.assistant_panel
+                .clone()
+                .filter(|_| app.assistant_panel_mode != AssistantPanelMode::Floating),
+            |this, panel| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h_full()
+                        // 与内容面板同构的圆角玻璃板：顶部描边余量 + 右侧/底部窗口间距，
+                        // 与内容面板之间保留 8px 缝隙，收起时由外层动画宽度整体裁掉。
+                        .pt(px(WINDOW_CONTENT_RING_ALLOWANCE))
+                        .pr(px(WINDOW_CONTENT_INSET))
+                        .pb(px(WINDOW_CONTENT_INSET))
+                        .child(
+                            div()
+                                .size_full()
+                                .p(px(WINDOW_CONTENT_PADDING))
+                                .rounded(px(WINDOW_CONTENT_RADIUS))
+                                .bg(rgb(theme.content))
+                                .shadow(window_content_shadows())
+                                .child(panel),
+                        ),
+                )
+            },
+        )
         // 透明拖动层最后加入元素树，确保覆盖在面板内容之上并保持稳定命中。
         .when(!app.is_assistant_panel_collapsed, |this| {
             this.child(render_assistant_resizer(app, cx))

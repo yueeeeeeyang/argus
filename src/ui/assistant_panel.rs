@@ -1,6 +1,6 @@
 //! 文件职责：渲染并管理主窗口右侧可持续交互的 Agent 助手面板。
 //! 创建日期：2026-07-16
-//! 修改日期：2026-07-16
+//! 修改日期：2026-09-28
 //! 作者：Argus 开发团队
 //! 主要功能：全来源扫描、多轮会话、模型切换、流式 Markdown、工具轨迹分组、Token 状态和可信日志引用跳转。
 
@@ -1258,6 +1258,30 @@ impl AssistantPanel {
         was_focused
     }
 
+    /// 返回输入框应用焦点状态，供焦点链路测试断言。
+    #[cfg(test)]
+    pub(crate) fn composer_is_focused_for_test(&self) -> bool {
+        self.input.is_focused
+    }
+
+    /// 返回输入框原生焦点句柄，供焦点链路测试断言。
+    #[cfg(test)]
+    pub(crate) fn input_focus_handle_for_test(&self) -> FocusHandle {
+        self.input_focus.clone()
+    }
+
+    /// 注入一条启用模型并跳过系统凭据检查，供焦点链路测试解除输入框禁用态。
+    #[cfg(test)]
+    pub(crate) fn force_composer_enabled_for_test(&mut self) {
+        let mut profile = AiModelProfile::new();
+        profile.name = "测试模型".to_string();
+        profile.base_url = "http://localhost/v1".to_string();
+        profile.model = "test-model".to_string();
+        self.selected_model_id = Some(profile.profile_id.clone());
+        self.models = vec![profile];
+        self.credential_error = None;
+    }
+
     /// 展开或收起指定工具轨迹组。
     fn toggle_tool_group(&mut self, index: usize) {
         let messages = Arc::make_mut(&mut self.messages);
@@ -1460,6 +1484,7 @@ impl Render for AssistantPanel {
 
         div()
             .id("assistant-panel-root")
+            .debug_selector(|| "assistant-panel-root".to_string())
             .size_full()
             .min_w(px(0.0))
             .flex()
@@ -1598,6 +1623,7 @@ impl Render for AssistantPanel {
             )
             .child(
                 div()
+                    .debug_selector(|| "assistant-composer".to_string())
                     .flex_none()
                     .p_3()
                     .pt_2()
@@ -2289,6 +2315,7 @@ fn render_assistant_scrollbar(
     let mouse_state = list_state.clone();
     div()
         .id("assistant-message-scrollbar")
+        .debug_selector(|| "assistant-message-scrollbar".to_string())
         .absolute()
         .top(metrics.thumb_start)
         .right(px(ASSISTANT_SCROLLBAR_PADDING))
@@ -2326,7 +2353,10 @@ fn render_assistant_scrollbar(
                         let panel = panel.clone();
                         let list_state = mouse_state.clone();
                         move |event: &MouseUpEvent, phase, _, app_cx| {
-                            if !phase.bubble() || event.button != MouseButton::Left {
+                            // 捕获阶段收尾拖拽：冒泡路径上的停传播（如输入框拖选、其他浮层）
+                            // 可能吞掉抬起事件；一旦漏收，拖拽起始高度会永久残留，
+                            // 内容未溢出时也会画出幻影滚动条。
+                            if !phase.capture() || event.button != MouseButton::Left {
                                 return;
                             }
                             let handled = panel.update(app_cx, |view, _| {

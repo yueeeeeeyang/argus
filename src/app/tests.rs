@@ -1,6 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-09-24
+//! 修改日期：2026-09-28
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -3195,6 +3195,114 @@ fn applying_source_load_result_clears_progress(cx: &mut gpui::TestAppContext) {
         assert!(!app.is_source_loading);
         assert!(app.source_load_progress.is_none(), "成功回填应清理进度");
     });
+}
+
+/// 验证内容未溢出时助手消息列表不显示滚动条。
+#[gpui::test]
+fn assistant_scrollbar_hidden_when_content_fits(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.update(|window, app_cx| {
+        app.update(app_cx, |app, app_cx| {
+            app.toggle_assistant_panel(Some(window), app_cx);
+        });
+    });
+
+    assert!(
+        cx.debug_bounds("assistant-message-scrollbar").is_none(),
+        "内容未溢出时消息滚动条应隐藏"
+    );
+}
+
+/// 验证点击助手输入框后应用焦点与原生焦点同时生效。
+#[gpui::test]
+fn assistant_composer_click_sets_focus(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    // 共享测试配置可能残留超大的来源栏宽度，显式收敛，保证助手面板有可用宽度。
+    app.update(cx, |app, _| {
+        app.source_panel_width = 240.0;
+    });
+    // 窗口太小时助手面板会被主内容最小宽度约束压成 0 宽，先放大到真实桌面尺寸。
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    cx.update(|window, app_cx| {
+        app.update(app_cx, |app, app_cx| {
+            app.toggle_assistant_panel(Some(window), app_cx);
+            // 测试时钟不推进动画，直接落到展开宽度，避免输入框随动画停在 0 宽。
+            let width = app.assistant_panel_animation_to_width;
+            app.assistant_panel_animation_from_width = width;
+            app.is_assistant_panel_resizing = true;
+            // 未配置模型时输入框处于禁用态、不挂载点击处理，先注入可用模型。
+            let panel = app.assistant_panel.clone().expect("应创建助手面板实体");
+            panel.update(app_cx, |panel, _| {
+                panel.force_composer_enabled_for_test();
+            });
+        });
+    });
+    // 强制再铺一帧，确保展开后的面板进入最新渲染帧再读取边界。
+    cx.simulate_resize(gpui::size(gpui::px(1601.0), gpui::px(900.0)));
+    let input_bounds = cx
+        .debug_bounds("assistant-composer")
+        .expect("应渲染助手输入框");
+    cx.simulate_click(
+        gpui::point(
+            input_bounds.left() + gpui::px(20.0),
+            input_bounds.top() + gpui::px(14.0),
+        ),
+        gpui::Modifiers::default(),
+    );
+
+    cx.update(|window, app_cx| {
+        let panel = app
+            .read(app_cx)
+            .assistant_panel
+            .as_ref()
+            .expect("应创建助手面板实体");
+        let (is_focused, focus_handle) = panel.read_with(app_cx, |panel, _| {
+            (
+                panel.composer_is_focused_for_test(),
+                panel.input_focus_handle_for_test(),
+            )
+        });
+        assert!(is_focused, "点击后输入框应获得应用焦点");
+        assert!(
+            focus_handle.is_focused(window),
+            "点击后输入框应获得原生焦点"
+        );
+    });
+}
+
+/// 验证浮动模式下主窗口不再渲染助手面板实体，避免两个窗口共享列表测量态互相污染。
+#[gpui::test]
+fn floating_assistant_panel_not_rendered_inline(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    // 共享测试配置可能残留超大的来源栏宽度，显式收敛，保证助手面板有可用宽度。
+    app.update(cx, |app, _| {
+        app.source_panel_width = 240.0;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    cx.update(|window, app_cx| {
+        app.update(app_cx, |app, app_cx| {
+            app.toggle_assistant_panel(Some(window), app_cx);
+            // 测试时钟不推进动画，直接落到展开宽度，避免面板随动画停在 0 宽。
+            let width = app.assistant_panel_animation_to_width;
+            app.assistant_panel_animation_from_width = width;
+            app.is_assistant_panel_resizing = true;
+        });
+    });
+    // 强制再铺一帧，确保展开后的面板进入最新渲染帧再读取边界。
+    cx.simulate_resize(gpui::size(gpui::px(1601.0), gpui::px(900.0)));
+    assert!(
+        cx.debug_bounds("assistant-panel-root").is_some(),
+        "内嵌展开时应渲染助手面板"
+    );
+
+    app.update(cx, |app, _| {
+        app.assistant_panel_mode = crate::app::AssistantPanelMode::Floating;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1602.0), gpui::px(900.0)));
+    assert!(
+        cx.debug_bounds("assistant-panel-root").is_none(),
+        "浮动模式下主窗口不应再渲染助手面板实体"
+    );
 }
 
 /// 验证加载单个文件来源时左侧目录树默认收起并直接打开文件，目录来源保持展开。

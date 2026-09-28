@@ -1,6 +1,6 @@
 //! 文件职责：提供 Argus 界面可复用的紧凑输入框组件。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-07-15
+//! 修改日期：2026-09-28
 //! 作者：Argus 开发团队
 //! 主要功能：统一输入框和多行文本域尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
 
@@ -18,7 +18,7 @@ use gpui::{
     ScrollHandle, ShapedLine, SharedString, TextRun, UTF16Selection, UnderlineStyle, Window,
     canvas, div, fill, point, prelude::*, px, rgb, size,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
@@ -38,6 +38,8 @@ const TEXTAREA_SCROLLBAR_THUMB_SIZE: f32 = 4.0;
 /// 普通样式附件按钮（如清空）的右侧留白：避开贴边纵向滚动条（边距 + 滑块厚度），再留 2px 间距。
 const TEXTAREA_ACCESSORY_RIGHT_INSET: f32 =
     TEXTAREA_SCROLLBAR_BORDER_GAP + TEXTAREA_SCROLLBAR_THUMB_SIZE + 2.0;
+/// 指针按下后移动超过该距离（像素）才视为拖选；阈值内的抖动仍按点击处理，保证点击聚焦不被误吞。
+const POINTER_CLICK_DRAG_THRESHOLD: f64 = 4.0;
 
 /// 原生文本编辑写回回调；单行输入框和文本域共享同一签名。
 type NativeEditCallback = Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>;
@@ -336,6 +338,8 @@ pub(crate) fn render_input(
                         native_input.focus_handle.focus(window);
                     }
                     on_click(event, window, cx);
+                    // 点击输入框视为已消费：冒泡到面板或窗口根会被当作"点击空白"而立即失焦。
+                    cx.stop_propagation();
                 });
             if let Some(native_input) = native_input_for_focus.as_ref() {
                 element.track_focus(&native_input.focus_handle)
@@ -507,6 +511,7 @@ pub(crate) fn render_textarea(
 
     div()
         .id(textarea.id)
+        .debug_selector(move || format!("textarea-{}", textarea.id))
         .w_full()
         .relative()
         .bg(rgb(theme.content))
@@ -557,6 +562,8 @@ pub(crate) fn render_textarea(
                         native_input.focus_handle.focus(window);
                     }
                     on_click(event, window, cx);
+                    // 点击输入框视为已消费：冒泡到面板或窗口根会被当作"点击空白"而立即失焦。
+                    cx.stop_propagation();
                 });
             if let Some(native_input) = native_input_for_focus.as_ref() {
                 element.track_focus(&native_input.focus_handle)
@@ -1122,10 +1129,17 @@ fn render_pointer_layer(
                         );
                     }
 
+                    // 拖选超过阈值后才在抬起阶段阻断点击合成，否则普通点击永远到不了
+                    // 根级 on_click，业务焦点（高亮边框、光标）无法置位。
+                    let pointer_down_position = Rc::new(Cell::new(None));
+                    let pointer_dragged = Rc::new(Cell::new(false));
+
                     window.on_mouse_event({
                         let value = value.clone();
                         let on_pointer_select = on_pointer_select.clone();
                         let native_input = native_input.clone();
+                        let pointer_down_position = pointer_down_position.clone();
+                        let pointer_dragged = pointer_dragged.clone();
                         move |event: &MouseDownEvent, phase, window, cx| {
                             if !phase.bubble()
                                 || event.button != MouseButton::Left
@@ -1137,6 +1151,8 @@ fn render_pointer_layer(
                             if let Some(native_input) = native_input.as_ref() {
                                 native_input.focus_handle.focus(window);
                             }
+                            pointer_down_position.set(Some(event.position));
+                            pointer_dragged.set(false);
                             let character_index = input_character_index_from_pointer(
                                 &value,
                                 font_size,
@@ -1156,18 +1172,26 @@ fn render_pointer_layer(
                                 window,
                                 cx,
                             );
-                            cx.stop_propagation();
+                            // 不阻断冒泡：外层 div 依赖同一事件暂存点击合成的按下状态。
                         }
                     });
 
                     window.on_mouse_event({
                         let value = value.clone();
                         let on_pointer_select = on_pointer_select.clone();
+                        let pointer_down_position = pointer_down_position.clone();
+                        let pointer_dragged = pointer_dragged.clone();
                         move |event: &MouseMoveEvent, phase, window, cx| {
                             if !phase.bubble() || !event.dragging() || !is_pointer_selecting {
                                 return;
                             }
 
+                            if let Some(down_position) = pointer_down_position.get()
+                                && (event.position - down_position).magnitude()
+                                    > POINTER_CLICK_DRAG_THRESHOLD
+                            {
+                                pointer_dragged.set(true);
+                            }
                             let character_index = input_character_index_from_pointer(
                                 &value,
                                 font_size,
@@ -1191,6 +1215,7 @@ fn render_pointer_layer(
 
                     window.on_mouse_event({
                         let on_pointer_select = on_pointer_select.clone();
+                        let pointer_dragged = pointer_dragged.clone();
                         move |event: &MouseUpEvent, phase, window, cx| {
                             if !phase.bubble()
                                 || event.button != MouseButton::Left
@@ -1208,7 +1233,10 @@ fn render_pointer_layer(
                                 window,
                                 cx,
                             );
-                            cx.stop_propagation();
+                            // 拖选后的抬起不算点击：阻断冒泡，避免根级 on_click 重置刚拖出的选区。
+                            if pointer_dragged.get() {
+                                cx.stop_propagation();
+                            }
                         }
                     });
                 },
@@ -1514,7 +1542,9 @@ fn render_textarea_scrollbar_thumb(
                     window.on_mouse_event({
                         let scroll_state = scroll_state.clone();
                         move |event: &MouseUpEvent, phase, window, cx| {
-                            if !phase.bubble() || event.button != MouseButton::Left {
+                            // 捕获阶段收尾拖拽：冒泡路径上的停传播可能吞掉抬起事件，
+                            // 漏收会让滑块永久停留在拖拽态。
+                            if !phase.capture() || event.button != MouseButton::Left {
                                 return;
                             }
 
@@ -1838,11 +1868,18 @@ fn render_textarea_pointer_layer(
                         );
                     }
 
+                    // 拖选超过阈值后才在抬起阶段阻断点击合成，否则普通点击永远到不了
+                    // 根级 on_click，业务焦点（高亮边框、光标）无法置位。
+                    let pointer_down_position = Rc::new(Cell::new(None));
+                    let pointer_dragged = Rc::new(Cell::new(false));
+
                     window.on_mouse_event({
                         let value = value.clone();
                         let on_pointer_select = on_pointer_select.clone();
                         let native_input = native_input.clone();
                         let scroll_handle = scroll_handle.clone();
+                        let pointer_down_position = pointer_down_position.clone();
+                        let pointer_dragged = pointer_dragged.clone();
                         move |event: &MouseDownEvent, phase, window, cx| {
                             if !phase.bubble()
                                 || event.button != MouseButton::Left
@@ -1854,6 +1891,8 @@ fn render_textarea_pointer_layer(
                             if let Some(native_input) = native_input.as_ref() {
                                 native_input.focus_handle.focus(window);
                             }
+                            pointer_down_position.set(Some(event.position));
+                            pointer_dragged.set(false);
                             let character_index = textarea_character_index_from_pointer(
                                 &value,
                                 font_size,
@@ -1874,7 +1913,7 @@ fn render_textarea_pointer_layer(
                                 window,
                                 cx,
                             );
-                            cx.stop_propagation();
+                            // 不阻断冒泡：外层 div 依赖同一事件暂存点击合成的按下状态。
                         }
                     });
 
@@ -1882,11 +1921,19 @@ fn render_textarea_pointer_layer(
                         let value = value.clone();
                         let on_pointer_select = on_pointer_select.clone();
                         let scroll_handle = scroll_handle.clone();
+                        let pointer_down_position = pointer_down_position.clone();
+                        let pointer_dragged = pointer_dragged.clone();
                         move |event: &MouseMoveEvent, phase, window, cx| {
                             if !phase.bubble() || !event.dragging() || !is_pointer_selecting {
                                 return;
                             }
 
+                            if let Some(down_position) = pointer_down_position.get()
+                                && (event.position - down_position).magnitude()
+                                    > POINTER_CLICK_DRAG_THRESHOLD
+                            {
+                                pointer_dragged.set(true);
+                            }
                             let character_index = textarea_character_index_from_pointer(
                                 &value,
                                 font_size,
@@ -1911,6 +1958,7 @@ fn render_textarea_pointer_layer(
 
                     window.on_mouse_event({
                         let on_pointer_select = on_pointer_select.clone();
+                        let pointer_dragged = pointer_dragged.clone();
                         move |event: &MouseUpEvent, phase, window, cx| {
                             if !phase.bubble()
                                 || event.button != MouseButton::Left
@@ -1928,7 +1976,10 @@ fn render_textarea_pointer_layer(
                                 window,
                                 cx,
                             );
-                            cx.stop_propagation();
+                            // 拖选后的抬起不算点击：阻断冒泡，避免根级 on_click 重置刚拖出的选区。
+                            if pointer_dragged.get() {
+                                cx.stop_propagation();
+                            }
                         }
                     });
                 },
