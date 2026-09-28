@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义标题栏中的日志标签区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-24
+//! 修改日期：2026-09-25
 //! 作者：Argus 开发团队
 //! 主要功能：展示可切换标签、右键菜单和多标签溢出下拉入口。
 
@@ -92,7 +92,13 @@ pub(crate) fn render(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let theme = app.theme.clone();
-    let tabs = app.tabs.clone();
+    // “未选择日志”占位页签不参与渲染：没有真实日志时标签栏只保留拖拽空白和右侧按钮。
+    let tabs = app
+        .tabs
+        .iter()
+        .filter(|tab| !matches!(tab.kind, TabKind::Empty))
+        .cloned()
+        .collect::<Vec<_>>();
     let active_tab_id = app.active_tab_id;
     let hovered_tab_id = app.hovered_tab_id;
     let active_index = tabs
@@ -553,7 +559,37 @@ mod tests {
     /// 构造使用 `.argus_test` 独立目录的应用状态，避免视觉测试污染真实设置文件。
     fn visual_test_app() -> ArgusApp {
         let config_dir = isolated_test_dir("tab-bar-visual");
-        ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
+        let mut app =
+            ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")));
+        // 占位页签不再渲染，边界类视觉测试统一使用真实日志页签。
+        app.tabs = vec![crate::app::ArgusTab {
+            id: 1,
+            title: "app.log".to_string(),
+            kind: TabKind::LogSource {
+                source_id: SourceId(1),
+                path: "/tmp/app.log".to_string(),
+            },
+        }];
+        app.active_tab_id = 1;
+        app
+    }
+
+    /// 验证“未选择日志”占位页签不在标签栏渲染，标签区只剩拖拽空白与右侧按钮。
+    #[gpui::test]
+    fn empty_placeholder_tab_is_hidden(cx: &mut TestAppContext) {
+        let (_app, cx) = cx.add_window_view(|_, _| {
+            let config_dir = isolated_test_dir("tab-bar-empty");
+            ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
+        });
+
+        assert!(
+            cx.debug_bounds("tab-1").is_none(),
+            "占位页签不应渲染在标签栏"
+        );
+        assert!(
+            cx.debug_bounds("tab-bar-drag-area").is_some(),
+            "没有占位页签时仍应保留标题栏拖拽空白"
+        );
     }
 
     /// 在指定位置模拟连续点击，确保测试覆盖 GPUI 的按下、释放和点击合成链路。
