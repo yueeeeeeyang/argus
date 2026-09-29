@@ -1,5 +1,6 @@
 //! 文件职责：把用户选择的日志来源物化到独立工作目录。
 //! 创建日期：2026-09-12
+//! 修改日期：2026-09-29
 //! 作者：Argus 开发团队
 //! 主要功能：加载日志时将普通文件/目录复制、压缩包（含嵌套）解压到 `cache/workdirs/<id>/`，
 //! 统一浏览器与 AI 的读取模型为普通文件；提供条目路径清洗和残留工作目录清扫。
@@ -2265,5 +2266,41 @@ mod tests {
         // 单文件来源提升到顶层后在扩展名前追加序号消歧，不再各套一层标签目录。
         assert!(workspace.root.join("app.log").exists());
         assert!(workspace.root.join("app (2).log").exists());
+    }
+
+    /// 验证反斜杠条目名（Windows 打包）按归一化索引正确落盘，不走逐条目线性扫描。
+    #[test]
+    fn materialize_zip_extracts_backslash_entry_names() {
+        let dir = isolated_test_dir("workspace-backslash-entries");
+        let archive = write_test_zip(
+            &dir.join("windows.zip"),
+            &[
+                ("logs\\app\\first.log", b"first"),
+                ("logs\\app\\second.log", b"second"),
+                ("logs\\third.log", b"third"),
+            ],
+        );
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("反斜杠条目物化应成功");
+
+        assert_eq!(
+            fs::read(workspace.root.join("windows/logs/app/first.log")).expect("应读取归一化条目"),
+            b"first"
+        );
+        assert_eq!(
+            fs::read(workspace.root.join("windows/logs/app/second.log")).expect("应读取归一化条目"),
+            b"second"
+        );
+        assert_eq!(
+            fs::read(workspace.root.join("windows/logs/third.log")).expect("应读取归一化条目"),
+            b"third"
+        );
     }
 }

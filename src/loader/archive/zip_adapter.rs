@@ -1,6 +1,6 @@
 //! 文件职责：实现 ZIP 压缩包条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-12
+//! 修改日期：2026-09-29
 //! 作者：Argus 开发团队
 //! 主要功能：打开 ZIP、枚举条目元信息，并按条目读取或流式输出日志内容。
 
@@ -105,6 +105,8 @@ where
     source_label: String,
     /// 解密密码；整个会话共用。
     password: Option<String>,
+    /// 规范化条目名到中央目录序号的索引缓存；首个按名查找未命中时构建。
+    normalized_index: Option<NormalizedEntryIndex>,
 }
 
 impl<R> ZipEntrySession<R>
@@ -119,6 +121,7 @@ where
             archive,
             source_label,
             password: password.map(str::to_string),
+            normalized_index: None,
         })
     }
 }
@@ -145,6 +148,7 @@ where
             entry_path,
             &self.source_label,
             self.password.as_deref(),
+            &mut self.normalized_index,
             consumer,
         )
     }
@@ -260,7 +264,38 @@ where
 {
     let mut archive =
         ZipArchive::new(reader).with_context(|| format!("无法解析 ZIP 压缩包：{source_label}"))?;
-    stream_zip_entry_in_archive(&mut archive, entry_path, source_label, password, consumer)
+    let mut normalized_index = None;
+    stream_zip_entry_in_archive(
+        &mut archive,
+        entry_path,
+        source_label,
+        password,
+        &mut normalized_index,
+        consumer,
+    )
+}
+
+/// 规范化条目名到中央目录序号的索引：按名直接查找未命中时一次构建，之后查找为 O(1)。
+///
+/// 说明：Windows 打包的 ZIP 条目名使用反斜杠，调用方传入的是归一化后的正斜杠路径，
+/// 直接按名查找必然全部未命中；若每个条目都线性扫描兜底，数万条目的包会退化为 O(n²)，
+/// 实测 1.7 万条目耗时约两分钟，索引缓存后同包解压降至秒级。
+type NormalizedEntryIndex = std::collections::HashMap<String, usize>;
+
+/// 构建规范化条目名索引；同名冲突保留首个条目，与线性扫描的命中顺序一致。
+fn build_normalized_entry_index<R>(
+    archive: &mut ZipArchive<R>,
+    source_label: &str,
+) -> Result<NormalizedEntryIndex>
+where
+    R: Read + Seek,
+{
+    let mut index = NormalizedEntryIndex::with_capacity(archive.len());
+    for entry_index in 0..archive.len() {
+        let (entry_path, _, _) = read_zip_entry_metadata(archive, entry_index, source_label)?;
+        index.entry(entry_path).or_insert(entry_index);
+    }
+    Ok(index)
 }
 
 /// 在已解析的 ZIP 句柄上流式输出条目；会话与单次读取共用同一实现。
@@ -269,6 +304,7 @@ fn stream_zip_entry_in_archive<R>(
     entry_path: &str,
     source_label: &str,
     password: Option<&str>,
+    normalized_index: &mut Option<NormalizedEntryIndex>,
     consumer: &mut ArchiveEntryConsumer<'_>,
 ) -> Result<()>
 where
@@ -296,29 +332,31 @@ where
         Err(error) => return Err(error),
     }
 
-    // 部分异常压缩包可能使用反斜杠或不规范路径名；保留旧的归一化扫描作为兼容回退。
-    for index in 0..archive.len() {
-        let (current_path, is_dir, encrypted) =
-            read_zip_entry_metadata(archive, index, source_label)?;
-        if current_path != normalized_entry_path {
-            continue;
-        }
-        if is_dir {
-            bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
-        }
-
-        let mut file = open_zip_entry_by_index(archive, index, encrypted, password, source_label)?;
-        stream_open_zip_file(
-            &mut file,
-            &normalized_entry_path,
-            source_label,
-            &mut buffer,
-            consumer,
-        )?;
-        return Ok(());
+    // 部分异常压缩包使用反斜杠或不规范路径名：按名未命中时构建规范化名称索引定位。
+    if normalized_index.is_none() {
+        *normalized_index = Some(build_normalized_entry_index(archive, source_label)?);
+    }
+    let Some(&entry_index) = normalized_index
+        .as_ref()
+        .and_then(|index| index.get(&normalized_entry_path))
+    else {
+        anyhow::bail!("无法读取 ZIP 条目 {normalized_entry_path}：{source_label}");
+    };
+    let (_, is_dir, encrypted) = read_zip_entry_metadata(archive, entry_index, source_label)?;
+    if is_dir {
+        bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
     }
 
-    anyhow::bail!("无法读取 ZIP 条目 {normalized_entry_path}：{source_label}")
+    let mut file =
+        open_zip_entry_by_index(archive, entry_index, encrypted, password, source_label)?;
+    stream_open_zip_file(
+        &mut file,
+        &normalized_entry_path,
+        source_label,
+        &mut buffer,
+        consumer,
+    )?;
+    Ok(())
 }
 
 /// 读取 ZIP 条目的元数据；使用 raw 读取避免没有密码时直接触发解密错误。
