@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Jstack 线程详情独立窗口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-09-24
+//! 修改日期：2026-09-29
 //! 作者：Argus 开发团队
 //! 主要功能：在无系统标题栏窗口中展示线程完整堆栈，并支持在不同快照间切换同名线程。
 
@@ -287,7 +287,7 @@ impl JstackThreadDetailWindow {
         }
     }
 
-    /// 记录拖拽选择指针位置；指针进入视口任一轴边缘区时启动逐帧自动滚动循环。
+    /// 记录拖拽选择指针位置；指针越过视口任一轴边缘时启动逐帧自动滚动循环。
     ///
     /// 说明：GPUI 按命中测试分发鼠标事件，行元素的 `on_mouse_move` 在指针离开行后不再
     /// 触发，这里通过窗口级监听把指针位置持续喂给自动滚动循环。
@@ -319,7 +319,7 @@ impl JstackThreadDetailWindow {
     /// 横向与纵向各自独立判定边缘强度；滚动后按当前偏移反算指针所在堆栈行，
     /// 使选区随滚动逐帧向不可见区域扩展。
     ///
-    /// 返回值：拖拽仍在进行且指针停留在任一轴边缘滚动区时返回 `true`，表示继续调度下一帧。
+    /// 返回值：拖拽仍在进行且指针仍越出视口边缘时返回 `true`，表示继续调度下一帧。
     fn step_selection_autoscroll(&mut self, window: &mut Window) -> bool {
         let Some(pointer) = self.selection_autoscroll_pointer else {
             return false;
@@ -387,7 +387,7 @@ impl JstackThreadDetailWindow {
         true
     }
 
-    /// 判断指针是否位于堆栈视口任一轴的自动滚动边缘区。
+    /// 判断指针是否越过堆栈视口任一轴的边缘。
     fn pointer_in_selection_autoscroll_zone(&self, pointer: Point<Pixels>) -> bool {
         let bounds = self.stack_scroll.bounds();
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
@@ -825,7 +825,7 @@ fn render_stack_content(
         .child(render_stack_selection_autoscroll_sensor(cx))
 }
 
-/// 调度详情窗口拖拽选择自动滚动的下一帧；拖拽结束或指针离开边缘区时循环自动停止。
+/// 调度详情窗口拖拽选择自动滚动的下一帧；拖拽结束或指针回到视口内时循环自动停止。
 fn schedule_selection_autoscroll_frame(
     entity: Entity<JstackThreadDetailWindow>,
     window: &mut Window,

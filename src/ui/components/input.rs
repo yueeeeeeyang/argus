@@ -1,6 +1,6 @@
 //! 文件职责：提供 Argus 界面可复用的紧凑输入框组件。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-09-28
+//! 修改日期：2026-09-29
 //! 作者：Argus 开发团队
 //! 主要功能：统一输入框和多行文本域尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
 
@@ -40,6 +40,8 @@ const TEXTAREA_ACCESSORY_RIGHT_INSET: f32 =
     TEXTAREA_SCROLLBAR_BORDER_GAP + TEXTAREA_SCROLLBAR_THUMB_SIZE + 2.0;
 /// 指针按下后移动超过该距离（像素）才视为拖选；阈值内的抖动仍按点击处理，保证点击聚焦不被误吞。
 const POINTER_CLICK_DRAG_THRESHOLD: f64 = 4.0;
+/// 拖选越过边缘时单次鼠标事件允许的最大滚动量（像素）；超出距离等比滚动并以此封顶，保证精准选择。
+const POINTER_DRAG_SCROLL_MAX: f32 = 6.0;
 
 /// 原生文本编辑写回回调；单行输入框和文本域共享同一签名。
 type NativeEditCallback = Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>;
@@ -635,6 +637,7 @@ pub(crate) fn render_textarea(
                                                     line_height,
                                                     cursor_index,
                                                     textarea.is_focused,
+                                                    textarea.is_pointer_selecting,
                                                     runtime_focus_handle_for_scroll_sync,
                                                     scroll_handle,
                                                     scroll_state_for_sync,
@@ -1192,11 +1195,15 @@ fn render_pointer_layer(
                             {
                                 pointer_dragged.set(true);
                             }
+                            // 单行输入框的滚动量由光标位置推导：拖选越界时把有效指针钳制在
+                            // 边缘加少量超出量内，避免直接映射到内容末端瞬间滚到底。
+                            let effective_position =
+                                pointer_position_for_drag_select(event.position, bounds);
                             let character_index = input_character_index_from_pointer(
                                 &value,
                                 font_size,
                                 cursor_index,
-                                event.position.x,
+                                effective_position.x,
                                 bounds,
                                 window,
                             );
@@ -1253,6 +1260,7 @@ fn render_textarea_scroll_sync(
     line_height: f32,
     cursor_index: usize,
     is_focused: bool,
+    is_pointer_selecting: bool,
     runtime_focus_handle: Option<FocusHandle>,
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
@@ -1268,8 +1276,11 @@ fn render_textarea_scroll_sync(
             canvas(
                 |_, _, _| (),
                 move |_, _, window: &mut Window, _| {
+                    // 拖选期间由指针层按越界距离等比滚动；光标跟随滚动按整行对齐，
+                    // 两者叠加会导致指针未到边缘内容就跳动。
                     if !effective_input_focus(is_focused, runtime_focus_handle.as_ref(), window)
                         || value.is_empty()
+                        || is_pointer_selecting
                         || scroll_state.scrollbar_drag.borrow().is_some()
                     {
                         return;
@@ -1933,6 +1944,20 @@ fn render_textarea_pointer_layer(
                                     > POINTER_CLICK_DRAG_THRESHOLD
                             {
                                 pointer_dragged.set(true);
+                            }
+                            // 拖选自动滚动：仅当指针越过文本区边缘才按超出量等比滚动，
+                            // 指针在框内时不滚动，保证选择手感稳定。
+                            let overshoot = pointer_overshoot(event.position, bounds);
+                            if overshoot.x != px(0.0) || overshoot.y != px(0.0) {
+                                let next_offset = pointer_drag_scroll_offset(
+                                    scroll_handle.offset(),
+                                    overshoot,
+                                    scroll_handle.max_offset(),
+                                );
+                                if next_offset != scroll_handle.offset() {
+                                    scroll_handle.set_offset(next_offset);
+                                    window.refresh();
+                                }
                             }
                             let character_index = textarea_character_index_from_pointer(
                                 &value,
@@ -2701,6 +2726,51 @@ fn textarea_character_index_from_pointer(
     line.start + column
 }
 
+/// 计算指针越过元素边缘的距离（带符号，在元素内部为 0），供拖选边缘自动滚动按超出量等比滚动。
+fn pointer_overshoot(position: gpui::Point<Pixels>, bounds: Bounds<Pixels>) -> gpui::Point<Pixels> {
+    point(
+        px(
+            crate::infra::selection_autoscroll::selection_autoscroll_intensity(
+                f32::from(position.x),
+                f32::from(bounds.left()),
+                f32::from(bounds.right()),
+            ),
+        ),
+        px(
+            crate::infra::selection_autoscroll::selection_autoscroll_intensity(
+                f32::from(position.y),
+                f32::from(bounds.top()),
+                f32::from(bounds.bottom()),
+            ),
+        ),
+    )
+}
+
+/// 按指针越界距离计算拖选滚动偏移（GPUI 负向滚动坐标），单事件滚动量按超出距离等比并封顶。
+fn pointer_drag_scroll_offset(
+    current_offset: gpui::Point<Pixels>,
+    overshoot: gpui::Point<Pixels>,
+    max_offset: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let cap = px(POINTER_DRAG_SCROLL_MAX);
+    let next_scroll_x = (-current_offset.x + overshoot.x.clamp(-cap, cap))
+        .clamp(px(0.0), max_offset.width.max(px(0.0)));
+    let next_scroll_y = (-current_offset.y + overshoot.y.clamp(-cap, cap))
+        .clamp(px(0.0), max_offset.height.max(px(0.0)));
+    point(-next_scroll_x, -next_scroll_y)
+}
+
+/// 拖选时把有效指针位置钳制在元素边缘外加少量超出量内，避免单行输入框按内容末端瞬间滚到底。
+fn pointer_position_for_drag_select(
+    position: gpui::Point<Pixels>,
+    bounds: Bounds<Pixels>,
+) -> gpui::Point<Pixels> {
+    let cap = px(POINTER_DRAG_SCROLL_MAX);
+    let x = position.x.clamp(bounds.left() - cap, bounds.right() + cap);
+    let y = position.y.clamp(bounds.top() - cap, bounds.bottom() + cap);
+    point(x, y)
+}
+
 /// 根据鼠标横坐标和 GPUI 字形布局计算输入框内的字符位置。
 fn input_character_index_from_pointer(
     value: &str,
@@ -2999,5 +3069,77 @@ mod tests {
         let scroll = textarea_scroll_for_scrollbar_drag(px(53.0), px(10.0), metrics);
 
         assert_eq!(scroll, px(200.0));
+    }
+
+    /// 指针在元素内部时越界距离为零，越过边缘时按超出量带符号返回。
+    #[test]
+    fn pointer_overshoot_only_counts_beyond_edges() {
+        let bounds = Bounds::new(point(px(100.0), px(100.0)), size(px(50.0), px(40.0)));
+
+        assert_eq!(
+            pointer_overshoot(point(px(120.0), px(120.0)), bounds),
+            point(px(0.0), px(0.0)),
+            "元素内部不应产生越界量"
+        );
+        assert_eq!(
+            pointer_overshoot(point(px(155.0), px(95.0)), bounds),
+            point(px(5.0), px(-5.0)),
+            "越过右下/左上边缘应带符号返回超出距离"
+        );
+    }
+
+    /// 拖选滚动按越界距离等比推进并单事件封顶，且不超出可滚动范围。
+    #[test]
+    fn pointer_drag_scroll_offset_is_proportional_and_capped() {
+        let max_offset = size(px(80.0), px(100.0));
+
+        // 越界 3px 只滚 3px：精准选择。
+        let next = pointer_drag_scroll_offset(
+            point(px(0.0), px(0.0)),
+            point(px(0.0), px(3.0)),
+            max_offset,
+        );
+        assert_eq!(next, point(px(0.0), px(-3.0)));
+        // 越界 20px 单事件封顶 6px：避免瞬间滚到底。
+        let next = pointer_drag_scroll_offset(
+            point(px(0.0), px(0.0)),
+            point(px(0.0), px(20.0)),
+            max_offset,
+        );
+        assert_eq!(next, point(px(0.0), px(-6.0)));
+        // 反向越界对称推进（当前已横向滚出 10px，向左越界 2px 回收 2px）。
+        let next = pointer_drag_scroll_offset(
+            point(px(-10.0), px(-10.0)),
+            point(px(-2.0), px(0.0)),
+            max_offset,
+        );
+        assert_eq!(next, point(px(-8.0), px(-10.0)));
+        // 滚动量钳制在 [0, max]，不会滚出内容外。
+        let next = pointer_drag_scroll_offset(
+            point(px(0.0), px(-98.0)),
+            point(px(0.0), px(6.0)),
+            max_offset,
+        );
+        assert_eq!(next, point(px(0.0), px(-100.0)));
+        let next = pointer_drag_scroll_offset(
+            point(px(0.0), px(-2.0)),
+            point(px(0.0), px(-6.0)),
+            max_offset,
+        );
+        assert_eq!(next, point(px(0.0), px(0.0)));
+    }
+
+    /// 拖选时有效指针位置被钳制在边缘加封顶超出量内，内部位置保持不变。
+    #[test]
+    fn pointer_position_for_drag_select_clamps_beyond_edges() {
+        let bounds = Bounds::new(point(px(100.0), px(100.0)), size(px(50.0), px(40.0)));
+        let cap = px(POINTER_DRAG_SCROLL_MAX);
+
+        let inside = point(px(120.0), px(110.0));
+        assert_eq!(pointer_position_for_drag_select(inside, bounds), inside);
+        assert_eq!(
+            pointer_position_for_drag_select(point(px(400.0), px(90.0)), bounds),
+            point(px(150.0) + cap, px(100.0) - cap),
+        );
     }
 }

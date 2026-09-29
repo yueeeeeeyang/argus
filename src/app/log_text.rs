@@ -1,6 +1,6 @@
 //! 文件职责：维护日志阅读区的文本选择、复制和分页滚动行为。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-06-11
+//! 修改日期：2026-09-29
 //! 作者：Argus 开发团队
 //! 主要功能：将日志正文鼠标选择、键盘复制、只读粘贴提示和大日志滚动从主应用状态中拆分出来。
 
@@ -317,7 +317,7 @@ impl ArgusApp {
         }
     }
 
-    /// 记录拖拽选择过程中的指针位置；指针进入视口任一轴的边缘区时启动逐帧自动滚动循环。
+    /// 记录拖拽选择过程中的指针位置；指针越过视口任一轴的边缘时启动逐帧自动滚动循环。
     ///
     /// 说明：GPUI 按命中测试分发鼠标事件，行元素的 `on_mouse_move` 在指针拖出可见行后
     /// 不再触发，因此需要窗口级监听把指针位置持续喂给自动滚动循环。
@@ -358,7 +358,7 @@ impl ArgusApp {
     /// 横向与纵向各自独立判定边缘强度；任一轴需要滚动就更新该轴，并把选区焦点更新到
     /// 指针钳制后的可见行列，使选区随滚动逐帧向不可见区域扩展。
     ///
-    /// 返回值：拖拽仍在进行且指针停留在任一轴的边缘滚动区时返回 `true`，表示需要继续调度下一帧。
+    /// 返回值：拖拽仍在进行且指针仍越出视口边缘时返回 `true`，表示需要继续调度下一帧。
     pub(crate) fn step_log_selection_autoscroll(&mut self, window: &mut Window) -> bool {
         let Some(autoscroll) = self.log_selection_autoscroll else {
             return false;
@@ -487,7 +487,7 @@ impl ArgusApp {
         (bounds.size.height > px(0.0) && bounds.size.width > px(0.0)).then_some(bounds)
     }
 
-    /// 判断指针是否位于日志视口任一轴的自动滚动边缘区。
+    /// 判断指针是否越过日志视口任一轴的边缘。
     fn pointer_in_log_selection_autoscroll_zone(
         &self,
         tab_id: usize,
@@ -1179,7 +1179,7 @@ pub(crate) fn merge_log_text_ranges(
     }
 }
 
-/// 调度拖拽选择自动滚动的下一帧；拖拽结束或指针离开边缘区时循环自动停止。
+/// 调度拖拽选择自动滚动的下一帧；拖拽结束或指针回到视口内时循环自动停止。
 fn schedule_log_selection_autoscroll_frame(entity: Entity<ArgusApp>, window: &mut Window) {
     window.on_next_frame(move |window, cx| {
         let keep_running = entity.update(cx, |app, _| app.step_log_selection_autoscroll(window));

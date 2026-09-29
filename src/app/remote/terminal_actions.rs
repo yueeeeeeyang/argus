@@ -1,6 +1,6 @@
 //! 文件职责：实现 SSH 终端标签的创建、事件回收、主机指纹确认和输入转发。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-09-24
+//! 修改日期：2026-09-29
 //! 作者：Argus 开发团队
 //! 主要功能：把链接树中的 SSH 链接接入右侧终端面板，并负责关闭标签时释放后台会话。
 
@@ -188,7 +188,7 @@ impl ArgusApp {
         session.scroll_scrollback_by(line_delta)
     }
 
-    /// 记录终端拖拽选择过程中的指针位置；指针进入视口纵向边缘区时启动逐帧自动滚动循环。
+    /// 记录终端拖拽选择过程中的指针位置；指针越过视口纵向边缘时启动逐帧自动滚动循环。
     ///
     /// 说明：正文元素的 `on_mouse_move` 在指针拖出视口后不再触发，终端视图通过窗口级
     /// 传感器持续调用本入口；返回值为本次是否新启动了自动滚动循环。
@@ -219,7 +219,7 @@ impl ArgusApp {
 
     /// 拖拽选择期间执行一帧自动滚动，并把选区扩展到指针钳制在视口内后对应的边缘行列。
     ///
-    /// 返回值：拖拽仍在进行、指针停留在边缘区且尚未滚到边界时返回 `true`，继续调度下一帧。
+    /// 返回值：拖拽仍在进行、指针仍越出视口边缘且尚未滚到边界时返回 `true`，继续调度下一帧。
     pub(crate) fn step_terminal_selection_autoscroll(&mut self, window: &mut Window) -> bool {
         let Some(autoscroll) = self.terminal_selection_autoscroll else {
             return false;
@@ -278,7 +278,7 @@ impl ArgusApp {
         true
     }
 
-    /// 判断指针是否位于终端视口纵向的自动滚动边缘区。
+    /// 判断指针是否越过终端视口纵向边缘。
     fn pointer_in_terminal_selection_autoscroll_zone(
         &self,
         session_id: usize,
@@ -584,7 +584,7 @@ fn terminal_paste_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
 }
 
-/// 调度终端拖拽选择自动滚动的下一帧；拖拽结束、指针离开边缘区或滚到边界时循环自动停止。
+/// 调度终端拖拽选择自动滚动的下一帧；拖拽结束、指针回到视口内或滚到边界时循环自动停止。
 fn schedule_terminal_selection_autoscroll_frame(entity: Entity<ArgusApp>, window: &mut Window) {
     window.on_next_frame(move |window, cx| {
         let keep_running =
@@ -611,7 +611,7 @@ mod tests {
         assert!(terminal_autoscroll_line_delta(10.0) < 0.0);
         assert_eq!(terminal_autoscroll_line_delta(0.0), 0.0);
         let delta = terminal_autoscroll_line_delta(-8.0);
-        assert!((delta - 4.0 / TERMINAL_LINE_HEIGHT).abs() < f32::EPSILON);
+        assert!((delta - 3.2 / TERMINAL_LINE_HEIGHT).abs() < f32::EPSILON);
     }
 
     /// 验证到达历史或实时边界时自动滚动循环应停止，未到时继续。
