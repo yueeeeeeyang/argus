@@ -1,6 +1,6 @@
 //! 文件职责：渲染智能分析的模型配置、日志类型说明与默认系统提示词子对话框。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-16
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、原文授权、日志类型匹配规则、分析说明和专业提示词。
 
@@ -1586,6 +1586,7 @@ fn render_local_input(
                 })
             },
             native_input: Some(native_input),
+            scroll_handle: input.scroll_handle.clone(),
         },
         theme,
         move |event, _, app_cx| {

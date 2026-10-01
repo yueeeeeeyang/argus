@@ -1,10 +1,12 @@
 //! 文件职责：维护应用内通用的一维文本输入状态。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
-//! 主要功能：统一文本值、Unicode 字符光标、选区、输入法标记区、鼠标拖拽和焦点清理语义。
+//! 主要功能：统一文本值、Unicode 字符光标、选区、输入法标记区、鼠标拖拽、横向滚动和焦点清理语义。
 
 use std::ops::Range;
+
+use gpui::ScrollHandle;
 
 use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
@@ -21,7 +23,7 @@ pub(crate) struct InputTextSelectionDrag {
 }
 
 /// 应用通用文本输入状态；字符位置均按 Unicode 标量值计数，不直接使用 UTF-8 字节下标。
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct TextInputState {
     /// 输入框当前文本。
     pub value: String,
@@ -35,6 +37,9 @@ pub(crate) struct TextInputState {
     pub selection_drag: Option<InputTextSelectionDrag>,
     /// 是否处于焦点状态。
     pub is_focused: bool,
+    /// 单行输入框横向滚动句柄：跨渲染持久保存滚动位置，光标移动时按最小可见揭示更新，
+    /// 避免点击后文本重排导致光标偏离鼠标落点。
+    pub scroll_handle: ScrollHandle,
 }
 
 impl TextInputState {
@@ -48,6 +53,7 @@ impl TextInputState {
             marked_range: None,
             selection_drag: None,
             is_focused: false,
+            scroll_handle: ScrollHandle::new(),
         }
     }
 
@@ -151,6 +157,20 @@ impl Default for TextInputState {
         Self::from_value(String::new())
     }
 }
+
+impl PartialEq for TextInputState {
+    /// 滚动句柄是瞬时 UI 状态，不参与内容比较。
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+            && self.cursor == other.cursor
+            && self.selection_anchor == other.selection_anchor
+            && self.marked_range == other.marked_range
+            && self.selection_drag == other.selection_drag
+            && self.is_focused == other.is_focused
+    }
+}
+
+impl Eq for TextInputState {}
 
 /// 将外部输入范围限制到当前文本长度内，并纠正可能反向的起止位置。
 fn clamp_range(range: Range<usize>, text_length: usize) -> Range<usize> {

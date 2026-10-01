@@ -1,6 +1,6 @@
 //! 文件职责：渲染侧栏和内容区的紧凑上下文工具栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：提供加载日志、过滤、目录树折叠、智能分析、导航和更多上下文操作。
 
@@ -262,6 +262,7 @@ fn render_source_search_toolbar(
                     tooltip: "关闭搜索",
                 }),
                 native_input,
+                scroll_handle: app.source_tree_search_input.scroll_handle.clone(),
             },
             theme,
             cx.listener(|app, event: &KeyDownEvent, _, cx| {
@@ -344,6 +345,7 @@ fn render_connection_search_toolbar(
                     tooltip: "关闭搜索",
                 }),
                 native_input,
+                scroll_handle: input.scroll_handle.clone(),
             },
             theme,
             cx.listener(|app, event: &KeyDownEvent, _, cx| {

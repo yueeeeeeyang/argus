@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义跨平台日志来源选择器模态框。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-09-25
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：提供主窗口模态框中的目录浏览、目录/文件/压缩包多选和确认加载入口。
 
@@ -449,6 +449,12 @@ fn render_browser(
             theme,
             app_handle,
             path_focus_handle,
+            // 滚动句柄是持久状态，不走内容快照。
+            app_handle
+                .read(cx)
+                .source_picker
+                .path_input_scroll_handle
+                .clone(),
         ))
         .child(render_entry_area(snapshot, theme, app_handle, cx))
         .child(render_footer(snapshot, theme, app_handle))
@@ -460,6 +466,7 @@ fn render_header(
     theme: &AppTheme,
     app_handle: &Entity<ArgusApp>,
     path_focus_handle: FocusHandle,
+    path_scroll_handle: gpui::ScrollHandle,
 ) -> impl IntoElement + use<> {
     let parent_dir = snapshot.source_picker.parent_dir.clone();
     let can_go_parent = parent_dir.is_some();
@@ -516,6 +523,7 @@ fn render_header(
                 }),
                 trailing_accessory: None,
                 native_input: Some(native_input),
+                scroll_handle: path_scroll_handle,
             },
             theme,
             move |event: &KeyDownEvent, _, cx| {

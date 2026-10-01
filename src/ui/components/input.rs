@@ -1,6 +1,6 @@
 //! 文件职责：提供 Argus 界面可复用的紧凑输入框组件。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：统一输入框和多行文本域尺寸、图标、占位文本、禁用态、系统输入法和键盘输入回调。
 
@@ -40,8 +40,6 @@ const TEXTAREA_ACCESSORY_RIGHT_INSET: f32 =
     TEXTAREA_SCROLLBAR_BORDER_GAP + TEXTAREA_SCROLLBAR_THUMB_SIZE + 2.0;
 /// 指针按下后移动超过该距离（像素）才视为拖选；阈值内的抖动仍按点击处理，保证点击聚焦不被误吞。
 const POINTER_CLICK_DRAG_THRESHOLD: f64 = 4.0;
-/// 拖选越过边缘时单次鼠标事件允许的最大滚动量（像素）；超出距离等比滚动并以此封顶，保证精准选择。
-const POINTER_DRAG_SCROLL_MAX: f32 = 6.0;
 
 /// 原生文本编辑写回回调；单行输入框和文本域共享同一签名。
 type NativeEditCallback = Rc<dyn Fn(NativeTextEdit, &mut Window, &mut App)>;
@@ -150,6 +148,8 @@ pub(crate) struct Input {
     pub trailing_accessory: Option<InputAccessory>,
     /// 系统文本输入桥接配置；为空时退回按键事件输入。
     pub native_input: Option<NativeInput>,
+    /// 横向滚动句柄；跨渲染持久保存滚动位置，保证点击落点与光标位置一致。
+    pub scroll_handle: ScrollHandle,
 }
 
 /// 多行文本域渲染配置；业务输入状态由调用方维护。
@@ -299,6 +299,10 @@ pub(crate) fn render_input(
     } else {
         input.value.clone()
     };
+    if input.value.is_empty() {
+        // 清空内容后同步归零横向滚动，避免下一段长文本继承旧偏移。
+        input.scroll_handle.set_offset(point(px(0.0), px(0.0)));
+    }
     let native_input = input.native_input.clone();
     let native_input_for_focus = native_input.clone();
     let native_input_for_click = native_input.clone();
@@ -375,6 +379,7 @@ pub(crate) fn render_input(
                     marked_range,
                     input.is_focused,
                     runtime_focus_handle_for_text,
+                    input.scroll_handle.clone(),
                     text_color,
                     selection_background,
                     cursor_color,
@@ -389,6 +394,7 @@ pub(crate) fn render_input(
                     input.is_pointer_selecting,
                     on_pointer_select,
                     native_input_for_pointer,
+                    input.scroll_handle.clone(),
                 )),
         )
         .when_some(visible_trailing_accessory, |this, accessory| {
@@ -760,6 +766,9 @@ fn effective_input_focus(
 }
 
 /// 渲染输入框文本、选区和光标；光标通过循环动画实现静止闪烁。
+///
+/// 横向滚动由调用方持有的 `scroll_handle` 持久承载：光标已在可视区内时保持滚动不变，
+/// 越出可视区时按最小揭示推进，点击落点与文本位置始终一致。
 fn render_editable_text(
     input_id: &'static str,
     value: &str,
@@ -770,6 +779,7 @@ fn render_editable_text(
     marked_range: Option<Range<usize>>,
     is_focused: bool,
     runtime_focus_handle: Option<FocusHandle>,
+    scroll_handle: ScrollHandle,
     text_color: u32,
     selection_background: u32,
     cursor_color: u32,
@@ -790,6 +800,7 @@ fn render_editable_text(
         display_text.clone()
     };
     let runtime_focus_handle_for_canvas = runtime_focus_handle.clone();
+    let scroll_handle_for_canvas = scroll_handle.clone();
 
     div()
         .relative()
@@ -824,12 +835,19 @@ fn render_editable_text(
                     let scroll_x = if is_placeholder {
                         px(0.0)
                     } else {
-                        input_scroll_x_for_shaped_line(
+                        let current_scroll = -scroll_handle_for_canvas.offset().x;
+                        let next_scroll = input_scroll_x_for_shaped_line(
                             &visual_value_for_canvas,
                             cursor_index,
                             &shaped_line,
+                            current_scroll,
                             bounds.size.width,
-                        )
+                        );
+                        if next_scroll != current_scroll {
+                            // 最小揭示：光标越出可视区时才推进滚动，本帧文本立即按新偏移绘制。
+                            scroll_handle_for_canvas.set_offset(point(-next_scroll, px(0.0)));
+                        }
+                        next_scroll
                     };
 
                     if !is_placeholder
@@ -860,18 +878,20 @@ fn render_editable_text(
                 cursor_index.min(character_count(&visual_value_for_caret)),
                 font_size,
                 runtime_focus_handle,
+                scroll_handle.clone(),
                 cursor_color,
             ))
         })
 }
 
-/// 渲染绝对定位闪烁光标，并用真实字形排版计算位置。
+/// 渲染绝对定位闪烁光标，并用真实字形排版计算位置；横向偏移读取同一持久滚动句柄。
 fn render_caret(
     input_id: &'static str,
     value: String,
     cursor_index: usize,
     font_size: f32,
     runtime_focus_handle: Option<FocusHandle>,
+    scroll_handle: ScrollHandle,
     cursor_color: u32,
 ) -> impl IntoElement {
     div()
@@ -888,13 +908,11 @@ fn render_caret(
                     if !effective_input_focus(true, runtime_focus_handle.as_ref(), window) {
                         return;
                     }
-                    let (caret_x, scroll_x) = caret_x_and_scroll_for_character_index(
-                        &value,
-                        cursor_index,
-                        font_size,
-                        bounds.size.width,
-                        window,
-                    );
+                    let scroll_x = -scroll_handle.offset().x;
+                    let color = window.text_style().color;
+                    let shaped_line = shape_input_line(&value, font_size, color, None, window);
+                    let caret_x =
+                        caret_x_for_shaped_character_index(&value, cursor_index, &shaped_line);
                     window.paint_quad(fill(
                         Bounds::new(
                             point(bounds.left() + caret_x - scroll_x, bounds.top() + px(1.0)),
@@ -1004,28 +1022,6 @@ fn paint_input_selection(
     ));
 }
 
-/// 使用 GPUI 实际 shaped line 计算光标位置和横向滚动量，保证显示和鼠标命中完全对齐。
-fn caret_x_and_scroll_for_character_index(
-    value: &str,
-    cursor_index: usize,
-    font_size: f32,
-    viewport_width: Pixels,
-    window: &mut Window,
-) -> (Pixels, Pixels) {
-    if value.is_empty() {
-        return (px(0.0), px(0.0));
-    }
-
-    let color = window.text_style().color;
-    let shaped_line = shape_input_line(value, font_size, color, None, window);
-    let cursor_index = cursor_index.min(character_count(value));
-    let caret_x = caret_x_for_shaped_character_index(value, cursor_index, &shaped_line);
-    let scroll_x =
-        input_scroll_x_for_shaped_line(value, cursor_index, &shaped_line, viewport_width);
-
-    (caret_x, scroll_x)
-}
-
 /// 返回指定字符索引对应的 shaped line 横坐标。
 fn caret_x_for_shaped_character_index(
     value: &str,
@@ -1035,11 +1031,12 @@ fn caret_x_for_shaped_character_index(
     shaped_line.x_for_index(byte_index_for_character(value, cursor_index))
 }
 
-/// 根据当前光标和文本宽度计算单行输入框的横向滚动量。
+/// 根据当前光标和文本宽度计算单行输入框的横向滚动揭示目标。
 fn input_scroll_x_for_shaped_line(
     value: &str,
     cursor_index: usize,
     shaped_line: &ShapedLine,
+    current_scroll_x: Pixels,
     viewport_width: Pixels,
 ) -> Pixels {
     if value.is_empty() {
@@ -1051,47 +1048,56 @@ fn input_scroll_x_for_shaped_line(
         caret_x_for_shaped_character_index(value, cursor_index.min(text_length), shaped_line);
     let content_width = caret_x_for_shaped_character_index(value, text_length, shaped_line);
 
-    input_scroll_x_for_caret(caret_x, content_width, viewport_width)
+    input_scroll_x_reveal(current_scroll_x, caret_x, content_width, viewport_width)
 }
 
 /// 根据光标位置、内容宽度和视口宽度得到横向滚动量；该纯计算方便测试边界。
-fn input_scroll_x_for_caret(
+///
+/// 与 Zed 编辑器的滚动语义一致：光标已在可视区内时保持当前滚动位置不变，
+/// 点击落点与文本不跳动；光标越出可视区时仅滚动到刚好可见。
+fn input_scroll_x_reveal(
+    current_scroll_x: Pixels,
     caret_x: Pixels,
     content_width: Pixels,
     viewport_width: Pixels,
 ) -> Pixels {
-    if viewport_width <= px(0.0) || content_width <= viewport_width {
+    if viewport_width <= px(0.0) || content_width <= px(0.0) {
         return px(0.0);
     }
 
     let margin = px(INPUT_HORIZONTAL_SCROLL_MARGIN).min(viewport_width / 2.0);
-    // 末尾光标需要额外尾部空间，否则文本宽度刚好贴齐视口右侧时，1px 光标会被裁剪。
-    let max_scroll = (content_width + margin - viewport_width).max(px(0.0));
-    let visible_right = viewport_width - margin;
-    if caret_x <= visible_right {
-        px(0.0)
+    let max_scroll = input_max_scroll_x_for_content(content_width, viewport_width);
+    let current = current_scroll_x.clamp(px(0.0), max_scroll);
+    if caret_x >= current + margin && caret_x + margin <= current + viewport_width {
+        current
+    } else if caret_x + margin > current + viewport_width {
+        (caret_x + margin - viewport_width).min(max_scroll)
     } else {
-        (caret_x + margin - viewport_width)
-            .max(px(0.0))
-            .min(max_scroll)
+        (caret_x - margin).max(px(0.0))
     }
 }
 
-/// 根据当前输入框快照计算横向滚动量，鼠标命中和输入法候选框定位都复用该偏移。
-fn input_scroll_x_for_value(
+/// 单行输入框的最大横向滚动量；末尾保留边距，避免 1px 光标在内容刚好贴齐时被裁剪。
+fn input_max_scroll_x_for_content(content_width: Pixels, viewport_width: Pixels) -> Pixels {
+    let margin = px(INPUT_HORIZONTAL_SCROLL_MARGIN).min(viewport_width / 2.0);
+    (content_width + margin - viewport_width).max(px(0.0))
+}
+
+/// 按当前文本与视口计算单行输入框的最大横向滚动量；拖选越界滚动时用于钳制。
+fn input_max_scroll_x_for_value(
     value: &str,
-    cursor_index: usize,
     font_size: f32,
     viewport_width: Pixels,
     window: &mut Window,
 ) -> Pixels {
-    if value.is_empty() {
+    if value.is_empty() || viewport_width <= px(0.0) {
         return px(0.0);
     }
-
     let color = window.text_style().color;
     let shaped_line = shape_input_line(value, font_size, color, None, window);
-    input_scroll_x_for_shaped_line(value, cursor_index, &shaped_line, viewport_width)
+    let content_width =
+        caret_x_for_shaped_character_index(value, character_count(value), &shaped_line);
+    input_max_scroll_x_for_content(content_width, viewport_width)
 }
 
 /// 渲染输入框透明命中层，用于把鼠标选择转换成字符索引。
@@ -1105,6 +1111,7 @@ fn render_pointer_layer(
     is_pointer_selecting: bool,
     on_pointer_select: Rc<impl Fn(&InputPointerEvent, &mut Window, &mut App) + 'static>,
     native_input: Option<NativeInput>,
+    scroll_handle: ScrollHandle,
 ) -> impl IntoElement {
     div()
         .id((input_id, 3usize))
@@ -1118,6 +1125,8 @@ fn render_pointer_layer(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, cx| {
                     let visible_bounds = bounds.intersect(&window.content_mask().bounds);
+                    // 命中与输入法候选窗定位都读取同一持久滚动偏移，保证与文本绘制严格对齐。
+                    let scroll_x = -scroll_handle.offset().x;
                     if let Some(native_input) = native_input.as_ref() {
                         install_native_input_handler(
                             native_input,
@@ -1127,6 +1136,7 @@ fn render_pointer_layer(
                             selection_range.clone(),
                             marked_range.clone(),
                             bounds,
+                            scroll_x,
                             window,
                             cx,
                         );
@@ -1159,7 +1169,7 @@ fn render_pointer_layer(
                             let character_index = input_character_index_from_pointer(
                                 &value,
                                 font_size,
-                                cursor_index,
+                                scroll_x,
                                 event.position.x,
                                 bounds,
                                 window,
@@ -1195,15 +1205,31 @@ fn render_pointer_layer(
                             {
                                 pointer_dragged.set(true);
                             }
-                            // 单行输入框的滚动量由光标位置推导：拖选越界时把有效指针钳制在
-                            // 边缘加少量超出量内，避免直接映射到内容末端瞬间滚到底。
-                            let effective_position =
-                                pointer_position_for_drag_select(event.position, bounds);
+                            // 拖选自动滚动：仅当指针越过输入框边缘才滚动，步长曲线与
+                            // Zed 编辑器一致——近边缘近乎静止，远边缘快速推进。
+                            let overshoot_x = f32::from(pointer_overshoot(event.position, bounds).x);
+                            let scroll_x = if overshoot_x != 0.0 {
+                                let max_scroll =
+                                    input_max_scroll_x_for_value(&value, font_size, bounds.size.width, window);
+                                let next_scroll = (scroll_x
+                                    + px(
+                                        crate::infra::selection_autoscroll::selection_autoscroll_step_horizontal_px(
+                                            overshoot_x,
+                                            (font_size * 0.62).max(6.0),
+                                        ),
+                                    ))
+                                .clamp(px(0.0), max_scroll);
+                                scroll_handle.set_offset(point(-next_scroll, px(0.0)));
+                                window.refresh();
+                                next_scroll
+                            } else {
+                                scroll_x
+                            };
                             let character_index = input_character_index_from_pointer(
                                 &value,
                                 font_size,
-                                cursor_index,
-                                effective_position.x,
+                                scroll_x,
+                                event.position.x,
                                 bounds,
                                 window,
                             );
@@ -1945,14 +1971,16 @@ fn render_textarea_pointer_layer(
                             {
                                 pointer_dragged.set(true);
                             }
-                            // 拖选自动滚动：仅当指针越过文本区边缘才按超出量等比滚动，
-                            // 指针在框内时不滚动，保证选择手感稳定。
+                            // 拖选自动滚动：仅当指针越过文本区边缘才滚动，步长曲线与
+                            // Zed 编辑器一致——近边缘近乎静止，远边缘快速推进。
                             let overshoot = pointer_overshoot(event.position, bounds);
                             if overshoot.x != px(0.0) || overshoot.y != px(0.0) {
                                 let next_offset = pointer_drag_scroll_offset(
                                     scroll_handle.offset(),
                                     overshoot,
                                     scroll_handle.max_offset(),
+                                    line_height,
+                                    (font_size * 0.62).max(6.0),
                                 );
                                 if next_offset != scroll_handle.offset() {
                                     scroll_handle.set_offset(next_offset);
@@ -2022,6 +2050,7 @@ fn install_native_input_handler(
     selection_range: Option<Range<usize>>,
     marked_range: Option<Range<usize>>,
     bounds: Bounds<Pixels>,
+    scroll_x: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -2034,6 +2063,7 @@ fn install_native_input_handler(
             selection_range,
             marked_range,
             bounds,
+            scroll_x,
             on_edit: native_input.on_edit.clone(),
         },
         cx,
@@ -2054,6 +2084,8 @@ struct NativeInputHandler {
     marked_range: Option<Range<usize>>,
     /// 输入框文本区域绘制边界。
     bounds: Bounds<Pixels>,
+    /// 当前横向滚动量（非负像素），与文本绘制使用的偏移一致。
+    scroll_x: Pixels,
     /// 编辑写回回调。
     on_edit: NativeEditCallback,
 }
@@ -2133,17 +2165,17 @@ impl NativeInputHandler {
     ) -> Option<Bounds<Pixels>> {
         let color = window.text_style().color;
         let shaped_line = shape_input_line(&self.value, self.font_size, color, None, window);
-        let scroll_x = input_scroll_x_for_shaped_line(
-            &self.value,
-            self.cursor_index,
-            &shaped_line,
-            self.bounds.size.width,
-        );
         let start = caret_x_for_shaped_character_index(&self.value, range.start, &shaped_line);
         let end = caret_x_for_shaped_character_index(&self.value, range.end, &shaped_line);
         Some(Bounds::from_corners(
-            point(self.bounds.left() + start - scroll_x, self.bounds.top()),
-            point(self.bounds.left() + end - scroll_x, self.bounds.bottom()),
+            point(
+                self.bounds.left() + start - self.scroll_x,
+                self.bounds.top(),
+            ),
+            point(
+                self.bounds.left() + end - self.scroll_x,
+                self.bounds.bottom(),
+            ),
         ))
     }
 }
@@ -2249,7 +2281,7 @@ impl InputHandler for NativeInputHandler {
         let character_index = input_character_index_from_pointer(
             &self.value,
             self.font_size,
-            self.cursor_index,
+            self.scroll_x,
             point.x,
             self.bounds,
             window,
@@ -2746,36 +2778,39 @@ fn pointer_overshoot(position: gpui::Point<Pixels>, bounds: Bounds<Pixels>) -> g
     )
 }
 
-/// 按指针越界距离计算拖选滚动偏移（GPUI 负向滚动坐标），单事件滚动量按超出距离等比并封顶。
+/// 按指针越界距离计算拖选滚动偏移（GPUI 负向滚动坐标）；步长曲线与 Zed 编辑器一致：
+/// 纵向按行高、横向按列宽做越界距离的 1.2 次幂缩放，近边缘近乎静止、远边缘快速推进。
 fn pointer_drag_scroll_offset(
     current_offset: gpui::Point<Pixels>,
     overshoot: gpui::Point<Pixels>,
     max_offset: gpui::Size<Pixels>,
+    line_height: f32,
+    column_width: f32,
 ) -> gpui::Point<Pixels> {
-    let cap = px(POINTER_DRAG_SCROLL_MAX);
-    let next_scroll_x = (-current_offset.x + overshoot.x.clamp(-cap, cap))
-        .clamp(px(0.0), max_offset.width.max(px(0.0)));
-    let next_scroll_y = (-current_offset.y + overshoot.y.clamp(-cap, cap))
-        .clamp(px(0.0), max_offset.height.max(px(0.0)));
+    let step_x = px(
+        crate::infra::selection_autoscroll::selection_autoscroll_step_horizontal_px(
+            f32::from(overshoot.x),
+            column_width,
+        ),
+    );
+    let step_y = px(
+        crate::infra::selection_autoscroll::selection_autoscroll_step_vertical_px(
+            f32::from(overshoot.y),
+            line_height,
+        ),
+    );
+    let next_scroll_x = (-current_offset.x + step_x).clamp(px(0.0), max_offset.width.max(px(0.0)));
+    let next_scroll_y = (-current_offset.y + step_y).clamp(px(0.0), max_offset.height.max(px(0.0)));
     point(-next_scroll_x, -next_scroll_y)
 }
 
-/// 拖选时把有效指针位置钳制在元素边缘外加少量超出量内，避免单行输入框按内容末端瞬间滚到底。
-fn pointer_position_for_drag_select(
-    position: gpui::Point<Pixels>,
-    bounds: Bounds<Pixels>,
-) -> gpui::Point<Pixels> {
-    let cap = px(POINTER_DRAG_SCROLL_MAX);
-    let x = position.x.clamp(bounds.left() - cap, bounds.right() + cap);
-    let y = position.y.clamp(bounds.top() - cap, bounds.bottom() + cap);
-    point(x, y)
-}
-
 /// 根据鼠标横坐标和 GPUI 字形布局计算输入框内的字符位置。
+///
+/// `scroll_x` 为当前横向滚动量（非负像素），与文本绘制使用的偏移一致。
 fn input_character_index_from_pointer(
     value: &str,
     font_size: f32,
-    cursor_index: usize,
+    scroll_x: Pixels,
     pointer_x: Pixels,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -2784,8 +2819,6 @@ fn input_character_index_from_pointer(
         return 0;
     }
 
-    let scroll_x =
-        input_scroll_x_for_value(value, cursor_index, font_size, bounds.size.width, window);
     let text_relative_x = pointer_x - bounds.left() + scroll_x;
     if text_relative_x <= px(0.0) {
         return 0;
@@ -2835,7 +2868,7 @@ mod tests {
     /// 内容宽度未超过视口时，不应产生横向滚动。
     #[test]
     fn input_scroll_keeps_short_content_at_origin() {
-        let scroll = input_scroll_x_for_caret(px(80.0), px(180.0), px(200.0));
+        let scroll = input_scroll_x_reveal(px(0.0), px(80.0), px(180.0), px(200.0));
 
         assert_eq!(scroll, px(0.0));
     }
@@ -2843,7 +2876,7 @@ mod tests {
     /// 光标超过可视右侧边距时，输入框应把内容横向滚到光标附近。
     #[test]
     fn input_scroll_follows_caret_past_right_edge() {
-        let scroll = input_scroll_x_for_caret(px(300.0), px(500.0), px(200.0));
+        let scroll = input_scroll_x_reveal(px(0.0), px(300.0), px(500.0), px(200.0));
 
         assert!((pixels_to_f32(scroll) - 108.0).abs() < 0.01);
     }
@@ -2851,10 +2884,28 @@ mod tests {
     /// 光标位于文本末尾时，滚动量应包含尾部边距，避免光标被右边界裁剪。
     #[test]
     fn input_scroll_keeps_trailing_caret_visible() {
-        let scroll = input_scroll_x_for_caret(px(500.0), px(500.0), px(200.0));
+        let scroll = input_scroll_x_reveal(px(0.0), px(500.0), px(500.0), px(200.0));
 
         assert_eq!(scroll, px(308.0));
         assert!(px(500.0) - scroll <= px(192.0));
+    }
+
+    /// 光标已在可视区内时保持当前滚动位置：点击落点与文本不跳动（对齐 Zed 编辑器行为）。
+    #[test]
+    fn input_scroll_stays_put_when_caret_visible() {
+        // 已滚动到 308（光标在末尾），点击可视区中部字符后光标移到 350：滚动应保持不变。
+        let scroll = input_scroll_x_reveal(px(308.0), px(350.0), px(500.0), px(200.0));
+
+        assert_eq!(scroll, px(308.0));
+    }
+
+    /// 光标越过可视左边界时向左回滚到刚好可见。
+    #[test]
+    fn input_scroll_reveals_caret_past_left_edge() {
+        // 已滚动到 308，光标移到 300：距左边界不足 8px 边距，回滚到 292。
+        let scroll = input_scroll_x_reveal(px(308.0), px(300.0), px(500.0), px(200.0));
+
+        assert_eq!(scroll, px(292.0));
     }
 
     /// 文本域关闭或重新渲染时即使遇到旧行范围，也不能因范围相减导致崩溃。
@@ -3071,7 +3122,7 @@ mod tests {
         assert_eq!(scroll, px(200.0));
     }
 
-    /// 指针在元素内部时越界距离为零，越过边缘时按超出量带符号返回。
+    /// 拖选时指针在元素内部不滚动、越界后按 Zed 曲线推进。
     #[test]
     fn pointer_overshoot_only_counts_beyond_edges() {
         let bounds = Bounds::new(point(px(100.0), px(100.0)), size(px(50.0), px(40.0)));
@@ -3088,58 +3139,65 @@ mod tests {
         );
     }
 
-    /// 拖选滚动按越界距离等比推进并单事件封顶，且不超出可滚动范围。
+    /// 拖选滚动遵循 Zed 曲线：近边缘近乎静止、远边缘封顶 3 行，且不超出可滚动范围。
     #[test]
-    fn pointer_drag_scroll_offset_is_proportional_and_capped() {
-        let max_offset = size(px(80.0), px(100.0));
+    fn pointer_drag_scroll_offset_follows_zed_curve() {
+        let max_offset = size(px(80.0), px(200.0));
+        let line_height = 18.0;
+        let column_width = 8.0;
 
-        // 越界 3px 只滚 3px：精准选择。
+        // 越界 3px：约 0.037 行 ≈ 0.67px，近乎静止保证精准选择。
         let next = pointer_drag_scroll_offset(
             point(px(0.0), px(0.0)),
             point(px(0.0), px(3.0)),
             max_offset,
+            line_height,
+            column_width,
         );
-        assert_eq!(next, point(px(0.0), px(-3.0)));
-        // 越界 20px 单事件封顶 6px：避免瞬间滚到底。
+        assert!((f32::from(next.y) + 0.673).abs() < 0.01);
+        // 越界 20px：约 0.364 行 ≈ 6.55px，随距离超线性增长。
         let next = pointer_drag_scroll_offset(
             point(px(0.0), px(0.0)),
             point(px(0.0), px(20.0)),
             max_offset,
+            line_height,
+            column_width,
         );
-        assert_eq!(next, point(px(0.0), px(-6.0)));
-        // 反向越界对称推进（当前已横向滚出 10px，向左越界 2px 回收 2px）。
+        assert!((f32::from(next.y) + 6.55).abs() < 0.01);
+        // 越界 200px：封顶 3 行 = 54px，避免瞬间滚到底。
+        let next = pointer_drag_scroll_offset(
+            point(px(0.0), px(0.0)),
+            point(px(0.0), px(200.0)),
+            max_offset,
+            line_height,
+            column_width,
+        );
+        assert_eq!(next, point(px(0.0), px(-54.0)));
+        // 反向越界对称回收（当前已横向滚出 10px，向左越界 2px 回收约 0.06px）。
         let next = pointer_drag_scroll_offset(
             point(px(-10.0), px(-10.0)),
             point(px(-2.0), px(0.0)),
             max_offset,
+            line_height,
+            column_width,
         );
-        assert_eq!(next, point(px(-8.0), px(-10.0)));
+        assert!(f32::from(next.x) < -9.9 && f32::from(next.x) > -10.0);
         // 滚动量钳制在 [0, max]，不会滚出内容外。
         let next = pointer_drag_scroll_offset(
-            point(px(0.0), px(-98.0)),
-            point(px(0.0), px(6.0)),
+            point(px(0.0), px(-198.0)),
+            point(px(0.0), px(200.0)),
             max_offset,
+            line_height,
+            column_width,
         );
-        assert_eq!(next, point(px(0.0), px(-100.0)));
+        assert_eq!(next, point(px(0.0), px(-200.0)));
         let next = pointer_drag_scroll_offset(
             point(px(0.0), px(-2.0)),
-            point(px(0.0), px(-6.0)),
+            point(px(0.0), px(-200.0)),
             max_offset,
+            line_height,
+            column_width,
         );
         assert_eq!(next, point(px(0.0), px(0.0)));
-    }
-
-    /// 拖选时有效指针位置被钳制在边缘加封顶超出量内，内部位置保持不变。
-    #[test]
-    fn pointer_position_for_drag_select_clamps_beyond_edges() {
-        let bounds = Bounds::new(point(px(100.0), px(100.0)), size(px(50.0), px(40.0)));
-        let cap = px(POINTER_DRAG_SCROLL_MAX);
-
-        let inside = point(px(120.0), px(110.0));
-        assert_eq!(pointer_position_for_drag_select(inside, bounds), inside);
-        assert_eq!(
-            pointer_position_for_drag_select(point(px(400.0), px(90.0)), bounds),
-            point(px(150.0) + cap, px(100.0) - cap),
-        );
     }
 }

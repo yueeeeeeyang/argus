@@ -203,6 +203,7 @@ pub(crate) fn render_runtime_filter_input(
                 tooltip: "清空",
             }),
             native_input,
+            scroll_handle: input_state.scroll_handle.clone(),
         },
         theme,
         cx.listener(move |app, event: &KeyDownEvent, _, cx| {

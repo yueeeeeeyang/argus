@@ -1,6 +1,6 @@
 //! 文件职责：渲染日志搜索对话框（主窗口内模态框）。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-08-05
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：提供主窗口内搜索模态框、关键字/目录输入和搜索范围切换控件。
 
@@ -832,6 +832,7 @@ fn render_search_input(
                             tooltip: "清空",
                         }),
                         native_input: Some(native_input),
+                        scroll_handle: input_state.scroll_handle.clone(),
                     },
                     &theme,
                     move |event: &KeyDownEvent, _, cx| {

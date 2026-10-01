@@ -1,6 +1,6 @@
 //! 文件职责：渲染可写远程文件后端共用的应用内模态弹窗。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：提供远程文件重命名和删除二次确认交互。
 
@@ -144,6 +144,7 @@ fn render_rename_dialog(
                         leading_accessory: None,
                         trailing_accessory: None,
                         native_input,
+                        scroll_handle: input_state.scroll_handle.clone(),
                     },
                     theme,
                     move |event: &KeyDownEvent, _, cx| {

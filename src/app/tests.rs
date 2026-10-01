@@ -1,6 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-09-28
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -2204,6 +2204,7 @@ fn closing_settings_modal_clears_modal_state() {
             marked_range: None,
             selection_drag: None,
             is_focused: true,
+            scroll_handle: gpui::ScrollHandle::new(),
         },
         discard_on_close: false,
     });

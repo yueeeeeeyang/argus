@@ -1,6 +1,6 @@
 //! 文件职责：渲染链接工作区的目录、链接和确认模态框。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：提供目录与多协议链接表单、统一删除确认样式，并展示首次连接主机指纹确认。
 
@@ -1165,6 +1165,7 @@ fn render_directory_input_row(
                 leading_accessory: None,
                 trailing_accessory: None,
                 native_input: Some(native_input),
+                scroll_handle: input_state.scroll_handle.clone(),
             },
             theme,
             move |event: &KeyDownEvent, window, cx| {
@@ -1262,6 +1263,7 @@ fn render_link_input_row(
                 leading_accessory: None,
                 trailing_accessory: None,
                 native_input: Some(native_input),
+                scroll_handle: input_state.scroll_handle.clone(),
             },
             theme,
             move |event: &KeyDownEvent, window, cx| {

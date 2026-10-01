@@ -1,6 +1,6 @@
 //! 文件职责：维护自定义日志来源选择器的应用状态与业务动作。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-07-16
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：替代系统文件选择器，提供跨平台目录浏览、多选和确认加载流程。
 
@@ -115,6 +115,8 @@ pub(crate) struct SourcePickerState {
     pub path_input_selection_drag: Option<InputTextSelectionDrag>,
     /// 手动路径输入框是否聚焦。
     pub is_path_input_focused: bool,
+    /// 手动路径输入框横向滚动句柄；跨渲染持久保存滚动位置，保证点击落点与光标一致。
+    pub path_input_scroll_handle: gpui::ScrollHandle,
     /// 当前目录列表排序字段。
     pub sort_key: SourcePickerSortKey,
     /// 当前目录列表排序方向。
@@ -145,6 +147,7 @@ impl Default for SourcePickerState {
             path_input_marked_range: None,
             path_input_selection_drag: None,
             is_path_input_focused: false,
+            path_input_scroll_handle: gpui::ScrollHandle::new(),
             sort_key: SourcePickerSortKey::Modified,
             sort_direction: SourcePickerSortDirection::Descending,
         }

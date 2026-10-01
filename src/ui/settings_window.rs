@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Argus 主窗口设置模态框和独立设置编辑器。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-09-25
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：以主窗口模态框展示分类设置，并提供智能分析、系统提示词和 Jstack 过滤规则编辑入口。
 
@@ -2027,6 +2027,7 @@ fn quick_keywords_input_control(
                 tooltip: "清空快搜关键字",
             }),
             native_input: Some(native_input),
+            scroll_handle: input_state.scroll_handle.clone(),
         },
         theme,
         move |event: &KeyDownEvent, _, cx| {

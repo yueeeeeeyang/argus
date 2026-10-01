@@ -1,6 +1,6 @@
 //! 文件职责：承接系统原生文本输入提交并写回 Argus 自绘输入框状态。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：把输入法 UTF-16 编辑结果转换后的字符范围应用到来源搜索、日志搜索、来源选择器和设置输入框。
 
@@ -454,6 +454,7 @@ mod tests {
                 marked_range: Some(0..5),
                 selection_drag: None,
                 is_focused: true,
+                scroll_handle: gpui::ScrollHandle::new(),
             },
             discard_on_close: false,
         });

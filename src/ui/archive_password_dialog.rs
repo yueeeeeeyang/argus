@@ -1,6 +1,6 @@
 //! 文件职责：渲染压缩包密码输入弹窗。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-08
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：在用户主动打开或展开加密压缩包时收集密码，并触发原操作重试。
 
@@ -107,6 +107,7 @@ fn render_dialog_content(
                         leading_accessory: None,
                         trailing_accessory: None,
                         native_input,
+                        scroll_handle: input_state.scroll_handle.clone(),
                     },
                     theme,
                     move |event: &KeyDownEvent, _, cx| {
