@@ -1,6 +1,6 @@
 //! 文件职责：维护日志阅读区的文本选择、复制和分页滚动行为。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：将日志正文鼠标选择、键盘复制、只读粘贴提示和大日志滚动从主应用状态中拆分出来。
 
@@ -19,7 +19,7 @@ use super::{
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::infra::selection_autoscroll::{
     advance_negative_scroll, advance_positive_scroll, selection_autoscroll_intensity,
-    selection_autoscroll_step_px,
+    selection_autoscroll_step_horizontal_px, selection_autoscroll_step_vertical_px,
 };
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
@@ -400,8 +400,13 @@ impl ArgusApp {
         }
         let viewport_height = viewport.size.height;
         let viewport_width = viewport.size.width;
-        let vertical_step = f32::from(px(selection_autoscroll_step_px(vertical_intensity)));
-        let horizontal_step = f32::from(px(selection_autoscroll_step_px(horizontal_intensity)));
+        // 步长曲线对齐 Zed 编辑器：纵向按行、横向按列宽，近边缘近乎静止、远边缘快速推进。
+        let vertical_step =
+            selection_autoscroll_step_vertical_px(vertical_intensity, LOG_VIEWER_ROW_HEIGHT);
+        let horizontal_step = selection_autoscroll_step_horizontal_px(
+            horizontal_intensity,
+            crate::ui::log_content_view::estimated_log_char_width(self.log_content_font_size),
+        );
         let estimated_columns = handle.estimated_longest_display_columns();
         let font_size = self.log_content_font_size;
 

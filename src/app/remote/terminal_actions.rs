@@ -1,6 +1,6 @@
 //! 文件职责：实现 SSH 终端标签的创建、事件回收、主机指纹确认和输入转发。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：把链接树中的 SSH 链接接入右侧终端面板，并负责关闭标签时释放后台会话。
 
@@ -10,7 +10,7 @@ use gpui::{ClipboardItem, Context, Entity, Keystroke, Pixels, Point, Window, poi
 
 use crate::app::{ArgusApp, ArgusTab, TabKind, Workspace};
 use crate::infra::selection_autoscroll::{
-    selection_autoscroll_intensity, selection_autoscroll_step_px,
+    selection_autoscroll_intensity, selection_autoscroll_step_lines,
 };
 use crate::remote::connection::ConnectionNodeId;
 use crate::remote::terminal::{
@@ -18,9 +18,7 @@ use crate::remote::terminal::{
     TerminalGridPosition, TerminalSelectionAutoscroll, TerminalSessionState, TerminalStatus,
     TerminalWorkerRequest, spawn_ssh_worker, terminal_input_bytes,
 };
-use crate::ui::terminal_view::{
-    TERMINAL_LINE_HEIGHT, terminal_metrics, terminal_position_from_pointer,
-};
+use crate::ui::terminal_view::{terminal_metrics, terminal_position_from_pointer};
 
 impl ArgusApp {
     /// 为指定 SSH 链接打开新的终端标签；同一链接允许同时打开多个独立会话。
@@ -561,12 +559,13 @@ impl ArgusApp {
     }
 }
 
-/// 把自动滚动强度换算成终端 scrollback 行增量：指针越过顶边向历史滚动，越过底边向实时滚动。
+/// 把自动滚动强度换算成终端 scrollback 行增量：指针越过顶边向历史滚动，越过底边向实时滚动；
+/// 步长曲线与 Zed 编辑器一致，近边缘近乎静止、远边缘快速推进。
 fn terminal_autoscroll_line_delta(vertical_intensity: f32) -> f32 {
     if vertical_intensity == 0.0 {
         return 0.0;
     }
-    -selection_autoscroll_step_px(vertical_intensity) / TERMINAL_LINE_HEIGHT
+    -selection_autoscroll_step_lines(vertical_intensity)
 }
 
 /// 判断自动滚动是否已到历史或实时边界；到达边界后逐帧循环停止，选区不再继续扩展。
@@ -604,14 +603,15 @@ fn schedule_terminal_selection_autoscroll_frame(entity: Entity<ArgusApp>, window
 mod tests {
     use super::*;
 
-    /// 验证顶边强度产生向历史的正行增量，底边强度产生向实时的负行增量，并按行高折算。
+    /// 验证顶边强度产生向历史的正行增量，底边强度产生向实时的负行增量，步长遵循 Zed 曲线。
     #[test]
     fn terminal_autoscroll_line_delta_follows_pointer_edge() {
         assert!(terminal_autoscroll_line_delta(-10.0) > 0.0);
         assert!(terminal_autoscroll_line_delta(10.0) < 0.0);
         assert_eq!(terminal_autoscroll_line_delta(0.0), 0.0);
+        // 越界 8px：8^1.2 / 100 ≈ 0.121 行，近边缘近乎静止保证精准选择。
         let delta = terminal_autoscroll_line_delta(-8.0);
-        assert!((delta - 3.2 / TERMINAL_LINE_HEIGHT).abs() < f32::EPSILON);
+        assert!((delta - 0.1213).abs() < 0.001);
     }
 
     /// 验证到达历史或实时边界时自动滚动循环应停止，未到时继续。

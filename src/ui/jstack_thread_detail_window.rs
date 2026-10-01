@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Jstack 线程详情独立窗口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：在无系统标题栏窗口中展示线程完整堆栈，并支持在不同快照间切换同名线程。
 
@@ -11,7 +11,8 @@ use crate::analysis::jstack::{JstackThreadDetail, JstackThreadStackOccurrence};
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{HighlightLanguage, HighlightTokenKind, SyntaxHighlighter};
 use crate::infra::selection_autoscroll::{
-    advance_negative_scroll, selection_autoscroll_intensity, selection_autoscroll_step_px,
+    advance_negative_scroll, selection_autoscroll_intensity,
+    selection_autoscroll_step_horizontal_px, selection_autoscroll_step_vertical_px,
 };
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
@@ -349,15 +350,19 @@ impl JstackThreadDetailWindow {
 
         let max_offset = self.stack_scroll.max_offset();
         let current_offset = self.stack_scroll.offset();
+        // 步长曲线对齐 Zed 编辑器：纵向按行、横向按列宽，近边缘近乎静止、远边缘快速推进。
         let next_offset = point(
             px(advance_negative_scroll(
                 f32::from(current_offset.x),
-                selection_autoscroll_step_px(horizontal_intensity),
+                selection_autoscroll_step_horizontal_px(
+                    horizontal_intensity,
+                    DETAIL_STACK_FONT_SIZE * 0.62,
+                ),
                 f32::from(max_offset.width),
             )),
             px(advance_negative_scroll(
                 f32::from(current_offset.y),
-                selection_autoscroll_step_px(vertical_intensity),
+                selection_autoscroll_step_vertical_px(vertical_intensity, DETAIL_STACK_LINE_HEIGHT),
                 f32::from(max_offset.height),
             )),
         );

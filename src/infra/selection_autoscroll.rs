@@ -1,11 +1,8 @@
 //! 文件职责：提供拖拽文本选择时的视口边缘自动滚动计算。
 //! 创建日期：2026-09-23
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：统一各视图的滚动强度、步长和偏移推进规则，同时支持横向与纵向两个轴向。
-
-/// 单帧自动滚动的最大步长（像素），避免滚动跳跃感。
-pub(crate) const SELECTION_AUTOSCROLL_MAX_STEP: f32 = 12.0;
 
 /// 计算单轴拖拽指针的自动滚动强度。
 ///
@@ -34,11 +31,27 @@ pub(crate) fn selection_autoscroll_intensity(
     }
 }
 
-/// 按滚动强度计算每帧滚动像素；强度越大滚动越快，并限制在最大步长内。
-pub(crate) fn selection_autoscroll_step_px(intensity: f32) -> f32 {
-    (intensity.abs() * 0.4)
-        .clamp(1.0, SELECTION_AUTOSCROLL_MAX_STEP)
+/// 计算纵向自动滚动步长（行），曲线与 Zed 编辑器一致：越界距离的 1.2 次幂缩放、
+/// 封顶 3 行。近边缘步长趋近于零保证精准选择，远边缘快速推进避免拖泥带水。
+pub(crate) fn selection_autoscroll_step_lines(intensity: f32) -> f32 {
+    (intensity.abs().powf(1.2) / 100.0)
+        .min(3.0)
         .copysign(intensity)
+}
+
+/// 计算横向自动滚动步长（列），与纵向同曲线但缩放更缓、不封顶，与 Zed 编辑器一致。
+pub(crate) fn selection_autoscroll_step_columns(intensity: f32) -> f32 {
+    (intensity.abs().powf(1.2) / 300.0).copysign(intensity)
+}
+
+/// 纵向步长换算为像素：行数曲线 × 行高。
+pub(crate) fn selection_autoscroll_step_vertical_px(intensity: f32, line_height: f32) -> f32 {
+    selection_autoscroll_step_lines(intensity) * line_height
+}
+
+/// 横向步长换算为像素：列数曲线 × 列宽。
+pub(crate) fn selection_autoscroll_step_horizontal_px(intensity: f32, column_width: f32) -> f32 {
+    selection_autoscroll_step_columns(intensity) * column_width
 }
 
 /// 推进使用正数偏移的滚动位置（如分页日志的 `top_px`/`left_px`）。
@@ -88,21 +101,32 @@ mod tests {
         assert_eq!(selection_autoscroll_intensity(10.0, 100.0, 50.0), 0.0);
     }
 
-    /// 验证步长保底 1px、按强度等比推进、上限受最大步长约束，并保留滚动方向。
+    /// 验证纵向步长遵循 Zed 曲线：近边缘趋近于零、随越界距离超线性增长、封顶 3 行。
     #[test]
-    fn step_clamps_speed_range_and_keeps_direction() {
-        assert_eq!(selection_autoscroll_step_px(1.0), 1.0);
-        assert_eq!(selection_autoscroll_step_px(-1.0), -1.0);
-        assert_eq!(selection_autoscroll_step_px(10.0), 4.0);
-        assert_eq!(selection_autoscroll_step_px(-10.0), -4.0);
-        assert_eq!(
-            selection_autoscroll_step_px(1000.0),
-            SELECTION_AUTOSCROLL_MAX_STEP
-        );
-        assert_eq!(
-            selection_autoscroll_step_px(-1000.0),
-            -SELECTION_AUTOSCROLL_MAX_STEP
-        );
+    fn step_lines_follow_zed_autoscroll_curve() {
+        assert_eq!(selection_autoscroll_step_lines(0.0), 0.0);
+        // 越界 1px：几乎静止，保证精准选择。
+        assert!(selection_autoscroll_step_lines(1.0) <= 0.01);
+        // 越界 8px：8^1.2 / 100 ≈ 0.121 行。
+        assert!((selection_autoscroll_step_lines(8.0) - 0.1213).abs() < 0.001);
+        // 方向保留。
+        assert!((selection_autoscroll_step_lines(-8.0) + 0.1213).abs() < 0.001);
+        // 远边缘封顶 3 行。
+        assert_eq!(selection_autoscroll_step_lines(10000.0), 3.0);
+        assert_eq!(selection_autoscroll_step_lines(-10000.0), -3.0);
+        // 超线性：距离加倍，步长增长超过两倍。
+        let near = selection_autoscroll_step_lines(20.0);
+        let far = selection_autoscroll_step_lines(40.0);
+        assert!(far > near * 2.0);
+    }
+
+    /// 验证横向步长与纵向同曲线、缩放更缓且不封顶。
+    #[test]
+    fn step_columns_follow_zed_autoscroll_curve() {
+        assert_eq!(selection_autoscroll_step_columns(0.0), 0.0);
+        // 越界 8px：8^1.2 / 300 ≈ 0.04 列。
+        assert!((selection_autoscroll_step_columns(8.0) - 0.0404).abs() < 0.001);
+        assert!(selection_autoscroll_step_columns(10000.0) > 3.0);
     }
 
     /// 验证正数偏移推进不会越出滚动范围。

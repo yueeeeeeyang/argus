@@ -1,6 +1,6 @@
 //! 文件职责：渲染带语法高亮的远程文件只读预览独立窗口。
 //! 创建日期：2026-07-03
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
 //! 主要功能：以项目统一编辑器样式展示远程文本、代码高亮、行号，并支持文本拖拽选中、自动滚动、复制与全选。
 
@@ -22,7 +22,7 @@ use crate::highlight::{
     HighlightCache, HighlightLanguage, HighlightSpan, detect_highlight_language,
 };
 use crate::infra::selection_autoscroll::{
-    advance_negative_scroll, selection_autoscroll_intensity, selection_autoscroll_step_px,
+    advance_negative_scroll, selection_autoscroll_intensity, selection_autoscroll_step_vertical_px,
 };
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
@@ -340,9 +340,10 @@ impl FilePreviewWindow {
             .map(|size| (size.height - bounds.size.height).max(px(0.0)))
             .unwrap_or(px(0.0));
         let current_offset = base_handle.offset();
+        // 步长曲线对齐 Zed 编辑器：近边缘近乎静止保证精准选择，远边缘快速推进。
         let next_offset_y = advance_negative_scroll(
             f32::from(current_offset.y),
-            selection_autoscroll_step_px(intensity),
+            selection_autoscroll_step_vertical_px(intensity, FILE_PREVIEW_ROW_HEIGHT),
             f32::from(max_vertical),
         );
         base_handle.set_offset(point(current_offset.x, px(next_offset_y)));
