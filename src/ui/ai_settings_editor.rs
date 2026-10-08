@@ -12,8 +12,9 @@ use secrecy::SecretString;
 
 use crate::app::{ArgusApp, TextInputState};
 use crate::config::{
-    AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, DEFAULT_AI_SYSTEM_PROMPT, LogNameMatcher,
-    LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
+    AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, DEFAULT_AI_MAX_RETRY_ATTEMPTS,
+    DEFAULT_AI_SYSTEM_PROMPT, LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget,
+    LogTypeProfile,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::theme::AppTheme;
@@ -111,6 +112,8 @@ enum AiDraftField {
     Model,
     /// 模型上下文窗口 Token 数。
     ContextWindow,
+    /// 单次模型请求失败后的最大自动重试次数。
+    MaxRetryAttempts,
     /// 只写不回显的 API Key。
     ApiKey,
     /// 当前日志类型名称。
@@ -185,6 +188,8 @@ struct AiSettingsDraft {
     consent_version: String,
     /// 模型请求超时秒数。
     request_timeout_seconds: u64,
+    /// 单次模型请求失败后的最大自动重试次数。
+    max_retry_attempts: TextInputState,
     /// 用户可编辑的专业分析系统提示词。
     system_prompt: TextInputState,
     /// 被禁用的 Skill 名称；编辑入口在设置的 Skill 管理分区，这里保持透传。
@@ -217,6 +222,7 @@ impl AiSettingsDraft {
             allow_raw_log_content: config.allow_raw_log_content,
             consent_version: config.consent_version,
             request_timeout_seconds: config.request_timeout_seconds,
+            max_retry_attempts: TextInputState::from_value(config.max_retry_attempts.to_string()),
             system_prompt: TextInputState::from_value(config.system_prompt),
             disabled_skills: config.disabled_skills,
             selected_profile: None,
@@ -252,6 +258,13 @@ impl AiSettingsDraft {
             allow_raw_log_content: self.allow_raw_log_content,
             consent_version: self.consent_version.clone(),
             request_timeout_seconds: self.request_timeout_seconds,
+            // 输入非法或为空时回落到配置默认值，随后由 AiConfig::normalize 统一收敛区间。
+            max_retry_attempts: self
+                .max_retry_attempts
+                .value
+                .trim()
+                .parse()
+                .unwrap_or(DEFAULT_AI_MAX_RETRY_ATTEMPTS),
             system_prompt: self.system_prompt.value.clone(),
             disabled_skills: self.disabled_skills.clone(),
             log_profiles: self.profiles.iter().map(ProfileDraft::to_profile).collect(),
@@ -394,6 +407,7 @@ struct AiSettingsFocusHandles {
     base_url: FocusHandle,
     model: FocusHandle,
     context_window: FocusHandle,
+    max_retry_attempts: FocusHandle,
     api_key: FocusHandle,
     profile_name: FocusHandle,
     matcher_pattern: FocusHandle,
@@ -409,6 +423,7 @@ impl AiSettingsFocusHandles {
             AiDraftField::BaseUrl => self.base_url.clone(),
             AiDraftField::Model => self.model.clone(),
             AiDraftField::ContextWindow => self.context_window.clone(),
+            AiDraftField::MaxRetryAttempts => self.max_retry_attempts.clone(),
             AiDraftField::ApiKey => self.api_key.clone(),
             AiDraftField::ProfileName => self.profile_name.clone(),
             AiDraftField::MatcherPattern => self.matcher_pattern.clone(),
@@ -445,6 +460,7 @@ impl AiSettingsEditor {
                 base_url: cx.focus_handle(),
                 model: cx.focus_handle(),
                 context_window: cx.focus_handle(),
+                max_retry_attempts: cx.focus_handle(),
                 api_key: cx.focus_handle(),
                 profile_name: cx.focus_handle(),
                 matcher_pattern: cx.focus_handle(),
@@ -473,6 +489,7 @@ impl AiSettingsEditor {
             AiDraftField::ContextWindow => self
                 .selected_model_mut()
                 .map(|model| &mut model.context_window),
+            AiDraftField::MaxRetryAttempts => Some(&mut self.draft.max_retry_attempts),
             AiDraftField::ApiKey => self.selected_model_mut().map(|model| &mut model.api_key),
             AiDraftField::ProfileName => {
                 self.selected_profile_mut().map(|profile| &mut profile.name)
@@ -515,6 +532,7 @@ impl AiSettingsEditor {
             AiDraftField::BaseUrl,
             AiDraftField::Model,
             AiDraftField::ContextWindow,
+            AiDraftField::MaxRetryAttempts,
             AiDraftField::ApiKey,
             AiDraftField::ProfileName,
             AiDraftField::MatcherPattern,
@@ -1076,6 +1094,27 @@ fn render_model_configuration(
                                         }),
                                 ),
                         ),
+                )
+                .child(editor_section_heading(
+                    "请求重试",
+                    "模型请求失败后按指数退避自动重试；达到上限会结束本轮会话并如实报错。",
+                    theme,
+                ))
+                .child(
+                    editor_card(theme).child(labeled_input(
+                        "最大重试次数",
+                        "填写 0～20 的整数：0 表示不重试，默认 10 次。首次尝试不计入该次数。",
+                        render_local_input(
+                            entity.clone(),
+                            AiDraftField::MaxRetryAttempts,
+                            &draft.max_retry_attempts,
+                            false,
+                            "例如 10",
+                            &editor.focus_handles,
+                            theme,
+                        ),
+                        theme,
+                    )),
                 )
                 .child(editor_section_heading(
                     "数据发送",
@@ -1992,6 +2031,7 @@ fn input_id(field: AiDraftField) -> &'static str {
         AiDraftField::BaseUrl => "ai-base-url-input",
         AiDraftField::Model => "ai-model-input",
         AiDraftField::ContextWindow => "ai-model-context-window-input",
+        AiDraftField::MaxRetryAttempts => "ai-max-retry-attempts-input",
         AiDraftField::ApiKey => "ai-api-key-input",
         AiDraftField::ProfileName => "ai-profile-name-input",
         AiDraftField::MatcherPattern => "ai-matcher-pattern-input",

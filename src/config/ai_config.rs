@@ -21,6 +21,12 @@ pub(crate) const DEFAULT_AI_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 pub(crate) const MIN_AI_CONTEXT_WINDOW_TOKENS: u64 = 4_096;
 /// 允许配置的最大上下文窗口，阻止异常配置导致比例计算失真。
 pub(crate) const MAX_AI_CONTEXT_WINDOW_TOKENS: u64 = 10_000_000;
+/// 模型请求失败后的默认自动重试次数；首次尝试不计入该次数。
+pub(crate) const DEFAULT_AI_MAX_RETRY_ATTEMPTS: u32 = 10;
+/// 允许配置的最小重试次数；0 表示首次失败即结束会话，不再自动重试。
+pub(crate) const MIN_AI_MAX_RETRY_ATTEMPTS: u32 = 0;
+/// 允许配置的最大重试次数；配合 30 秒退避上限，避免故障服务长时间占用会话与额度。
+pub(crate) const MAX_AI_MAX_RETRY_ATTEMPTS: u32 = 20;
 /// 当前原文授权说明版本；版本变化后用户需要重新确认。
 pub(crate) const AI_RAW_LOG_CONSENT_VERSION: &str = "2026-07-15";
 /// 用户可编辑系统提示词的最大 UTF-8 字节数，避免设置文件和每轮模型上下文异常膨胀。
@@ -64,6 +70,9 @@ pub(crate) struct AiConfig {
     /// 单次模型请求超时秒数。
     #[serde(default = "default_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
+    /// 单次模型请求失败后的最大自动重试次数；0 表示不自动重试。
+    #[serde(default = "default_max_retry_attempts")]
+    pub max_retry_attempts: u32,
     /// 用户可编辑的专业分析系统提示词；不可覆盖编排器内置的权限、证据和流程规则。
     #[serde(default = "default_ai_system_prompt")]
     pub system_prompt: String,
@@ -103,6 +112,9 @@ impl AiConfig {
         self.base_url.clear();
         self.model.clear();
         self.request_timeout_seconds = self.request_timeout_seconds.clamp(10, 600);
+        self.max_retry_attempts = self
+            .max_retry_attempts
+            .clamp(MIN_AI_MAX_RETRY_ATTEMPTS, MAX_AI_MAX_RETRY_ATTEMPTS);
         self.system_prompt = self.system_prompt.trim().to_string();
         if self.system_prompt.is_empty() {
             self.system_prompt = default_ai_system_prompt();
@@ -218,6 +230,7 @@ impl Default for AiConfig {
             allow_raw_log_content: false,
             consent_version: String::new(),
             request_timeout_seconds: default_request_timeout_seconds(),
+            max_retry_attempts: default_max_retry_attempts(),
             system_prompt: default_ai_system_prompt(),
             disabled_skills: Vec::new(),
             log_profiles: Vec::new(),
@@ -498,6 +511,11 @@ fn default_request_timeout_seconds() -> u64 {
     120
 }
 
+/// 返回默认模型请求自动重试次数。
+fn default_max_retry_attempts() -> u32 {
+    DEFAULT_AI_MAX_RETRY_ATTEMPTS
+}
+
 /// 返回模型上下文窗口的兼容默认值，供旧配置反序列化和新增模型复用。
 fn default_context_window_tokens() -> u64 {
     DEFAULT_AI_CONTEXT_WINDOW_TOKENS
@@ -601,6 +619,25 @@ mod tests {
             DEFAULT_AI_CONTEXT_WINDOW_TOKENS
         );
         assert!(uuid::Uuid::parse_str(&config.model_profiles[0].profile_id).is_ok());
+    }
+
+    /// 验证旧配置缺少重试次数时采用默认值，且越界值会被规范化收敛到合法区间。
+    #[test]
+    fn retry_attempts_default_and_clamp() {
+        let legacy: AiConfig = serde_json::from_value(serde_json::json!({}))
+            .expect("缺少新字段的旧 AI 配置应可反序列化");
+        assert_eq!(legacy.max_retry_attempts, DEFAULT_AI_MAX_RETRY_ATTEMPTS);
+
+        let mut config = AiConfig {
+            max_retry_attempts: MAX_AI_MAX_RETRY_ATTEMPTS + 1,
+            ..AiConfig::default()
+        };
+        config.normalize();
+        assert_eq!(config.max_retry_attempts, MAX_AI_MAX_RETRY_ATTEMPTS);
+
+        config.max_retry_attempts = MIN_AI_MAX_RETRY_ATTEMPTS;
+        config.normalize();
+        assert_eq!(config.max_retry_attempts, MIN_AI_MAX_RETRY_ATTEMPTS);
     }
 
     /// 验证上下文窗口必须处于可用于工具分析的合理范围。

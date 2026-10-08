@@ -38,7 +38,7 @@ use crate::config::{AiConfig, AiModelProfile};
 
 /// 模型调用失败后的首次重试等待时间；后续按指数增长以降低故障服务压力。
 const MODEL_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
-/// 自动重试的最大等待间隔；不限制重试次数，用户主动取消是唯一的运行期收敛边界。
+/// 自动重试的最大等待间隔；重试次数由 AI 配置的 `max_retry_attempts` 限定。
 const MODEL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// 循环所属的产品线；只影响开场白、事件文案和终态事件形态。
@@ -212,6 +212,7 @@ pub(crate) async fn run_agent_loop(request: AgentLoopRequest) {
             event_sender.clone(),
             user_message_receiver,
             &api_key,
+            config.max_retry_attempts,
         )
         .await
     } else {
@@ -243,6 +244,7 @@ pub(crate) async fn run_agent_loop(request: AgentLoopRequest) {
             event_sender.clone(),
             user_message_receiver,
             &api_key,
+            config.max_retry_attempts,
         )
         .await
     };
@@ -289,9 +291,10 @@ enum ModelLoopOutcome {
 
 /// 在同一会话内持续重试可恢复的模型调用失败，并保留共享用量统计。
 ///
-/// 重试不设置次数和会话时长上限；指数退避和 30 秒封顶用于避免故障服务被紧密轮询，用户主动
-/// 取消是唯一运行期停止边界。每次重试使用全新模型对话，用量统计保留，模型可重新规划当前
-/// 回答而不会把会话切到失败终态。
+/// 重试上限由 AI 配置的 `max_retry_attempts` 决定：连续失败次数超过该上限后会话进入失败终态，
+/// 不再无限占用用户额度。指数退避和 30 秒封顶用于避免故障服务被紧密轮询；用户主动取消始终
+/// 可以提前收敛。每次重试使用全新模型对话，用量统计保留，模型可重新规划当前回答而不会把
+/// 会话切到失败终态。
 async fn run_with_retry<M, F>(
     completion_model_factory: &F,
     uses_deepseek_thinking: bool,
@@ -304,6 +307,7 @@ async fn run_with_retry<M, F>(
     event_sender: async_channel::Sender<AgentEvent>,
     user_message_receiver: async_channel::Receiver<AgentUserMessage>,
     api_key: &SecretString,
+    max_retry_attempts: u32,
 ) -> Option<String>
 where
     F: Fn() -> M,
@@ -339,13 +343,25 @@ where
             }
             ModelLoopOutcome::Failed(ModelLoopFailure::Retryable(error)) => {
                 failed_attempt = failed_attempt.saturating_add(1);
+                // 首次尝试不计入重试次数；超过上限后必须如实收敛为失败终态，避免无限重试。
+                if !should_retry_after_failure(failed_attempt, max_retry_attempts) {
+                    fail_session(
+                        &event_sender,
+                        format!(
+                            "模型调用已连续失败 {failed_attempt} 次，达到设置的重试上限（{max_retry_attempts} 次）：{}",
+                            humanize_model_error(&error, api_key)
+                        ),
+                    )
+                    .await;
+                    return None;
+                }
                 let delay = model_retry_delay(failed_attempt);
                 let _ = event_sender.send(AgentEvent::AssistantAttemptReset).await;
                 context.trace(
                     AgentTraceKind::Warning,
                     "模型调用失败，正在自动重试",
                     format!(
-                        "第 {failed_attempt} 次尝试失败：{}；将在 {} 秒后重试，已累计的 Token 用量会保留",
+                        "第 {failed_attempt}/{max_retry_attempts} 次重试：{}；将在 {} 秒后重试，已累计的 Token 用量会保留",
                         humanize_model_error(&error, api_key),
                         delay.as_secs()
                     ),
@@ -362,6 +378,17 @@ where
             }
         }
     }
+}
+
+/// 判断在给定连续失败次数下是否还允许再发起一次重试。
+///
+/// 参数说明：
+/// - `failed_attempt`：本次失败后的连续失败次数，从 1 开始计数。
+/// - `max_retry_attempts`：用户配置的最大重试次数，0 表示不重试。
+///
+/// 返回值：仍可重试返回 `true`；已达上限返回 `false`，由调用方发布失败终态。
+pub(crate) fn should_retry_after_failure(failed_attempt: u32, max_retry_attempts: u32) -> bool {
+    failed_attempt <= max_retry_attempts
 }
 
 /// 按失败次数计算指数退避间隔，并把长时间故障时的单次等待封顶为 30 秒。
@@ -819,6 +846,17 @@ pub(crate) fn humanize_model_error(message: &str, api_key: &SecretString) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 验证重试上限的边界：达到上限前可重试，超过上限立即收敛。
+    #[test]
+    fn retry_stops_after_configured_attempts() {
+        // 默认 10 次：第 1～10 次失败仍可重试，第 11 次失败必须停止。
+        assert!(should_retry_after_failure(1, 10));
+        assert!(should_retry_after_failure(10, 10));
+        assert!(!should_retry_after_failure(11, 10));
+        // 配置为 0 表示不重试，首次失败即结束。
+        assert!(!should_retry_after_failure(1, 0));
+    }
 
     /// 验证安全骨架始终包裹可编辑提示词，且工作目录与授权开关如实写入边界。
     #[test]
