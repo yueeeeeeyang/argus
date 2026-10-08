@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-06-11
 //! 作者：Argus 开发团队
-//! 主要功能：识别 BOM、UTF-8、编码声明与中文本地编码，并按用户配置编码兜底解码日志正文。
+//! 主要功能：按 BOM、严格 UTF-8、chardetng 候选与中文本地编码兜底识别编码，并按用户配置编码解码日志正文。
 
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::{BIG5, Encoding, GB18030, GBK, UTF_8, UTF_16BE, UTF_16LE};

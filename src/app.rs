@@ -69,10 +69,10 @@ use crate::loader::{
     SourceId, SourceKind, SourceLocation, SourceRegistry, SourceTreeNode, SourceTreeScanResult,
     SourceTreeScanner,
 };
-use crate::platform::open_with_registration::RegistrationStatus;
-use crate::reader::log_file_reader::{
+use crate::log_io::log_file_reader::{
     LogFileReader, LogOpenState, LogReaderHandle, OpenLogRequest,
 };
+use crate::platform::open_with_registration::RegistrationStatus;
 use crate::remote::connection::ConnectionNodeId;
 use crate::remote::remote_file::RemoteFileSessionState;
 use crate::remote::terminal::{TerminalSelectionAutoscroll, TerminalSessionState};
@@ -1370,7 +1370,7 @@ impl ArgusApp {
         let _span = PerfSpan::new("request_paged_log_prefetch");
         if !matches!(
             handle.document(),
-            crate::reader::log_file_reader::LogDocument::Paged(_)
+            crate::log_io::log_file_reader::LogDocument::Paged(_)
         ) || visible_rows == 0
         {
             return;

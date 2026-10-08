@@ -43,8 +43,10 @@ mod architecture_tests {
         "src/agent/tools.rs",
     ];
     /// 主窗口业务模块的导入前缀；模型工具不得重新接回这些展示或交互流程。
-    const FORBIDDEN_BUSINESS_IMPORTS: &[&str] =
-        &["crate::reader::", "crate::search::", "crate::analysis::"];
+    ///
+    /// 说明：日志读取底层已统一收敛到 `crate::log_io`，它是界面与 Agent 共享的基础边界，
+    /// 允许工具直接使用（如 `decode_log_bytes`）；此处只拦截界面专属的搜索与分析页面实现。
+    const FORBIDDEN_BUSINESS_IMPORTS: &[&str] = &["crate::search::", "crate::analysis::"];
 
     /// 防止后续功能扩展把 Agent 工具重新绑定到主窗口阅读、搜索或分析页面实现。
     #[test]

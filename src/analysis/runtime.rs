@@ -16,7 +16,7 @@ use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::config::LoaderConfig;
 use crate::loader::{SourceId, SourceLocation};
-use crate::reader::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
+use crate::log_io::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
 
 use super::source_input::collect_analysis_files;
 

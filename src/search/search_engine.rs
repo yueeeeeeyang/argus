@@ -14,7 +14,7 @@ use regex::{Regex, RegexBuilder};
 
 use crate::loader::archive::ArchivePasswordStore;
 use crate::loader::{SourceId, SourceLocation};
-use crate::reader::log_file_reader::{
+use crate::log_io::log_file_reader::{
     DisplayedLogLine, LogDocument, LogFileReader, LogReaderHandle, OpenLogRequest, PagedLogDocument,
 };
 
@@ -1642,7 +1642,7 @@ mod tests {
     };
     use crate::config::paths::{isolated_test_dir, isolated_test_file_path};
     use crate::loader::{SourceId, SourceLocation};
-    use crate::reader::log_file_reader::{LogFileReader, OpenLogRequest};
+    use crate::log_io::log_file_reader::{LogFileReader, OpenLogRequest};
 
     /// 验证搜索默认大小写不敏感并返回全部命中范围。
     #[test]

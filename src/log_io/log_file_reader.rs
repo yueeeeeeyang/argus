@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,7 +21,7 @@ use crate::log_io::encoding_detector::{
 use crate::log_io::line_index::{
     LineIndex, LineIndexEntry, build_line_index_with_encoding_and_cancel, checked_line_span,
 };
-use crate::log_io::mmap_backend::MmapBackend;
+use crate::log_io::mmap_backend::MappedLogFile;
 
 /// 超大日志分页阈值；超过该大小后不再整体解码到内存。
 pub(crate) const LARGE_LOG_THRESHOLD_BYTES: u64 = 30 * 1024 * 1024;
@@ -275,8 +275,10 @@ pub(crate) struct PagedLogDocument {
     line_index: LineIndex,
     /// 解码行缓存。
     cache: Arc<Mutex<PagedLineCache>>,
-    /// 共享文件句柄，避免滚动过程中反复打开文件。
-    file_handle: Arc<Mutex<Option<File>>>,
+    /// 只读内存映射；按行读取直接切片，不再为每次滚动执行 seek/read 系统调用。
+    ///
+    /// 用 `Arc` 共享：克隆分页文档只复制句柄，不重复建立映射。
+    mapped: Arc<MappedLogFile>,
 }
 
 impl PagedLogDocument {
@@ -300,6 +302,8 @@ impl PagedLogDocument {
     ) -> Result<Self> {
         let encoding = detect_encoding_from_file_sample(&path, &preferred_encoding)?;
         let line_index = build_line_index_with_encoding_and_cancel(&path, &encoding, cancel_flag)?;
+        // 映射在打开阶段建立：失败立刻上报，避免滚动到某一行才暴露读取问题。
+        let mapped = MappedLogFile::open(&path)?;
 
         Ok(Self {
             path,
@@ -310,7 +314,7 @@ impl PagedLogDocument {
             cache: Arc::new(Mutex::new(PagedLineCache::new(
                 PAGED_DECODE_CACHE_LIMIT_BYTES,
             ))),
-            file_handle: Arc::new(Mutex::new(None)),
+            mapped: Arc::new(mapped),
         })
     }
 
@@ -443,7 +447,7 @@ impl PagedLogDocument {
 
             for line_number in batch_start..batch_end {
                 let Some(line) =
-                    self.decode_displayed_line_from_batch(line_number, batch_offset, &span)?
+                    self.decode_displayed_line_from_batch(line_number, batch_offset, span)?
                 else {
                     continue;
                 };
@@ -486,7 +490,7 @@ impl PagedLogDocument {
 
             for line_number in (batch_start..batch_end).rev() {
                 let Some(line) =
-                    self.decode_displayed_line_from_batch(line_number, batch_offset, &span)?
+                    self.decode_displayed_line_from_batch(line_number, batch_offset, span)?
                 else {
                     continue;
                 };
@@ -524,35 +528,19 @@ impl PagedLogDocument {
                 .line_index
                 .get(*line_number)
                 .ok_or_else(|| anyhow::anyhow!("日志行 {} 不存在", line_number + 1))?;
-            decoded.push(self.decode_line_from_span(*line_number, entry, first_entry, &span)?);
+            decoded.push(self.decode_line_from_span(*line_number, entry, first_entry, span)?);
         }
 
         Ok(decoded)
     }
 
-    /// 从共享文件句柄读取指定原始字节范围。
-    fn read_byte_span(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
-        let mut handle_guard = self
-            .file_handle
-            .lock()
-            .map_err(|_| anyhow::anyhow!("分页日志文件句柄被占用，暂时无法读取"))?;
-        if handle_guard.is_none() {
-            *handle_guard = Some(
-                File::open(&self.path)
-                    .with_context(|| format!("无法打开分页日志：{}", self.path.display()))?,
-            );
-        }
-        let handle = handle_guard
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("分页日志文件句柄初始化失败"))?;
-        handle
-            .seek(SeekFrom::Start(offset))
-            .with_context(|| format!("无法定位分页日志：{}", self.path.display()))?;
-        let mut bytes = vec![0_u8; len as usize];
-        handle
-            .read_exact(&mut bytes)
-            .with_context(|| format!("无法读取分页日志：{}", self.path.display()))?;
-        Ok(bytes)
+    /// 从只读映射中切出指定原始字节范围。
+    ///
+    /// 返回值：借用映射内存的切片；映射建立后不再产生系统调用与整段字节副本。
+    fn read_byte_span(&self, offset: u64, len: u64) -> Result<&[u8]> {
+        self.mapped
+            .byte_span(offset, len)
+            .with_context(|| format!("无法读取分页日志：{}", self.path.display()))
     }
 
     /// 从合并读取的 span 中切出单行并解码。
@@ -864,17 +852,18 @@ fn open_local_log(
         return build_paged_handle(request, path.to_path_buf(), metadata.len(), cancel_flag);
     }
 
-    let bytes = MmapBackend::read_to_bytes(path)?;
+    let mapped = MappedLogFile::open(path)?;
     if cancel_flag.load(Ordering::Relaxed) {
         bail!("日志读取已取消");
     }
-    build_memory_handle(request, bytes)
+    // 直接在映射切片上解码，省去整份原始字节到 `Vec<u8>` 的额外副本。
+    build_memory_handle(request, mapped.as_slice())
 }
 
 /// 从完整字节构建内存行文档。
-fn build_memory_handle(request: OpenLogRequest, bytes: Vec<u8>) -> Result<LogReaderHandle> {
+fn build_memory_handle(request: OpenLogRequest, bytes: &[u8]) -> Result<LogReaderHandle> {
     let byte_len = bytes.len() as u64;
-    let decoded = decode_log_bytes(&bytes, &request.default_encoding);
+    let decoded = decode_log_bytes(bytes, &request.default_encoding);
     let lines = split_decoded_lines(&decoded.text);
     let longest_line_index = longest_line_index(&lines);
     let longest_display_columns = lines

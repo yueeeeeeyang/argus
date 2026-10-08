@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::config::{JstackThreadFilterRule, JstackThreadFilterRuleKind, LoaderConfig};
 use crate::loader::{SourceId, SourceLocation};
-use crate::reader::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
+use crate::log_io::log_file_reader::{LogDocument, LogFileReader, OpenLogRequest};
 
 use super::source_input::collect_analysis_files;
 

@@ -629,7 +629,7 @@ impl ArgusApp {
     ) -> Result<
         (
             SearchTarget,
-            crate::reader::log_file_reader::LogReaderHandle,
+            crate::log_io::log_file_reader::LogReaderHandle,
             SearchQuery,
             QuickMatchKey,
         ),
@@ -676,7 +676,7 @@ impl ArgusApp {
     fn current_log_navigation_position(
         &self,
         source_id: SourceId,
-        handle: &crate::reader::log_file_reader::LogReaderHandle,
+        handle: &crate::log_io::log_file_reader::LogReaderHandle,
     ) -> CurrentLogMatchPosition {
         let Some(state) = self.log_tab_view_states.get(&self.active_tab_id) else {
             return CurrentLogMatchPosition::default();
@@ -1901,7 +1901,7 @@ impl ArgusApp {
         };
         let is_paged_document = matches!(
             handle.document(),
-            crate::reader::log_file_reader::LogDocument::Paged(_)
+            crate::log_io::log_file_reader::LogDocument::Paged(_)
         );
         let line_count = handle.line_count();
         self.clear_line_marker_jump_cache(tab_id);
@@ -2437,7 +2437,7 @@ mod tests {
         SourceKind, SourceLocation, SourceMetadata, SourceRegistry, SourceTreeNode,
         SourceTreeScanner,
     };
-    use crate::reader::log_file_reader::{LogFileReader, LogOpenState, OpenLogRequest};
+    use crate::log_io::log_file_reader::{LogFileReader, LogOpenState, OpenLogRequest};
 
     /// 构造隔离配置路径的应用状态。
     fn test_app() -> ArgusApp {

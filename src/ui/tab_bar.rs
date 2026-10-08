@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use crate::app::{ArgusApp, JstackAnalysisTaskState, RuntimeAnalysisTaskState, TabKind};
+use crate::log_io::log_file_reader::LogOpenState;
 use crate::platform::custom_titlebar;
-use crate::reader::log_file_reader::LogOpenState;
 use crate::theme::AppTheme;
 use crate::ui::components::context_menu::ActiveMenuKind;
 use crate::ui::components::icon::{ArgusIcon, render_icon};

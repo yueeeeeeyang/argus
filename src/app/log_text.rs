@@ -26,7 +26,7 @@ use crate::infra::text_selection::{
     character_count, slice_character_range, word_range_at,
 };
 use crate::loader::SourceId;
-use crate::reader::log_file_reader::{LogDocument, LogOpenState};
+use crate::log_io::log_file_reader::{LogDocument, LogOpenState};
 
 impl ArgusApp {
     /// 返回当前是否存在可搜索的日志标签页。
