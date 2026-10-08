@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use gpui::{Pixels, ScrollHandle, UniformListScrollHandle};
@@ -31,6 +32,11 @@ pub(crate) enum RuntimeAnalysisTaskState {
     },
     /// 分析完成，可渲染三层统计表格。
     Ready(Arc<RuntimeAnalysisResult>),
+    /// 用户取消了后台分析任务；仅保留取消前的进度描述。
+    Cancelled {
+        /// 取消结果提示。
+        message: String,
+    },
 }
 
 /// Runtime 分析页当前显示层级。
@@ -336,6 +342,8 @@ pub(crate) struct RuntimeAnalysisState {
     pub sql_dialog_scroll: ScrollHandle,
     /// 当前任务状态。
     pub task_state: RuntimeAnalysisTaskState,
+    /// 在途分析任务的取消标记；任务进入终态后清空。
+    pub cancel_token: Option<Arc<AtomicBool>>,
 }
 
 /// Runtime SQL 文本单元格悬浮目标，用于在单元格末尾展示"更多"入口。

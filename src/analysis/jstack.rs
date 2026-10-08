@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -211,6 +212,8 @@ pub(crate) struct JstackAnalysisResult {
     pub total_files: usize,
     /// 解析到的线程样本总数。
     pub total_samples: usize,
+    /// 是否因用户取消而提前结束；为 true 时上面的统计只覆盖取消前已完成的文件。
+    pub was_cancelled: bool,
 }
 
 /// Jstack 线程过滤器，按线程名关键字和完整线程段片段隐藏分析结果。
@@ -431,18 +434,27 @@ impl JstackAnalysisResult {
 /// 参数说明：
 /// - `targets`：按来源树顺序排列的分析目标。
 /// - `default_encoding`：日志读取兜底编码。
+/// - `loader_config`：目录递归与符号链接策略。
+/// - `cancel_token`：取消标记；置位后在当前文件边界停止，已完成的快照仍然返回。
 ///
-/// 返回值：可直接供 UI 渲染的频率矩阵结果。
+/// 返回值：可直接供 UI 渲染的频率矩阵结果，`was_cancelled` 标记是否被用户取消。
 pub(crate) fn analyze_jstack_targets(
     targets: Vec<JstackAnalysisTarget>,
     default_encoding: String,
     loader_config: LoaderConfig,
+    cancel_token: Arc<AtomicBool>,
 ) -> JstackAnalysisResult {
     let mut snapshot_targets = Vec::new();
     let mut snapshots = Vec::new();
     let mut skipped_snapshots = Vec::new();
+    let mut was_cancelled = false;
 
     for target in targets {
+        // 目录展开可能递归大量文件；取消后不再继续展开剩余目标。
+        if cancel_token.load(Ordering::Relaxed) {
+            was_cancelled = true;
+            break;
+        }
         match expand_jstack_target(target, &loader_config) {
             Ok(mut expanded) => snapshot_targets.append(&mut expanded),
             Err((source_id, label, reason)) => skipped_snapshots.push(JstackSkippedSnapshot {
@@ -455,6 +467,11 @@ pub(crate) fn analyze_jstack_targets(
 
     let total_files = snapshot_targets.len();
     for target in snapshot_targets {
+        // 取消只在文件边界生效，保证单个快照的解析结果不会被截断成半份。
+        if cancel_token.load(Ordering::Relaxed) {
+            was_cancelled = true;
+            break;
+        }
         match read_jstack_snapshot(target.clone(), &default_encoding) {
             Ok(snapshot) if snapshot.samples.is_empty() => {
                 skipped_snapshots.push(JstackSkippedSnapshot {
@@ -472,7 +489,9 @@ pub(crate) fn analyze_jstack_targets(
         }
     }
 
-    build_analysis_result(snapshots, skipped_snapshots, total_files)
+    let mut result = build_analysis_result(snapshots, skipped_snapshots, total_files);
+    result.was_cancelled = was_cancelled;
+    result
 }
 
 /// 展开 Jstack 分析目标；本地目录会递归转换为可读取的纯文本日志列表。
@@ -655,6 +674,8 @@ pub(crate) fn build_analysis_result(
         skipped_snapshots,
         total_files,
         total_samples,
+        // 取消状态由调用方在聚合完成后写入，聚合函数本身不感知取消。
+        was_cancelled: false,
     }
 }
 
@@ -973,6 +994,11 @@ mod tests {
     use crate::loader::SourceLocation;
 
     use super::*;
+
+    /// 构造一个永不取消的取消标记，供不关注取消路径的用例复用。
+    fn test_cancel_token() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
 
     /// 构造一条线程名过滤规则。
     fn thread_name_rule(pattern: &str) -> JstackThreadFilterRule {
@@ -1387,6 +1413,32 @@ mod tests {
         assert_eq!(hit_rows, 2);
     }
 
+    /// 验证已置位的取消标记会让分析立即收敛为取消结果，而不是产出完整矩阵。
+    #[test]
+    fn analyze_targets_reports_cancellation() {
+        let path = isolated_test_file_path("jstack-cancel", "thread.log");
+        fs::write(&path, sample_jstack_text()).expect("应能写入 Jstack 测试日志");
+
+        let cancel_token = Arc::new(AtomicBool::new(true));
+        let result = analyze_jstack_targets(
+            vec![JstackAnalysisTarget {
+                source_id: SourceId(1),
+                location: SourceLocation::LocalPath(path.clone()),
+                label: "thread.log".to_string(),
+                path: path.display().to_string(),
+            }],
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+            cancel_token,
+        );
+
+        assert!(result.was_cancelled, "取消标记置位后结果必须标记为已取消");
+        assert_eq!(result.snapshot_count(), 0, "取消后不应产出快照");
+        assert_eq!(result.total_files, 0, "取消发生在展开阶段，不应进入读取");
+
+        let _ = fs::remove_file(path);
+    }
+
     /// 验证通过 LogFileReader 的读取集成路径，并记录失败来源。
     #[test]
     fn analyzes_targets_with_reader_and_skips_failures() {
@@ -1411,6 +1463,7 @@ mod tests {
             ],
             "UTF-8".to_string(),
             LoaderConfig::default(),
+            test_cancel_token(),
         );
 
         assert_eq!(result.total_files, 2);
@@ -1441,6 +1494,7 @@ mod tests {
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),
+            test_cancel_token(),
         );
 
         assert_eq!(result.total_files, 2);
@@ -1473,6 +1527,7 @@ mod tests {
             }],
             "UTF-8".to_string(),
             config,
+            test_cancel_token(),
         );
 
         assert_eq!(result.total_files, 1);
@@ -1499,6 +1554,7 @@ mod tests {
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),
+            test_cancel_token(),
         );
 
         assert_eq!(result.total_files, 1);

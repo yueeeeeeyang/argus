@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -199,6 +200,8 @@ pub(crate) struct RuntimeAnalysisResult {
     pub total_files: usize,
     /// SQL 明细总数。
     pub total_sql_records: usize,
+    /// 是否因用户取消而提前结束；为 true 时上面的统计只覆盖取消前已完成的文件。
+    pub was_cancelled: bool,
 }
 
 /// Runtime 分析过滤输入快照，保存用户在过滤栏中输入的原始文本。
@@ -276,17 +279,25 @@ impl RuntimeAnalysisResult {
 /// - `targets`：按来源树顺序排列的分析目标。
 /// - `default_encoding`：日志读取兜底编码。
 /// - `loader_config`：日志加载配置，目录递归会尊重符号链接策略。
+/// - `cancel_token`：取消标记；置位后已展开的目标不再派发解析任务。
 ///
-/// 返回值：可直接供 Runtime 分析页渲染的聚合结果。
+/// 返回值：可直接供 Runtime 分析页渲染的聚合结果，`was_cancelled` 标记是否被用户取消。
 pub(crate) fn analyze_runtime_targets(
     targets: Vec<RuntimeAnalysisTarget>,
     default_encoding: String,
     loader_config: LoaderConfig,
+    cancel_token: Arc<AtomicBool>,
 ) -> RuntimeAnalysisResult {
     let mut file_targets = Vec::new();
     let mut skipped_files = Vec::new();
+    let mut was_cancelled = false;
 
     for target in targets {
+        // 目录展开可能递归大量文件；取消后不再继续展开剩余目标。
+        if cancel_token.load(Ordering::Relaxed) {
+            was_cancelled = true;
+            break;
+        }
         match expand_runtime_target(target, &loader_config) {
             Ok(mut expanded) => file_targets.append(&mut expanded),
             Err((source_id, label, reason)) => skipped_files.push(RuntimeSkippedFile {
@@ -298,7 +309,14 @@ pub(crate) fn analyze_runtime_targets(
     }
 
     let total_files = file_targets.len();
-    let parsed_files = read_runtime_requests_parallel(file_targets, &default_encoding);
+    let parsed_files = if was_cancelled {
+        Vec::new()
+    } else {
+        read_runtime_requests_parallel(file_targets, &default_encoding, &cancel_token)
+    };
+    if cancel_token.load(Ordering::Relaxed) {
+        was_cancelled = true;
+    }
     let mut requests = Vec::new();
     for parsed_file in parsed_files {
         match parsed_file {
@@ -310,7 +328,7 @@ pub(crate) fn analyze_runtime_targets(
         }
     }
 
-    build_runtime_analysis_result(requests, skipped_files, total_files)
+    build_runtime_analysis_result(requests, skipped_files, total_files, was_cancelled)
 }
 
 /// 解析单个 Runtime 日志文件文本。
@@ -348,6 +366,7 @@ pub(crate) fn build_runtime_analysis_result(
     requests: Vec<RuntimeRequestRecord>,
     skipped_files: Vec<RuntimeSkippedFile>,
     total_files: usize,
+    was_cancelled: bool,
 ) -> RuntimeAnalysisResult {
     let mut grouped = BTreeMap::<String, Vec<usize>>::new();
     let total_sql_records = requests
@@ -411,6 +430,7 @@ pub(crate) fn build_runtime_analysis_result(
         skipped_files,
         total_files,
         total_sql_records,
+        was_cancelled,
     }
 }
 
@@ -1141,6 +1161,7 @@ struct PreparedRuntimeTarget {
 fn read_runtime_requests_parallel(
     file_targets: Vec<RuntimeAnalysisTarget>,
     default_encoding: &str,
+    cancel_token: &Arc<AtomicBool>,
 ) -> Vec<RuntimeParseOutcome> {
     let total_targets = file_targets.len();
     if total_targets == 0 {
@@ -1152,6 +1173,9 @@ fn read_runtime_requests_parallel(
         .collect::<Vec<Option<RuntimeParseOutcome>>>();
     let mut prepared_targets = Vec::new();
     for (order, target) in file_targets.into_iter().enumerate() {
+        if cancel_token.load(Ordering::Relaxed) {
+            break;
+        }
         match prepare_runtime_target(order, target) {
             Ok(prepared) => prepared_targets.push(prepared),
             Err(skipped_file) => outcomes[order] = Some(Err(skipped_file)),
@@ -1159,7 +1183,7 @@ fn read_runtime_requests_parallel(
     }
 
     for (order, outcome) in
-        read_prepared_runtime_requests_parallel(prepared_targets, default_encoding)
+        read_prepared_runtime_requests_parallel(prepared_targets, default_encoding, cancel_token)
     {
         outcomes[order] = Some(outcome);
     }
@@ -1194,6 +1218,7 @@ fn prepare_runtime_target(
 fn read_prepared_runtime_requests_parallel(
     prepared_targets: Vec<PreparedRuntimeTarget>,
     default_encoding: &str,
+    cancel_token: &Arc<AtomicBool>,
 ) -> Vec<(usize, RuntimeParseOutcome)> {
     if prepared_targets.is_empty() {
         return Vec::new();
@@ -1228,11 +1253,14 @@ fn read_prepared_runtime_requests_parallel(
     thread::scope(|scope| {
         let mut handles = Vec::new();
         for chunk in prepared_targets.chunks(chunk_size) {
+            // 取消标记在线程间共享：已启动的工作线程在各自文件边界停止，未处理的文件不再产出结果。
+            let cancel_token = cancel_token.clone();
             handles.push(scope.spawn(move || {
                 let mut encoding_hint = None;
                 chunk
                     .iter()
                     .cloned()
+                    .take_while(|_| !cancel_token.load(Ordering::Relaxed))
                     .map(|target| {
                         let order = target.order;
                         (
@@ -1570,6 +1598,11 @@ fn parse_runtime_sql_records(text: &str) -> Vec<RuntimeSqlRecord> {
 
 #[cfg(test)]
 mod tests {
+
+    /// 构造一个永不取消的取消标记，供不关注取消路径的用例复用。
+    fn test_cancel_token() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -1711,7 +1744,7 @@ mod tests {
         first.index = 0;
         second.index = 1;
 
-        let result = build_runtime_analysis_result(vec![first, second], Vec::new(), 2);
+        let result = build_runtime_analysis_result(vec![first, second], Vec::new(), 2, false);
 
         assert_eq!(result.summaries.len(), 1);
         assert_eq!(result.summaries[0].request_count, 2);
@@ -1806,7 +1839,8 @@ mod tests {
         first.index = 0;
         second.index = 1;
         third.index = 2;
-        let result = build_runtime_analysis_result(vec![first, second, third], Vec::new(), 3);
+        let result =
+            build_runtime_analysis_result(vec![first, second, third], Vec::new(), 3, false);
 
         let rows = build_runtime_analysis_filter_rows(
             &result,
@@ -1940,10 +1974,39 @@ mod tests {
             }],
             "UTF-8".to_string(),
             LoaderConfig::default(),
+            test_cancel_token(),
         );
 
         assert_eq!(result.requests.len(), 1);
         assert!(result.requests[0].sql_records[0].sql_text.contains("中文"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 验证已置位的取消标记会让 Runtime 分析立即收敛为取消结果，而不是产出完整统计。
+    #[test]
+    fn runtime_analysis_reports_cancellation() {
+        let dir = runtime_test_dir("cancel");
+        let target = dir.join("100&u&_api_cancel&1782368843095&0&0.log");
+        fs::write(&target, "1ms 0ms 0ms 0ms 0ms select 1").expect("应能写入 Runtime 测试日志");
+
+        let cancel_token = Arc::new(AtomicBool::new(true));
+        let result = analyze_runtime_targets(
+            vec![RuntimeAnalysisTarget {
+                source_id: SourceId(1),
+                location: SourceLocation::LocalPath(target.clone()),
+                label: target.file_name().unwrap().to_string_lossy().to_string(),
+                path: target.display().to_string(),
+                kind: RuntimeAnalysisTargetKind::File,
+            }],
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+            cancel_token,
+        );
+
+        assert!(result.was_cancelled, "取消标记置位后结果必须标记为已取消");
+        assert_eq!(result.requests.len(), 0, "取消后不应产出请求记录");
+        assert_eq!(result.total_files, 0, "取消发生在展开阶段，不应进入解析");
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1975,6 +2038,7 @@ mod tests {
             ],
             "UTF-8".to_string(),
             LoaderConfig::default(),
+            test_cancel_token(),
         );
 
         assert_eq!(result.requests.len(), 2);

@@ -22,6 +22,7 @@ use crate::infra::text_selection::{
 };
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
 use gpui::{
@@ -154,7 +155,10 @@ pub(crate) fn render(
         .child(render_header(app, state, analysis_id, &theme, cx))
         .child(match &state.task_state {
             JstackAnalysisTaskState::Loading { message } => {
-                render_loading_state(message, &theme).into_any_element()
+                render_loading_state(message, analysis_id, &theme, cx).into_any_element()
+            }
+            JstackAnalysisTaskState::Cancelled { message } => {
+                render_cancelled_state(message, &theme).into_any_element()
             }
             JstackAnalysisTaskState::Ready(result) => render_frequency_matrix(
                 app,
@@ -207,6 +211,7 @@ fn render_header(
                 state.filtered_row_count,
             ),
             JstackAnalysisTaskState::Loading { .. } => (0, 0, 0, 0, 0),
+            JstackAnalysisTaskState::Cancelled { .. } => (0, 0, 0, 0, 0),
         };
     let filter_summary = if filtered_count > 0 {
         format!("，过滤 {filtered_count} 个线程")
@@ -392,7 +397,13 @@ fn render_state_filter_item(
 }
 
 /// 渲染加载态。
-fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
+fn render_loading_state(
+    message: &str,
+    analysis_id: usize,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let cancel_entity = cx.entity();
     div()
         .flex_1()
         .flex()
@@ -406,6 +417,34 @@ fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + u
             theme.foreground_muted,
             18.0,
         ))
+        .child(message.to_string())
+        .child(render_icon_button(
+            "jstack-analysis-cancel",
+            ArgusIcon::Close,
+            "取消分析",
+            false,
+            IconButtonSize::Small,
+            theme,
+            move |_, _, app_cx| {
+                cancel_entity.update(app_cx, |app, cx| {
+                    app.cancel_jstack_analysis(analysis_id);
+                    cx.notify();
+                });
+            },
+        ))
+}
+
+/// 渲染用户取消后的终态提示；取消的任务不会产出可渲染的频率矩阵。
+fn render_cancelled_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .text_size(px(13.0))
+        .text_color(rgb(theme.foreground_muted))
+        .child(render_icon(ArgusIcon::Close, theme.foreground_muted, 18.0))
         .child(message.to_string())
 }
 

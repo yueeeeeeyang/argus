@@ -37,6 +37,7 @@ use crate::infra::text_selection::{
 use crate::theme::AppTheme;
 use crate::ui::components::datetime_picker::{DateTimePickerValue, render_datetime_picker};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
@@ -177,7 +178,10 @@ pub(crate) fn render(
         .child(render_header(state, &theme))
         .child(match &state.task_state {
             RuntimeAnalysisTaskState::Loading { message } => {
-                render_loading_state(message, &theme).into_any_element()
+                render_loading_state(message, analysis_id, &theme, cx).into_any_element()
+            }
+            RuntimeAnalysisTaskState::Cancelled { message } => {
+                render_cancelled_state(message, &theme).into_any_element()
             }
             RuntimeAnalysisTaskState::Ready(result) => render_ready_view(
                 app,
@@ -226,6 +230,7 @@ fn render_header(state: &RuntimeAnalysisState, theme: &AppTheme) -> impl IntoEle
                 result.skipped_count(),
             ),
             RuntimeAnalysisTaskState::Loading { .. } => (0, 0, 0, 0, 0),
+            RuntimeAnalysisTaskState::Cancelled { .. } => (0, 0, 0, 0, 0),
         };
 
     div()
@@ -255,7 +260,13 @@ fn render_header(state: &RuntimeAnalysisState, theme: &AppTheme) -> impl IntoEle
 }
 
 /// 渲染加载态。
-fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
+fn render_loading_state(
+    message: &str,
+    analysis_id: usize,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement + use<> {
+    let cancel_entity = cx.entity();
     div()
         .flex_1()
         .flex()
@@ -269,6 +280,34 @@ fn render_loading_state(message: &str, theme: &AppTheme) -> impl IntoElement + u
             theme.foreground_muted,
             18.0,
         ))
+        .child(message.to_string())
+        .child(render_icon_button(
+            "runtime-analysis-cancel",
+            ArgusIcon::Close,
+            "取消分析",
+            false,
+            IconButtonSize::Small,
+            theme,
+            move |_, _, app_cx| {
+                cancel_entity.update(app_cx, |app, cx| {
+                    app.cancel_runtime_analysis(analysis_id);
+                    cx.notify();
+                });
+            },
+        ))
+}
+
+/// 渲染用户取消后的终态提示；取消的任务不会产出可渲染的统计表格。
+fn render_cancelled_state(message: &str, theme: &AppTheme) -> impl IntoElement + use<> {
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .text_size(px(13.0))
+        .text_color(rgb(theme.foreground_muted))
+        .child(render_icon(ArgusIcon::Close, theme.foreground_muted, 18.0))
         .child(message.to_string())
 }
 
@@ -726,6 +765,7 @@ mod tests {
             task_state: RuntimeAnalysisTaskState::Loading {
                 message: String::new(),
             },
+            cancel_token: None,
         }
     }
 
@@ -771,7 +811,7 @@ mod tests {
         for (index, request) in requests.iter_mut().enumerate() {
             request.index = index;
         }
-        build_runtime_analysis_result(requests, Vec::new(), 3)
+        build_runtime_analysis_result(requests, Vec::new(), 3, false)
     }
 
     /// 构造 SQL 频率和慢 SQL 分析测试结果。
@@ -802,7 +842,7 @@ mod tests {
         for (index, request) in requests.iter_mut().enumerate() {
             request.index = index;
         }
-        build_runtime_analysis_result(requests, Vec::new(), 3)
+        build_runtime_analysis_result(requests, Vec::new(), 3, false)
     }
 
     /// 验证用户名和时间区间过滤会跨表格影响总览聚合统计。

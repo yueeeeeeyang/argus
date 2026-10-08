@@ -6,6 +6,8 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use gpui::UniformListScrollHandle;
 
@@ -25,6 +27,11 @@ pub(crate) enum JstackAnalysisTaskState {
     },
     /// 分析完成，可渲染频率矩阵。
     Ready(JstackAnalysisResult),
+    /// 用户取消了后台分析任务；仅保留取消前的进度描述。
+    Cancelled {
+        /// 取消结果提示。
+        message: String,
+    },
 }
 
 /// 单个 Jstack 分析页签的持久状态。
@@ -50,6 +57,8 @@ pub(crate) struct JstackAnalysisState {
     pub row_scroll: UniformListScrollHandle,
     /// 当前任务状态。
     pub task_state: JstackAnalysisTaskState,
+    /// 在途分析任务的取消标记；任务进入终态后清空。
+    pub cancel_token: Option<Arc<AtomicBool>>,
 }
 
 /// Jstack 分析矩阵左侧线程名的单行文本选区。

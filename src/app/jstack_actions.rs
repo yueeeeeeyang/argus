@@ -1,6 +1,7 @@
 //! 文件职责：提取 Jstack 线程日志分析的标签创建、结果应用、线程筛选和选区交互等方法到独立子模块。
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 impl ArgusApp {
     /// 创建 Jstack 分析标签页，并启动后台读取与聚合任务。
@@ -22,6 +23,10 @@ impl ArgusApp {
             self.placeholder_notice = "未找到可读取的 Jstack 日志来源".to_string();
             return;
         };
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        if let Some(state) = self.jstack_analyses.get_mut(&analysis_id) {
+            state.cancel_token = Some(cancel_token.clone());
+        }
 
         let default_encoding = self.selected_encoding.clone();
         let loader_config = self.config.loader.clone();
@@ -29,7 +34,12 @@ impl ArgusApp {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    analyze_jstack_targets(background_targets, default_encoding, loader_config)
+                    analyze_jstack_targets(
+                        background_targets,
+                        default_encoding,
+                        loader_config,
+                        cancel_token,
+                    )
                 })
                 .await;
 
@@ -40,6 +50,28 @@ impl ArgusApp {
             .ok();
         })
         .detach();
+    }
+
+    /// 取消在途的 Jstack 分析任务；已进入终态的页签不做任何改动。
+    ///
+    /// 参数说明：
+    /// - `analysis_id`：Jstack 分析页签 ID。
+    ///
+    /// 返回值：无；成功置位后立即把页签切到取消终态，后台任务在文件边界自行停止。
+    pub(crate) fn cancel_jstack_analysis(&mut self, analysis_id: usize) {
+        let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        let Some(cancel_token) = state.cancel_token.take() else {
+            return;
+        };
+        cancel_token.store(true, Ordering::Relaxed);
+        state.task_state = JstackAnalysisTaskState::Cancelled {
+            message: "已取消 Jstack 分析".to_string(),
+        };
+        state.visible_row_indices.clear();
+        state.filtered_row_count = 0;
+        self.placeholder_notice = "已取消 Jstack 分析".to_string();
     }
 
     /// 返回指定 Jstack 分析状态。
@@ -312,6 +344,8 @@ impl ArgusApp {
                 task_state: JstackAnalysisTaskState::Loading {
                     message: "正在分析 Jstack 日志文件".to_string(),
                 },
+                // 取消标记由发起任务的动作在创建页签后写入；测试可只创建状态。
+                cancel_token: None,
             },
         );
         self.placeholder_notice = format!("已创建 {title} 页签");
@@ -561,6 +595,22 @@ impl ArgusApp {
         let thread_count = result.thread_count();
         let snapshot_count = result.snapshot_count();
         let skipped_count = result.skipped_count();
+        // 取消后仍保留取消前已完成的快照统计，但页签明确进入取消终态，不冒充完整结果。
+        let was_cancelled = result.was_cancelled;
+        state.cancel_token = None;
+        if was_cancelled {
+            state.task_state = JstackAnalysisTaskState::Cancelled {
+                message: format!(
+                    "已取消 Jstack 分析：取消前完成 {snapshot_count} 个快照，跳过 {skipped_count} 个文件"
+                ),
+            };
+            state.visible_row_indices.clear();
+            state.filtered_row_count = 0;
+            self.placeholder_notice = format!(
+                "已取消 Jstack 分析：取消前完成 {snapshot_count} 个快照，{thread_count} 个线程"
+            );
+            return;
+        }
         state.task_state = JstackAnalysisTaskState::Ready(result);
         state.rebuild_visible_row_cache(&thread_filter);
         // 设置页打开时同步刷新规则命中徽标，避免新完成的分析迟迟不反映在规则列表上。

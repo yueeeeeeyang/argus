@@ -1902,6 +1902,7 @@ fn jstack_filtered_row_count_survives_empty_active_states() {
         filtered_row_count: 0,
         row_scroll: UniformListScrollHandle::new(),
         task_state: JstackAnalysisTaskState::Ready(result),
+        cancel_token: None,
     };
 
     state.rebuild_visible_row_cache(&filter);

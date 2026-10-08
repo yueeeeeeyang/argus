@@ -1,6 +1,7 @@
 //! 文件职责：提取 Runtime 请求日志分析的标签创建、过滤、排序、SQL 弹窗和单元格选区等方法到独立子模块。
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 impl ArgusApp {
     pub(crate) fn open_runtime_analysis_tab(
@@ -20,6 +21,10 @@ impl ArgusApp {
             self.placeholder_notice = "未找到可读取的 Runtime 日志来源".to_string();
             return;
         };
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        if let Some(state) = self.runtime_analyses.get_mut(&analysis_id) {
+            state.cancel_token = Some(cancel_token.clone());
+        }
 
         let default_encoding = self.selected_encoding.clone();
         let loader_config = self.config.loader.clone();
@@ -27,7 +32,12 @@ impl ArgusApp {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    analyze_runtime_targets(background_targets, default_encoding, loader_config)
+                    analyze_runtime_targets(
+                        background_targets,
+                        default_encoding,
+                        loader_config,
+                        cancel_token,
+                    )
                 })
                 .await;
 
@@ -38,6 +48,26 @@ impl ArgusApp {
             .ok();
         })
         .detach();
+    }
+
+    /// 取消在途的 Runtime 分析任务；已进入终态的页签不做任何改动。
+    ///
+    /// 参数说明：
+    /// - `analysis_id`：Runtime 分析页签 ID。
+    ///
+    /// 返回值：无；成功置位后立即把页签切到取消终态，后台工作线程在文件边界自行停止。
+    pub(crate) fn cancel_runtime_analysis(&mut self, analysis_id: usize) {
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        let Some(cancel_token) = state.cancel_token.take() else {
+            return;
+        };
+        cancel_token.store(true, Ordering::Relaxed);
+        state.task_state = RuntimeAnalysisTaskState::Cancelled {
+            message: "已取消 Runtime 分析".to_string(),
+        };
+        self.placeholder_notice = "已取消 Runtime 分析".to_string();
     }
 
     /// 返回指定 Runtime 分析状态。
@@ -149,6 +179,8 @@ impl ArgusApp {
                 task_state: RuntimeAnalysisTaskState::Loading {
                     message: "正在分析 Runtime 日志文件".to_string(),
                 },
+                // 取消标记由发起任务的动作在创建页签后写入；测试可只创建状态。
+                cancel_token: None,
             },
         );
         self.placeholder_notice = format!("已创建 {title} 页签");
@@ -262,6 +294,20 @@ impl ArgusApp {
         let request_count = result.request_count();
         let sql_count = result.total_sql_records;
         let skipped_count = result.skipped_count();
+        // 取消后只报告取消前的进度，避免把部分统计当成完整分析结果展示。
+        let was_cancelled = result.was_cancelled;
+        state.cancel_token = None;
+        if was_cancelled {
+            state.task_state = RuntimeAnalysisTaskState::Cancelled {
+                message: format!(
+                    "已取消 Runtime 分析：取消前完成 {request_count} 个请求，跳过 {skipped_count} 个文件"
+                ),
+            };
+            self.placeholder_notice = format!(
+                "已取消 Runtime 分析：取消前完成 {file_count} 个文件中的 {request_count} 个请求"
+            );
+            return;
+        }
         state.task_state = RuntimeAnalysisTaskState::Ready(Arc::new(result));
         let pending_generation = state
             .is_filter_pending
