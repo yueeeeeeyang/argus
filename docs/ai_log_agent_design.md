@@ -1,7 +1,7 @@
 <!--
 文件职责：描述 Argus 通用智能体（工作目录物化 + 通用工具 + Skill）的产品边界、总体架构、工具契约、安全策略和测试策略。
 创建日期：2026-07-15
-修改日期：2026-09-14
+修改日期：2026-10-08
 作者：Argus 开发团队
 -->
 
@@ -55,8 +55,8 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 物化器（`loader/workspace.rs`）在日志加载时把全部来源转换为普通文件：
 
-- 选址 `argus_config_dir()/cache/workdirs/<uuid>/`；顶层布局 `<标签>/`，标签清洗为合法
-  目录名，同名根追加 ` (1)` 消歧。
+- 选址 `argus_config_dir()/cache/workdirs/argus-<pid>-<纳秒时间戳>/`；顶层布局 `<标签>/`，
+  标签清洗为合法目录名，同名根追加 ` (1)` 消歧。
 - 解压不设总量、单条目或条目数上限；zip slip 清洗（拒 `..`/绝对路径/控制字符/Windows
   保留名）；重名冲突条目拒绝；嵌套容器流式落盘 scratch 后递归解压，不留内存整包缓冲。
 - 密码包两阶段：加载时保持"需要密码"占位；解锁后向当前工作目录追加物化并重扫顶层。
@@ -71,8 +71,11 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 `AgentLoopNote` 区分两条产品线（只影响开场状态事件与完成事件形态）。循环职责：
 
 - reqwest/DeepSeek/OpenAI 兼容客户端构建；官方 DeepSeek 端点附加 thinking 参数；
-- 无限次指数退避重试（1s 起步、30s 封顶；仅传输类故障可重试，配置类错误立即失败）；
-  重试前发布 `AssistantAttemptReset`，界面丢弃未完成的流式正文；
+- 指数退避重试（1s 起步、30s 封顶）；只有 HTTP 408/429/5xx、底层连接错误和流意外结束可重试，
+  认证失败、模型不存在、参数不兼容、URL、请求构造与响应解析等永久故障立即失败；重试次数上限由
+  `AiConfig.max_retry_attempts` 限定（默认 10、范围 0～20、设置页“请求重试”区可修改，首次尝试
+  不计入该次数），达到上限后如实发布失败终态；重试前发布 `AssistantAttemptReset`，界面丢弃
+  未完成的流式正文；
 - Rig 多轮流式消费（思考/正文增量、权威 usage）、预算计数、工具轨迹；
 - 模型请求边界串行消费追加提示（`USER_HINT` 边界文档），重试只在首次请求重放已消费
   消息；会话退出守卫关闭消息门闩、拒绝残留提示、收敛未决 bash 审批并停止审批答复泵。
@@ -138,7 +141,8 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 ## 七、测试方案
 
-每阶段 `cargo fmt && cargo clippy --all-targets && cargo test` 全绿（当前 494 项）。
+每阶段 `cargo fmt && cargo clippy --all-targets && cargo test` 全绿（当前 `cargo test` 通过
+583 项；统计口径为 `cargo test` 报告的通过用例数，该数字随测试增补变化，以实际运行为准）。
 重点覆盖：
 
 - 物化器：复制/解压/zip slip/重名冲突/嵌套/GZIP 命名/密码包追加（loader 模块）；
