@@ -33,6 +33,11 @@ pub(crate) struct ConnectionConfig {
     /// 已经由用户确认可信的主机指纹。
     #[serde(default)]
     pub trusted_hosts: Vec<TrustedHostKeyConfig>,
+    /// 系统凭据库不可用时保存的连接机密密文；键为凭据账户名，值为本地密文。
+    ///
+    /// 凭据库可用时该表始终为空——设置文件中不会出现任何机密，无论明文还是密文。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secrets: BTreeMap<String, String>,
 }
 
 impl Default for ConnectionConfig {
@@ -43,6 +48,7 @@ impl Default for ConnectionConfig {
             directories: Vec::new(),
             links: Vec::new(),
             trusted_hosts: Vec::new(),
+            secrets: BTreeMap::new(),
         }
     }
 }
@@ -54,29 +60,16 @@ impl ConnectionConfig {
         self.directories.retain(|directory| {
             directory.id > 0 && used_ids.insert(directory.id) && !directory.name.trim().is_empty()
         });
+        // 这里只做结构性收敛（ID、名称、协议），不重复做协议字段校验。
+        //
+        // 原因：密码等机密保存在系统凭据库中，读取可能因凭据库被锁或设置文件来自其他机器而
+        // 失败。若在此按“字段不完整”丢弃链接，用户会在毫无提示的情况下失去整条连接配置——
+        // 那是不可接受的数据丢失。字段问题由新增/编辑对话框与连接动作显式报错。
         self.links.retain(|link| {
             link.id > 0
                 && used_ids.insert(link.id)
                 && !link.name.trim().is_empty()
-                && match link.protocol() {
-                    Some(ConnectionLinkKind::Ssh) => link
-                        .ssh
-                        .clone()
-                        .is_some_and(|ssh| ssh.normalized_for_save().is_ok()),
-                    Some(ConnectionLinkKind::Smb) => link
-                        .smb
-                        .clone()
-                        .is_some_and(|smb| smb.normalized_for_save().is_ok()),
-                    Some(ConnectionLinkKind::Git) => link
-                        .git
-                        .clone()
-                        .is_some_and(|git| git.normalized_for_save().is_ok()),
-                    Some(ConnectionLinkKind::Svn) => link
-                        .svn
-                        .clone()
-                        .is_some_and(|svn| svn.normalized_for_save().is_ok()),
-                    None => false,
-                }
+                && link.protocol().is_some()
         });
         let directory_ids = self
             .directories
@@ -864,6 +857,144 @@ pub(crate) struct ConnectionLinkConfig {
     pub svn: Option<SvnLinkConfig>,
 }
 
+/// 连接机密槽位；决定凭据库账户名与设置文件中本地密文表的键。
+///
+/// 槽位标识是持久化契约的一部分：一旦发布就不能改名，否则已保存的凭据会失联。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConnectionSecretSlot {
+    /// SSH 登录密码。
+    SshPassword,
+    /// SSH 私钥口令。
+    SshKeyPassphrase,
+    /// SMB 登录密码。
+    SmbPassword,
+    /// Git HTTPS 访问令牌。
+    GitToken,
+    /// Git SSH 私钥口令。
+    GitKeyPassphrase,
+    /// SVN 登录密码。
+    SvnPassword,
+    /// SVN SSH 私钥口令。
+    SvnKeyPassphrase,
+}
+
+impl ConnectionSecretSlot {
+    /// 返回槽位在账户名与密文表中的稳定标识。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SshPassword => "ssh_password",
+            Self::SshKeyPassphrase => "ssh_key_passphrase",
+            Self::SmbPassword => "smb_password",
+            Self::GitToken => "git_token",
+            Self::GitKeyPassphrase => "git_key_passphrase",
+            Self::SvnPassword => "svn_password",
+            Self::SvnKeyPassphrase => "svn_key_passphrase",
+        }
+    }
+}
+
+impl ConnectionLinkConfig {
+    /// 返回该链接当前携带的全部机密槽位取值；未设置或协议不适用时值为 `None`。
+    ///
+    /// 说明：返回值是内存中的明文副本，只允许交给 `secret_store` 或远端连接代码，
+    /// 不得写入日志、Debug 输出或错误提示。
+    pub(crate) fn secret_slots(&self) -> Vec<(ConnectionSecretSlot, Option<String>)> {
+        let mut slots = Vec::new();
+        if let Some(ssh) = &self.ssh {
+            slots.push((
+                ConnectionSecretSlot::SshPassword,
+                (!ssh.password.is_empty()).then(|| ssh.password.clone()),
+            ));
+            slots.push((
+                ConnectionSecretSlot::SshKeyPassphrase,
+                ssh.private_key_passphrase.clone(),
+            ));
+        }
+        if let Some(smb) = &self.smb {
+            slots.push((
+                ConnectionSecretSlot::SmbPassword,
+                (!smb.password.is_empty()).then(|| smb.password.clone()),
+            ));
+        }
+        if let Some(git) = &self.git {
+            slots.push((ConnectionSecretSlot::GitToken, git.access_token.clone()));
+            slots.push((
+                ConnectionSecretSlot::GitKeyPassphrase,
+                git.private_key_passphrase.clone(),
+            ));
+        }
+        if let Some(svn) = &self.svn {
+            slots.push((ConnectionSecretSlot::SvnPassword, svn.password.clone()));
+            slots.push((
+                ConnectionSecretSlot::SvnKeyPassphrase,
+                svn.private_key_passphrase.clone(),
+            ));
+        }
+        slots
+    }
+
+    /// 把一条机密写回内存中的对应槽位；`None` 表示清除该槽位。
+    ///
+    /// 返回值：槽位属于当前链接协议时返回 `true`，否则返回 `false` 且不修改任何字段。
+    pub(crate) fn set_secret_slot(
+        &mut self,
+        slot: ConnectionSecretSlot,
+        value: Option<String>,
+    ) -> bool {
+        match slot {
+            ConnectionSecretSlot::SshPassword => match &mut self.ssh {
+                Some(ssh) => {
+                    ssh.password = value.unwrap_or_default();
+                    true
+                }
+                None => false,
+            },
+            ConnectionSecretSlot::SshKeyPassphrase => match &mut self.ssh {
+                Some(ssh) => {
+                    ssh.private_key_passphrase = value;
+                    true
+                }
+                None => false,
+            },
+            ConnectionSecretSlot::SmbPassword => match &mut self.smb {
+                Some(smb) => {
+                    smb.password = value.unwrap_or_default();
+                    true
+                }
+                None => false,
+            },
+            ConnectionSecretSlot::GitToken => match &mut self.git {
+                Some(git) => {
+                    git.access_token = value;
+                    true
+                }
+                None => false,
+            },
+            ConnectionSecretSlot::GitKeyPassphrase => match &mut self.git {
+                Some(git) => {
+                    git.private_key_passphrase = value;
+                    true
+                }
+                None => false,
+            },
+            ConnectionSecretSlot::SvnPassword => match &mut self.svn {
+                Some(svn) => {
+                    svn.password = value;
+                    true
+                }
+                None => false,
+            },
+            ConnectionSecretSlot::SvnKeyPassphrase => match &mut self.svn {
+                Some(svn) => {
+                    svn.private_key_passphrase = value;
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+}
+
 impl ConnectionLinkConfig {
     /// 返回当前链接协议；缺少协议或同时存在多种协议的损坏配置返回空。
     pub(crate) fn protocol(&self) -> Option<ConnectionLinkKind> {
@@ -980,8 +1111,8 @@ pub(crate) enum ConnectionLinkKind {
     Svn,
 }
 
-/// SSH 链接参数；按当前产品选择，密码和私钥口令也会持久化到配置文件。
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// SSH 链接参数；密码与私钥口令保存到系统凭据库，不进入设置文件。
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct SshLinkConfig {
     /// 远程主机名或 IP。
     pub host: String,
@@ -991,14 +1122,38 @@ pub(crate) struct SshLinkConfig {
     /// 登录用户名。
     pub username: String,
     /// 密码鉴权字段；为空时跳过密码登录。
-    #[serde(default)]
+    ///
+    /// 该字段只用于读取旧版本遗留的明文配置并由 `ConfigManager` 迁移到凭据库，
+    /// 之后一律不再序列化，机密落盘位置由 `secret_store` 统一决定。
+    #[serde(default, skip_serializing)]
     pub password: String,
     /// 私钥文件路径；为空时跳过私钥登录。
     #[serde(default)]
     pub private_key_path: Option<String>,
-    /// 私钥口令；为空时按无口令私钥处理。
-    #[serde(default)]
+    /// 私钥口令；为空时按无口令私钥处理；序列化语义同 `password`。
+    #[serde(default, skip_serializing)]
     pub private_key_passphrase: Option<String>,
+}
+
+impl fmt::Debug for SshLinkConfig {
+    /// 输出脱敏调试信息；密码和私钥口令永不进入日志或断言失败文本。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SshLinkConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field(
+                "password",
+                &(!self.password.is_empty()).then_some("<redacted>"),
+            )
+            .field("private_key_path", &self.private_key_path)
+            .field(
+                "private_key_passphrase",
+                &self.private_key_passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for SshLinkConfig {
@@ -1035,7 +1190,7 @@ impl SshLinkConfig {
 }
 
 /// SMB 链接参数；密码按当前产品策略持久化到本地配置文件。
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct SmbLinkConfig {
     /// SMB 服务器主机名或 IP。
     pub host: String,
@@ -1052,9 +1207,28 @@ pub(crate) struct SmbLinkConfig {
     pub domain: Option<String>,
     /// 登录用户名。
     pub username: String,
-    /// 密码鉴权字段。
-    #[serde(default)]
+    /// 密码鉴权字段；序列化语义同 SSH 的 `password`，只读旧明文、不再写回。
+    #[serde(default, skip_serializing)]
     pub password: String,
+}
+
+impl fmt::Debug for SmbLinkConfig {
+    /// 输出脱敏调试信息；密码永不进入日志或断言失败文本。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SmbLinkConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("share", &self.share)
+            .field("initial_dir", &self.initial_dir)
+            .field("domain", &self.domain)
+            .field("username", &self.username)
+            .field(
+                "password",
+                &(!self.password.is_empty()).then_some("<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for SmbLinkConfig {
@@ -1110,14 +1284,14 @@ pub(crate) struct GitLinkConfig {
     /// HTTPS 或 SSH 用户名；SSH URL 已包含用户名时可以为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// HTTPS 访问令牌；公开仓库或 SSH 仓库为空。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// HTTPS 访问令牌；公开仓库或 SSH 仓库为空；只读旧明文、不再写回设置文件。
+    #[serde(default, skip_serializing)]
     pub access_token: Option<String>,
     /// SSH 私钥路径；HTTPS 仓库为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
-    /// 加密 SSH 私钥的可选口令。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 加密 SSH 私钥的可选口令；序列化语义同 `access_token`。
+    #[serde(default, skip_serializing)]
     pub private_key_passphrase: Option<String>,
 }
 
@@ -1185,14 +1359,14 @@ pub(crate) struct SvnLinkConfig {
     /// SVN 或 SSH 用户名；URL 已包含 SSH 用户名时可以为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// HTTP(S)/`svn://` 仓库密码或 `svn+ssh://` SSH 密码。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// HTTP(S)/`svn://` 仓库密码或 `svn+ssh://` SSH 密码；只读旧明文、不再写回设置文件。
+    #[serde(default, skip_serializing)]
     pub password: Option<String>,
     /// `svn+ssh://` SSH 私钥路径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
-    /// 加密 SSH 私钥的可选口令。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 加密 SSH 私钥的可选口令；序列化语义同 `password`。
+    #[serde(default, skip_serializing)]
     pub private_key_passphrase: Option<String>,
 }
 
@@ -2285,9 +2459,12 @@ mod tests {
         assert_eq!(invalid.protocol(), None);
     }
 
-    /// 验证仓库秘密会序列化持久化，但过滤与 Debug 输出不会泄漏明文。
+    /// 验证仓库机密绝不进入序列化结果，且过滤与 Debug 输出都不会泄漏明文。
+    ///
+    /// 这是凭据改造的核心回归点：机密只能存在于系统凭据库（或本地密文表），
+    /// 任何把这些字段重新写回设置文件的改动都会让本用例失败。
     #[test]
-    fn repository_secrets_are_persisted_but_redacted_from_debug_and_filtering() {
+    fn repository_secrets_never_serialize_and_stay_redacted() {
         let mut config = ConnectionConfig::default();
         let link_id = config
             .add_git_link(
@@ -2303,8 +2480,78 @@ mod tests {
             .unwrap();
         let link = config.link(link_id).unwrap();
         let serialized = toml::to_string(link).expect("Git 链接应能序列化");
-        assert!(serialized.contains("super-secret-token"));
+
+        assert!(
+            !serialized.contains("super-secret-token"),
+            "访问令牌不得进入设置文件：{serialized}"
+        );
         assert!(!link.matches_query("super-secret-token"));
         assert!(!format!("{link:?}").contains("super-secret-token"));
+
+        // SSH 私钥口令同样不得序列化；单独验证，避免与 HTTPS 凭据校验规则冲突。
+        let ssh = SshLinkConfig {
+            host: "example.com".to_string(),
+            username: "deploy".to_string(),
+            private_key_path: Some("/home/deploy/.ssh/id_ed25519".to_string()),
+            private_key_passphrase: Some("super-secret-phrase".to_string()),
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&ssh).expect("SSH 链接应能序列化");
+        assert!(
+            !serialized.contains("super-secret-phrase"),
+            "私钥口令不得进入设置文件：{serialized}"
+        );
+        assert!(!format!("{ssh:?}").contains("super-secret-phrase"));
+    }
+
+    /// 验证连接机密覆盖全部协议槽位，且槽位标识是稳定的持久化契约。
+    #[test]
+    fn secret_slots_cover_every_protocol_and_round_trip() {
+        let mut link = ConnectionLinkConfig {
+            id: 5,
+            parent_id: None,
+            name: "all-protocols".to_string(),
+            ssh: Some(SshLinkConfig {
+                password: "ssh-pass".to_string(),
+                private_key_passphrase: Some("ssh-phrase".to_string()),
+                ..Default::default()
+            }),
+            smb: None,
+            git: None,
+            svn: None,
+        };
+
+        let slots = link.secret_slots();
+        assert_eq!(slots.len(), 2);
+        assert_eq!(
+            slots[0],
+            (
+                ConnectionSecretSlot::SshPassword,
+                Some("ssh-pass".to_string())
+            )
+        );
+
+        // 清除槽位后必须读回 `None`，而不是空字符串残留。
+        assert!(link.set_secret_slot(ConnectionSecretSlot::SshPassword, None));
+        link.set_secret_slot(
+            ConnectionSecretSlot::SshKeyPassphrase,
+            Some("new-phrase".to_string()),
+        );
+        let slots = link.secret_slots();
+        assert_eq!(slots[0], (ConnectionSecretSlot::SshPassword, None));
+        assert_eq!(
+            slots[1],
+            (
+                ConnectionSecretSlot::SshKeyPassphrase,
+                Some("new-phrase".to_string())
+            )
+        );
+
+        // 协议不匹配的槽位必须被拒绝，避免把机密写到错误的链接上。
+        assert!(!link.set_secret_slot(ConnectionSecretSlot::SmbPassword, Some("x".to_string())));
+        assert_eq!(
+            ConnectionSecretSlot::SvnKeyPassphrase.as_str(),
+            "svn_key_passphrase"
+        );
     }
 }

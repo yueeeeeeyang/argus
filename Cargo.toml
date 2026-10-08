@@ -17,6 +17,8 @@ unreachable_pub = "warn"
 [dependencies]
 # Agent 批量搜索使用成熟的多模式自动机一次匹配全部普通关键字，避免逐模式正则扫描。
 aho-corasick = "1.1.4"
+# 系统凭据库不可用时的本地回落：AES-256-GCM 提供认证加密，避免任何明文密钥材料落盘。
+aes-gcm = "0.11.0"
 anyhow = "1.0.102"
 async-channel = "2.5.0"
 base64 = "0.22.1"
@@ -30,7 +32,11 @@ futures = "0.3.32"
 # GPUI 0.2.2 在 macOS 默认会调用完整 Xcode 的 metal 工具预编译 shader。
 # 当前开发环境只有 Command Line Tools，因此启用 runtime_shaders 让 cargo check 可在本机完成。
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# 采集操作系统随机盐，配合机器标识派生本地回落密钥；代码中不保存任何密钥常量。
+getrandom = "0.2.17"
 hex = "0.4.3"
+# HKDF 把机器标识与随机盐扩展为固定长度密钥，避免把盐直接当作密钥使用。
+hkdf = "0.12.4"
 icondata = { version = "0.7.0", default-features = false, features = ["lucide"] }
 keyring = "4.1.5"
 memmap2 = "0.9.10"

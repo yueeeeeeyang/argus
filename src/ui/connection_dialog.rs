@@ -993,6 +993,13 @@ fn render_link_window_content(
                         &window_entity,
                         &app_handle,
                     ))
+                    // 凭据存储位置对用户可见：密码写入系统凭据库，不会出现在设置文件中。
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.foreground_muted))
+                            .child("密码保存在系统凭据库中，不会写入设置文件；凭据库不可用时改用本机密钥加密。"),
+                    )
                 })
                 .when(form.link_kind == ConnectionLinkKind::Smb, |this| {
                     this.child(render_link_input_row(

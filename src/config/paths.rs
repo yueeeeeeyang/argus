@@ -28,6 +28,8 @@ const ARGUS_REPOSITORIES_DIR_NAME: &str = "repositories";
 const ARGUS_GIT_REPOSITORIES_DIR_NAME: &str = "git";
 /// SVN SSH 主机公钥记录文件名称。
 const ARGUS_SVN_KNOWN_HOSTS_FILE_NAME: &str = "svn_known_hosts";
+/// 本地回落加密所需的随机盐文件名称；该文件必须以 0600 权限保存。
+const ARGUS_SECRET_SALT_FILE_NAME: &str = "secret.salt";
 /// 当前测试进程的唯一目录，保证同一用户并发运行测试时互不覆盖。
 #[cfg(test)]
 static ARGUS_TEST_PROCESS_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -171,6 +173,13 @@ pub(crate) fn argus_git_repositories_dir() -> PathBuf {
 /// 该文件与用户的 `~/.ssh/known_hosts` 隔离，避免读取系统 SSH 配置或默认身份。
 pub(crate) fn argus_svn_known_hosts_file() -> PathBuf {
     argus_svn_known_hosts_file_from_config(&argus_config_dir())
+}
+
+/// 返回本地回落加密的随机盐文件路径。
+///
+/// 返回值：固定为配置目录下的 `secret.salt`；该文件只保存随机盐，不包含任何用户机密。
+pub(crate) fn argus_secret_salt_file() -> PathBuf {
+    argus_config_dir().join(ARGUS_SECRET_SALT_FILE_NAME)
 }
 
 /// 根据指定 home 目录构造 Argus 配置目录，供单元测试避免依赖真实用户目录。

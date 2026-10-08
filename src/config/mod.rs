@@ -8,6 +8,7 @@ pub(crate) mod ai_config;
 pub(crate) mod app_config;
 pub(crate) mod config_manager;
 pub(crate) mod paths;
+pub(crate) mod secret_store;
 
 pub(crate) use ai_config::{
     AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, DEFAULT_AI_MAX_RETRY_ATTEMPTS,

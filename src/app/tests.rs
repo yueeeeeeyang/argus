@@ -2595,7 +2595,8 @@ fn settings_changes_are_persisted_to_config_file() {
         },
     ]);
 
-    let saved = ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
+    let (saved, _warnings) =
+        ConfigManager::load_from_path(&settings_path).expect("设置变更后应写入配置文件");
 
     assert_eq!(saved.appearance.theme_mode, "dark.toml");
     assert_eq!(saved.appearance.log_content_font_size, 14.0);
