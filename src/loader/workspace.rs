@@ -1,6 +1,6 @@
 //! 文件职责：把用户选择的日志来源物化到独立工作目录。
 //! 创建日期：2026-09-12
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：加载日志时将普通文件/目录复制、压缩包（含嵌套）解压到 `cache/workdirs/<id>/`，
 //! 统一浏览器与 AI 的读取模型为普通文件；提供条目路径清洗和残留工作目录清扫。
@@ -18,7 +18,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::LoaderConfig;
 use crate::config::paths::argus_config_dir;
-use crate::loader::archive::adapter::{ArchiveAdapter, ArchiveEntryConsumer, ArchiveEntrySession};
+use crate::loader::archive::adapter::{
+    ArchiveAdapter, ArchiveEntrySession, is_skippable_entry_error,
+};
 use crate::loader::archive::detector::{
     ArchiveFormat, detect_archive_format, detect_archive_format_by_name,
 };
@@ -27,6 +29,7 @@ use crate::loader::archive::password::{
 };
 use crate::loader::archive::registry::archive_registry;
 use crate::loader::source_scanner::{SourceLoadPhase, SourceTreeScanProgress};
+use crate::utils::size_format::format_bytes;
 
 /// Argus 缓存目录名。
 const ARGUS_CACHE_DIR_NAME: &str = "cache";
@@ -88,6 +91,8 @@ enum MaterializeRootError {
     PasswordPending,
     /// 加载被新请求取消，整个物化必须立即终止。
     Cancelled,
+    /// 单个条目无法解码；调用方按警告跳过该条目，继续处理后续条目。
+    EntrySkipped(anyhow::Error),
     /// 其它不可恢复错误（I/O、工作目录创建失败等）。
     Fatal(anyhow::Error),
 }
@@ -98,6 +103,7 @@ impl std::fmt::Display for MaterializeRootError {
         match self {
             Self::PasswordPending => write!(f, "压缩包需要密码"),
             Self::Cancelled => write!(f, "已取消日志加载"),
+            Self::EntrySkipped(error) => write!(f, "{error:#}"),
             Self::Fatal(error) => write!(f, "{error}"),
         }
     }
@@ -226,19 +232,35 @@ impl EntrySource<'_> {
         }
     }
 
-    /// 流式输出一个条目。
-    fn stream_entry(
+    /// 把条目流式写入目标文件。
+    ///
+    /// 会话路径按 chunk 转发到文件；适配器路径优先使用专用流式实现（RAR 的大成员
+    /// 解码需要磁盘 scratch，不能先把整个条目读进内存）。
+    fn extract_entry_to_path(
         &mut self,
         entry_path: &str,
-        consumer: &mut ArchiveEntryConsumer<'_>,
+        target: &Path,
+        max_log_bytes: u64,
     ) -> anyhow::Result<()> {
         match self {
-            Self::Session(session) => session.stream_entry(entry_path, consumer),
+            Self::Session(session) => {
+                let mut file = File::create(target)
+                    .with_context(|| format!("无法创建物化文件：{}", target.display()))?;
+                let mut written = 0_u64;
+                session.stream_entry(entry_path, &mut |chunk| {
+                    written = written.saturating_add(chunk.len() as u64);
+                    if written > max_log_bytes {
+                        anyhow::bail!("解压后超过最大日志大小 {max_log_bytes} 字节");
+                    }
+                    file.write_all(chunk)?;
+                    Ok(())
+                })
+            }
             Self::Adapter {
                 adapter,
                 path,
                 password,
-            } => adapter.stream_entry(path, entry_path, *password, consumer),
+            } => adapter.extract_entry_to_path(path, entry_path, *password, target, max_log_bytes),
         }
     }
 }
@@ -427,6 +449,11 @@ pub(crate) fn append_materialize_archive(
                     .into(),
             )
         }
+        Err(MaterializeRootError::EntrySkipped(error)) => {
+            materializer.warnings.push(format!("{error}，已跳过"));
+            let root_path = materializer.promote_single_file_root(&label, &label_dir);
+            Ok(MaterializedRootInfo { path: root_path })
+        }
         Err(MaterializeRootError::Cancelled) => {
             let _ = fs::remove_dir_all(&label_dir);
             bail!("已取消")
@@ -471,6 +498,7 @@ fn stream_entry_to_path(
     entry_path: &str,
     target: &Path,
     display_entry: &str,
+    max_log_bytes: u64,
 ) -> Result<(), MaterializeRootError> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -480,23 +508,37 @@ fn stream_entry_to_path(
             )
         })?;
     }
-    let mut file = File::create(target).map_err(|error| {
-        MaterializeRootError::Fatal(
-            anyhow::Error::new(error).context(format!("无法创建物化文件：{}", target.display())),
-        )
-    })?;
 
-    let consume_result = source.stream_entry(entry_path, &mut |chunk: &[u8]| {
-        file.write_all(chunk)?;
-        Ok(())
-    });
-    consume_result.map_err(|error| {
-        let _ = fs::remove_file(target);
-        if is_retryable_password_error(&error) {
-            return MaterializeRootError::PasswordPending;
+    match source.extract_entry_to_path(entry_path, target, max_log_bytes) {
+        Ok(()) => {
+            // 兜底校验：适配器无法在包头给出大小时（如 GZIP），按落盘结果判断。
+            let produced = fs::metadata(target)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if produced > max_log_bytes {
+                let _ = fs::remove_file(target);
+                return Err(MaterializeRootError::EntrySkipped(anyhow::anyhow!(
+                    "解压条目失败：{display_entry}：解压后 {} 超过最大日志大小 {}",
+                    format_bytes(produced),
+                    format_bytes(max_log_bytes)
+                )));
+            }
+            Ok(())
         }
-        MaterializeRootError::Fatal(error.context(format!("解压条目失败：{display_entry}")))
-    })
+        Err(error) => {
+            let _ = fs::remove_file(target);
+            if is_retryable_password_error(&error) {
+                return Err(MaterializeRootError::PasswordPending);
+            }
+            // 条目级解码失败只跳过该条目；文件写入等 I/O 失败仍然中断整次加载。
+            let context = format!("解压条目失败：{display_entry}");
+            if is_skippable_entry_error(&error) {
+                Err(MaterializeRootError::EntrySkipped(error.context(context)))
+            } else {
+                Err(MaterializeRootError::Fatal(error.context(context)))
+            }
+        }
+    }
 }
 
 /// 根据任务数与 CPU 数决定并行解压 worker 数量。
@@ -562,6 +604,9 @@ impl WorkspaceMaterializer<'_> {
                     // 密码占位已在 materialize_root 内部消化，不会传播到这里。
                     MaterializeRootError::PasswordPending => unreachable!("密码占位不应上抛"),
                     MaterializeRootError::Cancelled => bail!("已取消日志加载"),
+                    MaterializeRootError::EntrySkipped(error) => {
+                        self.warnings.push(format!("{error}，已跳过"));
+                    }
                     MaterializeRootError::Fatal(error) => return Err(error),
                 }
             }
@@ -741,9 +786,21 @@ impl WorkspaceMaterializer<'_> {
         let mut written_paths = HashSet::new();
         let mut nested_jobs = Vec::new();
         let mut plain_jobs = Vec::new();
+        let max_log_bytes = self.config.max_log_size_bytes();
         for entry in entries {
             self.ensure_not_cancelled()?;
             let display_entry = format!("{}!/{}", container.display, entry.path);
+            // 声明大小已知时先跳过超大日志，避免无效解码和临时磁盘占用。
+            if let Some(unpacked_size) = entry.unpacked_size
+                && unpacked_size > max_log_bytes
+            {
+                self.warnings.push(format!(
+                    "{display_entry} 解压后 {}，超过最大日志大小 {}，已跳过",
+                    format_bytes(unpacked_size),
+                    format_bytes(max_log_bytes)
+                ));
+                continue;
+            }
             let Some(relative) = sanitize_entry_path(&entry.path) else {
                 self.warnings
                     .push(format!("压缩包条目路径不安全，已跳过：{display_entry}"));
@@ -997,11 +1054,7 @@ impl WorkspaceMaterializer<'_> {
         }
 
         for job in jobs {
-            stream_entry_to_path(source, &job.entry_path, &job.target, &job.display_entry)?;
-            self.files_written += 1;
-            if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
-                self.report_progress(&job.display_entry);
-            }
+            self.stream_entry_to_file(source, &job.entry_path, &job.target, &job.display_entry)?;
         }
         Ok(())
     }
@@ -1026,13 +1079,16 @@ impl WorkspaceMaterializer<'_> {
         let next_index = AtomicUsize::new(0);
         let completed = AtomicUsize::new(0);
         let failure: Mutex<Option<MaterializeRootError>> = Mutex::new(None);
+        let skipped_warnings: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let base_files = self.files_written;
+        let max_log_bytes = self.config.max_log_size_bytes();
 
         std::thread::scope(|scope| {
             for session in sessions {
                 let next_index = &next_index;
                 let completed = &completed;
                 let failure = &failure;
+                let skipped_warnings = &skipped_warnings;
                 let cancellation = cancellation.clone();
                 let progress = progress.clone();
                 scope.spawn(move || {
@@ -1049,14 +1105,25 @@ impl WorkspaceMaterializer<'_> {
                         let Some(job) = jobs.get(index) else {
                             return;
                         };
-                        if let Err(error) = stream_entry_to_path(
+                        match stream_entry_to_path(
                             &mut source,
                             &job.entry_path,
                             &job.target,
                             &job.display_entry,
+                            max_log_bytes,
                         ) {
-                            store_parallel_failure(failure, error);
-                            return;
+                            Ok(()) => {}
+                            Err(MaterializeRootError::EntrySkipped(error)) => {
+                                // 条目级失败只跳过该条目，继续解压其它任务。
+                                if let Ok(mut guard) = skipped_warnings.lock() {
+                                    guard.push(format!("{error}，已跳过"));
+                                }
+                                continue;
+                            }
+                            Err(error) => {
+                                store_parallel_failure(failure, error);
+                                return;
+                            }
                         }
                         let finished = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         if finished.is_multiple_of(PROGRESS_REPORT_INTERVAL)
@@ -1074,6 +1141,9 @@ impl WorkspaceMaterializer<'_> {
         });
 
         let error = failure.into_inner().ok().flatten();
+        if let Ok(mut warnings) = skipped_warnings.into_inner() {
+            self.warnings.append(&mut warnings);
+        }
         self.files_written = base_files + completed.load(Ordering::Relaxed);
         Some(match error {
             Some(error) => Err(error),
@@ -1138,9 +1208,25 @@ impl WorkspaceMaterializer<'_> {
             )))
         })?;
         let scratch_file = next_scratch_file(&self.root, depth);
-        if let Err(error) = stream_entry_to_path(source, entry_path, &scratch_file, display_entry) {
-            let _ = fs::remove_file(&scratch_file);
-            return Err(error);
+        let max_log_bytes = self.config.max_log_size_bytes();
+        match stream_entry_to_path(
+            source,
+            entry_path,
+            &scratch_file,
+            display_entry,
+            max_log_bytes,
+        ) {
+            Ok(()) => {}
+            Err(MaterializeRootError::EntrySkipped(error)) => {
+                let _ = fs::remove_file(&scratch_file);
+                let _ = fs::remove_dir_all(&nested_dir);
+                self.warnings.push(format!("{error}，已跳过"));
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&scratch_file);
+                return Err(error);
+            }
         }
 
         let mut nested_chain = chain;
@@ -1235,12 +1321,22 @@ impl WorkspaceMaterializer<'_> {
         target: &Path,
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
-        stream_entry_to_path(source, entry_path, target, display_entry)?;
-        self.files_written += 1;
-        if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
-            self.report_progress(display_entry);
+        let max_log_bytes = self.config.max_log_size_bytes();
+        match stream_entry_to_path(source, entry_path, target, display_entry, max_log_bytes) {
+            Ok(()) => {
+                self.files_written += 1;
+                if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
+                    self.report_progress(display_entry);
+                }
+                Ok(())
+            }
+            Err(MaterializeRootError::EntrySkipped(error)) => {
+                // 条目级解码失败只影响该条目，记录警告后继续加载其余来源。
+                self.warnings.push(format!("{error}，已跳过"));
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
-        Ok(())
     }
 
     /// 流式复制普通文件。
@@ -1341,6 +1437,11 @@ impl WorkspaceMaterializer<'_> {
                     "目录中的加密压缩包未展开，按原文件保留：{}",
                     source.display()
                 ));
+                self.copy_file_into(source, target)
+            }
+            Err(MaterializeRootError::EntrySkipped(error)) => {
+                let _ = fs::remove_dir_all(&stem_dir);
+                self.warnings.push(format!("{error}，已跳过"));
                 self.copy_file_into(source, target)
             }
             Err(MaterializeRootError::Cancelled) => Err(anyhow::anyhow!("已取消日志加载")),
@@ -1599,6 +1700,95 @@ mod tests {
     use flate2::write::GzEncoder;
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
+
+    /// 手动验收：对指定 RAR 走完整物化流程，验证大过滤器成员经磁盘 scratch 解码。
+    ///
+    /// 运行方式：
+    /// `ARGUS_RAR_SCRATCH_ARCHIVE=/path/to/archive.rar cargo test --offline -- --ignored rar_scratch`
+    #[test]
+    #[ignore]
+    fn materializes_large_filtered_rar_via_disk_scratch() {
+        let archive = std::env::var_os("ARGUS_RAR_SCRATCH_ARCHIVE")
+            .map(std::path::PathBuf::from)
+            .expect("需要设置 ARGUS_RAR_SCRATCH_ARCHIVE 指向待验收的 RAR");
+        let started = std::time::Instant::now();
+        let workspace = materialize_sources(
+            std::slice::from_ref(&archive),
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &CancellationToken::new(),
+            None,
+        )
+        .expect("RAR 物化应成功");
+        println!(
+            "roots={} files={} warnings={:?} elapsed={:?}",
+            workspace.roots.len(),
+            workspace.materialized_files,
+            workspace.warnings,
+            started.elapsed()
+        );
+        let mut total_bytes = 0_u64;
+        for root in &workspace.roots {
+            for entry in walkdir_files(&root.path) {
+                let size = std::fs::metadata(&entry)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                println!("  {} {size} bytes", entry.display());
+                total_bytes = total_bytes.saturating_add(size);
+            }
+        }
+        println!("total materialized bytes={total_bytes}");
+        assert!(workspace.materialized_files > 0, "应至少物化一个文件");
+        assert!(workspace.warnings.is_empty(), "验收样例不应产生警告");
+        let _ = std::fs::remove_dir_all(&workspace.root);
+
+        // 同一样例把最大日志大小调到下限：超大日志应在规划阶段被跳过并给出警告。
+        let limited = materialize_sources(
+            std::slice::from_ref(&archive),
+            &LoaderConfig {
+                max_log_size_mb: crate::config::app_config::MAX_LOG_SIZE_MB_MIN,
+                ..LoaderConfig::default()
+            },
+            &ArchivePasswordStore::default(),
+            &CancellationToken::new(),
+            None,
+        )
+        .expect("限制场景下仍应完成物化");
+        println!(
+            "limited files={} warnings={:?}",
+            limited.materialized_files, limited.warnings
+        );
+        assert!(
+            !limited.warnings.is_empty(),
+            "超过最大日志大小的条目应产生警告"
+        );
+        assert!(
+            limited
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("最大日志大小")),
+            "警告应说明触发了最大日志大小限制：{:?}",
+            limited.warnings
+        );
+        let _ = std::fs::remove_dir_all(&limited.root);
+    }
+
+    /// 递归列出目录下的普通文件，供手动验收输出物化结果。
+    fn walkdir_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return files;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walkdir_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
+    }
 
     /// 构造默认取消令牌，物化测试无需真实取消场景。
     fn test_cancellation() -> CancellationToken {

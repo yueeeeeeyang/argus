@@ -52,6 +52,9 @@ use crate::analysis::runtime::{
     build_runtime_slow_sql_rows_for_filter, build_runtime_sql_frequency_rows_for_filter,
     parse_runtime_analysis_filter_criteria,
 };
+use crate::config::app_config::{
+    MAX_LOG_SIZE_MB_MAX, MAX_LOG_SIZE_MB_MIN, normalize_max_log_size_mb,
+};
 use crate::config::{AppConfig, ConfigManager, JstackThreadFilterRule};
 use crate::highlight::HighlightLanguage;
 use crate::infra::perf::PerfSpan;
@@ -249,6 +252,8 @@ pub(crate) struct ArgusApp {
     pub workspace: Workspace,
     /// 用户点击未实现操作后的占位提示。
     pub placeholder_notice: String,
+    /// 最近一次来源加载失败或带警告的摘要；内容区空状态展示，新加载开始时清空。
+    pub source_load_notice: Option<String>,
     /// 当前主题令牌。
     pub theme: AppTheme,
     /// 真实来源注册表，维护节点、父子关系和可见索引。
@@ -494,6 +499,7 @@ impl ArgusApp {
             theme_manager,
             workspace: Workspace::LogAnalysis,
             placeholder_notice: config_warning.unwrap_or_else(|| "请选择日志来源".to_string()),
+            source_load_notice: None,
             theme,
             source_registry: SourceRegistry::new(),
             has_loaded_real_sources: false,
@@ -1781,6 +1787,29 @@ impl ArgusApp {
         self.placeholder_notice = format!(
             "嵌套压缩包深度已调整为 {} 层",
             self.config.loader.max_archive_depth
+        );
+        self.persist_config_or_report();
+    }
+
+    /// 把最大日志大小翻到上一档（2 倍），范围收敛到配置上下限。
+    pub(crate) fn increase_max_log_size(&mut self) {
+        let current = normalize_max_log_size_mb(self.config.loader.max_log_size_mb);
+        self.set_max_log_size(current.saturating_mul(2));
+    }
+
+    /// 把最大日志大小降到下一档（1/2），范围收敛到配置上下限。
+    pub(crate) fn decrease_max_log_size(&mut self) {
+        let current = normalize_max_log_size_mb(self.config.loader.max_log_size_mb);
+        self.set_max_log_size(current / 2);
+    }
+
+    /// 写入最大日志大小并持久化配置。
+    fn set_max_log_size(&mut self, max_log_size_mb: u64) {
+        let next = max_log_size_mb.clamp(MAX_LOG_SIZE_MB_MIN, MAX_LOG_SIZE_MB_MAX);
+        self.config.loader.max_log_size_mb = next;
+        self.placeholder_notice = format!(
+            "最大日志大小已调整为 {}",
+            crate::utils::size_format::format_bytes(next.saturating_mul(1024 * 1024))
         );
         self.persist_config_or_report();
     }

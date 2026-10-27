@@ -1,6 +1,6 @@
 //! 文件职责：实现 ZIP 压缩包条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-29
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：打开 ZIP、枚举条目元信息，并按条目读取或流式输出日志内容。
 
@@ -190,19 +190,19 @@ where
     let mut password_verified = false;
 
     for index in 0..archive.len() {
-        let (entry_path, is_dir, encrypted) =
-            read_zip_entry_metadata(archive, index, source_label)?;
-        if encrypted && !password_verified {
-            ensure_zip_entry_password(archive, index, encrypted, password, source_label)?;
+        let metadata = read_zip_entry_metadata(archive, index, source_label)?;
+        if metadata.encrypted && !password_verified {
+            ensure_zip_entry_password(archive, index, metadata.encrypted, password, source_label)?;
             password_verified = true;
         }
-        if entry_path.is_empty() {
+        if metadata.path.is_empty() {
             continue;
         }
 
         entries.push(ArchiveEntryInfo {
-            path: entry_path,
-            is_dir,
+            path: metadata.path,
+            is_dir: metadata.is_dir,
+            unpacked_size: (!metadata.is_dir).then_some(metadata.unpacked_size),
         });
     }
 
@@ -292,7 +292,7 @@ where
 {
     let mut index = NormalizedEntryIndex::with_capacity(archive.len());
     for entry_index in 0..archive.len() {
-        let (entry_path, _, _) = read_zip_entry_metadata(archive, entry_index, source_label)?;
+        let entry_path = read_zip_entry_metadata(archive, entry_index, source_label)?.path;
         index.entry(entry_path).or_insert(entry_index);
     }
     Ok(index)
@@ -342,7 +342,8 @@ where
     else {
         anyhow::bail!("无法读取 ZIP 条目 {normalized_entry_path}：{source_label}");
     };
-    let (_, is_dir, encrypted) = read_zip_entry_metadata(archive, entry_index, source_label)?;
+    let metadata = read_zip_entry_metadata(archive, entry_index, source_label)?;
+    let (is_dir, encrypted) = (metadata.is_dir, metadata.encrypted);
     if is_dir {
         bail!("ZIP 条目是目录，无法读取内容：{normalized_entry_path}");
     }
@@ -364,7 +365,7 @@ fn read_zip_entry_metadata<R>(
     archive: &mut ZipArchive<R>,
     index: usize,
     source_label: &str,
-) -> Result<(String, bool, bool)>
+) -> Result<ZipEntryMetadata>
 where
     R: Read + Seek,
 {
@@ -372,11 +373,24 @@ where
         .by_index_raw(index)
         .map_err(|error| map_zip_error(error, source_label))
         .with_context(|| format!("无法读取 ZIP 第 {index} 个条目：{source_label}"))?;
-    Ok((
-        normalize_archive_entry_path(file.name()),
-        file.is_dir(),
-        file.encrypted(),
-    ))
+    Ok(ZipEntryMetadata {
+        path: normalize_archive_entry_path(file.name()),
+        is_dir: file.is_dir(),
+        encrypted: file.encrypted(),
+        unpacked_size: file.size(),
+    })
+}
+
+/// ZIP 条目在不解密正文时即可获得的元数据。
+struct ZipEntryMetadata {
+    /// 规范化条目路径。
+    path: String,
+    /// 是否为目录。
+    is_dir: bool,
+    /// 是否加密。
+    encrypted: bool,
+    /// 解压后大小（字节）。
+    unpacked_size: u64,
 }
 
 /// 确认加密 ZIP 条目已有密码并可通过底层库的解密头校验。

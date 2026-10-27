@@ -1,12 +1,12 @@
 # 文件职责：定义 Argus 桌面客户端的 Cargo 包信息与依赖版本。
 # 创建日期：2026-06-09
-# 修改日期：2026-07-17
+# 修改日期：2026-10-27
 # 作者：Argus 开发团队
 # 主要功能：配置 Rust 版本、包元信息以及 GPUI 界面依赖。
 
 [package]
 name = "argus"
-version = "1.1.14"
+version = "1.1.15"
 edition = "2024"
 publish = false
 description = "Argus 高性能日志查看与分析桌面客户端"
@@ -43,7 +43,7 @@ memmap2 = "0.9.10"
 percent-encoding = "2.3.2"
 # 使用成熟的 CommonMark/GFM 事件解析器驱动 AI 消息 Markdown 展示，关闭未使用的 HTML 输出功能。
 pulldown-cmark = { version = "0.13.4", default-features = false }
-rars = "0.2.0"
+rars = { version = "0.12.3", default-features = false, features = ["encryption"] }
 regex = "1.12.3"
 # Rig 使用 reqwest 发送 OpenAI 兼容请求；直接依赖用于设置每次模型请求的超时。
 reqwest = "0.13.4"
@@ -119,9 +119,6 @@ wiremock = "0.6.5"
 # GPUI 0.2.2 的 Windows release shader 构建仅能在 Windows 主机运行；本地补丁复用
 # runtime_shaders 特性，将内嵌 HLSL 交给 Windows D3DCompiler，支持 macOS/Linux 交叉编译。
 gpui = { path = "third_party/gpui" }
-# Git/SVN 引入后，SMB 与 russh 统一使用稳定版 aes 0.9；本地补丁让压缩格式实现复用同一版本，
-# 避免 Cargo 在同一个 0.9 系列中混用预发布版，同时保留现有 ZIP/RAR AES 解密能力。
-rars-crypto = { path = "third_party/rars-crypto" }
 zip = { path = "third_party/zip" }
 # svn 仍保持 0.1.13 API；本地补丁仅升级其纯 Rust russh 传输依赖，统一稳定加密栈。
 svn = { path = "third_party/svn" }

@@ -416,6 +416,7 @@ impl ArgusApp {
             } else {
                 format!("来源加载失败：{}", warnings.join("；"))
             };
+            self.source_load_notice = Some(self.placeholder_notice.clone());
             return false;
         }
 
@@ -434,7 +435,36 @@ impl ArgusApp {
                 warnings.join("；")
             )
         };
+        // 部分文件被跳过时保留提示，让用户知道来源不完整；完全成功则清空。
+        self.source_load_notice = Self::summarize_load_warnings(&warnings);
         true
+    }
+
+    /// 生成来源加载警告摘要；提示条空间有限，最多列出前 3 项。
+    ///
+    /// 参数说明：
+    /// - `warnings`：物化与扫描阶段累计的警告文案。
+    ///
+    /// 返回值：无警告时返回 `None`，否则返回带跳过数量的摘要。
+    fn summarize_load_warnings(warnings: &[String]) -> Option<String> {
+        if warnings.is_empty() {
+            return None;
+        }
+        let preview = warnings
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("；");
+        if warnings.len() > 3 {
+            Some(format!(
+                "{} 项文件已跳过：{preview}；…（其余 {} 项）",
+                warnings.len(),
+                warnings.len() - 3
+            ))
+        } else {
+            Some(format!("{} 项文件已跳过：{preview}", warnings.len()))
+        }
     }
 
     /// 应用来源加载后的侧栏默认状态：单文件来源没有目录层级，收起左侧目录树并直接打开
@@ -503,7 +533,8 @@ impl ArgusApp {
             }
             Err(error) => {
                 self.is_source_loading = false;
-                self.placeholder_notice = format!("来源加载失败：{error}");
+                self.placeholder_notice = format!("来源加载失败：{error:#}");
+                self.source_load_notice = Some(self.placeholder_notice.clone());
             }
         }
     }

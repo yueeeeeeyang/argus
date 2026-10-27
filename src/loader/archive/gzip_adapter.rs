@@ -1,6 +1,6 @@
 //! 文件职责：实现普通 GZIP 单文件压缩适配器。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-09-12
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：把 `.gz` 单文件压缩包展开为虚拟日志条目，并支持流式读取。
 
@@ -81,6 +81,8 @@ fn single_gzip_entry(source_label: &str) -> Vec<ArchiveEntryInfo> {
     vec![ArchiveEntryInfo {
         path: label,
         is_dir: false,
+        // GZIP 头部的原始大小是 32 位回绕值，不能作为可靠上限依据，解压后校验。
+        unpacked_size: None,
     }]
 }
 

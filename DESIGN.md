@@ -79,7 +79,7 @@ AI 智能体的产品边界、工具契约与安全策略另见 `docs/ai_log_age
 - macOS：`objc`/`objc2`/`objc2-foundation`、`block`、`raw-window-handle`（自定义标题栏与原生窗口跟随）。
 
 **本地补丁**（`[patch.crates-io]`，源码在 `third_party/`）：`gpui`（让 Windows release shader
-可在非 Windows 主机构建）、`rars-crypto` 与 `zip`（统一到稳定版 `aes` 0.9）、`svn`
+可在非 Windows 主机构建）、`zip`（统一到稳定版 `aes` 0.9）、`svn`
 （升级纯 Rust `russh` 传输依赖）、`block`（替换已废弃的空枚举占位类型）。
 
 ### 2.2 GPUI 架构适配
@@ -242,10 +242,20 @@ Argus 围绕 GPUI 的 `Entity`、`Context`、`Render` 与事件订阅能力组�
 | BZIP2 + TAR | `.tar.bz2` `.tbz2` | `tar` + `bzip2` | 支持 | 不适用 | 支持 |
 | XZ + TAR | `.tar.xz` `.txz` | `tar` + `xz2` | 支持 | 不适用 | 支持 |
 | GZIP 单文件 | `.gz` | `flate2` | 支持 | 不适用 | 支持 |
-| RAR | `.rar` | `rars` | 支持 | 部分支持 | **不支持**：条目整块读入内存 |
+| RAR | `.rar` | `rars` 0.12 | 支持 | 部分支持 | 支持（带过滤器的大成员经磁盘 scratch） |
 
 RAR 的目录、正文与加密兼容性取决于 RAR 家族、压缩方法和加密算法，不宜宣称支持全部
 RAR 文件；其适配器在 `rars` 解析失败时回退到内置头解析。
+
+RAR5 的过滤器（delta / E8 / E9 / ARM）需要整块反解，`rars` 对超过 32 MiB 的此类成员
+走**磁盘 scratch**：`Rar50Scratch` 在来源工作目录下创建私有暂存目录（`Drop` 自动清理），
+内存占用只与字典和 8 MiB 过滤工作区相关，与解压后大小无关。
+
+暂存磁盘配额由设置项 **最大日志大小** 推导（默认 10 GiB，可配置 128 MiB–64 GiB）：
+配额 = 2 × 最大日志大小 + 64 MiB。声明大小超过上限的日志在**规划阶段**直接跳过，不会
+先解码再丢弃；ZIP/TAR/7Z/RAR 共用这条上限规则，GZIP 等无法预知大小的格式在落盘后校验。
+条目级解码失败（损坏、资源上限、不支持的算法）标记为可跳过错误，物化器记录警告并继续
+加载其余条目；只有工作目录 I/O、密码和取消会中断整次加载。
 
 #### 4.1.6 嵌套压缩包与密码处理
 
@@ -1204,10 +1214,9 @@ argus/
 ├── assets/                                         # 内置字体与图标源文件
 │   ├── fonts/
 │   └── icons/
-├── third_party/                                    # gpui / rars-crypto / zip / svn / block 本地补丁
+├── third_party/                                    # gpui / zip / svn / block 本地补丁
 │   ├── block/
 │   ├── gpui/
-│   ├── rars-crypto/
 │   ├── svn/
 │   └── zip/
 └── src/
@@ -1298,7 +1307,7 @@ argus/
     │   │   ├── gzip_adapter.rs                     # GZIP 单文件
     │   │   ├── mod.rs
     │   │   ├── password.rs                         # 仅内存的压缩包密码存储
-    │   │   ├── rar_adapter.rs                      # RAR（无流式读取）
+    │   │   ├── rar_adapter.rs                      # RAR（流式写盘 + 磁盘 scratch）
     │   │   ├── registry.rs                         # 适配器注册表
     │   │   ├── sevenz_adapter.rs                   # 7Z
     │   │   ├── tar_adapter.rs                      # TAR

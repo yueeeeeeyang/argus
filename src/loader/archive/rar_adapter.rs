@@ -1,10 +1,10 @@
 //! 文件职责：实现 RAR 压缩包目录结构枚举适配器。
 //! 创建日期：2026-06-10
-//! 修改日期：2026-06-10
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：解析 RAR 条目结构，并通过纯 Rust 解码库读取压缩包内条目字节。
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
@@ -13,7 +13,9 @@ use std::rc::Rc;
 use anyhow::{Context as _, Result, anyhow, bail};
 use memmap2::{Mmap, MmapOptions};
 
-use crate::loader::archive::adapter::{ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo};
+use crate::loader::archive::adapter::{
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryInfo, SkippableEntryError,
+};
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::password::{ArchivePasswordError, ArchivePasswordErrorKind};
 use crate::utils::path::normalize_archive_entry_path;
@@ -100,6 +102,18 @@ impl ArchiveAdapter for RarArchiveAdapter {
     ) -> Result<Vec<u8>> {
         read_rar_entry_bytes(path, entry_path, password)
     }
+
+    /// 把条目直接流式写入目标文件：大成员经磁盘 scratch 解码，避免整条目驻留内存。
+    fn extract_entry_to_path(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        password: Option<&str>,
+        target: &Path,
+        max_log_bytes: u64,
+    ) -> Result<()> {
+        extract_rar_entry_to_path(path, entry_path, password, target, max_log_bytes)
+    }
 }
 
 /// 从本地 RAR 压缩包读取指定条目的完整字节。
@@ -153,7 +167,7 @@ pub(crate) fn list_rar_entries_from_bytes(
         Ok(entries) => Ok(entries),
         Err(rars_error) if is_archive_password_error(&rars_error) => Err(rars_error),
         Err(rars_error) => list_rar_entries_direct(bytes, source_label).map_err(|direct_error| {
-            anyhow!("纯 Rust RAR 库枚举失败：{rars_error}；内置头解析兜底也失败：{direct_error}")
+            anyhow!("RAR 条目枚举失败：{rars_error:#}；内置头解析兜底也失败：{direct_error:#}")
         }),
     }
 }
@@ -177,9 +191,7 @@ pub(crate) fn read_rar_entry_bytes_from_bytes(
         Err(rars_error) if is_archive_password_error(&rars_error) => Err(rars_error),
         Err(rars_error) => {
             read_rar_entry_bytes_direct(bytes, entry_path, source_label).map_err(|direct_error| {
-                anyhow!(
-                    "纯 Rust RAR 库读取失败：{rars_error}；内置存储模式兜底也失败：{direct_error}"
-                )
+                anyhow!("RAR 解码失败：{rars_error:#}；内置存储模式兜底也失败：{direct_error:#}")
             })
         }
     }
@@ -202,7 +214,11 @@ fn list_rar_entries_with_rars(
             continue;
         }
 
-        entries.push(build_entry(entry_path, member.meta.is_directory));
+        entries.push(build_entry(
+            entry_path,
+            member.meta.is_directory,
+            Some(member.meta.unpacked_size),
+        ));
     }
 
     if has_encrypted_member && password.is_none() {
@@ -212,7 +228,155 @@ fn list_rar_entries_with_rars(
     Ok(entries)
 }
 
+/// RAR 磁盘 scratch 相对最大日志大小的额外余量：覆盖原始与变换后两份数据之外的开销。
+const RAR_SCRATCH_SLACK_BYTES: u64 = 64 * 1024 * 1024;
+/// 低于该大小的 RAR5 成员在内存中完成解码，避免为小文件创建临时文件。
+const RAR_BUFFERED_DECODE_LIMIT: u64 = 32 * 1024 * 1024;
+/// RAR5 过滤器反解的工作区内存上限；与解压后大小无关。
+const RAR_FILTER_MEMORY_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// RAR 解码使用的私有磁盘 scratch；Drop 时连同目录一起删除。
+struct RarScratch {
+    /// 私有暂存目录，权限由 tempfile 收紧，可能包含解密后的数据；仅靠 Drop 清理。
+    _directory: tempfile::TempDir,
+    /// rars 的磁盘 scratch 策略。
+    policy: rars::Rar50Scratch,
+}
+
+impl RarScratch {
+    /// 在来源工作目录下创建本次解码专用的 scratch。
+    ///
+    /// 配额由最大日志大小推导：rars 对带过滤器的成员按“原始 + 变换后”两份占用，
+    /// 因此取两倍大小再加固定余量，保证上限内的日志一定能完成解码。
+    fn create(max_log_bytes: u64) -> Result<Self> {
+        let parent = crate::loader::workspace::workspaces_dir();
+        std::fs::create_dir_all(&parent)
+            .with_context(|| format!("无法创建 RAR 暂存目录：{}", parent.display()))?;
+        let directory = tempfile::Builder::new()
+            .prefix("rar-scratch-")
+            .tempdir_in(&parent)
+            .with_context(|| format!("无法创建 RAR 暂存目录：{}", parent.display()))?;
+        let quota = max_log_bytes
+            .saturating_mul(2)
+            .saturating_add(RAR_SCRATCH_SLACK_BYTES);
+        let policy = rars::Rar50Scratch::new(directory.path(), quota)
+            .with_filter_memory_limit(RAR_FILTER_MEMORY_LIMIT);
+        Ok(Self {
+            _directory: directory,
+            policy,
+        })
+    }
+}
+
+/// 构造 RAR 提取选项；`scratch` 为 `None` 时只允许内存内解码。
+fn rar_extraction_options<'a>(
+    password: Option<&'a str>,
+    scratch: Option<&'a RarScratch>,
+) -> rars::ArchiveReadOptions<'a> {
+    let options = rars::ArchiveReadOptions::with_optional_password(password.map(str::as_bytes))
+        .with_rar50_buffered_decode_limit(RAR_BUFFERED_DECODE_LIMIT);
+    match scratch {
+        Some(scratch) => options.with_rar50_scratch(&scratch.policy),
+        None => options,
+    }
+}
+
+/// 判断 RAR 档案是否为固实；固实档案不能跳过前序成员，必须顺序解码。
+fn rar_archive_is_solid(archive: &rars::Archive) -> bool {
+    match archive {
+        rars::Archive::Rar13(archive) => archive.main.is_solid(),
+        rars::Archive::Rar15To40(archive) => archive.main.is_solid(),
+        rars::Archive::Rar50Plus(archive) => archive.main.is_solid(),
+        _ => false,
+    }
+}
+
+/// 把条目级解码失败标记为“可跳过”，I/O 与取消错误保持致命。
+fn mark_rar_entry_error(error: anyhow::Error) -> anyhow::Error {
+    let is_skippable = error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rars::Error>(),
+            Some(error)
+                if !matches!(
+                    error.kind(),
+                    rars::ErrorKind::Io | rars::ErrorKind::Cancelled
+                )
+        )
+    });
+    if is_skippable {
+        anyhow::Error::new(SkippableEntryError::new(error))
+    } else {
+        error
+    }
+}
+
+/// 用受控解压只写出目标条目。
+///
+/// 说明：非固实档案用 `Skip` 跳过无关成员（不读取、不解码），固实档案必须按顺序
+/// 解码并用 `sink` 丢弃前序成员；目标写完后立即 `Stop`，避免继续解码剩余成员。
+///
+/// 参数说明：
+/// - `archive`：已解析的 RAR 档案。
+/// - `normalized_entry_path`：规范化后的目标条目路径。
+/// - `options`：解压选项（含 scratch 策略）。
+/// - `open_target`：目标条目写入器工厂；返回错误时停止解压并原样上报。
+///
+/// 返回值：目标条目成功写出时返回 `Ok`；未找到目标条目或解码失败时返回错误。
+fn extract_rar_entry_with_control(
+    archive: &rars::Archive,
+    normalized_entry_path: &str,
+    options: rars::ArchiveReadOptions<'_>,
+    mut open_target: impl FnMut() -> Result<Box<dyn Write>>,
+) -> Result<()> {
+    let solid = rar_archive_is_solid(archive);
+    let mut found = false;
+    let mut finished = false;
+    let mut open_error: Option<anyhow::Error> = None;
+
+    let result = archive
+        .extract_with_control(options, |member| {
+            if finished {
+                return Ok(rars::ExtractionDecision::Stop);
+            }
+            let is_target = !member.meta.is_directory
+                && normalize_archive_entry_path(&member.meta.name_lossy()) == normalized_entry_path;
+            if is_target {
+                finished = true;
+                return match open_target() {
+                    Ok(writer) => {
+                        found = true;
+                        Ok(rars::ExtractionDecision::Extract(writer))
+                    }
+                    Err(error) => {
+                        open_error = Some(error);
+                        Ok(rars::ExtractionDecision::Stop)
+                    }
+                };
+            }
+            if solid {
+                // 固实档案的后续成员依赖前序解码历史，只能解码后丢弃。
+                return Ok(rars::ExtractionDecision::Extract(Box::new(io::sink())));
+            }
+            Ok(rars::ExtractionDecision::Skip)
+        })
+        .map_err(|error| map_rar_error(error, normalized_entry_path))
+        .with_context(|| format!("无法解码 RAR 条目 {normalized_entry_path}"))
+        .map_err(mark_rar_entry_error);
+
+    if let Some(error) = open_error {
+        return Err(error);
+    }
+    result?;
+
+    if !found {
+        bail!("RAR 解码过程未输出目标条目：{normalized_entry_path}");
+    }
+    Ok(())
+}
+
 /// 使用 rars 从 RAR 原始字节读取目标条目内容。
+///
+/// 说明：整条目驻留内存，仅用于小条目；大条目请走 [`extract_rar_entry_to_path`]。
 fn read_rar_entry_bytes_with_rars(
     bytes: &[u8],
     entry_path: &str,
@@ -221,36 +385,70 @@ fn read_rar_entry_bytes_with_rars(
 ) -> Result<Vec<u8>> {
     let archive = read_rars_archive(bytes, source_label, password)?;
     let normalized_entry_path = normalize_archive_entry_path(entry_path);
-    let password_bytes = password.map(str::as_bytes);
+    let captured = Rc::new(RefCell::new(Vec::new()));
+    let captured_for_writer = Rc::clone(&captured);
+    extract_rar_entry_with_control(
+        &archive,
+        &normalized_entry_path,
+        rar_extraction_options(password, None),
+        move || {
+            Ok(Box::new(RarCapturedWriter {
+                bytes: Rc::clone(&captured_for_writer),
+            }) as Box<dyn Write>)
+        },
+    )?;
+    Ok(captured.borrow().clone())
+}
 
-    match &archive {
-        rars::Archive::Rar13(rar13_archive) => {
-            read_rar13_target_entry_bytes(rar13_archive, &normalized_entry_path, password_bytes)
-        }
-        rars::Archive::Rar15To40(rar15_archive) if rar15_archive.main.is_solid() => {
-            read_rar_entry_bytes_by_streaming_archive(
-                &archive,
-                &normalized_entry_path,
-                password_bytes,
-            )
-        }
-        rars::Archive::Rar15To40(rar15_archive) => read_rar15_to_40_target_entry_bytes(
-            rar15_archive,
-            &normalized_entry_path,
-            password_bytes,
-        ),
-        rars::Archive::Rar50Plus(rar50_archive) if rar50_archive.main.is_solid() => {
-            read_rar_entry_bytes_by_streaming_archive(
-                &archive,
-                &normalized_entry_path,
-                password_bytes,
-            )
-        }
-        rars::Archive::Rar50Plus(rar50_archive) => {
-            read_rar50_target_entry_bytes(rar50_archive, &normalized_entry_path, password_bytes)
-        }
-        _ => bail!("暂不支持该 RAR 家族读取条目：{normalized_entry_path}"),
+/// 把 RAR 条目直接流式写入目标文件；大成员经磁盘 scratch 解码。
+///
+/// 参数说明：
+/// - `archive_path`：本地 RAR 路径。
+/// - `entry_path`：目标条目路径。
+/// - `password`：压缩包密码。
+/// - `target`：目标文件路径，已由调用方创建父目录。
+///
+/// 返回值：写入成功返回 `Ok`；条目失败时返回错误链，调用方据此降级为警告。
+pub(crate) fn extract_rar_entry_to_path(
+    archive_path: &Path,
+    entry_path: &str,
+    password: Option<&str>,
+    target: &Path,
+    max_log_bytes: u64,
+) -> Result<()> {
+    let source_label = archive_path.display().to_string();
+    let bytes = map_rar_file(archive_path)?;
+    let archive = read_rars_archive(&bytes, &source_label, password)?;
+    let normalized_entry_path = normalize_archive_entry_path(entry_path);
+
+    // 声明大小已知且超过上限时直接跳过，避免无谓解码和临时磁盘占用。
+    if let Some(declared) = archive
+        .members()
+        .find(|member| {
+            !member.meta.is_directory
+                && normalize_archive_entry_path(&member.meta.name_lossy()) == normalized_entry_path
+        })
+        .map(|member| member.meta.unpacked_size)
+        && declared > max_log_bytes
+    {
+        return Err(anyhow::Error::new(SkippableEntryError::new(anyhow!(
+            "RAR 条目 {normalized_entry_path} 解压后 {} 超过最大日志大小 {}",
+            crate::utils::size_format::format_bytes(declared),
+            crate::utils::size_format::format_bytes(max_log_bytes)
+        ))));
     }
+
+    let scratch = RarScratch::create(max_log_bytes)?;
+    extract_rar_entry_with_control(
+        &archive,
+        &normalized_entry_path,
+        rar_extraction_options(password, Some(&scratch)),
+        || {
+            File::create(target)
+                .with_context(|| format!("无法创建物化文件：{}", target.display()))
+                .map(|file| Box::new(file) as Box<dyn Write>)
+        },
+    )
 }
 
 /// 解析 RAR 原始字节为 rars 归档对象，并统一错误上下文。
@@ -265,40 +463,6 @@ fn read_rars_archive(
     )
     .map_err(|error| map_rar_error(error, source_label))
     .with_context(|| format!("无法解析 RAR 压缩包 {source_label}"))
-}
-
-/// 顺序流式读取目标条目；solid RAR 需要保留前序文件解码上下文，因此不能直接跳到目标成员。
-fn read_rar_entry_bytes_by_streaming_archive(
-    archive: &rars::Archive,
-    normalized_entry_path: &str,
-    password: Option<&[u8]>,
-) -> Result<Vec<u8>> {
-    let captured_bytes = Rc::new(RefCell::new(Vec::new()));
-    let did_open_target = Rc::new(Cell::new(false));
-    let captured_bytes_for_writer = Rc::clone(&captured_bytes);
-    let did_open_target_for_writer = Rc::clone(&did_open_target);
-    let normalized_entry_path_for_writer = normalized_entry_path.to_string();
-
-    archive
-        .extract_to(password, |meta| {
-            let current_path = normalize_archive_entry_path(&meta.name_lossy());
-            if current_path == normalized_entry_path_for_writer && !meta.is_directory {
-                did_open_target_for_writer.set(true);
-                Ok(Box::new(RarCapturedWriter {
-                    bytes: Rc::clone(&captured_bytes_for_writer),
-                }) as Box<dyn Write>)
-            } else {
-                Ok(Box::new(io::sink()) as Box<dyn Write>)
-            }
-        })
-        .map_err(|error| map_rar_error(error, normalized_entry_path))
-        .with_context(|| format!("无法解码 RAR 条目 {normalized_entry_path}"))?;
-
-    if !did_open_target.get() {
-        bail!("RAR 解码过程未输出目标条目：{normalized_entry_path}");
-    }
-
-    Ok(captured_bytes.borrow().clone())
 }
 
 /// rars 顺序解码回调使用的内存写入器，只捕获当前目标条目的解包字节。
@@ -318,73 +482,6 @@ impl Write for RarCapturedWriter {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
-}
-
-/// 从 RAR1.3/1.4 归档中只解码目标条目。
-fn read_rar13_target_entry_bytes(
-    archive: &rars::rar13::Archive,
-    normalized_entry_path: &str,
-    password: Option<&[u8]>,
-) -> Result<Vec<u8>> {
-    let entry = archive
-        .entries
-        .iter()
-        .find(|entry| normalize_archive_entry_path(&entry.name_lossy()) == normalized_entry_path)
-        .with_context(|| format!("未找到 RAR 条目：{normalized_entry_path}"))?;
-    if entry.is_directory() {
-        bail!("RAR 条目是目录，无法读取内容：{normalized_entry_path}");
-    }
-
-    let mut bytes = Vec::new();
-    entry
-        .write_to(archive, password, &mut bytes)
-        .map_err(|error| map_rar_error(error, normalized_entry_path))
-        .with_context(|| format!("无法解码 RAR 条目 {normalized_entry_path}"))?;
-    Ok(bytes)
-}
-
-/// 从 RAR1.5 到 RAR4.x 归档中只解码目标条目。
-fn read_rar15_to_40_target_entry_bytes(
-    archive: &rars::rar15_40::Archive,
-    normalized_entry_path: &str,
-    password: Option<&[u8]>,
-) -> Result<Vec<u8>> {
-    let entry = archive
-        .files()
-        .find(|entry| normalize_archive_entry_path(&entry.name_lossy()) == normalized_entry_path)
-        .with_context(|| format!("未找到 RAR 条目：{normalized_entry_path}"))?;
-    if entry.is_directory() {
-        bail!("RAR 条目是目录，无法读取内容：{normalized_entry_path}");
-    }
-
-    let mut bytes = Vec::new();
-    entry
-        .write_to(archive, password, &mut bytes)
-        .map_err(|error| map_rar_error(error, normalized_entry_path))
-        .with_context(|| format!("无法解码 RAR 条目 {normalized_entry_path}"))?;
-    Ok(bytes)
-}
-
-/// 从 RAR5+ 归档中只解码目标条目。
-fn read_rar50_target_entry_bytes(
-    archive: &rars::rar50::Archive,
-    normalized_entry_path: &str,
-    password: Option<&[u8]>,
-) -> Result<Vec<u8>> {
-    let entry = archive
-        .files()
-        .find(|entry| normalize_archive_entry_path(&entry.name_lossy()) == normalized_entry_path)
-        .with_context(|| format!("未找到 RAR 条目：{normalized_entry_path}"))?;
-    if entry.is_directory() {
-        bail!("RAR 条目是目录，无法读取内容：{normalized_entry_path}");
-    }
-
-    let mut bytes = Vec::new();
-    entry
-        .write_to(archive, password, &mut bytes)
-        .map_err(|error| map_rar_error(error, normalized_entry_path))
-        .with_context(|| format!("无法解码 RAR 条目 {normalized_entry_path}"))?;
-    Ok(bytes)
 }
 
 /// 判断 anyhow 错误链中是否已包含统一密码错误。
@@ -416,9 +513,9 @@ fn rar_password_error_kind(error: &rars::Error) -> Option<ArchivePasswordErrorKi
         rars::Error::NeedPassword => Some(ArchivePasswordErrorKind::Required),
         rars::Error::WrongPasswordOrCorruptData => Some(ArchivePasswordErrorKind::Invalid),
         rars::Error::UnsupportedEncryption { .. } => Some(ArchivePasswordErrorKind::Unsupported),
-        rars::Error::AtArchiveOffset { source, .. } | rars::Error::AtEntry { source, .. } => {
-            rar_password_error_kind(source)
-        }
+        rars::Error::AtArchiveOffset { source, .. }
+        | rars::Error::AtEntry { source, .. }
+        | rars::Error::InVolume { source, .. } => rar_password_error_kind(source),
         _ => None,
     }
 }
@@ -600,7 +697,11 @@ fn parse_rar4_file_block(
     let file_info = read_rar4_file_info(bytes, block_offset, header, header_end, source_label)?;
 
     if !file_info.entry_path.is_empty() {
-        entries.push(build_entry(file_info.entry_path, file_info.is_dir));
+        entries.push(build_entry(
+            file_info.entry_path,
+            file_info.is_dir,
+            Some(file_info.unpacked_size),
+        ));
     }
 
     Ok(file_info.packed_size)
@@ -844,7 +945,11 @@ fn parse_rar5_file_block(
         return Ok(());
     }
 
-    entries.push(build_entry(file_info.entry_path, file_info.is_dir));
+    entries.push(build_entry(
+        file_info.entry_path,
+        file_info.is_dir,
+        Some(file_info.unpacked_size),
+    ));
     Ok(())
 }
 
@@ -933,8 +1038,12 @@ fn skip_bytes(
 }
 
 /// 构建统一压缩包条目模型。
-fn build_entry(path: String, is_dir: bool) -> ArchiveEntryInfo {
-    ArchiveEntryInfo { path, is_dir }
+fn build_entry(path: String, is_dir: bool, unpacked_size: Option<u64>) -> ArchiveEntryInfo {
+    ArchiveEntryInfo {
+        path,
+        is_dir,
+        unpacked_size: (!is_dir).then_some(unpacked_size).flatten(),
+    }
 }
 
 /// 读取小端 u16。
@@ -961,7 +1070,10 @@ fn checked_add(left: usize, right: usize, source_label: &str) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RAR4_SIGNATURE, RAR5_SIGNATURE, list_rar_entries_from_bytes};
+    use super::{
+        RAR4_SIGNATURE, RAR5_SIGNATURE, list_rar_entries_from_bytes, mark_rar_entry_error,
+    };
+    use crate::loader::archive::adapter::is_skippable_entry_error;
 
     /// 写入小端 u16。
     fn push_u16(bytes: &mut Vec<u8>, value: u16) {
@@ -986,6 +1098,24 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// 条目级解码失败（损坏、资源上限、不支持的算法）应标记为可跳过。
+    #[test]
+    fn entry_decode_failures_are_skippable() {
+        let error = mark_rar_entry_error(anyhow::Error::new(rars::Error::InvalidHeader(
+            "corrupt member payload",
+        )));
+        assert!(
+            is_skippable_entry_error(&error),
+            "RAR 条目解码失败应降级为警告并跳过该条目"
+        );
+
+        let plain = mark_rar_entry_error(anyhow::anyhow!("工作目录不可写"));
+        assert!(
+            !is_skippable_entry_error(&plain),
+            "非解码失败（I/O 等）必须保持致命"
+        );
     }
 
     /// 构造 RAR4 文件块，测试只依赖目录树元数据，不需要真实压缩数据。
@@ -1056,8 +1186,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, "logs");
         assert!(entries[0].is_dir);
+        assert_eq!(entries[0].unpacked_size, None);
         assert_eq!(entries[1].path, "logs/app.log");
         assert!(!entries[1].is_dir);
+        assert_eq!(entries[1].unpacked_size, Some(12));
     }
 
     /// 验证 RAR5 文件头可生成目录和文件条目。
@@ -1083,7 +1215,9 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, "logs");
         assert!(entries[0].is_dir);
+        assert_eq!(entries[0].unpacked_size, None);
         assert_eq!(entries[1].path, "logs/app.log");
         assert!(!entries[1].is_dir);
+        assert_eq!(entries[1].unpacked_size, Some(42));
     }
 }

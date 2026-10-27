@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -718,6 +718,7 @@ private_key_passphrase = " phrase "
             loader: LoaderConfig {
                 max_archive_depth: 4,
                 follow_symlinks: true,
+                max_log_size_mb: 2048,
             },
             log_search: LogSearchConfig {
                 quick_keywords: "ERROR,WARN".to_string(),

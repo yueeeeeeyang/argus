@@ -3488,6 +3488,104 @@ fn overflow_menu_action_activates_tab_and_closes_menu() {
     assert!(app.active_menu.is_none());
 }
 
+/// 验证来源加载失败和带警告的成功加载都会写入来源加载提示。
+///
+/// 回归背景：加载失败只写入 `placeholder_notice`，界面没有任何渲染入口，
+/// 用户只看到来源树回到“暂无日志来源”，误以为没有反应。
+#[gpui::test]
+fn source_load_result_surfaces_failure_and_warnings(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| app_with_placeholder_sources());
+    app.update(cx, |app, cx| {
+        assert!(app.source_load_notice.is_none());
+        let generation = app.source_load_generation;
+        app.apply_source_load_result(
+            generation,
+            Err(anyhow::anyhow!("RAR 成员解压需要 2.8 GB 临时空间")),
+            cx,
+        );
+        let notice = app
+            .source_load_notice
+            .as_deref()
+            .expect("加载失败应写入来源加载提示");
+        assert!(
+            notice.contains("RAR 成员解压需要 2.8 GB 临时空间"),
+            "提示应保留具体失败原因：{notice}"
+        );
+    });
+
+    let app = cx.new(|_| app_with_placeholder_sources());
+    app.update(cx, |app, _| {
+        app.source_load_notice = None;
+        let scan_result = crate::loader::SourceTreeScanResult {
+            registry: placeholder_source_registry(),
+            warnings: vec!["1(1).rar!/1/stdout.log 解压失败，已跳过".to_string()],
+        };
+        assert!(app.apply_load_report(scan_result));
+        let notice = app
+            .source_load_notice
+            .as_deref()
+            .expect("带警告的加载应写入来源加载提示");
+        assert!(
+            notice.contains("1 项文件已跳过"),
+            "提示应说明跳过数量：{notice}"
+        );
+    });
+}
+
+/// 验证最大日志大小按 2 倍档位调整，并收敛到可配置上下限。
+#[test]
+fn max_log_size_steps_between_configured_bounds() {
+    use crate::config::app_config::{
+        MAX_LOG_SIZE_MB_DEFAULT, MAX_LOG_SIZE_MB_MAX, MAX_LOG_SIZE_MB_MIN,
+    };
+
+    let mut app = test_app();
+    app.config.loader.max_log_size_mb = MAX_LOG_SIZE_MB_DEFAULT;
+    app.increase_max_log_size();
+    assert_eq!(
+        app.config.loader.max_log_size_mb,
+        MAX_LOG_SIZE_MB_DEFAULT * 2
+    );
+    app.decrease_max_log_size();
+    assert_eq!(app.config.loader.max_log_size_mb, MAX_LOG_SIZE_MB_DEFAULT);
+
+    app.config.loader.max_log_size_mb = MAX_LOG_SIZE_MB_MIN;
+    app.decrease_max_log_size();
+    assert_eq!(app.config.loader.max_log_size_mb, MAX_LOG_SIZE_MB_MIN);
+
+    app.config.loader.max_log_size_mb = MAX_LOG_SIZE_MB_MAX;
+    app.increase_max_log_size();
+    assert_eq!(app.config.loader.max_log_size_mb, MAX_LOG_SIZE_MB_MAX);
+}
+
+/// 验证来源加载提示条在失败/警告时出现，并在清空提示后消失。
+#[gpui::test]
+fn source_load_notice_banner_is_visible_and_dismissible(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+    assert!(
+        cx.debug_bounds("source-load-notice").is_none(),
+        "没有加载问题时不显示提示条"
+    );
+
+    app.update(cx, |app, cx| {
+        let generation = app.source_load_generation;
+        app.apply_source_load_result(generation, Err(anyhow::anyhow!("模拟解压失败")), cx);
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+    assert!(
+        cx.debug_bounds("source-load-notice").is_some(),
+        "加载失败时应显示来源加载提示条"
+    );
+
+    app.update(cx, |app, _| app.source_load_notice = None);
+    cx.simulate_resize(gpui::size(gpui::px(1402.0), gpui::px(900.0)));
+    assert!(
+        cx.debug_bounds("source-load-notice").is_none(),
+        "关闭提示后提示条应消失"
+    );
+}
+
 /// 验证没有打开任何标签时内容区展示空状态，关闭最后一个标签后同样回到空状态。
 #[gpui::test]
 fn no_tabs_show_content_empty_state(cx: &mut gpui::TestAppContext) {

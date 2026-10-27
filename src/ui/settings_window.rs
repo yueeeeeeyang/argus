@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Argus 主窗口设置模态框和独立设置编辑器。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-10-16
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：以主窗口模态框展示分类设置，并提供智能分析、系统提示词和 Jstack 过滤规则编辑入口。
 
@@ -33,6 +33,7 @@ use crate::ui::input_native::app_native_input;
 use crate::ui::main_window::{
     WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS, window_content_shadows,
 };
+use crate::utils::size_format::format_bytes;
 
 /// 设置行右侧内边距，用于让浮层菜单和选择框左边缘对齐。
 const SETTINGS_ROW_HORIZONTAL_PADDING: f32 = 12.0;
@@ -117,6 +118,8 @@ struct SettingsModalSnapshot {
     log_content_font_size: f32,
     /// 最大嵌套压缩包深度。
     max_archive_depth: usize,
+    /// 单个日志大小上限（MiB）。
+    max_log_size_mb: u64,
     /// 是否跟随符号链接。
     follow_symlinks: bool,
     /// 快搜关键字输入框状态。
@@ -167,6 +170,7 @@ impl SettingsModalSnapshot {
             is_theme_dropdown_open: app.is_theme_dropdown_open,
             log_content_font_size: app.log_content_font_size,
             max_archive_depth: app.config.loader.max_archive_depth,
+            max_log_size_mb: app.config.loader.max_log_size_mb,
             follow_symlinks: app.config.loader.follow_symlinks,
             quick_keywords_input: app.settings_quick_keywords_input.clone(),
             jstack_filter_rules: app.config.log_display.jstack_thread_filter_rules.clone(),
@@ -2087,6 +2091,12 @@ fn render_log_loading_section(
             archive_depth_control(snapshot.max_archive_depth, app_handle, theme),
             theme,
         ))
+        .child(setting_row_with_note(
+            "最大日志大小",
+            "压缩包内单个日志解压后超过该大小时跳过并提示，同时决定 RAR 大成员解码的磁盘暂存上限。",
+            max_log_size_control(snapshot.max_log_size_mb, app_handle, theme),
+            theme,
+        ))
         .child(setting_row(
             "符号链接策略",
             follow_symlink_control(snapshot.follow_symlinks, app_handle, theme),
@@ -2303,6 +2313,86 @@ fn archive_depth_control(
             theme,
             move |_, _, cx| {
                 update_settings_app(&plus_app, cx, |app, _| app.adjust_max_archive_depth(1));
+            },
+        ))
+}
+
+/// 渲染带说明文字的设置行；说明用于解释限制的影响范围。
+fn setting_row_with_note(
+    label: &'static str,
+    note: &'static str,
+    control: impl IntoElement,
+    theme: &AppTheme,
+) -> impl IntoElement {
+    div()
+        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+        .px_3()
+        .py_2()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .rounded_sm()
+        .bg(rgb(theme.current_line))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(theme.foreground))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.foreground_muted))
+                        .child(note),
+                ),
+        )
+        .child(control)
+}
+
+/// 渲染最大日志大小步进控件；按 2 倍档位调整，避免逐 MiB 点击。
+fn max_log_size_control(
+    max_log_size_mb: u64,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> impl IntoElement + use<> {
+    let minus_app = app_handle.clone();
+    let plus_app = app_handle.clone();
+
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(render_icon_button(
+            "settings-max-log-size-minus",
+            ArgusIcon::Minus,
+            "减小最大日志大小",
+            false,
+            IconButtonSize::Small,
+            theme,
+            move |_, _, cx| {
+                update_settings_app(&minus_app, cx, |app, _| app.decrease_max_log_size());
+            },
+        ))
+        .child(value_badge(
+            format_bytes(max_log_size_mb.saturating_mul(1024 * 1024)),
+            theme,
+        ))
+        .child(render_icon_button(
+            "settings-max-log-size-plus",
+            ArgusIcon::Plus,
+            "增大最大日志大小",
+            false,
+            IconButtonSize::Small,
+            theme,
+            move |_, _, cx| {
+                update_settings_app(&plus_app, cx, |app, _| app.increase_max_log_size());
             },
         ))
 }

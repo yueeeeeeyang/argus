@@ -1,6 +1,6 @@
 //! 文件职责：实现 TAR 归档条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-12
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：打开普通 TAR、枚举条目元信息，并按条目读取或流式输出日志内容。
 
@@ -90,9 +90,11 @@ where
             continue;
         }
 
+        let is_dir = entry.header().entry_type().is_dir();
         entries.push(ArchiveEntryInfo {
             path: entry_path,
-            is_dir: entry.header().entry_type().is_dir(),
+            is_dir,
+            unpacked_size: (!is_dir).then(|| entry.size()),
         });
     }
 

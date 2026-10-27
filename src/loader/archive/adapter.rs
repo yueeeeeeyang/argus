@@ -1,12 +1,14 @@
 //! 文件职责：定义压缩包统一适配器抽象。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-14
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：为 ZIP、TAR、压缩 TAR、7Z 和 RAR 等格式提供统一识别、枚举、单条读取、会话式读取和能力声明模型。
 
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 
 use crate::loader::archive::detector::ArchiveFormat;
 
@@ -17,6 +19,8 @@ pub(crate) struct ArchiveEntryInfo {
     pub path: String,
     /// 是否为目录条目。
     pub is_dir: bool,
+    /// 解压后的大小（字节）；格式无法在包头给出时为 `None`，此时只能解压后校验。
+    pub unpacked_size: Option<u64>,
 }
 
 /// 压缩格式能力声明，供 UI、加载器和后续格式扩展判断可用能力。
@@ -40,6 +44,43 @@ pub(crate) struct ArchiveCapabilities {
 
 /// 压缩包条目流式输出回调；适配器每读取到一段解压后字节就调用一次。
 pub(crate) type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
+
+/// 标记“单个条目无法解码、可以跳过该条目继续加载”的错误。
+///
+/// 说明：只有适配器能明确区分条目级解码失败（数据损坏、解码资源上限）与目标
+/// 文件写入失败时才使用该标记。调用方据此把该条目降级为警告，既避免一个坏条目
+/// 让整次加载失败，也不会把磁盘写满之类的问题掩盖成警告。
+#[derive(Debug)]
+pub(crate) struct SkippableEntryError {
+    /// 真实解码失败原因。
+    source: anyhow::Error,
+}
+
+impl SkippableEntryError {
+    /// 把条目级解码失败包装为可跳过错误。
+    pub(crate) fn new(source: anyhow::Error) -> Self {
+        Self { source }
+    }
+}
+
+impl std::fmt::Display for SkippableEntryError {
+    /// 直接输出下层失败原因，保留用户在提示里看到的细节。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)
+    }
+}
+
+impl std::error::Error for SkippableEntryError {
+    /// 保留下层错误链，便于用 `{:#}` 输出完整原因。
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// 判断错误是否为“可跳过条目”的标记错误。
+pub(crate) fn is_skippable_entry_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SkippableEntryError>().is_some()
+}
 
 /// 一次打开压缩包后的会话式条目读取。
 ///
@@ -106,6 +147,32 @@ pub(crate) trait ArchiveAdapter: Sync {
     ) -> Result<()> {
         let bytes = self.read_entry_bytes(path, entry_path, password)?;
         consumer(&bytes)
+    }
+
+    /// 把指定条目直接流式写入目标文件。
+    ///
+    /// 默认实现先创建目标文件，再通过 [`ArchiveAdapter::stream_entry`] 顺序追加。
+    /// 支持大压缩比或带过滤器的格式（如 RAR5）应覆盖本方法，让解码库直接写文件，
+    /// 避免整个条目驻留内存。
+    fn extract_entry_to_path(
+        &self,
+        path: &Path,
+        entry_path: &str,
+        password: Option<&str>,
+        target: &Path,
+        max_log_bytes: u64,
+    ) -> Result<()> {
+        let mut file = File::create(target)
+            .with_context(|| format!("无法创建物化文件：{}", target.display()))?;
+        let mut written = 0_u64;
+        self.stream_entry(path, entry_path, password, &mut |chunk| {
+            written = written.saturating_add(chunk.len() as u64);
+            if written > max_log_bytes {
+                bail!("解压后超过最大日志大小 {max_log_bytes} 字节");
+            }
+            file.write_all(chunk)?;
+            Ok(())
+        })
     }
 
     /// 打开压缩包建立会话式读取；返回 `None` 时调用方回退逐条目打开的旧路径。

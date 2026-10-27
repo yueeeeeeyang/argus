@@ -1,6 +1,6 @@
 //! 文件职责：维护自定义日志来源选择器的应用状态与业务动作。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：替代系统文件选择器，提供跨平台目录浏览、多选和确认加载流程。
 
@@ -392,6 +392,7 @@ impl ArgusApp {
         self.source_picker.selected_paths.clear();
         self.is_source_loading = true;
         self.source_load_progress = Some(SourceTreeScanProgress::default());
+        self.source_load_notice = None;
         // 立即卸载旧日志工作区：新来源加载期间界面进入加载状态，
         // 而不是继续展示即将被替换的过期来源树和日志内容。
         self.source_registry = SourceRegistry::new();

@@ -1,6 +1,6 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：提供 AI、外观、日志加载、日志搜索、链接和编码设置的默认值及 TOML 模型。
 
@@ -106,6 +106,7 @@ impl AppConfig {
         self.appearance.log_content_font_size =
             self.appearance.log_content_font_size.clamp(12.0, 20.0);
         self.loader.max_archive_depth = self.loader.max_archive_depth.min(8);
+        self.loader.max_log_size_mb = normalize_max_log_size_mb(self.loader.max_log_size_mb);
         self.log_search.quick_keywords = self.log_search.quick_keywords.trim().to_string();
         self.log_search
             .recent_keywords
@@ -177,6 +178,33 @@ pub(crate) struct LoaderConfig {
     pub max_archive_depth: usize,
     /// 是否跟随符号链接；默认关闭以避免大目录扫描时出现循环。
     pub follow_symlinks: bool,
+    /// 单个日志大小上限（MiB）；压缩包内解压后超过该大小的日志会被跳过并提示。
+    #[serde(default = "default_max_log_size_mb")]
+    pub max_log_size_mb: u64,
+}
+
+/// 单个日志大小上限的默认值（MiB），即 10 GiB。
+pub(crate) const MAX_LOG_SIZE_MB_DEFAULT: u64 = 10 * 1024;
+/// 单个日志大小上限的可配置下限（MiB）。
+pub(crate) const MAX_LOG_SIZE_MB_MIN: u64 = 128;
+/// 单个日志大小上限的可配置上限（MiB）。
+pub(crate) const MAX_LOG_SIZE_MB_MAX: u64 = 64 * 1024;
+
+/// 返回最大日志大小的默认值，兼容没有该字段的旧配置文件。
+fn default_max_log_size_mb() -> u64 {
+    MAX_LOG_SIZE_MB_DEFAULT
+}
+
+/// 返回归一化后的最大日志大小（MiB），越界配置按上下限收敛。
+pub(crate) fn normalize_max_log_size_mb(value: u64) -> u64 {
+    value.clamp(MAX_LOG_SIZE_MB_MIN, MAX_LOG_SIZE_MB_MAX)
+}
+
+impl LoaderConfig {
+    /// 返回单个日志大小上限的字节数；同时决定 RAR 大成员解码的磁盘暂存配额。
+    pub(crate) fn max_log_size_bytes(&self) -> u64 {
+        normalize_max_log_size_mb(self.max_log_size_mb).saturating_mul(1024 * 1024)
+    }
 }
 
 impl Default for LoaderConfig {
@@ -185,6 +213,7 @@ impl Default for LoaderConfig {
         Self {
             max_archive_depth: 2,
             follow_symlinks: false,
+            max_log_size_mb: MAX_LOG_SIZE_MB_DEFAULT,
         }
     }
 }
@@ -354,6 +383,7 @@ mod tests {
             loader: LoaderConfig {
                 max_archive_depth: 99,
                 follow_symlinks: true,
+                max_log_size_mb: 8192,
             },
             log_search: LogSearchConfig {
                 quick_keywords: " ERROR, WARN ".to_string(),
@@ -375,6 +405,8 @@ mod tests {
         assert_eq!(config.appearance.log_content_font_size, 20.0);
         assert_eq!(config.appearance.theme_mode, "light.toml");
         assert_eq!(config.loader.max_archive_depth, 8);
+        assert_eq!(config.loader.max_log_size_mb, 8192, "范围内配置应原样保留");
+        assert_eq!(config.loader.max_log_size_bytes(), 8192 * 1024 * 1024);
         assert_eq!(config.log_search.quick_keywords, "ERROR, WARN");
         let rules = &config.log_display.jstack_thread_filter_rules;
         assert_eq!(rules.len(), 4);
@@ -392,6 +424,46 @@ mod tests {
         assert!(config.log_display.jstack_thread_name_filters.is_empty());
         assert!(config.log_display.jstack_stack_segment_filters.is_empty());
         assert_eq!(config.encoding.selected, "UTF-8");
+    }
+
+    /// 验证旧配置文件缺少最大日志大小时回落到默认值。
+    #[test]
+    fn missing_max_log_size_uses_default_when_deserializing() {
+        let loader: LoaderConfig =
+            toml::from_str("max_archive_depth = 2\nfollow_symlinks = false\n")
+                .expect("应能解析缺少最大日志大小的配置");
+        assert_eq!(loader.max_log_size_mb, MAX_LOG_SIZE_MB_DEFAULT);
+    }
+
+    /// 验证最大日志大小越界配置会收敛到可配置范围。
+    #[test]
+    fn max_log_size_is_clamped_to_supported_range() {
+        let too_small = AppConfig {
+            loader: LoaderConfig {
+                max_log_size_mb: 1,
+                ..LoaderConfig::default()
+            },
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(too_small.loader.max_log_size_mb, MAX_LOG_SIZE_MB_MIN);
+
+        let too_large = AppConfig {
+            loader: LoaderConfig {
+                max_log_size_mb: u64::MAX,
+                ..LoaderConfig::default()
+            },
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(too_large.loader.max_log_size_mb, MAX_LOG_SIZE_MB_MAX);
+
+        let default = LoaderConfig::default();
+        assert_eq!(default.max_log_size_mb, MAX_LOG_SIZE_MB_DEFAULT);
+        assert_eq!(
+            default.max_log_size_bytes(),
+            MAX_LOG_SIZE_MB_DEFAULT * 1024 * 1024
+        );
     }
 
     /// 验证新安装用户默认使用设计文档要求的 12px 日志字号。
