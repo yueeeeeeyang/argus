@@ -51,7 +51,10 @@ impl ArgusApp {
             self.placeholder_notice = "未找到可操作的来源节点".to_string();
             return;
         };
-        if !self.source_supports_any_analysis_context_menu(source_id) {
+        // 普通文件即使不是分析候选也支持“另存为”，因此两种可用性取并集。
+        if !self.source_supports_any_analysis_context_menu(source_id)
+            && !self.source_is_exportable_file(source_id)
+        {
             self.placeholder_notice = format!("{} 不是可分析的日志候选", source.label);
             return;
         }
@@ -127,6 +130,13 @@ impl ArgusApp {
             ],
             ActiveMenuKind::SourceTree { source_id } => {
                 let mut entries = Vec::new();
+                // 另存为对任意普通文件可用，因此排在分析类入口之前，且不依赖分析候选判定。
+                if self.source_is_exportable_file(source_id) {
+                    entries.push(MenuEntry::new(
+                        "另存为…",
+                        MenuAction::SaveSourceAs { source_id },
+                    ));
+                }
                 if self.source_supports_jstack_analysis(source_id) {
                     entries.push(MenuEntry::new(
                         "Jstack线程日志分析",
@@ -271,6 +281,9 @@ impl ArgusApp {
             MenuAction::CloseAllTabs => self.close_all_tabs(),
             MenuAction::ExpandAllSearchResults => self.expand_all_search_result_groups(),
             MenuAction::CollapseAllSearchResults => self.collapse_all_search_result_groups(),
+            MenuAction::SaveSourceAs { .. } => {
+                self.placeholder_notice = "另存为需要从来源树右键菜单触发".to_string();
+            }
             MenuAction::OpenJstackAnalysis { .. } => {
                 self.placeholder_notice = "Jstack 分析需要从界面菜单触发".to_string();
             }
@@ -343,6 +356,10 @@ impl ArgusApp {
             }
             MenuAction::CloseAllTabs => {
                 self.close_all_tabs_with_context(cx);
+                self.close_active_menu();
+            }
+            MenuAction::SaveSourceAs { source_id } => {
+                self.save_source_as(source_id, cx);
                 self.close_active_menu();
             }
             MenuAction::OpenJstackAnalysis { source_id } => {

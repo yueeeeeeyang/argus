@@ -20,7 +20,9 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, slice_character_range, word_range_at,
 };
 
-use super::types::{RuntimeDateTimePart, RuntimeFilterInputKind, TextInputState};
+use super::types::{
+    RuntimeDateTimePart, RuntimeFilterInputKind, RuntimePickerTimeEdit, TextInputState,
+};
 
 /// Runtime 分析任务状态，供内容区页签展示加载、结果或失败。
 #[derive(Clone, Debug)]
@@ -286,6 +288,10 @@ pub(crate) struct RuntimeAnalysisState {
     pub is_filter_computing: bool,
     /// 当前展开的时间选择器输入框；为空表示没有打开时间面板。
     pub open_time_picker: Option<RuntimeFilterInputKind>,
+    /// 过滤栏开始/结束时间输入框在视图内的横向偏移（渲染层实测）；用于浮层对齐输入框。
+    pub time_input_offsets: Option<(f32, f32)>,
+    /// 当前正在直接键入数字的时间字段；为空表示未进入时分秒字段编辑。
+    pub picker_time_edit: Option<RuntimePickerTimeEdit>,
     /// 当前 Runtime 表格单元格中的文本选区。
     pub cell_selection: Option<RuntimeTableCellSelection>,
     /// 当前 Runtime 表格单元格拖拽状态。
@@ -573,13 +579,14 @@ pub(super) fn selected_runtime_sql_text_from_lines(
     (!selected.is_empty()).then_some(selected)
 }
 
-/// 清理 Runtime 分析页所有过滤输入框焦点态。
+/// 清理 Runtime 分析页所有过滤输入框焦点态与时间选择器编辑态。
 pub(super) fn clear_runtime_filter_inputs_focus(state: &mut RuntimeAnalysisState) {
     clear_runtime_filter_input_focus(&mut state.filter_keyword_input);
     clear_runtime_filter_input_focus(&mut state.filter_username_input);
     clear_runtime_filter_input_focus(&mut state.filter_start_time_input);
     clear_runtime_filter_input_focus(&mut state.filter_end_time_input);
     state.open_time_picker = None;
+    state.picker_time_edit = None;
 }
 
 /// 从 Runtime 过滤输入框状态生成原始输入快照。

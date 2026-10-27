@@ -1,12 +1,109 @@
 //! 文件职责：提取来源树选择、展开折叠、完整加载回填和按节点密码重试等方法到独立子模块。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-09-07
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
-//! 主要功能：维护来源树语义状态、整树替换式加载回填、加密压缩包子树重试，并通知助手真实来源内容版本变化。
+//! 主要功能：维护来源树语义状态、整树替换式加载回填、加密压缩包子树重试、单文件另存为，并通知助手真实来源内容版本变化。
 
 use super::*;
+use gpui::{PathPromptOptions, SharedString};
 
 impl ArgusApp {
+    /// 判断来源节点是否是可直接另存为的单个文件。
+    ///
+    /// 说明：物化后所有来源都是工作目录中的普通文件，目录、加密占位与不支持的节点都不具备
+    /// 单文件语义，因此只有 `LogFile` 且确实指向普通文件时才允许另存。
+    pub(super) fn source_is_exportable_file(&self, source_id: SourceId) -> bool {
+        self.source_registry.node(source_id).is_some_and(|node| {
+            node.kind.is_log_candidate()
+                && matches!(&node.location, SourceLocation::LocalPath(path) if path.is_file())
+        })
+    }
+
+    /// 打开目标目录选择器，把选中的来源文件另存到该目录。
+    ///
+    /// 参数说明：
+    /// - `source_id`：来源树中被右键的文件节点 ID。
+    /// - `cx`：主应用上下文，用于在后台执行复制并把结果写回界面。
+    ///
+    /// 返回值：无；节点不是单个文件时只更新提示，不做任何文件操作。
+    pub(crate) fn save_source_as(&mut self, source_id: SourceId, cx: &mut Context<Self>) {
+        let Some(node) = self.source_registry.node(source_id) else {
+            self.placeholder_notice = "未找到可另存的来源节点".to_string();
+            return;
+        };
+        if !self.source_is_exportable_file(source_id) {
+            self.placeholder_notice = format!("{} 不是可另存的单个文件", node.label);
+            return;
+        }
+        // 物化后来源位置只有本地路径这一种形态，无需再做分支处理。
+        let SourceLocation::LocalPath(source_path) = node.location.clone();
+        let label = node.label.clone();
+
+        let receiver = {
+            let app_context: &gpui::App = (*cx).borrow();
+            app_context.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some(SharedString::from("选择另存为的目标目录")),
+            })
+        };
+        cx.spawn(async move |view, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(target_dir) = paths.into_iter().next() else {
+                return;
+            };
+            view.update(cx, |app, cx| {
+                app.start_source_export(source_path, target_dir, label, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 在后台把来源文件复制到目标目录，并在完成后报告实际写入位置。
+    pub(super) fn start_source_export(
+        &mut self,
+        source_path: std::path::PathBuf,
+        target_dir: std::path::PathBuf,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder_notice = format!("正在另存 {label}...");
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::loader::export_source_file(&source_path, &target_dir)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await;
+
+            view.update(cx, |app, cx| {
+                app.placeholder_notice = match result {
+                    Ok(outcome) => {
+                        let size = crate::utils::size_format::format_bytes(outcome.copied_bytes);
+                        if outcome.used_fallback_name {
+                            format!(
+                                "已另存为 {}（目标目录存在同名文件，已自动改用新文件名，{size}）",
+                                outcome.target_path.display()
+                            )
+                        } else {
+                            format!("已另存为 {}（{size}）", outcome.target_path.display())
+                        }
+                    }
+                    Err(error) => format!("另存 {label} 失败：{error}"),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// 判断来源节点是否至少支持一种右键分析动作。
     pub(super) fn source_supports_any_analysis_context_menu(&self, source_id: SourceId) -> bool {
         self.source_supports_jstack_analysis(source_id)
@@ -350,9 +447,10 @@ impl ArgusApp {
         true
     }
 
-    /// 单文件来源没有目录层级：左侧目录树默认收起，直接打开该文件并触发后台读取，
-    /// 不再要求二次点击。
-    fn apply_single_file_load_defaults(&mut self, cx: &mut Context<Self>) {
+    /// 应用来源加载后的侧栏默认状态：单文件来源没有目录层级，收起左侧目录树并直接打开
+    /// 该文件并触发后台读取，不再要求二次点击；多文件或目录来源则展开目录树，
+    /// 避免上一次单文件加载留下的收起状态让用户看不到新加载的来源。
+    fn apply_source_load_panel_defaults(&mut self, cx: &mut Context<Self>) {
         let root_ids = self.source_registry.root_ids();
         let single_file_root = if root_ids.len() == 1 {
             root_ids.first().copied()
@@ -365,6 +463,10 @@ impl ArgusApp {
                 .is_some_and(|node| matches!(node.kind, SourceKind::LogFile))
         });
         let Some(root_id) = single_file_root else {
+            if self.is_source_panel_collapsed {
+                self.is_source_panel_collapsed = false;
+                self.sync_source_panel_animation_to_current_width();
+            }
             return;
         };
         if !self.is_source_panel_collapsed {
@@ -397,7 +499,7 @@ impl ArgusApp {
                 // 物化警告并入加载报告，让用户在完成提示中看到跳过和降级项。
                 scan_result.warnings.append(&mut workspace.warnings);
                 if self.apply_load_report(scan_result) {
-                    self.apply_single_file_load_defaults(cx);
+                    self.apply_source_load_panel_defaults(cx);
                     self.placeholder_notice = format!(
                         "{}，已物化 {} 个文件到工作目录",
                         self.placeholder_notice, workspace.materialized_files

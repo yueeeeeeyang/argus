@@ -173,6 +173,7 @@ pub(crate) fn render_request_details_topbar(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
     div()
+        .debug_selector(|| "runtime-request-details-topbar".to_string())
         .px(px(RUNTIME_VIEW_PADDING))
         .py_2()
         .flex()
@@ -183,10 +184,13 @@ pub(crate) fn render_request_details_topbar(
         .border_color(rgb(theme.border))
         .child(
             div()
+                .debug_selector(|| "runtime-request-details-info".to_string())
+                .flex_1()
                 .flex()
                 .items_center()
                 .gap_2()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(render_back_button(
                     "runtime-request-back-summary",
                     "总览",
@@ -198,7 +202,9 @@ pub(crate) fn render_request_details_topbar(
                 ))
                 .child(
                     div()
+                        .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
                         .child(
@@ -212,6 +218,8 @@ pub(crate) fn render_request_details_topbar(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(rgb(theme.foreground))
+                                // 单行截断：统计文案换行会把顶部栏撑高并挤掉下方明细表。
+                                .truncate()
                                 .child(format!(
                                     "{} 次请求，平均耗时 {}，慢 SQL 比例 {}",
                                     summary.request_count,
@@ -364,6 +372,7 @@ pub(crate) fn render_sql_topbar(
 ) -> impl IntoElement + use<> {
     let request_path_for_back = request_path.to_string();
     div()
+        .debug_selector(|| "runtime-sql-details-topbar".to_string())
         .px(px(RUNTIME_VIEW_PADDING))
         .py_2()
         .flex()
@@ -374,10 +383,12 @@ pub(crate) fn render_sql_topbar(
         .border_color(rgb(theme.border))
         .child(
             div()
+                .flex_1()
                 .flex()
                 .items_center()
                 .gap_2()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(render_back_button(
                     "runtime-sql-back-details",
                     "详情",
@@ -392,7 +403,9 @@ pub(crate) fn render_sql_topbar(
                 ))
                 .child(
                     div()
+                        .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
                         .child(
@@ -406,6 +419,8 @@ pub(crate) fn render_sql_topbar(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(rgb(theme.foreground))
+                                // 单行截断：统计文案换行会把顶部栏撑高并挤掉下方明细表。
+                                .truncate()
                                 .child(format!(
                                     "{} · {} · 请求耗时 {} · SQL 累积耗时 {} · 共执行 {} 个 SQL",
                                     request.request_time_label,

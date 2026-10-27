@@ -1,6 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-16
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -8,6 +8,7 @@ use super::*;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::analysis::runtime::{build_runtime_analysis_result, parse_runtime_request_text};
 use crate::config::JstackThreadFilterRuleKind;
 use crate::config::paths::{isolated_test_dir, temporary_test_dir};
 use crate::remote::connection::ConnectionLinkKind;
@@ -44,17 +45,49 @@ fn add_test_ssh_link(app: &mut ArgusApp) -> ConnectionNodeId {
 
 /// 插入不连接真实服务器的终端会话。
 fn insert_test_terminal_session(app: &mut ArgusApp, session_id: usize, link_id: ConnectionNodeId) {
+    let _receiver = insert_test_terminal_session_with_commands(app, session_id, link_id);
+}
+
+/// 插入不连接真实服务器的终端会话，并返回命令接收端。
+fn insert_test_terminal_session_with_commands(
+    app: &mut ArgusApp,
+    session_id: usize,
+    link_id: ConnectionNodeId,
+) -> std::sync::mpsc::Receiver<crate::remote::terminal::TerminalCommand> {
     let link = app
         .config
         .connections
         .link(link_id)
         .expect("应存在测试链接")
         .clone();
-    let (sender, _) = std::sync::mpsc::channel();
+    let (sender, receiver) = std::sync::mpsc::channel();
     let mut session =
         crate::remote::terminal::TerminalSessionState::connecting(session_id, &link, sender);
     session.status = crate::remote::terminal::TerminalStatus::Connected;
     app.terminal_sessions.insert(session_id, session);
+    receiver
+}
+
+/// 取出终端命令接收端内的全部输入字节，忽略其它命令。
+fn drain_terminal_input(
+    receiver: &std::sync::mpsc::Receiver<crate::remote::terminal::TerminalCommand>,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    while let Ok(command) = receiver.try_recv() {
+        if let crate::remote::terminal::TerminalCommand::Input(input) = command {
+            bytes.extend(input);
+        }
+    }
+    bytes
+}
+
+/// 构造终端按键测试输入。
+fn terminal_keystroke(key: &str, key_char: Option<&str>, modifiers: gpui::Modifiers) -> Keystroke {
+    Keystroke {
+        key: key.to_string(),
+        modifiers,
+        key_char: key_char.map(ToString::to_string),
+    }
 }
 
 /// 插入不连接真实服务器的 SFTP 会话，并返回命令接收端。
@@ -248,6 +281,173 @@ fn source_tree_context_menu_shows_analysis_actions_for_supported_sources() {
         app.active_menu_entries()[1].action,
         MenuAction::OpenRuntimeAnalysis { source_id } if source_id == logs_dir_id
     ));
+}
+
+/// 构造只含一个真实本地文件节点的来源树，供另存为相关用例复用。
+///
+/// 另有断言依赖文件真实存在，因此这里必须写入磁盘而不是使用占位路径。
+fn app_with_real_source_file(scope: &str) -> (ArgusApp, PathBuf, SourceId) {
+    let path = crate::config::paths::isolated_test_file_path(scope, "app.log");
+    std::fs::write(&path, b"line one\nline two\n").expect("应能写入测试来源文件");
+
+    let mut app = test_app();
+    let mut registry = SourceRegistry::new();
+    let file_id = registry.allocate_id();
+    registry.insert_node(SourceTreeNode {
+        id: file_id,
+        parent_id: None,
+        depth: 0,
+        label: "app.log".to_string(),
+        kind: SourceKind::LogFile,
+        location: SourceLocation::LocalPath(path.clone()),
+        metadata: SourceMetadata {
+            size: Some(18),
+            children_loaded: true,
+            is_loading: false,
+            message: None,
+        },
+        selected: false,
+        expanded: false,
+    });
+    registry.rebuild_all_indices();
+    app.source_registry = registry;
+    (app, path, file_id)
+}
+
+/// 验证单个文件的右键菜单首项是另存为。
+///
+/// 说明：物化后的普通文件同时是 Runtime 分析候选，因此菜单会同时出现分析入口；
+/// 这里断言的是另存为排在首位且绑定到被右键的节点。
+#[test]
+fn source_tree_context_menu_offers_save_as_for_single_file() {
+    let (mut app, _path, file_id) = app_with_real_source_file("menu-save-as-file");
+
+    app.open_source_tree_context_menu(file_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+
+    let entries = app.active_menu_entries();
+    assert!(
+        matches!(
+            app.active_menu.as_ref().map(|menu| &menu.kind),
+            Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == file_id
+        ),
+        "单个文件必须能打开来源树菜单"
+    );
+    assert_eq!(entries[0].label, "另存为…", "另存为应是首个菜单项");
+    assert!(matches!(
+        entries[0].action,
+        MenuAction::SaveSourceAs { source_id } if source_id == file_id
+    ));
+}
+
+/// 验证目录节点不提供另存为入口。
+#[test]
+fn source_tree_context_menu_omits_save_as_for_directory() {
+    let mut app = app_with_placeholder_sources();
+    let logs_dir_id = source_id_by_label(&app, "logs");
+
+    assert!(
+        !app.source_is_exportable_file(logs_dir_id),
+        "目录不具备单文件另存语义"
+    );
+
+    app.open_source_tree_context_menu(logs_dir_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+    assert!(
+        app.active_menu_entries()
+            .iter()
+            .all(|entry| !matches!(entry.action, MenuAction::SaveSourceAs { .. })),
+        "目录菜单不应出现另存为"
+    );
+}
+
+/// 验证只有真实存在的普通文件才被判定为可另存。
+#[test]
+fn source_is_exportable_file_requires_existing_regular_file() {
+    let app = app_with_placeholder_sources();
+    let missing_id = source_id_by_label(&app, "app.log");
+    assert!(
+        !app.source_is_exportable_file(missing_id),
+        "占位路径指向的文件不存在时不得提供另存为入口"
+    );
+
+    let (real_app, _path, real_file_id) = app_with_real_source_file("menu-save-as-exists");
+    assert!(
+        real_app.source_is_exportable_file(real_file_id),
+        "真实存在的普通文件必须可另存"
+    );
+}
+
+/// 验证另存为动作会把文件写入目标目录，并在完成后如实报告结果。
+#[gpui::test]
+fn save_source_as_writes_file_and_reports_result(cx: &mut gpui::TestAppContext) {
+    let source_dir = isolated_test_dir("save-as-source");
+    let target_dir = isolated_test_dir("save-as-target");
+    std::fs::create_dir_all(&source_dir).expect("应能创建来源目录");
+    std::fs::create_dir_all(&target_dir).expect("应能创建目标目录");
+    let source_path = source_dir.join("app.log");
+    std::fs::write(&source_path, b"payload\n").expect("应能写入来源文件");
+
+    let app = cx.new(|_| test_app());
+    app.update(cx, |app, app_cx| {
+        app.start_source_export(
+            source_path.clone(),
+            target_dir.clone(),
+            "app.log".to_string(),
+            app_cx,
+        );
+        assert!(
+            app.placeholder_notice.contains("正在另存"),
+            "导出开始时应提示正在进行：{}",
+            app.placeholder_notice
+        );
+    });
+
+    cx.run_until_parked();
+
+    app.update(cx, |app, _app_cx| {
+        assert_eq!(
+            std::fs::read(target_dir.join("app.log")).expect("目标文件应已写出"),
+            b"payload\n"
+        );
+        assert!(
+            app.placeholder_notice.contains("已另存为"),
+            "导出完成后应报告实际写入位置：{}",
+            app.placeholder_notice
+        );
+        assert!(
+            app.placeholder_notice.contains("app.log"),
+            "提示应包含目标文件名：{}",
+            app.placeholder_notice
+        );
+    });
+}
+
+/// 验证另存为失败时会如实报告错误，而不是静默失败。
+#[gpui::test]
+fn save_source_as_reports_failure_for_missing_target_directory(cx: &mut gpui::TestAppContext) {
+    let source_dir = isolated_test_dir("save-as-missing-target");
+    std::fs::create_dir_all(&source_dir).expect("应能创建来源目录");
+    let source_path = source_dir.join("app.log");
+    std::fs::write(&source_path, b"payload").expect("应能写入来源文件");
+
+    let app = cx.new(|_| test_app());
+    app.update(cx, |app, app_cx| {
+        app.start_source_export(
+            source_path.clone(),
+            source_dir.join("does-not-exist"),
+            "app.log".to_string(),
+            app_cx,
+        );
+    });
+
+    cx.run_until_parked();
+
+    app.update(cx, |app, _app_cx| {
+        assert!(
+            app.placeholder_notice.contains("失败"),
+            "目标目录不存在时必须报告失败：{}",
+            app.placeholder_notice
+        );
+    });
 }
 
 /// 验证 SSH 终端正文右键菜单展示粘贴和文件管理入口。
@@ -1567,6 +1767,733 @@ fn closing_runtime_time_picker_clears_open_panel() {
     );
 }
 
+/// 构造时间选择器字段测试用数字按键，`key_char` 与 key 一致，覆盖真实键盘的数字直接输入。
+fn picker_time_digit_keystroke(digit: &str) -> Keystroke {
+    Keystroke {
+        key: digit.to_string(),
+        modifiers: gpui::Modifiers::default(),
+        key_char: Some(digit.to_string()),
+    }
+}
+
+/// 构造时间选择器字段测试用命名按键（方向键、回车等），此类按键没有字符输入。
+fn picker_time_named_keystroke(key: &str) -> Keystroke {
+    Keystroke {
+        key: key.to_string(),
+        modifiers: gpui::Modifiers::default(),
+        key_char: None,
+    }
+}
+
+/// 验证时间选择器时分秒字段支持直接键入数字：一位即时提交、两位夹取并自动推进，
+/// 方向键等价步进、退格只清草稿、回车结束字段编辑。
+#[test]
+fn runtime_time_picker_time_fields_accept_direct_digit_input() {
+    let mut app = app_with_placeholder_sources();
+    let app_log_id = source_id_by_label(&app, "app.log");
+    let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+    let (analysis_id, _) = app
+        .create_runtime_analysis_tab_state(targets)
+        .expect("应能创建 Runtime 分析 tab");
+    app.runtime_analysis_state_mut(analysis_id)
+        .expect("应存在 Runtime 分析状态")
+        .filter_start_time_input
+        .value = "2026-06-25 14:25:03".to_string();
+    app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::StartTime);
+    app.begin_runtime_picker_time_edit(analysis_id, RuntimeDateTimePart::Hour);
+
+    // 一位数字按原值提交；字段编辑期间过滤输入框不再显示光标。
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("8"), None);
+    let state = app
+        .runtime_analysis_state(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    assert_eq!(state.filter_start_time_input.value, "2026-06-25 08:25:03");
+    assert!(!state.filter_start_time_input.is_focused);
+    assert_eq!(
+        state
+            .picker_time_edit
+            .as_ref()
+            .map(|edit| (edit.part, edit.digits.as_str())),
+        Some((RuntimeDateTimePart::Hour, "8"))
+    );
+
+    // 两位数字按字段上限夹取，并自动跳到分钟字段。
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("5"), None);
+    let state = app
+        .runtime_analysis_state(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    assert_eq!(state.filter_start_time_input.value, "2026-06-25 23:25:03");
+    assert_eq!(
+        state
+            .picker_time_edit
+            .as_ref()
+            .map(|edit| (edit.part, edit.digits.as_str())),
+        Some((RuntimeDateTimePart::Minute, ""))
+    );
+
+    // 分钟继续键入两位数字后自动跳到秒字段。
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("4"), None);
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("5"), None);
+    let state = app
+        .runtime_analysis_state(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    assert_eq!(state.filter_start_time_input.value, "2026-06-25 23:45:03");
+    assert_eq!(
+        state.picker_time_edit.as_ref().map(|edit| edit.part),
+        Some(RuntimeDateTimePart::Second)
+    );
+
+    // 秒字段两位数字输入完成后仍停留在秒字段，重新开始新的数字草稿；超出上限按 59 夹取。
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("7"), None);
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("2"), None);
+    let state = app
+        .runtime_analysis_state(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    assert_eq!(state.filter_start_time_input.value, "2026-06-25 23:45:59");
+    assert_eq!(
+        state
+            .picker_time_edit
+            .as_ref()
+            .map(|edit| (edit.part, edit.digits.as_str())),
+        Some((RuntimeDateTimePart::Second, ""))
+    );
+
+    // 退格只清除数字草稿，不改动已提交的数值。
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("7"), None);
+    app.handle_runtime_picker_time_key(
+        analysis_id,
+        &picker_time_named_keystroke("backspace"),
+        None,
+    );
+    let state = app
+        .runtime_analysis_state(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    assert_eq!(state.filter_start_time_input.value, "2026-06-25 23:45:07");
+    assert_eq!(
+        state
+            .picker_time_edit
+            .as_ref()
+            .map(|edit| edit.digits.as_str()),
+        Some("")
+    );
+
+    // 上方向键等价于点击 + 按钮，并保持草稿为空。
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_named_keystroke("arrowup"), None);
+    let state = app
+        .runtime_analysis_state(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    assert_eq!(state.filter_start_time_input.value, "2026-06-25 23:45:08");
+
+    // 回车结束字段编辑，后续数字键不再改写过滤值。
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_named_keystroke("enter"), None);
+    let state = app
+        .runtime_analysis_state(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    assert!(state.picker_time_edit.is_none());
+    app.handle_runtime_picker_time_key(analysis_id, &picker_time_digit_keystroke("9"), None);
+    assert_eq!(
+        app.runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态")
+            .filter_start_time_input
+            .value,
+        "2026-06-25 23:45:08"
+    );
+}
+
+/// 验证切换或关闭时间选择器会清理字段直接输入状态，数字键不再改写过滤值。
+#[test]
+fn runtime_time_picker_switching_or_closing_clears_direct_input_state() {
+    let mut app = app_with_placeholder_sources();
+    let app_log_id = source_id_by_label(&app, "app.log");
+    let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+    let (analysis_id, _) = app
+        .create_runtime_analysis_tab_state(targets)
+        .expect("应能创建 Runtime 分析 tab");
+
+    app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::StartTime);
+    app.begin_runtime_picker_time_edit(analysis_id, RuntimeDateTimePart::Minute);
+    assert_eq!(
+        app.runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态")
+            .picker_time_edit
+            .as_ref()
+            .map(|edit| edit.part),
+        Some(RuntimeDateTimePart::Minute)
+    );
+
+    // 切换到结束时间选择器：上一个字段的直接输入状态应被清理。
+    app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::EndTime);
+    assert!(
+        app.runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态")
+            .picker_time_edit
+            .is_none()
+    );
+
+    // 关闭选择器：同样清理字段直接输入状态。
+    app.begin_runtime_picker_time_edit(analysis_id, RuntimeDateTimePart::Hour);
+    assert!(app.close_runtime_time_picker(analysis_id));
+    assert!(
+        app.runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态")
+            .picker_time_edit
+            .is_none()
+    );
+}
+
+/// 构造处于 Ready 状态的 Runtime 分析页，供日期时间选择器的真实渲染测试使用。
+fn runtime_analysis_ready_for_picker_test(app: &mut ArgusApp, start_time: &str) -> usize {
+    let app_log_id = source_id_by_label(app, "app.log");
+    let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
+    let (analysis_id, _) = app
+        .create_runtime_analysis_tab_state(targets)
+        .expect("应能创建 Runtime 分析 tab");
+    let mut request = parse_runtime_request_text(
+        SourceId(1),
+        "100&alice&_api_one&1000&0&0.log",
+        "/tmp/one.log",
+        "10 0 0 0 0 select * from users",
+    )
+    .expect("应能解析 Runtime 测试日志");
+    request.index = 0;
+    let result = build_runtime_analysis_result(vec![request], Vec::new(), 1, false);
+    let state = app
+        .runtime_analysis_state_mut(analysis_id)
+        .expect("应存在 Runtime 分析状态");
+    state.task_state = RuntimeAnalysisTaskState::Ready(Arc::new(result));
+    state.filter_start_time_input.value = start_time.to_string();
+    analysis_id
+}
+
+/// 验证点击时间选择器时分秒字段后浮层获得原生键盘焦点，直接键入数字即可改写时间过滤值。
+#[gpui::test]
+fn runtime_time_picker_field_click_accepts_keyboard_digits(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    let analysis_id = app.update(cx, |app, _| {
+        let analysis_id = runtime_analysis_ready_for_picker_test(app, "2026-06-25 14:25:03");
+        app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::StartTime);
+        analysis_id
+    });
+    // 再铺一帧，确保打开的时间选择器浮层进入最新渲染帧再读取字段边界。
+    cx.simulate_resize(gpui::size(gpui::px(1601.0), gpui::px(900.0)));
+
+    // 首个 Runtime 分析页 ID 固定为 1，与组件内的动态 debug 选择器一致（同 tab_bar 测试约定）。
+    let hour_field_bounds = cx
+        .debug_bounds("runtime-time-field-1-StartTime-Hour")
+        .expect("应渲染时间选择器小时字段");
+    cx.simulate_click(hour_field_bounds.center(), gpui::Modifiers::default());
+    cx.update(|window, app_cx| {
+        let focus_handle = app
+            .read(app_cx)
+            .input_focus_handles
+            .as_ref()
+            .expect("主窗口焦点句柄应已初始化")
+            .runtime_time_picker
+            .clone();
+        assert!(
+            focus_handle.is_focused(window),
+            "点击时分秒字段后浮层应获得原生键盘焦点"
+        );
+    });
+
+    cx.simulate_keystrokes("8");
+    app.update(cx, |app, _| {
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        assert_eq!(state.filter_start_time_input.value, "2026-06-25 08:25:03");
+        assert_eq!(
+            state.picker_time_edit.as_ref().map(|edit| edit.part),
+            Some(RuntimeDateTimePart::Hour)
+        );
+    });
+
+    // 回车结束字段编辑并把真实焦点交还时间过滤输入框。
+    cx.simulate_keystrokes("enter");
+    cx.update(|window, app_cx| {
+        let app_ref = app.read(app_cx);
+        assert!(
+            app_ref
+                .runtime_analysis_state(analysis_id)
+                .expect("应存在 Runtime 分析状态")
+                .picker_time_edit
+                .is_none(),
+            "回车应结束字段直接输入状态"
+        );
+        let filter_focus_handle = app_ref
+            .input_focus_handles
+            .as_ref()
+            .expect("主窗口焦点句柄应已初始化")
+            .runtime_filter_start_time
+            .clone();
+        assert!(
+            filter_focus_handle.is_focused(window),
+            "回车后焦点应交还时间过滤输入框"
+        );
+    });
+}
+
+/// 验证窗口变窄时过滤栏输入框按比例收缩，时间选择器浮层始终对齐对应输入框。
+///
+/// 回归背景：过滤栏输入框按固定宽度布局时，窗口过窄会把玻璃板右缘顶出窗口；
+/// 改为可收缩布局后，浮层必须跟随实测偏移而不是固定常量。
+#[gpui::test]
+fn runtime_time_picker_tracks_shrunken_filter_inputs(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    let analysis_id = app.update(cx, |app, _| {
+        let analysis_id = runtime_analysis_ready_for_picker_test(app, "2026-06-25 14:25:03");
+        app.open_runtime_time_picker(analysis_id, RuntimeFilterInputKind::StartTime);
+        analysis_id
+    });
+    // 连续铺三帧：窄窗口测量 → 回填实测偏移 → 浮层按实测偏移定位。
+    cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(800.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1001.0), gpui::px(800.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1002.0), gpui::px(800.0)));
+
+    let input_bounds = cx
+        .debug_bounds("runtime-filter-StartTime-input")
+        .expect("应渲染开始时间输入框");
+    let panel_bounds = cx
+        .debug_bounds("runtime-time-picker-panel")
+        .expect("应渲染时间选择器浮层");
+    let offset = f32::from(panel_bounds.left()) - f32::from(input_bounds.left());
+    assert!(
+        offset.abs() < 1.0,
+        "浮层应与开始时间输入框左对齐，实际偏移 {offset:.1}px"
+    );
+    app.update(cx, |app, _| {
+        assert!(
+            app.runtime_analysis_state(analysis_id)
+                .expect("应存在 Runtime 分析状态")
+                .time_input_offsets
+                .is_some(),
+            "窄窗口渲染后应回填实测输入框偏移"
+        );
+    });
+}
+
+/// 验证 Runtime 过滤状态单独占一行展示，不再与输入框挤在同一行被截断。
+#[gpui::test]
+fn runtime_filter_status_renders_on_its_own_row(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    app.update(cx, |app, _| {
+        let analysis_id = runtime_analysis_ready_for_picker_test(app, "2026-06-25 14:25:03");
+        // 输入框与已应用过滤保持一致，状态行展示完整过滤条件摘要。
+        let state = app
+            .runtime_analysis_state_mut(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        state.filter_keyword_input.value = "timeout".to_string();
+        state.applied_filter_keyword = "timeout".to_string();
+    });
+    // 再铺一帧，确保更新后的过滤栏进入最新渲染帧再读取行边界。
+    cx.simulate_resize(gpui::size(gpui::px(1601.0), gpui::px(900.0)));
+
+    let input_row = cx
+        .debug_bounds("runtime-filter-input-row")
+        .expect("应渲染 Runtime 过滤输入行");
+    let status_row = cx
+        .debug_bounds("runtime-filter-status")
+        .expect("应渲染 Runtime 过滤状态行");
+    assert!(
+        status_row.top() >= input_row.bottom(),
+        "过滤状态应换行显示在过滤输入行下方"
+    );
+    assert!(
+        status_row.size.width >= input_row.size.width - gpui::px(1.0),
+        "过滤状态行应占满整行宽度，长过滤条件才有换行空间"
+    );
+}
+
+/// 验证 SSH 终端断开后整个内容区显示连接断开面板与重连按钮。
+#[gpui::test]
+fn disconnected_terminal_shows_reconnect_panel(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+    app.update(cx, |app, _| {
+        insert_test_terminal_session(app, 7, link_id);
+        let session = app
+            .terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话");
+        session.status = crate::remote::terminal::TerminalStatus::Disconnected;
+        session.command_sender = None;
+        session.message = Some("SSH 连接已断开".to_string());
+        app.workspace = Workspace::Connections;
+        app.tabs = vec![ArgusTab {
+            id: 4,
+            title: "测试服务器".to_string(),
+            kind: TabKind::SshTerminal { session_id: 7 },
+        }];
+        app.active_tab_id = 4;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    assert!(
+        cx.debug_bounds("ssh-terminal-connection-lost").is_some(),
+        "断开的终端应整窗显示连接断开面板"
+    );
+    assert!(
+        cx.debug_bounds("ssh-terminal-connection-lost-reconnect")
+            .is_some(),
+        "连接断开面板应提供重连按钮"
+    );
+}
+
+/// 验证远程文件管理会话断开后整个内容区显示连接断开面板与重连按钮。
+#[gpui::test]
+fn disconnected_remote_file_session_shows_reconnect_panel(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+    app.update(cx, |app, _| {
+        let _receiver = insert_test_sftp_session(app, 9, link_id);
+        let session = app
+            .remote_file_sessions
+            .get_mut(&9)
+            .expect("应存在测试文件管理会话");
+        session.status = crate::remote::remote_file::RemoteFileStatus::Disconnected;
+        session.command_sender = None;
+        session.message = Some("SFTP 连接已断开".to_string());
+        app.workspace = Workspace::Connections;
+        app.tabs = vec![ArgusTab {
+            id: 5,
+            title: "SFTP 测试服务器".to_string(),
+            kind: TabKind::RemoteFileManager { session_id: 9 },
+        }];
+        app.active_tab_id = 5;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    assert!(
+        cx.debug_bounds("remote-file-connection-lost").is_some(),
+        "断开的文件管理会话应整窗显示连接断开面板"
+    );
+    assert!(
+        cx.debug_bounds("remote-file-connection-lost-reconnect")
+            .is_some(),
+        "连接断开面板应提供重连按钮"
+    );
+}
+
+/// 验证终端重连复用同一会话 ID 重建 worker 与会话状态，并如实提示正在重连。
+#[gpui::test]
+fn terminal_reconnect_rebuilds_disconnected_session(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+
+    app.update(cx, |app, app_cx| {
+        insert_test_terminal_session(app, 7, link_id);
+        let session = app
+            .terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话");
+        session.status = crate::remote::terminal::TerminalStatus::Disconnected;
+        session.command_sender = None;
+        session.message = Some("SSH 连接已断开".to_string());
+
+        app.reconnect_terminal_session(7, app_cx);
+
+        let session = app.terminal_sessions.get(&7).expect("重连后会话应保留");
+        assert_eq!(
+            session.status,
+            crate::remote::terminal::TerminalStatus::Connecting,
+            "重连后会话应回到连接中状态"
+        );
+        assert!(session.command_sender.is_some(), "重连应建立新的命令通道");
+        assert!(app.placeholder_notice.contains("正在重连"));
+    });
+}
+
+/// 验证链接不存在时终端重连如实失败，不静默把会话重置为连接中。
+#[gpui::test]
+fn terminal_reconnect_reports_missing_link(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+
+    app.update(cx, |app, app_cx| {
+        insert_test_terminal_session(app, 7, link_id);
+        let session = app
+            .terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话");
+        session.status = crate::remote::terminal::TerminalStatus::Disconnected;
+        session.command_sender = None;
+        // 模拟链接已被删除：会话仍指向不存在的链接节点。
+        session.link_id = 9999;
+
+        app.reconnect_terminal_session(7, app_cx);
+
+        let session = app.terminal_sessions.get(&7).expect("会话应保留");
+        assert_eq!(
+            session.status,
+            crate::remote::terminal::TerminalStatus::Disconnected
+        );
+        assert!(session.command_sender.is_none());
+        assert!(app.placeholder_notice.contains("未找到 SSH 链接"));
+    });
+}
+
+/// 验证远程文件管理会话重连复用同一会话 ID 重建 worker 与会话状态。
+#[gpui::test]
+fn remote_file_reconnect_rebuilds_disconnected_session(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+
+    app.update(cx, |app, app_cx| {
+        let _receiver = insert_test_sftp_session(app, 9, link_id);
+        let session = app
+            .remote_file_sessions
+            .get_mut(&9)
+            .expect("应存在测试文件管理会话");
+        session.status = crate::remote::remote_file::RemoteFileStatus::Disconnected;
+        session.command_sender = None;
+        session.message = Some("SFTP 连接已断开".to_string());
+
+        app.reconnect_remote_file_session(9, app_cx);
+
+        let session = app.remote_file_sessions.get(&9).expect("重连后会话应保留");
+        assert_eq!(
+            session.status,
+            crate::remote::remote_file::RemoteFileStatus::Connecting,
+            "重连后会话应回到连接中状态"
+        );
+        assert!(session.command_sender.is_some(), "重连应建立新的命令通道");
+        assert!(app.placeholder_notice.contains("正在重连"));
+    });
+}
+
+/// 验证终端按键按远端输入模式编码：控制键、编辑键区与应用光标键模式下的方向键。
+#[gpui::test]
+fn terminal_keys_follow_remote_input_mode(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+
+    app.update(cx, |app, app_cx| {
+        let receiver = insert_test_terminal_session_with_commands(app, 7, link_id);
+        app.tabs = vec![ArgusTab {
+            id: 4,
+            title: "测试服务器".to_string(),
+            kind: TabKind::SshTerminal { session_id: 7 },
+        }];
+        app.active_tab_id = 4;
+
+        // 普通方向键：CSI；PageDown 与 Ctrl+A 分别走编辑键区与控制字节。
+        app.handle_terminal_key(
+            &terminal_keystroke("up", None, gpui::Modifiers::default()),
+            app_cx,
+        );
+        app.handle_terminal_key(
+            &terminal_keystroke("pagedown", None, gpui::Modifiers::default()),
+            app_cx,
+        );
+        app.handle_terminal_key(
+            &terminal_keystroke(
+                "a",
+                Some("a"),
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            ),
+            app_cx,
+        );
+        assert_eq!(
+            drain_terminal_input(&receiver),
+            b"\x1b[A\x1b[6~\x01".to_vec()
+        );
+
+        // 远端开启应用光标键模式后：未带修饰的方向键切换为 SS3，带修饰仍使用 CSI。
+        app.terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话")
+            .process_output(b"\x1b[?1h");
+        app.handle_terminal_key(
+            &terminal_keystroke("up", None, gpui::Modifiers::default()),
+            app_cx,
+        );
+        app.handle_terminal_key(
+            &terminal_keystroke(
+                "up",
+                None,
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            ),
+            app_cx,
+        );
+        assert_eq!(drain_terminal_input(&receiver), b"\x1bOA\x1b[1;5A".to_vec());
+
+        // 平台快捷键保持本地，不会发送到远端。
+        app.handle_terminal_key(
+            &terminal_keystroke(
+                "c",
+                Some("c"),
+                gpui::Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+            ),
+            app_cx,
+        );
+        assert!(drain_terminal_input(&receiver).is_empty());
+    });
+}
+
+/// 验证鼠标转发仅在远端开启鼠标模式时生效，且按下/释放成对上报。
+#[gpui::test]
+fn terminal_mouse_forwarding_follows_remote_mode(cx: &mut gpui::TestAppContext) {
+    use crate::remote::terminal_input::{TerminalKeyModifiers, TerminalMouseButton};
+
+    let app = cx.new(|_| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+
+    app.update(cx, |app, _| {
+        let receiver = insert_test_terminal_session_with_commands(app, 7, link_id);
+        app.tabs = vec![ArgusTab {
+            id: 4,
+            title: "测试服务器".to_string(),
+            kind: TabKind::SshTerminal { session_id: 7 },
+        }];
+        app.active_tab_id = 4;
+
+        // 远端未开启鼠标模式：本地选择语义，不产生字节。
+        assert!(!app.terminal_forwards_mouse(7, false));
+        app.forward_terminal_mouse_press(
+            7,
+            TerminalMouseButton::Left,
+            TerminalKeyModifiers::default(),
+            10,
+            5,
+        );
+        assert!(drain_terminal_input(&receiver).is_empty());
+
+        // 开启 VT200 + SGR 后：按下与释放按 SGR 编码成对上报，Shift 保留本地语义。
+        app.terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话")
+            .process_output(b"\x1b[?1000h\x1b[?1006h");
+        assert!(app.terminal_forwards_mouse(7, false));
+        assert!(!app.terminal_forwards_mouse(7, true));
+
+        app.forward_terminal_mouse_press(
+            7,
+            TerminalMouseButton::Left,
+            TerminalKeyModifiers::default(),
+            10,
+            5,
+        );
+        app.forward_terminal_mouse_release(
+            7,
+            TerminalMouseButton::Left,
+            TerminalKeyModifiers::default(),
+            10,
+            5,
+        );
+        // 未经历过按下转发的释放事件不应回发。
+        app.forward_terminal_mouse_release(
+            7,
+            TerminalMouseButton::Left,
+            TerminalKeyModifiers::default(),
+            10,
+            5,
+        );
+        assert_eq!(
+            drain_terminal_input(&receiver),
+            b"\x1b[<0;10;5M\x1b[<0;10;5m".to_vec()
+        );
+    });
+}
+
+/// 验证焦点事件仅在远端开启 1004 时上报，且首次未聚焦不发送失焦。
+#[gpui::test]
+fn terminal_focus_events_follow_remote_mode(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+
+    app.update(cx, |app, _| {
+        let receiver = insert_test_terminal_session_with_commands(app, 7, link_id);
+
+        // 首次上报只记录状态：初始未聚焦不应发送失焦事件。
+        app.report_terminal_focus(7, false);
+        app.terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话")
+            .process_output(b"\x1b[?1004h");
+
+        app.report_terminal_focus(7, true);
+        app.report_terminal_focus(7, true);
+        app.report_terminal_focus(7, false);
+        assert_eq!(drain_terminal_input(&receiver), b"\x1b[I\x1b[O".to_vec());
+    });
+}
+
+/// 验证「Option 键作为 Meta」设置可切换并持久化到设置文件。
+#[test]
+fn terminal_option_as_meta_toggle_persists() {
+    let mut app = test_app();
+    assert!(!app.config.terminal.option_as_meta);
+
+    app.toggle_terminal_option_as_meta();
+    assert!(app.config.terminal.option_as_meta);
+    let (loaded, _warnings) = ConfigManager::load_from_path(app.config_manager.settings_path())
+        .expect("应能重新加载设置");
+    assert!(loaded.terminal.option_as_meta);
+
+    app.toggle_terminal_option_as_meta();
+    assert!(!app.config.terminal.option_as_meta);
+}
+
+/// 验证已连接的终端视图正常渲染正文，并在聚焦与模式切换时保持稳定。
+#[gpui::test]
+fn connected_terminal_view_renders_body(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+    app.update(cx, |app, _| {
+        let _receiver = insert_test_terminal_session_with_commands(app, 7, link_id);
+        app.terminal_sessions
+            .get_mut(&7)
+            .expect("应存在测试终端会话")
+            .process_output(b"\x1b[?1004h\x1b[?1000h\x1b[?1006hconnected\r\n");
+        app.tabs = vec![ArgusTab {
+            id: 4,
+            title: "测试服务器".to_string(),
+            kind: TabKind::SshTerminal { session_id: 7 },
+        }];
+        app.active_tab_id = 4;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(800.0)));
+
+    let body_bounds = cx
+        .debug_bounds("ssh-terminal-body")
+        .expect("已连接的终端应渲染正文区域");
+    // 点击正文聚焦终端：触发焦点事件上报与下一帧回写路径。
+    cx.simulate_click(body_bounds.center(), gpui::Modifiers::default());
+    cx.update(|window, app_cx| {
+        let is_focused = app
+            .read(app_cx)
+            .input_focus_handles
+            .as_ref()
+            .is_some_and(|handles| handles.terminal.is_focused(window));
+        assert!(is_focused, "点击终端正文后应获得键盘焦点");
+    });
+    // 回写发生在下一帧，连续铺两帧保证调度回调已经执行。
+    cx.simulate_resize(gpui::size(gpui::px(1201.0), gpui::px(800.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1202.0), gpui::px(800.0)));
+
+    app.update(cx, |app, _| {
+        assert_eq!(
+            app.terminal_sessions
+                .get(&7)
+                .expect("应存在测试终端会话")
+                .reported_focus,
+            Some(true),
+            "聚焦终端后应记录并上报焦点状态"
+        );
+    });
+}
+
 /// 验证 Runtime SQL 完整文本弹窗可以正常打开和关闭。
 #[test]
 fn runtime_sql_text_dialog_opens_and_closes() {
@@ -2559,13 +3486,16 @@ fn select_theme_updates_runtime_theme_tokens() {
     );
 }
 
-/// 验证旧版 light/system 配置会迁移到内置暗色主题文件。
+/// 验证旧版 light/system 配置会迁移到对应内置主题文件。
 #[test]
-fn legacy_theme_modes_resolve_to_dark_theme_file() {
+fn legacy_theme_modes_resolve_to_builtin_theme_files() {
     let mut app = test_app();
 
     app.select_theme("light".to_string());
+    assert_eq!(app.selected_theme_id, "light.toml");
+    assert_eq!(app.config.appearance.theme_mode, "light.toml");
 
+    app.select_theme("system".to_string());
     assert_eq!(app.selected_theme_id, "dark.toml");
     assert_eq!(app.config.appearance.theme_mode, "dark.toml");
 }
@@ -3308,9 +4238,10 @@ fn floating_assistant_panel_not_rendered_inline(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// 验证加载单个文件来源时左侧目录树默认收起并直接打开文件，目录来源保持展开。
+/// 验证来源加载后的侧栏默认状态：单文件来源自动收起目录树并直接打开文件，
+/// 目录或多文件来源自动展开目录树（含上一次单文件加载收起后的重新加载）。
 #[gpui::test]
-fn single_file_load_collapses_source_panel(cx: &mut gpui::TestAppContext) {
+fn source_load_panel_defaults_follow_source_shape(cx: &mut gpui::TestAppContext) {
     let app = cx.new(|_| test_app());
 
     app.update(cx, |app, app_cx| {
@@ -3347,7 +4278,7 @@ fn single_file_load_collapses_source_panel(cx: &mut gpui::TestAppContext) {
             )),
             app_cx,
         );
-        assert!(app.is_source_panel_collapsed, "单文件来源应默认收起目录树");
+        assert!(app.is_source_panel_collapsed, "单文件来源应自动收起目录树");
         assert!(
             matches!(
                 app.active_tab().map(|tab| &tab.kind),
@@ -3363,8 +4294,8 @@ fn single_file_load_collapses_source_panel(cx: &mut gpui::TestAppContext) {
             "单文件来源应自动触发后台读取，不再停留在等待读取状态"
         );
 
-        // 目录来源：保持目录树展开。
-        app.is_source_panel_collapsed = false;
+        // 目录或多文件来源：不重置折叠状态，验证在“单文件已收起”的现状上重新加载会
+        // 自动展开目录树。
         app.source_load_generation = 2;
         app.apply_source_load_result(
             2,
@@ -3383,7 +4314,7 @@ fn single_file_load_collapses_source_panel(cx: &mut gpui::TestAppContext) {
             )),
             app_cx,
         );
-        assert!(!app.is_source_panel_collapsed, "目录来源应保持目录树展开");
+        assert!(!app.is_source_panel_collapsed, "多文件来源应自动展开目录树");
     });
 }
 
@@ -3523,4 +4454,356 @@ fn archive_node_password_retry_invalid_password_reprompts(cx: &mut gpui::TestApp
             ArchivePasswordRetryAction::ReloadArchiveNode { source_id } if source_id == archive_id
         ));
     });
+}
+
+/// 验证各工作区与标签类型下内容玻璃板始终保留 8px 右侧窗口留白，不被窗口右缘裁掉。
+///
+/// 回归背景：终端栅格与 Runtime 表格按内容宽度参与布局时，玻璃板的最小宽度会超过窗口
+/// 可用宽度，导致右侧留白消失、面板贴到窗口边缘。
+#[gpui::test]
+fn content_panel_keeps_right_inset_across_tab_kinds(cx: &mut gpui::TestAppContext) {
+    use crate::ui::main_window::WINDOW_CONTENT_INSET;
+
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    let link_id = app.update(cx, |app, _| add_test_ssh_link(app));
+    app.update(cx, |app, _| {
+        insert_test_terminal_session(app, 7, link_id);
+        app.tabs = vec![ArgusTab {
+            id: 4,
+            title: "测试服务器".to_string(),
+            kind: TabKind::SshTerminal { session_id: 7 },
+        }];
+        app.active_tab_id = 4;
+        app.workspace = Workspace::Connections;
+    });
+
+    for width in [760.0_f32, 900.0, 1200.0, 1600.0] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.0)));
+        let panel = cx
+            .debug_bounds("window-content-panel")
+            .expect("应渲染内容玻璃板");
+        assert_eq!(
+            f32::from(panel.right()),
+            width - WINDOW_CONTENT_INSET,
+            "终端标签在 {width} 宽度下应保留右侧窗口留白"
+        );
+    }
+
+    app.update(cx, |app, _| {
+        let analysis_id = runtime_analysis_ready_for_picker_test(app, "2026-06-25 14:25:03");
+        app.tabs = vec![ArgusTab {
+            id: 11,
+            title: "Runtime分析".to_string(),
+            kind: TabKind::RuntimeAnalysis { analysis_id },
+        }];
+        app.active_tab_id = 11;
+    });
+    for width in [760.0_f32, 1200.0] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.0)));
+        let panel = cx
+            .debug_bounds("window-content-panel")
+            .expect("应渲染内容玻璃板");
+        assert_eq!(
+            f32::from(panel.right()),
+            width - WINDOW_CONTENT_INSET,
+            "Runtime 标签在 {width} 宽度下应保留右侧窗口留白"
+        );
+    }
+
+    app.update(cx, |app, _| {
+        let _receiver = insert_test_sftp_session(app, 9, link_id);
+        app.tabs = vec![ArgusTab {
+            id: 12,
+            title: "SFTP".to_string(),
+            kind: TabKind::RemoteFileManager { session_id: 9 },
+        }];
+        app.active_tab_id = 12;
+    });
+    for width in [760.0_f32, 1200.0] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.0)));
+        let panel = cx
+            .debug_bounds("window-content-panel")
+            .expect("应渲染内容玻璃板");
+        assert_eq!(
+            f32::from(panel.right()),
+            width - WINDOW_CONTENT_INSET,
+            "远程文件管理标签在 {width} 宽度下应保留右侧窗口留白"
+        );
+    }
+}
+
+/// 验证来源侧栏宽度拖拽命中区与内容玻璃板左缘重合。
+///
+/// 回归背景：侧栏背景色与窗口背景色相同，侧栏与内容区之间唯一可见的分界线是
+/// 内容玻璃板左侧边框；命中区曾以侧栏右缘为中心，比可见边框偏左 `WINDOW_CONTENT_INSET`，
+/// 用户必须把鼠标移到边框左侧的空白带才能拖动。
+#[gpui::test]
+fn source_resizer_hit_area_follows_content_panel_left_edge(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    let assert_aligned = |cx: &mut gpui::VisualTestContext, scene: &str| {
+        let hit_area = cx
+            .debug_bounds("source-resizer-hit-area")
+            .unwrap_or_else(|| panic!("{scene} 应渲染来源侧栏拖拽命中区"));
+        let panel = cx
+            .debug_bounds("window-content-panel")
+            .unwrap_or_else(|| panic!("{scene} 应渲染内容玻璃板"));
+        let hit_center = f32::from(hit_area.left()) + f32::from(hit_area.size.width) / 2.0;
+        let panel_left = f32::from(panel.left());
+        assert!(
+            (hit_center - panel_left).abs() <= 0.5,
+            "{scene} 拖拽命中区中心应与玻璃板左缘重合：命中区 {hit_center:.1} vs 玻璃板 {panel_left:.1}"
+        );
+        // 纵向只覆盖内容区：标题栏内没有这条边框，命中区不得与标签点击区抢事件。
+        let window_height = f32::from(cx.update(|window, _| window.viewport_size().height));
+        assert!(
+            (f32::from(hit_area.top()) - crate::ui::custom_title_bar::TITLE_BAR_HEIGHT).abs()
+                <= 0.5,
+            "{scene} 拖拽命中区应从标题栏下方开始，实际 {:.1}px",
+            f32::from(hit_area.top())
+        );
+        assert!(
+            (f32::from(hit_area.bottom()) - window_height).abs() <= 0.5,
+            "{scene} 拖拽命中区应延伸到窗口底部，实际 {:.1}px",
+            f32::from(hit_area.bottom())
+        );
+        // 命中区本身透明、不占布局宽度，只以边框为中心向两侧各展开半个命中宽度。
+        assert!(
+            f32::from(hit_area.size.width) <= 8.0,
+            "{scene} 拖拽命中区应保持窄条形状，实际 {:.1}px",
+            f32::from(hit_area.size.width)
+        );
+    };
+
+    assert_aligned(cx, "默认侧栏宽度");
+
+    // 通过真实拖拽改变侧栏宽度后，命中区仍应贴合玻璃板左缘。
+    app.update(cx, |app, _| {
+        let start_x = app.current_source_panel_width();
+        app.begin_source_panel_resize(start_x);
+        assert!(
+            app.resize_source_panel(start_x + 72.0),
+            "拖拽 72px 应更新侧栏宽度"
+        );
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+    assert_aligned(cx, "调整侧栏宽度后");
+}
+
+/// 验证设置模态框的顶部留白结构：左侧背板与模态框同高，右侧玻璃板保留 8px 窗口留白。
+///
+/// 回归背景：浅色主题背板与玻璃板色差过小时，这里的 8px 留白在视觉上会消失，
+/// 模态框顶部看起来贴边；本用例锁定布局关系，主题层另有色差下限用例。
+#[gpui::test]
+fn settings_modal_keeps_top_inset(cx: &mut gpui::TestAppContext) {
+    use crate::ui::main_window::WINDOW_CONTENT_INSET;
+
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    app.update(cx, |app, app_cx| app.open_settings_modal(app_cx));
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    let sidebar = cx
+        .debug_bounds("settings-modal-sidebar")
+        .expect("应渲染设置侧栏");
+    let content_area = cx
+        .debug_bounds("settings-modal-content-area")
+        .expect("应渲染设置内容区");
+    let plate = cx
+        .debug_bounds("settings-modal-plate")
+        .expect("应渲染设置玻璃板");
+
+    assert_eq!(
+        f32::from(content_area.top()),
+        f32::from(sidebar.top()),
+        "内容区与侧栏应从模态框同一条顶边开始"
+    );
+    assert_eq!(
+        f32::from(plate.top()) - f32::from(content_area.top()),
+        WINDOW_CONTENT_INSET,
+        "玻璃板顶部应保留 8px 窗口留白"
+    );
+}
+
+/// 验证设置模态框顶部留白：侧栏标题与内容区标题同高，且都留有足够的顶部内边距。
+///
+/// 回归背景：侧栏标题曾距离模态框上边框只有约 19px，而内容区标题在 44px 处，
+/// 两个标题不同线且左侧看起来贴住边框。
+#[gpui::test]
+fn settings_modal_titles_share_top_spacing(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    app.update(cx, |app, app_cx| app.open_settings_modal(app_cx));
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    let sidebar = cx
+        .debug_bounds("settings-modal-sidebar")
+        .expect("应渲染设置侧栏");
+    let sidebar_header = cx
+        .debug_bounds("settings-modal-sidebar-header")
+        .expect("应渲染设置侧栏标题头部");
+    let sidebar_title = cx
+        .debug_bounds("settings-modal-sidebar-title")
+        .expect("应渲染设置侧栏标题");
+    let section_label = cx
+        .debug_bounds("settings-modal-section-label")
+        .expect("应渲染内容区标题");
+
+    assert_eq!(
+        f32::from(sidebar_header.size.height),
+        56.0,
+        "侧栏标题头部应保持 56px 高度：分类较多时不得被弹性收缩压扁"
+    );
+
+    assert!(
+        (f32::from(sidebar_title.top()) - f32::from(section_label.top())).abs() < 1.0,
+        "两个标题应处于同一水平线：侧栏 {:.1} vs 内容区 {:.1}",
+        f32::from(sidebar_title.top()),
+        f32::from(section_label.top())
+    );
+    assert!(
+        f32::from(sidebar_title.top()) - f32::from(sidebar.top()) >= 32.0,
+        "侧栏标题上方应保留至少 32px 顶部留白，实际 {:.1}px",
+        f32::from(sidebar_title.top()) - f32::from(sidebar.top())
+    );
+}
+
+/// 验证 Runtime 四层下钻页的顶部栏不会挤掉下方明细表。
+///
+/// 回归背景：内容区包装容器曾使用 `min_w(0)`，使页签内容宽度进入固有尺寸计算；
+/// 顶部栏内带 `min_w(0)` 的信息行因此被收窄到 min-content（约 63px），统计文案
+/// 换行成多行把顶部栏撑到整屏高度，明细表被压到 6px，界面上只剩一个返回按钮。
+#[gpui::test]
+fn runtime_drilldown_topbars_keep_table_visible(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    let (analysis_id, request_path, normalized_sql) = app.update(cx, |app, _| {
+        let analysis_id = runtime_analysis_ready_for_picker_test(app, "");
+        let state = app
+            .runtime_analysis_state(analysis_id)
+            .expect("应存在 Runtime 分析状态");
+        let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+            panic!("Runtime 分析应处于就绪状态");
+        };
+        let summary = result.summaries.first().expect("测试数据应产出总览行");
+        let normalized_sql = summary
+            .request_indices
+            .first()
+            .and_then(|index| result.requests.get(*index))
+            .and_then(|request| request.sql_records.first())
+            .map(|sql| sql.normalized_sql.clone())
+            .expect("测试数据应产出 SQL 记录");
+        (analysis_id, summary.request_path.clone(), normalized_sql)
+    });
+
+    // 请求详情页：信息区必须占满剩余宽度，明细表必须保留可用高度。
+    app.update(cx, |app, _| {
+        app.open_runtime_request_details(analysis_id, request_path.clone());
+    });
+    next_frame(cx);
+    assert_details_layout_is_usable(
+        cx,
+        "请求详情",
+        "runtime-request-details-topbar",
+        "runtime-request-details-body",
+        Some("runtime-request-details-info"),
+    );
+
+    // SQL 列表页。
+    app.update(cx, |app, _| {
+        app.open_runtime_sql_list(analysis_id, request_path, 0);
+    });
+    next_frame(cx);
+    assert_details_layout_is_usable(
+        cx,
+        "SQL 列表",
+        "runtime-sql-details-topbar",
+        "runtime-sql-details-body",
+        None,
+    );
+
+    // SQL 频率分析下钻页。
+    app.update(cx, |app, _| {
+        app.open_runtime_sql_frequency_detail(analysis_id, normalized_sql.clone());
+    });
+    next_frame(cx);
+    assert_details_layout_is_usable(
+        cx,
+        "SQL 频率分析明细",
+        "runtime-sql-frequency-detail-topbar",
+        "runtime-sql-frequency-detail-body",
+        None,
+    );
+
+    // 慢 SQL 分析下钻页。
+    app.update(cx, |app, _| {
+        app.open_runtime_slow_sql_detail(analysis_id, normalized_sql);
+    });
+    next_frame(cx);
+    assert_details_layout_is_usable(
+        cx,
+        "慢 SQL 分析明细",
+        "runtime-slow-sql-detail-topbar",
+        "runtime-slow-sql-detail-body",
+        None,
+    );
+
+    // 窄窗口下顶部栏同样必须保持单行，不能靠换行撑高。
+    cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(700.0)));
+    cx.simulate_resize(gpui::size(gpui::px(901.0), gpui::px(700.0)));
+    assert_details_layout_is_usable(
+        cx,
+        "慢 SQL 分析明细（窄窗口）",
+        "runtime-slow-sql-detail-topbar",
+        "runtime-slow-sql-detail-body",
+        None,
+    );
+}
+
+/// 铺下一帧并保证尺寸与上一帧不同，使布局改动进入最新渲染帧。
+fn next_frame(cx: &mut gpui::VisualTestContext) {
+    let size = cx.update(|window, _| window.viewport_size());
+    let alternate = if f32::from(size.width) == 1600.0 {
+        1601.0
+    } else {
+        1600.0
+    };
+    cx.simulate_resize(gpui::size(gpui::px(alternate), size.height));
+}
+
+/// 断言下钻页顶部栏高度受限、明细表区域未被挤压，信息区宽度未被收窄到 min-content。
+fn assert_details_layout_is_usable(
+    cx: &mut gpui::VisualTestContext,
+    scene: &str,
+    topbar_selector: &'static str,
+    body_selector: &'static str,
+    info_selector: Option<&'static str>,
+) {
+    let topbar = cx
+        .debug_bounds(topbar_selector)
+        .unwrap_or_else(|| panic!("{scene} 应渲染顶部栏"));
+    let body = cx
+        .debug_bounds(body_selector)
+        .unwrap_or_else(|| panic!("{scene} 应渲染明细表区域"));
+    assert!(
+        topbar.size.height < gpui::px(80.0),
+        "{scene} 顶部栏应保持单行高度，实际 {:.1}px",
+        f32::from(topbar.size.height)
+    );
+    assert!(
+        body.size.height >= gpui::px(300.0),
+        "{scene} 明细表区域不应被顶部栏挤压，实际 {:.1}px",
+        f32::from(body.size.height)
+    );
+    if let Some(info_selector) = info_selector {
+        let info = cx
+            .debug_bounds(info_selector)
+            .unwrap_or_else(|| panic!("{scene} 应渲染顶部栏信息区"));
+        assert!(
+            info.size.width >= gpui::px(300.0),
+            "{scene} 信息区应占满剩余宽度，实际 {:.1}px",
+            f32::from(info.size.width)
+        );
+    }
 }

@@ -12,6 +12,8 @@ pub(crate) fn render_runtime_sql_text_dialog(
         .size_full()
         .flex()
         .flex_col()
+        // 内容根节点贴住模态框外壳，必须自带圆角，避免方角盖住外壳圆角形成尖角。
+        .rounded_lg()
         .bg(rgb(theme.side_bar))
         .on_mouse_down(
             MouseButton::Left,
@@ -25,6 +27,7 @@ pub(crate) fn render_runtime_sql_text_dialog(
         .child(
             div()
                 .h(px(46.0))
+                .flex_none()
                 .px_3()
                 .flex()
                 .items_center()

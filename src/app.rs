@@ -1,6 +1,6 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析、助手面板及远程连接状态。
 
@@ -620,6 +620,7 @@ impl ArgusApp {
                 runtime_filter_username: cx.focus_handle(),
                 runtime_filter_start_time: cx.focus_handle(),
                 runtime_filter_end_time: cx.focus_handle(),
+                runtime_time_picker: cx.focus_handle(),
             });
         }
         self.input_focus_handles
@@ -1834,6 +1835,17 @@ impl ArgusApp {
             "日志加载已允许跟随符号链接".to_string()
         } else {
             "日志加载已禁止跟随符号链接".to_string()
+        };
+        self.persist_config_or_report();
+    }
+
+    /// 切换「Option 键作为 Meta」终端输入设置；保存后下一次按键生效。
+    pub(crate) fn toggle_terminal_option_as_meta(&mut self) {
+        self.config.terminal.option_as_meta = !self.config.terminal.option_as_meta;
+        self.placeholder_notice = if self.config.terminal.option_as_meta {
+            "已开启 Option 键作为 Meta".to_string()
+        } else {
+            "已关闭 Option 键作为 Meta".to_string()
         };
         self.persist_config_or_report();
     }

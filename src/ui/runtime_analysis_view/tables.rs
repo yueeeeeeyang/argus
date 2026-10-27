@@ -103,6 +103,7 @@ pub(crate) fn render_request_details_table(
         ))
         .child(
             div()
+                .debug_selector(|| "runtime-request-details-body".to_string())
                 .relative()
                 .flex_1()
                 .min_h(px(0.0))
@@ -178,6 +179,7 @@ pub(crate) fn render_sql_table(
     let uniform_scroll = state.sql_scroll.clone();
     let request_index = request.index;
     let table_body = div()
+        .debug_selector(|| "runtime-sql-details-body".to_string())
         .relative()
         .flex_1()
         .min_h(px(0.0))
@@ -373,6 +375,7 @@ pub(crate) fn render_sql_frequency_detail_table(
         ))
         .child(
             div()
+                .debug_selector(|| "runtime-sql-frequency-detail-body".to_string())
                 .relative()
                 .flex_1()
                 .min_h(px(0.0))
@@ -545,6 +548,7 @@ pub(crate) fn render_slow_sql_detail_table(
         ))
         .child(
             div()
+                .debug_selector(|| "runtime-slow-sql-detail-body".to_string())
                 .relative()
                 .flex_1()
                 .min_h(px(0.0))
@@ -718,6 +722,7 @@ pub(crate) fn render_sql_frequency_detail_topbar(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
     div()
+        .debug_selector(|| "runtime-sql-frequency-detail-topbar".to_string())
         .px(px(RUNTIME_VIEW_PADDING))
         .py_2()
         .flex()
@@ -728,10 +733,12 @@ pub(crate) fn render_sql_frequency_detail_topbar(
         .border_color(rgb(theme.border))
         .child(
             div()
+                .flex_1()
                 .flex()
                 .items_center()
                 .gap_2()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(render_back_button(
                     "runtime-sql-frequency-detail-back",
                     "频率分析",
@@ -743,7 +750,9 @@ pub(crate) fn render_sql_frequency_detail_topbar(
                 ))
                 .child(
                     div()
+                        .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
                         .child(
@@ -757,6 +766,8 @@ pub(crate) fn render_sql_frequency_detail_topbar(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(rgb(theme.foreground))
+                                // 单行截断：统计文案换行会把顶部栏撑高并挤掉下方明细表。
+                                .truncate()
                                 .child(format!("{row_count} 次执行")),
                         ),
                 ),
@@ -987,6 +998,7 @@ pub(crate) fn render_slow_sql_detail_topbar(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
     div()
+        .debug_selector(|| "runtime-slow-sql-detail-topbar".to_string())
         .h(px(42.0))
         .px(px(RUNTIME_VIEW_PADDING))
         .flex()
@@ -996,9 +1008,12 @@ pub(crate) fn render_slow_sql_detail_topbar(
         .border_color(rgb(theme.border))
         .child(
             div()
+                .flex_1()
                 .flex()
                 .items_center()
                 .gap_2()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .child(render_action_button(
                     format!("runtime-slow-sql-detail-back-{analysis_id}"),
                     "返回",
@@ -1010,7 +1025,9 @@ pub(crate) fn render_slow_sql_detail_topbar(
                 ))
                 .child(
                     div()
+                        .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
                         .child(
@@ -1024,6 +1041,8 @@ pub(crate) fn render_slow_sql_detail_topbar(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(rgb(theme.foreground))
+                                // 单行截断：统计文案换行会把顶部栏撑高并挤掉下方明细表。
+                                .truncate()
                                 .child(format!("{row_count} 次执行")),
                         ),
                 ),

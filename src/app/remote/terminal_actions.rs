@@ -1,6 +1,6 @@
 //! 文件职责：实现 SSH 终端标签的创建、事件回收、主机指纹确认和输入转发。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：把链接树中的 SSH 链接接入右侧终端面板，并负责关闭标签时释放后台会话。
 
@@ -12,11 +12,16 @@ use crate::app::{ArgusApp, ArgusTab, TabKind, Workspace};
 use crate::infra::selection_autoscroll::{
     selection_autoscroll_intensity, selection_autoscroll_step_lines,
 };
-use crate::remote::connection::ConnectionNodeId;
+use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId};
 use crate::remote::terminal::{
     DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS, PendingHostKey, TerminalCommand, TerminalEvent,
     TerminalGridPosition, TerminalSelectionAutoscroll, TerminalSessionState, TerminalStatus,
-    TerminalWorkerRequest, spawn_ssh_worker, terminal_input_bytes,
+    TerminalWorkerRequest, spawn_ssh_worker,
+};
+use crate::remote::terminal_input::{
+    TerminalKeyInput, TerminalKeyModifiers, TerminalMouseButton, TerminalMouseEvent,
+    TerminalMouseEventKind, TerminalMouseMode, encode_focus, encode_key, encode_mouse,
+    encode_paste, terminal_input_chunks,
 };
 use crate::ui::terminal_view::{terminal_metrics, terminal_position_from_pointer};
 
@@ -30,7 +35,7 @@ impl ArgusApp {
         self.create_ssh_terminal_session(link_id, cx);
     }
 
-    /// 处理终端面板按键，将可发送的按键转换为远程 shell 字节。
+    /// 处理终端面板按键：平台快捷键保持本地，其余按键按远端输入模式编码后发送。
     pub(crate) fn handle_terminal_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let TabKind::SshTerminal { session_id } = self.active_tab_kind() else {
             return;
@@ -55,18 +60,33 @@ impl ArgusApp {
         if keystroke.key == "escape" && self.clear_terminal_selection(session_id) {
             return;
         }
-        let Some(bytes) = terminal_input_bytes(
-            keystroke.key.as_str(),
-            keystroke.key_char.as_deref(),
-            keystroke.modifiers.control,
-            keystroke.modifiers.platform,
-        ) else {
+        let Some(mode) = self
+            .terminal_sessions
+            .get(&session_id)
+            .map(TerminalSessionState::input_mode)
+        else {
             return;
         };
-        self.send_terminal_input(session_id, bytes);
+        let input = TerminalKeyInput {
+            key: keystroke.key.as_str(),
+            key_char: keystroke.key_char.as_deref(),
+            modifiers: TerminalKeyModifiers {
+                shift: keystroke.modifiers.shift,
+                alt: keystroke.modifiers.alt,
+                control: keystroke.modifiers.control,
+                platform: keystroke.modifiers.platform,
+                function: keystroke.modifiers.function,
+            },
+            option_as_meta: self.config.terminal.option_as_meta,
+        };
+        if let Some(bytes) = encode_key(&input, mode) {
+            self.send_terminal_input(session_id, bytes);
+        }
     }
 
-    /// 向指定终端会话发送输入字节。
+    /// 向指定终端会话发送输入字节；大负载按固定分块拆分，避免单条命令占用过大。
+    ///
+    /// 说明：键盘与粘贴属于用户主动输入，会清理本地选区并回到实时屏幕。
     pub(crate) fn send_terminal_input(&mut self, session_id: usize, bytes: Vec<u8>) {
         let Some(session) = self.terminal_sessions.get_mut(&session_id) else {
             self.placeholder_notice = "终端会话不存在".to_string();
@@ -78,8 +98,168 @@ impl ArgusApp {
         }
         session.clear_selection();
         session.reset_scrollback();
+        Self::send_terminal_bytes(session, &bytes);
+    }
+
+    /// 向指定终端会话写入控制序列字节（鼠标、焦点事件等），不清理本地选区与滚动位置。
+    fn send_terminal_control_bytes(&mut self, session_id: usize, bytes: Vec<u8>) {
+        let Some(session) = self.terminal_sessions.get_mut(&session_id) else {
+            return;
+        };
+        if session.status != TerminalStatus::Connected {
+            return;
+        }
+        Self::send_terminal_bytes(session, &bytes);
+    }
+
+    /// 按分块大小把字节写入会话命令通道。
+    fn send_terminal_bytes(session: &TerminalSessionState, bytes: &[u8]) {
         if let Some(sender) = &session.command_sender {
-            let _ = sender.send(TerminalCommand::Input(bytes));
+            for chunk in terminal_input_chunks(bytes) {
+                let _ = sender.send(TerminalCommand::Input(chunk.to_vec()));
+            }
+        }
+    }
+
+    /// 判断终端会话是否把鼠标事件交给远端程序；按住 Shift 时保持本地选择与滚动。
+    pub(crate) fn terminal_forwards_mouse(&self, session_id: usize, shift: bool) -> bool {
+        !shift
+            && self
+                .terminal_sessions
+                .get(&session_id)
+                .is_some_and(|session| session.input_mode().mouse_mode != TerminalMouseMode::None)
+    }
+
+    /// 判断远端是否要求上报全部鼠标移动事件（1003 模式）。
+    pub(crate) fn terminal_mouse_reports_any_motion(&self, session_id: usize) -> bool {
+        self.terminal_sessions
+            .get(&session_id)
+            .is_some_and(|session| session.input_mode().mouse_mode == TerminalMouseMode::AnyMotion)
+    }
+
+    /// 把终端鼠标事件编码后上报远端；远端未开启鼠标上报时不做任何事。
+    pub(crate) fn send_terminal_mouse_event(
+        &mut self,
+        session_id: usize,
+        event: TerminalMouseEvent,
+    ) {
+        let Some(mode) = self
+            .terminal_sessions
+            .get(&session_id)
+            .map(TerminalSessionState::input_mode)
+        else {
+            return;
+        };
+        if let Some(bytes) = encode_mouse(&event, mode) {
+            self.send_terminal_control_bytes(session_id, bytes);
+        }
+    }
+
+    /// 转发终端鼠标按下事件；远端未开启鼠标模式时不做任何事，并按会话记录待释放按钮。
+    pub(crate) fn forward_terminal_mouse_press(
+        &mut self,
+        session_id: usize,
+        button: TerminalMouseButton,
+        modifiers: TerminalKeyModifiers,
+        col: u16,
+        row: u16,
+    ) {
+        let Some(mode) = self
+            .terminal_sessions
+            .get(&session_id)
+            .map(TerminalSessionState::input_mode)
+        else {
+            return;
+        };
+        let event = TerminalMouseEvent {
+            kind: TerminalMouseEventKind::Press,
+            button: Some(button),
+            modifiers,
+            col,
+            row,
+        };
+        let Some(bytes) = encode_mouse(&event, mode) else {
+            return;
+        };
+        if let Some(session) = self.terminal_sessions.get_mut(&session_id) {
+            session.forwarded_mouse_button = Some(button);
+        }
+        self.send_terminal_control_bytes(session_id, bytes);
+    }
+
+    /// 转发终端鼠标释放事件；只有该按钮的按下事件确实转发过时才回发释放。
+    pub(crate) fn forward_terminal_mouse_release(
+        &mut self,
+        session_id: usize,
+        button: TerminalMouseButton,
+        modifiers: TerminalKeyModifiers,
+        col: u16,
+        row: u16,
+    ) {
+        let pending = self
+            .terminal_sessions
+            .get_mut(&session_id)
+            .and_then(|session| session.forwarded_mouse_button.take());
+        if pending != Some(button) {
+            return;
+        }
+        let Some(mode) = self
+            .terminal_sessions
+            .get(&session_id)
+            .map(TerminalSessionState::input_mode)
+        else {
+            return;
+        };
+        let event = TerminalMouseEvent {
+            kind: TerminalMouseEventKind::Release,
+            button: Some(button),
+            modifiers,
+            col,
+            row,
+        };
+        if let Some(bytes) = encode_mouse(&event, mode) {
+            self.send_terminal_control_bytes(session_id, bytes);
+        }
+    }
+
+    /// 判断指定按钮的按下事件是否已转发给远端，用于区分本地选择与远端鼠标释放。
+    pub(crate) fn terminal_has_pending_mouse_button(
+        &self,
+        session_id: usize,
+        button: TerminalMouseButton,
+    ) -> bool {
+        self.terminal_sessions
+            .get(&session_id)
+            .is_some_and(|session| session.forwarded_mouse_button == Some(button))
+    }
+
+    /// 上报终端视图焦点变化；远端未开启 1004 焦点事件时不做任何事。
+    ///
+    /// 首次上报只记录状态：会话刚建立时初始未聚焦不应向远端发送「失焦」事件。
+    pub(crate) fn report_terminal_focus(&mut self, session_id: usize, is_focused: bool) {
+        let Some(session) = self.terminal_sessions.get(&session_id) else {
+            return;
+        };
+        if session.reported_focus == Some(is_focused) {
+            return;
+        }
+        let is_first_report = session.reported_focus.is_none();
+        let mode = session.input_mode();
+        if let Some(session) = self.terminal_sessions.get_mut(&session_id) {
+            session.reported_focus = Some(is_focused);
+        }
+        if is_first_report && !is_focused {
+            return;
+        }
+        if let Some(bytes) = encode_focus(is_focused, mode) {
+            self.send_terminal_control_bytes(session_id, bytes);
+        }
+    }
+
+    /// 记录终端单元格像素尺寸，供远端 XTWINOPS 尺寸查询应答使用。
+    pub(crate) fn set_terminal_cell_size(&mut self, session_id: usize, height: f32, width: f32) {
+        if let Some(session) = self.terminal_sessions.get_mut(&session_id) {
+            session.set_cell_size(height, width);
         }
     }
 
@@ -162,7 +342,11 @@ impl ArgusApp {
             self.placeholder_notice = "剪贴板为空，无法粘贴".to_string();
             return;
         };
-        self.send_terminal_input(session_id, terminal_paste_bytes(&text));
+        let bracketed = self
+            .terminal_sessions
+            .get(&session_id)
+            .is_some_and(|session| session.input_mode().bracketed_paste);
+        self.send_terminal_input(session_id, encode_paste(&text, bracketed));
     }
 
     /// 平台全选快捷键：选择当前可见终端屏幕。
@@ -422,12 +606,58 @@ impl ArgusApp {
             self.placeholder_notice = "未找到 SSH 链接".to_string();
             return;
         };
-        let Some(ssh) = link.ssh_config().cloned() else {
-            self.placeholder_notice = "当前链接不是 SSH 链接".to_string();
-            return;
-        };
         let session_id = self.next_terminal_session_id;
         self.next_terminal_session_id += 1;
+        if !self.start_ssh_terminal_worker(session_id, &link, cx) {
+            return;
+        }
+        self.create_terminal_tab_for_session(session_id);
+        self.workspace = Workspace::Connections;
+        self.placeholder_notice = format!("正在连接 {}", link.address_label());
+    }
+
+    /// 重连已断开的 SSH 终端会话；复用同一会话 ID 与标签，重建 worker 与终端画面。
+    pub(crate) fn reconnect_terminal_session(&mut self, session_id: usize, cx: &mut Context<Self>) {
+        let Some((status, link_id)) = self
+            .terminal_sessions
+            .get(&session_id)
+            .map(|session| (session.status.clone(), session.link_id))
+        else {
+            self.placeholder_notice = "终端会话不存在".to_string();
+            return;
+        };
+        if !matches!(
+            status,
+            TerminalStatus::Disconnected | TerminalStatus::Failed
+        ) {
+            return;
+        }
+        let Some(link) = self.config.connections.link(link_id).cloned() else {
+            self.placeholder_notice = "未找到 SSH 链接，无法重连".to_string();
+            return;
+        };
+        if !self.start_ssh_terminal_worker(session_id, &link, cx) {
+            return;
+        }
+        self.placeholder_notice = format!("正在重连 {}", link.address_label());
+    }
+
+    /// 为新的或重连的终端会话启动 SSH worker，并以全新会话状态替换同 ID 的旧状态。
+    ///
+    /// 返回值：worker 是否成功启动；链接不再是 SSH 链接时返回 false 并如实提示。
+    ///
+    /// 说明：重连必须重建会话状态——旧终端画面与旧命令通道随断开一起失效，
+    /// 继续复用会让已断开的画面看起来仍可输入。
+    fn start_ssh_terminal_worker(
+        &mut self,
+        session_id: usize,
+        link: &ConnectionLinkConfig,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ssh) = link.ssh_config().cloned() else {
+            self.placeholder_notice = "当前链接不是 SSH 链接".to_string();
+            return false;
+        };
         let trusted_fingerprint = self
             .config
             .connections
@@ -441,12 +671,19 @@ impl ArgusApp {
             cols: DEFAULT_TERMINAL_COLS,
         };
         let (command_sender, event_receiver) = spawn_ssh_worker(request);
-        let session = TerminalSessionState::connecting(session_id, &link, command_sender);
-        self.terminal_sessions.insert(session_id, session);
-        self.create_terminal_tab_for_session(session_id);
-        self.workspace = Workspace::Connections;
-        self.placeholder_notice = format!("正在连接 {}", link.address_label());
+        self.terminal_sessions.insert(
+            session_id,
+            TerminalSessionState::connecting(session_id, link, command_sender),
+        );
+        Self::spawn_terminal_event_pump(cx, event_receiver);
+        true
+    }
 
+    /// 消费 SSH worker 事件并回写应用状态，直到事件通道关闭。
+    fn spawn_terminal_event_pump(
+        cx: &mut Context<Self>,
+        event_receiver: async_channel::Receiver<TerminalEvent>,
+    ) {
         cx.spawn(async move |view, cx| {
             while let Ok(event) = event_receiver.recv().await {
                 let _ = view.update(cx, |app, cx| {
@@ -578,11 +815,6 @@ fn terminal_autoscroll_at_boundary(
         || (vertical_intensity > 0.0 && current_offset == 0)
 }
 
-/// 把粘贴文本的换行统一归一化为终端回车字节；多行文本粘贴后仍按行提交，与手动输入一致。
-fn terminal_paste_bytes(text: &str) -> Vec<u8> {
-    text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
-}
-
 /// 调度终端拖拽选择自动滚动的下一帧；拖拽结束、指针回到视口内或滚到边界时循环自动停止。
 fn schedule_terminal_selection_autoscroll_frame(entity: Entity<ArgusApp>, window: &mut Window) {
     window.on_next_frame(move |window, cx| {
@@ -622,14 +854,5 @@ mod tests {
         assert!(terminal_autoscroll_at_boundary(1.0, 0, 5));
         assert!(!terminal_autoscroll_at_boundary(1.0, 1, 5));
         assert!(!terminal_autoscroll_at_boundary(0.0, 0, 5));
-    }
-
-    /// 验证粘贴文本的换行统一归一化为终端回车，CRLF/LF 混排都能正确处理。
-    #[test]
-    fn terminal_paste_bytes_normalizes_newlines() {
-        assert_eq!(terminal_paste_bytes("ls\r\npwd\n"), b"ls\rpwd\r");
-        assert_eq!(terminal_paste_bytes("single"), b"single");
-        assert_eq!(terminal_paste_bytes("a\rb\n"), b"a\rb\r");
-        assert!(terminal_paste_bytes("").is_empty());
     }
 }

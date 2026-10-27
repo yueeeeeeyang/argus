@@ -1,6 +1,6 @@
 //! 文件职责：实现 SFTP、SMB、Git、SVN 通用远程文件管理标签、事件回收、文件操作和输入框交互。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：从 SSH/SMB/Git/SVN 链接打开通用文件管理，并按协议能力约束浏览、预览、下载和写操作。
 
@@ -18,6 +18,7 @@ use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
 };
 use crate::loader::PathBrowser;
+use crate::remote::connection::ConnectionLinkConfig;
 use crate::remote::remote_file::{
     RemoteFileBackend, RemoteFileCommand, RemoteFileEntry, RemoteFileEntryKind, RemoteFileEvent,
     RemoteFileSessionState, RemoteFileStatus, RemoteFileWorkerBackend, RemoteFileWorkerRequest,
@@ -1004,73 +1005,11 @@ impl ArgusApp {
             self.placeholder_notice = "未找到链接".to_string();
             return;
         };
-        let worker_backend = match backend {
-            RemoteFileBackend::Sftp => {
-                let Some(ssh) = link.ssh_config().cloned() else {
-                    self.placeholder_notice = "当前链接不是 SSH 链接".to_string();
-                    return;
-                };
-                let trusted_fingerprint = self
-                    .config
-                    .connections
-                    .trusted_fingerprint(&ssh.host, ssh.port)
-                    .map(ToString::to_string);
-                RemoteFileWorkerBackend::Sftp {
-                    ssh,
-                    trusted_fingerprint,
-                }
-            }
-            RemoteFileBackend::Smb => {
-                let Some(smb) = link.smb_config().cloned() else {
-                    self.placeholder_notice = "当前链接不是 SMB 链接".to_string();
-                    return;
-                };
-                RemoteFileWorkerBackend::Smb { smb }
-            }
-            RemoteFileBackend::Git => {
-                let Some(git) = link.git_config().cloned() else {
-                    self.placeholder_notice = "当前链接不是 Git 链接".to_string();
-                    return;
-                };
-                let trusted_fingerprint = git_ssh_endpoint(&git.url).and_then(|(host, port)| {
-                    self.config
-                        .connections
-                        .trusted_fingerprint(&host, port)
-                        .map(ToString::to_string)
-                });
-                RemoteFileWorkerBackend::Git {
-                    link_id,
-                    git,
-                    trusted_fingerprint,
-                }
-            }
-            RemoteFileBackend::Svn => {
-                let Some(svn) = link.svn_config().cloned() else {
-                    self.placeholder_notice = "当前链接不是 SVN 链接".to_string();
-                    return;
-                };
-                let trusted_fingerprint = svn_ssh_endpoint(&svn.url).and_then(|(host, port)| {
-                    self.config
-                        .connections
-                        .trusted_fingerprint(&host, port)
-                        .map(ToString::to_string)
-                });
-                RemoteFileWorkerBackend::Svn {
-                    svn,
-                    trusted_fingerprint,
-                }
-            }
-        };
         let session_id = self.next_remote_file_session_id;
         self.next_remote_file_session_id += 1;
-        let request = RemoteFileWorkerRequest {
-            session_id,
-            backend: worker_backend,
-        };
-        let (command_sender, event_receiver) = spawn_remote_file_worker(request);
-        let session =
-            RemoteFileSessionState::connecting(session_id, &link, backend, command_sender);
-        self.remote_file_sessions.insert(session_id, session);
+        if !self.start_remote_file_worker(session_id, &link, backend, cx) {
+            return;
+        }
         self.create_remote_file_tab_for_session(session_id);
         self.workspace = Workspace::Connections;
         self.placeholder_notice = format!(
@@ -1078,7 +1017,138 @@ impl ArgusApp {
             link.address_label(),
             backend.label()
         );
+    }
 
+    /// 重连已断开的远程文件管理会话；复用同一会话 ID 与标签，重建 worker 与目录状态。
+    pub(crate) fn reconnect_remote_file_session(
+        &mut self,
+        session_id: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((status, link_id, backend)) = self
+            .remote_file_sessions
+            .get(&session_id)
+            .map(|session| (session.status.clone(), session.link_id, session.backend))
+        else {
+            self.placeholder_notice = "文件管理会话不存在".to_string();
+            return;
+        };
+        if !matches!(
+            status,
+            RemoteFileStatus::Disconnected | RemoteFileStatus::Failed
+        ) {
+            return;
+        }
+        let Some(link) = self.config.connections.link(link_id).cloned() else {
+            self.placeholder_notice = "未找到链接，无法重连".to_string();
+            return;
+        };
+        if !self.start_remote_file_worker(session_id, &link, backend, cx) {
+            return;
+        }
+        self.placeholder_notice = format!("正在重连 {}", link.address_label());
+    }
+
+    /// 为新的或重连的远程文件会话启动 worker，并以全新会话状态替换同 ID 的旧状态。
+    ///
+    /// 返回值：worker 是否成功启动；链接协议不匹配时返回 false 并如实提示。
+    ///
+    /// 说明：重连必须重建会话状态——旧目录列表与旧命令通道随断开一起失效，
+    /// 继续复用会让已断开列表看起来仍可操作。
+    fn start_remote_file_worker(
+        &mut self,
+        session_id: usize,
+        link: &ConnectionLinkConfig,
+        backend: RemoteFileBackend,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(worker_backend) = self.remote_file_worker_backend(link, backend) else {
+            return false;
+        };
+        let request = RemoteFileWorkerRequest {
+            session_id,
+            backend: worker_backend,
+        };
+        let (command_sender, event_receiver) = spawn_remote_file_worker(request);
+        self.remote_file_sessions.insert(
+            session_id,
+            RemoteFileSessionState::connecting(session_id, link, backend, command_sender),
+        );
+        Self::spawn_remote_file_event_pump(cx, event_receiver);
+        true
+    }
+
+    /// 组装远程文件 worker 的协议后端配置；链接缺失或协议不匹配时更新提示并返回 None。
+    fn remote_file_worker_backend(
+        &mut self,
+        link: &ConnectionLinkConfig,
+        backend: RemoteFileBackend,
+    ) -> Option<RemoteFileWorkerBackend> {
+        let link_id = link.id;
+        match backend {
+            RemoteFileBackend::Sftp => {
+                let Some(ssh) = link.ssh_config().cloned() else {
+                    self.placeholder_notice = "当前链接不是 SSH 链接".to_string();
+                    return None;
+                };
+                let trusted_fingerprint = self
+                    .config
+                    .connections
+                    .trusted_fingerprint(&ssh.host, ssh.port)
+                    .map(ToString::to_string);
+                Some(RemoteFileWorkerBackend::Sftp {
+                    ssh,
+                    trusted_fingerprint,
+                })
+            }
+            RemoteFileBackend::Smb => {
+                let Some(smb) = link.smb_config().cloned() else {
+                    self.placeholder_notice = "当前链接不是 SMB 链接".to_string();
+                    return None;
+                };
+                Some(RemoteFileWorkerBackend::Smb { smb })
+            }
+            RemoteFileBackend::Git => {
+                let Some(git) = link.git_config().cloned() else {
+                    self.placeholder_notice = "当前链接不是 Git 链接".to_string();
+                    return None;
+                };
+                let trusted_fingerprint = git_ssh_endpoint(&git.url).and_then(|(host, port)| {
+                    self.config
+                        .connections
+                        .trusted_fingerprint(&host, port)
+                        .map(ToString::to_string)
+                });
+                Some(RemoteFileWorkerBackend::Git {
+                    link_id,
+                    git,
+                    trusted_fingerprint,
+                })
+            }
+            RemoteFileBackend::Svn => {
+                let Some(svn) = link.svn_config().cloned() else {
+                    self.placeholder_notice = "当前链接不是 SVN 链接".to_string();
+                    return None;
+                };
+                let trusted_fingerprint = svn_ssh_endpoint(&svn.url).and_then(|(host, port)| {
+                    self.config
+                        .connections
+                        .trusted_fingerprint(&host, port)
+                        .map(ToString::to_string)
+                });
+                Some(RemoteFileWorkerBackend::Svn {
+                    svn,
+                    trusted_fingerprint,
+                })
+            }
+        }
+    }
+
+    /// 消费远程文件 worker 事件并回写应用状态，直到事件通道关闭。
+    fn spawn_remote_file_event_pump(
+        cx: &mut Context<Self>,
+        event_receiver: async_channel::Receiver<RemoteFileEvent>,
+    ) {
         cx.spawn(async move |view, cx| {
             while let Ok(event) = event_receiver.recv().await {
                 let _ = view.update(cx, |app, cx| {

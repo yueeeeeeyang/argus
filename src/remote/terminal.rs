@@ -1,6 +1,6 @@
-//! 文件职责：封装 SSH 终端会话、主机指纹校验、终端输出解析和按键字节映射。
+//! 文件职责：封装 SSH 终端会话、主机指纹校验、终端输出解析、输入模式跟踪与查询应答。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：使用内嵌 ssh2 通道建立远程 shell，并把后台输出安全回传给 GPUI 状态。
 
@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use async_channel::{Receiver, Sender};
 use gpui::ScrollHandle;
+use vt100::Callbacks as Vt100Callbacks;
 
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
@@ -20,6 +21,9 @@ use crate::infra::text_selection::{
 };
 use crate::remote::connection::{ConnectionLinkConfig, ConnectionNodeId, SshLinkConfig};
 use crate::remote::ssh::{authenticate_ssh_session, connect_ssh_session};
+use crate::remote::terminal_input::{
+    TerminalInputMode, TerminalMouseButton, TerminalMouseEncoding, TerminalMouseMode,
+};
 
 /// 终端默认行数。
 pub(crate) const DEFAULT_TERMINAL_ROWS: u16 = 30;
@@ -40,8 +44,8 @@ pub(crate) struct TerminalSessionState {
     pub title: String,
     /// 当前终端状态。
     pub status: TerminalStatus,
-    /// 终端输出解析器，负责把 ANSI 控制序列还原成屏幕文本。
-    pub parser: vt100::Parser,
+    /// 终端输出解析器，负责把 ANSI 控制序列还原成屏幕文本，并跟踪远端输入模式。
+    pub parser: vt100::Parser<TerminalCallbacks>,
     /// 发送给 SSH 后台线程的命令通道。
     pub command_sender: Option<mpsc::Sender<TerminalCommand>>,
     /// 等待用户确认的主机指纹；没有待确认时为空。
@@ -64,6 +68,10 @@ pub(crate) struct TerminalSessionState {
     selection_drag: Option<TerminalSelectionDrag>,
     /// 最近一次失败或断开提示。
     pub message: Option<String>,
+    /// 最近一次上报给远端的焦点状态；`None` 表示尚未上报过。
+    pub reported_focus: Option<bool>,
+    /// 已转发按下事件到远端的鼠标按钮；释放事件据此决定是否回发。
+    pub forwarded_mouse_button: Option<TerminalMouseButton>,
 }
 
 impl TerminalSessionState {
@@ -78,10 +86,11 @@ impl TerminalSessionState {
             link_id: link.id,
             title: link.name.clone(),
             status: TerminalStatus::Connecting,
-            parser: vt100::Parser::new(
+            parser: vt100::Parser::new_with_callbacks(
                 DEFAULT_TERMINAL_ROWS,
                 DEFAULT_TERMINAL_COLS,
                 TERMINAL_SCROLLBACK_LINES,
+                TerminalCallbacks::default(),
             ),
             command_sender: Some(command_sender),
             pending_host_key: None,
@@ -94,13 +103,67 @@ impl TerminalSessionState {
             selection: None,
             selection_drag: None,
             message: Some("正在建立 SSH 连接...".to_string()),
+            reported_focus: None,
+            forwarded_mouse_button: None,
         }
     }
 
-    /// 将后台输出写入 vt100 解析器。
+    /// 返回远端程序开启的输入模式快照，供按键、鼠标、粘贴与焦点事件编码使用。
+    ///
+    /// 鼠标编码优先级：远端同时开启多种编码时按能力从高到低取舍（SGR > UTF-8 > urxvt >
+    /// X10），保证按现代编码请求的程序拿到它声明的编码。
+    pub(crate) fn input_mode(&self) -> TerminalInputMode {
+        let callbacks = self.parser.callbacks();
+        let screen = self.parser.screen();
+        let mouse_encoding =
+            if screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr {
+                TerminalMouseEncoding::Sgr
+            } else if screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Utf8 {
+                TerminalMouseEncoding::Utf8
+            } else if callbacks.urxvt_mouse_encoding {
+                TerminalMouseEncoding::Urxvt
+            } else {
+                TerminalMouseEncoding::X10
+            };
+        TerminalInputMode {
+            application_cursor: screen.application_cursor(),
+            backarrow_key_sends_backspace: callbacks.backarrow_key_sends_backspace,
+            bracketed_paste: screen.bracketed_paste(),
+            focus_events: callbacks.focus_events,
+            mouse_mode: match screen.mouse_protocol_mode() {
+                vt100::MouseProtocolMode::None => TerminalMouseMode::None,
+                vt100::MouseProtocolMode::Press => TerminalMouseMode::Press,
+                vt100::MouseProtocolMode::PressRelease => TerminalMouseMode::PressRelease,
+                vt100::MouseProtocolMode::ButtonMotion => TerminalMouseMode::ButtonMotion,
+                vt100::MouseProtocolMode::AnyMotion => TerminalMouseMode::AnyMotion,
+            },
+            mouse_encoding,
+        }
+    }
+
+    /// 记录终端单元格像素尺寸，供远端 XTWINOPS 尺寸查询应答使用。
+    pub(crate) fn set_cell_size(&mut self, height: f32, width: f32) {
+        self.parser.callbacks_mut().cell_size = Some((height.round() as u16, width.round() as u16));
+    }
+
+    /// 返回最近记录的终端单元格像素尺寸（高, 宽）。
+    pub(crate) fn cell_size(&self) -> Option<(u16, u16)> {
+        self.parser.callbacks().cell_size
+    }
+
+    /// 将后台输出写入 vt100 解析器，并把解析过程中生成的查询应答立即回写远端。
+    ///
+    /// 应答必须紧随触发它的输出发送：远端程序在等待答复（DSR/DA/DECRQM 等）超时后
+    /// 会降级按键协议或功能探测，导致行为与真实终端不一致。
     pub(crate) fn process_output(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         self.refresh_max_scrollback_offset();
+        let replies = std::mem::take(&mut self.parser.callbacks_mut().pending_replies);
+        if !replies.is_empty()
+            && let Some(sender) = &self.command_sender
+        {
+            let _ = sender.send(TerminalCommand::Input(replies));
+        }
     }
 
     /// 生成当前终端屏幕快照，供 UI 按终端单元格绘制颜色、背景和光标。
@@ -847,36 +910,134 @@ pub(crate) fn spawn_ssh_worker(
     (command_sender, event_receiver)
 }
 
-/// 根据 GPUI 按键字段生成写入终端的字节序列。
-pub(crate) fn terminal_input_bytes(
-    key: &str,
-    key_char: Option<&str>,
-    is_control: bool,
-    is_platform: bool,
-) -> Option<Vec<u8>> {
-    if is_platform {
-        return None;
+/// DA1 应答：VT220 身份 + 选择性擦除 + ANSI 颜色，避免声明未实现的能力。
+const TERMINAL_DA1_REPLY: &[u8] = b"\x1b[?62;6;22c";
+/// DA2 应答：不声明具体产品身份，避免程序按某产品能力启用未实现的特性。
+const TERMINAL_DA2_REPLY: &[u8] = b"\x1b[>0;0;0c";
+
+/// vt100 未内建处理的控制序列回调：跟踪输入模式并为远端查询生成应答字节。
+///
+/// vt100 已经内建 DECCKM、DECOM、鼠标模式、备用屏幕与括号粘贴；这里补齐远端程序还会
+/// 开启或查询的其余模式（1004 焦点事件、67 回退键、1015 urxvt 鼠标编码），并应答
+/// DSR/DA/DECRQM/XTWINOPS 查询，避免程序等待超时后降级功能探测。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TerminalCallbacks {
+    /// 待回写远端的查询应答字节；由 `process_output` 取出后发送。
+    pending_replies: Vec<u8>,
+    /// 焦点事件上报（1004）。
+    focus_events: bool,
+    /// 回退键发送退格（DECBKM，67）。
+    backarrow_key_sends_backspace: bool,
+    /// urxvt 鼠标编码（1015）。
+    urxvt_mouse_encoding: bool,
+    /// 单元格像素尺寸（高, 宽）；未知时不对 XTWINOPS 14t 作答。
+    cell_size: Option<(u16, u16)>,
+}
+
+impl Vt100Callbacks for TerminalCallbacks {
+    /// 处理 vt100 未内建的控制序列：跟踪模式开关，并应答终端查询。
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        i1: Option<u8>,
+        i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        match (i1, i2, c) {
+            (Some(b'?'), None, 'h') => self.apply_dec_modes(params, true),
+            (Some(b'?'), None, 'l') => self.apply_dec_modes(params, false),
+            (None, None, 'n') => {
+                let code = params
+                    .first()
+                    .and_then(|param| param.first())
+                    .copied()
+                    .unwrap_or(0);
+                match code {
+                    // 设备状态报告：`CSI 5n` 回答「终端正常」，`CSI 6n` 回答 1 基光标位置。
+                    5 => self.pending_replies.extend_from_slice(b"\x1b[0n"),
+                    6 => {
+                        let (row, col) = screen.cursor_position();
+                        self.pending_replies
+                            .extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+                    }
+                    _ => {}
+                }
+            }
+            (None, None, 'c') => self.pending_replies.extend_from_slice(TERMINAL_DA1_REPLY),
+            (Some(b'>'), None, 'c') => self.pending_replies.extend_from_slice(TERMINAL_DA2_REPLY),
+            (Some(b'?'), Some(b'$'), 'p') => self.report_dec_modes(screen, params),
+            (None, None, 't') => self.report_window_ops(screen, params),
+            _ => {}
+        }
     }
-    if is_control {
-        return match key {
-            "c" => Some(vec![0x03]),
-            "d" => Some(vec![0x04]),
-            _ => None,
-        };
+}
+
+impl TerminalCallbacks {
+    /// 跟踪 vt100 未内建的 DEC 私有模式。
+    fn apply_dec_modes(&mut self, params: &[&[u16]], enabled: bool) {
+        for param in params {
+            match param.first().copied() {
+                Some(1004) => self.focus_events = enabled,
+                Some(67) => self.backarrow_key_sends_backspace = enabled,
+                Some(1015) => self.urxvt_mouse_encoding = enabled,
+                _ => {}
+            }
+        }
     }
 
-    match key {
-        "enter" => Some(b"\r".to_vec()),
-        "backspace" => Some(vec![0x7f]),
-        "tab" => Some(b"\t".to_vec()),
-        "escape" => Some(vec![0x1b]),
-        "up" | "arrowup" => Some(b"\x1b[A".to_vec()),
-        "down" | "arrowdown" => Some(b"\x1b[B".to_vec()),
-        "right" | "arrowright" => Some(b"\x1b[C".to_vec()),
-        "left" | "arrowleft" => Some(b"\x1b[D".to_vec()),
-        _ => key_char
-            .filter(|text| !text.chars().any(char::is_control))
-            .map(|text| text.as_bytes().to_vec()),
+    /// 应答 DECRQM 模式查询；未支持的模式回答「未识别」。
+    fn report_dec_modes(&mut self, screen: &mut vt100::Screen, params: &[&[u16]]) {
+        for param in params {
+            let Some(mode) = param.first().copied() else {
+                continue;
+            };
+            let state = self.dec_mode_state(screen, mode);
+            self.pending_replies
+                .extend_from_slice(format!("\x1b[?{mode};{state}$y").as_bytes());
+        }
+    }
+
+    /// 返回单个 DEC 私有模式的当前状态：1 设置、2 重置、0 未识别。
+    fn dec_mode_state(&self, screen: &mut vt100::Screen, mode: u16) -> u8 {
+        let state = |enabled: bool| if enabled { 1 } else { 2 };
+        match mode {
+            1 => state(screen.application_cursor()),
+            9 => state(screen.mouse_protocol_mode() == vt100::MouseProtocolMode::Press),
+            25 => state(!screen.hide_cursor()),
+            67 => state(self.backarrow_key_sends_backspace),
+            1000 => state(screen.mouse_protocol_mode() == vt100::MouseProtocolMode::PressRelease),
+            1002 => state(screen.mouse_protocol_mode() == vt100::MouseProtocolMode::ButtonMotion),
+            1003 => state(screen.mouse_protocol_mode() == vt100::MouseProtocolMode::AnyMotion),
+            1004 => state(self.focus_events),
+            1005 => state(screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Utf8),
+            1006 => state(screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr),
+            1015 => state(self.urxvt_mouse_encoding),
+            1047 | 1049 => state(screen.alternate_screen()),
+            2004 => state(screen.bracketed_paste()),
+            _ => 0,
+        }
+    }
+
+    /// 应答 XTWINOPS 窗口操作查询：14 单元格像素尺寸、18 文本区行列数。
+    fn report_window_ops(&mut self, screen: &mut vt100::Screen, params: &[&[u16]]) {
+        let Some(op) = params.first().and_then(|param| param.first()).copied() else {
+            return;
+        };
+        match op {
+            14 => {
+                if let Some((height, width)) = self.cell_size {
+                    self.pending_replies
+                        .extend_from_slice(format!("\x1b[4;{height};{width}t").as_bytes());
+                }
+            }
+            18 => {
+                let (rows, cols) = screen.size();
+                self.pending_replies
+                    .extend_from_slice(format!("\x1b[8;{rows};{cols}t").as_bytes());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1030,7 +1191,12 @@ mod tests {
             link_id: 1,
             title: "测试终端".to_string(),
             status: TerminalStatus::Connected,
-            parser: vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_LINES),
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                TERMINAL_SCROLLBACK_LINES,
+                TerminalCallbacks::default(),
+            ),
             command_sender: Some(sender),
             pending_host_key: None,
             rows,
@@ -1042,34 +1208,106 @@ mod tests {
             selection: None,
             selection_drag: None,
             message: None,
+            reported_focus: None,
+            forwarded_mouse_button: None,
         }
     }
 
-    /// 验证常用控制键会转换为终端预期字节。
-    #[test]
-    fn terminal_input_bytes_maps_control_keys() {
-        assert_eq!(
-            terminal_input_bytes("enter", None, false, false),
-            Some(b"\r".to_vec())
-        );
-        assert_eq!(
-            terminal_input_bytes("backspace", None, false, false),
-            Some(vec![0x7f])
-        );
-        assert_eq!(
-            terminal_input_bytes("up", None, false, false),
-            Some(b"\x1b[A".to_vec())
-        );
-        assert_eq!(
-            terminal_input_bytes("c", Some("c"), true, false),
-            Some(vec![0x03])
-        );
+    /// 构造带命令接收端的终端会话，便于断言回写远端的字节。
+    fn terminal_session_with_commands(
+        rows: u16,
+        cols: u16,
+    ) -> (TerminalSessionState, mpsc::Receiver<TerminalCommand>) {
+        let (sender, receiver) = mpsc::channel();
+        let mut session = terminal_session_for_test(rows, cols);
+        session.command_sender = Some(sender);
+        (session, receiver)
     }
 
-    /// 验证平台快捷键不会误发到远程终端。
+    /// 取出接收端内全部终端输入字节，忽略其它命令。
+    fn drain_terminal_input(receiver: &mpsc::Receiver<TerminalCommand>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        while let Ok(command) = receiver.try_recv() {
+            if let TerminalCommand::Input(input) = command {
+                bytes.extend(input);
+            }
+        }
+        bytes
+    }
+
+    /// 验证输入模式快照跟随远端开启的模式序列。
     #[test]
-    fn terminal_input_bytes_ignores_platform_shortcuts() {
-        assert_eq!(terminal_input_bytes("c", Some("c"), false, true), None);
+    fn input_mode_follows_remote_mode_sequences() {
+        let mut session = terminal_session_for_test(5, 20);
+        let default_mode = session.input_mode();
+        assert!(!default_mode.application_cursor);
+        assert_eq!(default_mode.mouse_mode, TerminalMouseMode::None);
+
+        session.process_output(b"\x1b[?1h\x1b[?1000h\x1b[?2004h\x1b[?1004h\x1b[?67h\x1b[?1015h");
+        let mode = session.input_mode();
+        assert!(mode.application_cursor);
+        assert_eq!(mode.mouse_mode, TerminalMouseMode::PressRelease);
+        assert_eq!(mode.mouse_encoding, TerminalMouseEncoding::Urxvt);
+        assert!(mode.bracketed_paste);
+        assert!(mode.focus_events);
+        assert!(mode.backarrow_key_sends_backspace);
+
+        session.process_output(b"\x1b[?1006h");
+        assert_eq!(
+            session.input_mode().mouse_encoding,
+            TerminalMouseEncoding::Sgr
+        );
+
+        session.process_output(b"\x1b[?1006l\x1b[?1015l");
+        assert_eq!(
+            session.input_mode().mouse_encoding,
+            TerminalMouseEncoding::X10
+        );
+
+        session.process_output(b"\x1b[?1l\x1b[?1000l\x1b[?2004l\x1b[?1004l");
+        let mode = session.input_mode();
+        assert!(!mode.application_cursor);
+        assert_eq!(mode.mouse_mode, TerminalMouseMode::None);
+        assert!(!mode.bracketed_paste);
+        assert!(!mode.focus_events);
+    }
+
+    /// 验证 DSR 查询会立即回写光标位置应答。
+    #[test]
+    fn device_status_report_replies_with_cursor_position() {
+        let (mut session, receiver) = terminal_session_with_commands(5, 20);
+        session.process_output(b"ab\x1b[2;3H");
+        session.process_output(b"\x1b[6n");
+
+        assert_eq!(drain_terminal_input(&receiver), b"\x1b[2;3R".to_vec());
+    }
+
+    /// 验证 DA/DECRQM/XTWINOPS 查询会生成对应应答。
+    #[test]
+    fn terminal_queries_reply_with_declared_capabilities() {
+        let (mut session, receiver) = terminal_session_with_commands(24, 80);
+        session.set_cell_size(18.0, 8.0);
+        session.process_output(b"\x1b[c\x1b[>c\x1b[?1;1000$p\x1b[14t\x1b[18t");
+
+        let expected = [
+            TERMINAL_DA1_REPLY,
+            TERMINAL_DA2_REPLY,
+            b"\x1b[?1;2$y",
+            b"\x1b[?1000;2$y",
+            b"\x1b[4;18;8t",
+            b"\x1b[8;24;80t",
+        ]
+        .concat();
+        assert_eq!(drain_terminal_input(&receiver), expected);
+    }
+
+    /// 验证应用光标键模式下箭头键与 Home/End 使用 SS3 序列。
+    #[test]
+    fn input_mode_reports_application_cursor_for_encoder() {
+        let mut session = terminal_session_for_test(5, 20);
+        session.process_output(b"\x1b[?1h");
+
+        assert!(session.input_mode().application_cursor);
     }
 
     /// 验证屏幕快照保留 vt100 解析出的前景色、背景色和光标位置。

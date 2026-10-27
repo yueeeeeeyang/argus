@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Argus 主窗口设置模态框和独立设置编辑器。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-16
 //! 作者：Argus 开发团队
 //! 主要功能：以主窗口模态框展示分类设置，并提供智能分析、系统提示词和 Jstack 过滤规则编辑入口。
 
@@ -137,6 +137,8 @@ struct SettingsModalSnapshot {
     skill_entries: Vec<SkillListEntry>,
     /// Skill 管理分区最近一次操作结果。
     skill_management_message: Option<crate::app::SkillManagementMessage>,
+    /// 终端设置：Option 键是否作为 Meta（发送 ESC 前缀）。
+    terminal_option_as_meta: bool,
 }
 
 /// Skill 管理分区的单行展示状态。
@@ -178,6 +180,7 @@ impl SettingsModalSnapshot {
             open_with_registration_message: app.open_with_registration_message.clone(),
             skill_entries: build_skill_entries(app),
             skill_management_message: app.skill_management_message.clone(),
+            terminal_option_as_meta: app.config.terminal.option_as_meta,
         }
     }
 }
@@ -414,13 +417,15 @@ fn render_settings_modal_content(
                 .min_w(px(0.0))
                 .h_full()
                 .p(px(WINDOW_CONTENT_INSET))
+                .debug_selector(|| "settings-modal-content-area".to_string())
                 .child(
                     div()
                         .size_full()
                         .p(px(WINDOW_CONTENT_PADDING))
                         .rounded(px(WINDOW_CONTENT_RADIUS))
                         .bg(rgb(theme.content))
-                        .shadow(window_content_shadows())
+                        .debug_selector(|| "settings-modal-plate".to_string())
+                        .shadow(window_content_shadows(theme.mode))
                         .flex()
                         .flex_col()
                         .overflow_hidden()
@@ -437,6 +442,9 @@ fn render_settings_modal_content(
                                         .text_size(px(14.0))
                                         .line_height(px(18.0))
                                         .font_weight(FontWeight::SEMIBOLD)
+                                        .debug_selector(|| {
+                                            "settings-modal-section-label".to_string()
+                                        })
                                         .child(snapshot.selected_section.label()),
                                 )
                                 .child(render_icon_button(
@@ -484,10 +492,17 @@ fn render_settings_sidebar(
         .flex_none()
         .flex()
         .flex_col()
+        .debug_selector(|| "settings-modal-sidebar".to_string())
+        // 侧栏背景贴住模态框左缘，必须自带左圆角，否则方角会盖住外壳圆角形成尖角。
+        .rounded_l_lg()
         .bg(rgb(theme.side_bar))
+        // 顶部留白与右侧玻璃板的内缩链一致（窗口留白 + 板内留白），
+        // 使侧栏标题与内容区标题处于同一水平线，且不贴住模态框上边框。
+        .pt(px(WINDOW_CONTENT_INSET + WINDOW_CONTENT_PADDING))
         .child(
             div()
                 .h(px(56.0))
+                .flex_none()
                 .px_4()
                 .flex()
                 .items_center()
@@ -495,16 +510,25 @@ fn render_settings_sidebar(
                 .text_size(px(14.0))
                 .line_height(px(18.0))
                 .font_weight(FontWeight::SEMIBOLD)
+                .debug_selector(|| "settings-modal-sidebar-header".to_string())
                 .child(render_icon(
                     ArgusIcon::Settings,
                     theme.foreground_muted,
                     SETTINGS_MODAL_TITLE_ICON_SIZE,
                 ))
-                .child("设置"),
+                .child(
+                    div()
+                        .debug_selector(|| "settings-modal-sidebar-title".to_string())
+                        .child("设置"),
+                ),
         )
         .child(
             div()
+                .id("settings-modal-nav-scroll")
                 .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .scrollbar_width(px(SETTINGS_MODAL_SCROLLBAR_WIDTH))
                 .px_2()
                 .flex()
                 .flex_col()
@@ -552,6 +576,18 @@ fn render_settings_sidebar(
                 .child(
                     div()
                         .mt_3()
+                        .child(settings_navigation_group_label("链接", theme)),
+                )
+                .child(settings_navigation_item(
+                    SettingsSection::Terminal,
+                    ArgusIcon::Terminal,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
+                .child(
+                    div()
+                        .mt_3()
                         .child(settings_navigation_group_label("智能分析", theme)),
                 )
                 .child(settings_navigation_item(
@@ -585,6 +621,7 @@ fn render_settings_sidebar(
         )
         .child(
             div()
+                .flex_none()
                 .px_4()
                 .pb_4()
                 .flex()
@@ -671,6 +708,7 @@ fn settings_section_id(section: SettingsSection) -> &'static str {
         SettingsSection::LogDisplay => "log-display",
         SettingsSection::LogSearch => "log-search",
         SettingsSection::LogLoading => "log-loading",
+        SettingsSection::Terminal => "terminal",
     }
 }
 
@@ -713,6 +751,9 @@ fn render_selected_settings_section(
         }
         SettingsSection::LogLoading => {
             render_log_loading_section(snapshot, app_handle, theme).into_any_element()
+        }
+        SettingsSection::Terminal => {
+            render_terminal_section(snapshot, app_handle, theme).into_any_element()
         }
     }
 }
@@ -1010,6 +1051,79 @@ fn render_ai_skills_section(
                     )
                 },
             ),
+        theme,
+    )
+    .into_any_element()
+}
+
+/// 渲染链接分组下的终端设置页面。
+fn render_terminal_section(
+    snapshot: &SettingsModalSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> AnyElement {
+    let toggle_app = app_handle.clone();
+    settings_section(
+        "终端",
+        ArgusIcon::Terminal,
+        setting_group(theme).child(
+            div()
+                .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_sm()
+                .bg(rgb(theme.current_line))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.foreground))
+                                .child("Option 键作为 Meta"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.foreground_muted))
+                                .child(
+                                    "开启后 Option/Alt 组合发送 ESC 前缀，便于 vim 等程序使用 Meta 组合；关闭则保持平台组合字符。",
+                                ),
+                        ),
+                )
+                .child(value_badge(
+                    if snapshot.terminal_option_as_meta {
+                        "已开启"
+                    } else {
+                        "已关闭"
+                    }
+                    .to_string(),
+                    theme,
+                ))
+                .child(render_icon_button(
+                    "settings-terminal-option-as-meta",
+                    if snapshot.terminal_option_as_meta {
+                        ArgusIcon::ToggleRight
+                    } else {
+                        ArgusIcon::ToggleLeft
+                    },
+                    "切换 Option 键作为 Meta",
+                    snapshot.terminal_option_as_meta,
+                    IconButtonSize::Small,
+                    theme,
+                    move |_, _, cx| {
+                        update_settings_app(&toggle_app, cx, |app, _| {
+                            app.toggle_terminal_option_as_meta();
+                        });
+                    },
+                )),
+        ),
         theme,
     )
     .into_any_element()

@@ -22,6 +22,14 @@ use crate::config::paths::argus_secret_salt_file;
 /// 测试构建刻意不访问真实凭据库（见 `keyring_entry`），因此该常量在测试中未被引用。
 #[cfg_attr(test, allow(dead_code))]
 const CONNECTION_KEYRING_SERVICE: &str = "argus.connection";
+/// 全部连接机密合并后的凭据库账户名。
+///
+/// 关键设计：macOS 原生钥匙串的访问授权是**按条目**授予的，而应用每次更新都会改变代码
+/// 签名，于是每个条目都会重新要求一次系统授权。把全部连接机密合并成单一条目，可把授权
+/// 次数从「机密条数」降为 **1 次**，这正是「输入一次即可」的实现基础。
+const CONNECTION_SECRETS_ACCOUNT: &str = "connection-secrets.v1";
+/// 本地密文表中保存整份连接机密的保留键。
+pub(crate) const LOCAL_SECRETS_KEY: &str = "connection-secrets.v1";
 /// 本地密文版本前缀；算法升级时据此识别并迁移旧密文。
 const LOCAL_CIPHERTEXT_PREFIX: &str = "v1:";
 /// AES-256-GCM 密钥长度。
@@ -53,73 +61,117 @@ pub(crate) fn account_for_link(link_id: usize, slot: &str) -> String {
     format!("link/{link_id}/{slot}")
 }
 
-/// 读取一条连接机密。
+/// 连接机密集合：账户名（`link/<id>/<槽位>`）→ 机密明文。
 ///
-/// 参数说明：
-/// - `account`：由 [`account_for_link`] 生成的账户名。
-/// - `local_ciphertext`：设置文件中保存的本地密文，凭据库可用时通常为空。
+/// 值使用 `SecretString` 包裹：集合本身会被比较与传递，Debug 输出必须是脱敏的，
+/// 否则任何一次 `{secrets:?}` 都会把全部连接密码写进日志。
+pub(crate) type ConnectionSecrets = std::collections::BTreeMap<String, SecretString>;
+
+/// 一次性读取全部连接机密。
 ///
-/// 返回值：读取成功返回机密；两处都不存在时返回 `None`；凭据库与密文都不可用时返回错误。
-pub(crate) fn load_secret(
-    account: &str,
-    local_ciphertext: Option<&str>,
-) -> Result<Option<SecretString>, String> {
-    match keyring_entry(account) {
-        Ok(entry) => match entry.get_password() {
-            Ok(value) => return Ok(Some(SecretString::from(value))),
-            // 凭据库中没有该条目时才查看本地密文，避免掩盖凭据库的真实故障。
+/// 返回值：读取成功返回机密集合（可能为空）；凭据库与本地密文都不可用时返回错误。
+///
+/// 说明：无论存在多少条机密，本函数最多只访问凭据库 **一次**，对应最多一次系统授权提示。
+pub(crate) fn load_connection_secrets(
+    local_secrets: &std::collections::BTreeMap<String, String>,
+) -> Result<ConnectionSecrets, String> {
+    // 1) 合并后的本地密文优先：它说明上次写入凭据库失败，读取它不触发任何授权提示。
+    if let Some(ciphertext) = local_secrets.get(LOCAL_SECRETS_KEY) {
+        return decrypt_local(ciphertext);
+    }
+
+    // 2) 单条凭据库记录：整个进程最多一次授权提示。
+    //
+    // 凭据库整体不可用（例如 Linux 缺少 Secret Service）时继续尝试本地密文，因此这里只
+    // 处理“能拿到条目”的情况，其余分支留给本地密文。
+    if let Ok(entry) = keyring_entry(CONNECTION_SECRETS_ACCOUNT) {
+        match entry.get_password() {
+            Ok(value) => return decode_secrets_payload(&value),
             Err(keyring::Error::NoEntry) => {}
-            Err(error) => {
-                return Err(format!("无法从系统凭据库读取连接凭据：{error}"));
-            }
-        },
-        Err(_) => {
-            // 凭据库整体不可用（例如 Linux 缺少 Secret Service）：改读本地密文。
+            Err(error) => return Err(format!("无法从系统凭据库读取连接凭据：{error}")),
         }
     }
 
-    match local_ciphertext {
-        Some(ciphertext) => decrypt_local(ciphertext).map(|value| Some(SecretString::from(value))),
-        None => Ok(None),
+    // 3) 旧版「一机密一份本地密文」的布局：就地合并，迁移后由下一次保存改写为单条记录。
+    let mut merged = ConnectionSecrets::new();
+    for (account, ciphertext) in local_secrets {
+        match decrypt_local_secret(ciphertext) {
+            Ok(secret) => {
+                merged.insert(account.clone(), SecretString::from(secret));
+            }
+            Err(error) => {
+                return Err(format!("旧版本地连接凭据无法解密：{error}"));
+            }
+        }
     }
+    Ok(merged)
 }
 
-/// 保存一条连接机密。
+/// 一次性保存全部连接机密。
 ///
 /// 参数说明：
-/// - `account`：由 [`account_for_link`] 生成的账户名。
-/// - `value`：机密明文，仅在当前调用栈与目标后端中短暂存在。
+/// - `secrets`：账户名到机密明文的完整集合；不在集合中的账户即视为已删除。
 ///
 /// 返回值：说明机密最终落到凭据库还是本地密文；两者都失败时返回错误，绝不静默丢弃机密。
-pub(crate) fn store_secret(account: &str, value: &str) -> Result<SecretWriteOutcome, String> {
-    match keyring_entry(account) {
-        Ok(entry) => match entry.set_password(value) {
+pub(crate) fn store_connection_secrets(
+    secrets: &ConnectionSecrets,
+) -> Result<SecretWriteOutcome, String> {
+    let payload = encode_secrets_payload(secrets)?;
+    match keyring_entry(CONNECTION_SECRETS_ACCOUNT) {
+        Ok(entry) => match entry.set_password(&payload) {
             Ok(()) => Ok(SecretWriteOutcome::Keyring),
-            Err(error) => fall_back_to_local(value, &format!("系统凭据库写入失败：{error}")),
+            Err(error) => fall_back_to_local(&payload, &format!("系统凭据库写入失败：{error}")),
         },
-        Err(error) => fall_back_to_local(value, &error),
+        Err(error) => fall_back_to_local(&payload, &error),
     }
 }
 
-/// 删除一条连接机密；不存在时视为成功，保证删除操作幂等。
-pub(crate) fn forget_secret(account: &str) -> Result<(), String> {
-    let Ok(entry) = keyring_entry(account) else {
-        return Ok(());
+/// 读取旧版本按“每机密一个条目”写入的凭据。
+///
+/// 说明：仅供一次性合并迁移使用。新版本不再写入这种布局；由于每个条目都会单独触发系统
+/// 授权提示，调用方只在合并条目与设置文件明文都拿不到该机密时才应调用本函数。
+pub(crate) fn load_legacy_connection_secret(account: &str) -> Result<Option<String>, String> {
+    let entry = match keyring_entry(account) {
+        Ok(entry) => entry,
+        Err(_) => return Ok(None),
     };
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!("无法从系统凭据库删除连接凭据：{error}")),
+    match entry.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!("无法读取旧版连接凭据：{error}")),
     }
+}
+
+/// 把机密集合编码为凭据库中的单条文本值。
+///
+/// 说明：先转成普通字符串映射再交给 serde，避免为 `SecretString` 开启额外 feature。
+fn encode_secrets_payload(secrets: &ConnectionSecrets) -> Result<String, String> {
+    use secrecy::ExposeSecret as _;
+    let plain = secrets
+        .iter()
+        .map(|(account, secret)| (account.as_str(), secret.expose_secret()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    serde_json::to_string(&plain).map_err(|error| format!("无法编码连接凭据：{error}"))
+}
+
+/// 解析凭据库中的单条文本值。
+fn decode_secrets_payload(payload: &str) -> Result<ConnectionSecrets, String> {
+    let plain: std::collections::BTreeMap<String, String> = serde_json::from_str(payload)
+        .map_err(|_| "系统凭据库中的连接凭据格式无法识别，请重新输入连接密码".to_string())?;
+    Ok(plain
+        .into_iter()
+        .map(|(account, secret)| (account, SecretString::from(secret)))
+        .collect())
 }
 
 /// 在凭据库不可用时改用机器绑定密钥加密。
-fn fall_back_to_local(value: &str, reason: &str) -> Result<SecretWriteOutcome, String> {
-    let ciphertext =
-        encrypt_local(value).map_err(|error| format!("{reason}；本地加密回落同样失败：{error}"))?;
+fn fall_back_to_local(payload: &str, reason: &str) -> Result<SecretWriteOutcome, String> {
+    let ciphertext = encrypt_local(payload)
+        .map_err(|error| format!("{reason}；本地加密回落同样失败：{error}"))?;
     Ok(SecretWriteOutcome::LocalCiphertext(ciphertext))
 }
 
-/// 使用机器绑定密钥加密明文，输出带版本前缀的密文。
+/// 使用机器绑定密钥加密整份连接机密，输出带版本前缀的密文。
 fn encrypt_local(plaintext: &str) -> Result<String, String> {
     let key = local_encryption_key()?;
     let cipher = Aes256Gcm::new(&Array::from(key));
@@ -140,8 +192,16 @@ fn encrypt_local(plaintext: &str) -> Result<String, String> {
     ))
 }
 
-/// 解密本地密文；版本前缀、长度或认证标签不匹配时返回错误。
-fn decrypt_local(ciphertext: &str) -> Result<String, String> {
+/// 解密整份连接机密；版本前缀、长度或认证标签不匹配时返回错误。
+fn decrypt_local(ciphertext: &str) -> Result<ConnectionSecrets, String> {
+    let payload = decrypt_local_secret(ciphertext)?;
+    decode_secrets_payload(&payload)
+}
+
+/// 解密本地密文并返回其承载的明文串。
+///
+/// 说明：当前格式承载整份机密集合的 JSON；旧版格式承载单条机密明文，两者共用本函数。
+fn decrypt_local_secret(ciphertext: &str) -> Result<String, String> {
     let encoded = ciphertext
         .strip_prefix(LOCAL_CIPHERTEXT_PREFIX)
         .ok_or_else(|| "本地连接凭据版本无法识别，请重新输入该连接的密码".to_string())?;
@@ -163,7 +223,7 @@ fn decrypt_local(ciphertext: &str) -> Result<String, String> {
         })?;
 
     String::from_utf8(plaintext)
-        .map_err(|_| "本地连接凭据解码结果不是合法文本，请重新输入该连接的密码".to_string())
+        .map_err(|_| "本地连接凭据解码结果不是合法文本，请重新输入连接密码".to_string())
 }
 
 /// 派生本地回落加密密钥。
@@ -480,39 +540,128 @@ mod tests {
         assert_eq!(account_for_link(7, "ssh_password"), "link/7/ssh_password");
     }
 
-    /// 验证本地密文可以往返解密，且同一明文的两次加密结果不同（nonce 随机）。
+    /// 构造一份用于往返验证的连接机密集合。
+    fn sample_secrets() -> ConnectionSecrets {
+        ConnectionSecrets::from([
+            (
+                account_for_link(1, "smb_password"),
+                SecretString::from("plain-text-secret"),
+            ),
+            (
+                account_for_link(2, "ssh_password"),
+                SecretString::from("另一条密码"),
+            ),
+        ])
+    }
+
+    /// 验证机密集合的 Debug 输出是脱敏的，不会把密码写进日志。
+    #[test]
+    fn secrets_debug_output_is_redacted() {
+        let debug = format!("{:?}", sample_secrets());
+        assert!(
+            !debug.contains("plain-text-secret"),
+            "Debug 不得泄漏密码：{debug}"
+        );
+        assert!(!debug.contains("另一条密码"), "Debug 不得泄漏密码：{debug}");
+    }
+
+    /// 验证本地密文可以往返解密，且同一份机密的两次加密结果不同（nonce 随机）。
     #[test]
     fn local_ciphertext_round_trips_with_random_nonce() {
-        let first = encrypt_local("s3cret-密码").expect("加密应成功");
-        let second = encrypt_local("s3cret-密码").expect("加密应成功");
+        let secrets = sample_secrets();
+        let payload = encode_secrets_payload(&secrets).expect("应能编码");
+        let first = encrypt_local(&payload).expect("加密应成功");
+        let second = encrypt_local(&payload).expect("加密应成功");
 
         assert!(first.starts_with(LOCAL_CIPHERTEXT_PREFIX));
         assert_ne!(first, second, "随机 nonce 必须让密文不同");
-        assert_eq!(decrypt_local(&first).expect("解密应成功"), "s3cret-密码");
-        assert!(!first.contains("s3cret"), "密文不得包含明文片段");
+        let decoded = decrypt_local(&first).expect("解密应成功");
+        assert_eq!(
+            encode_secrets_payload(&decoded).expect("应能编码"),
+            payload,
+            "解密结果必须与加密前的机密集合一致"
+        );
+        assert!(!first.contains("plain-text-secret"), "密文不得包含明文片段");
     }
 
-    /// 验证凭据库不可用时落盘的是本地密文而不是明文。
+    /// 验证凭据库不可用时落盘的是本地密文，且能完整读回全部机密。
     #[test]
-    fn store_secret_falls_back_to_ciphertext_without_plaintext() {
-        let account = account_for_link(1, "smb_password");
-        let outcome = store_secret(&account, "plain-text-secret").expect("应回落到本地密文");
+    fn store_secrets_falls_back_to_ciphertext_without_plaintext() {
+        let secrets = sample_secrets();
+        let outcome = store_connection_secrets(&secrets).expect("应回落到本地密文");
         let SecretWriteOutcome::LocalCiphertext(ciphertext) = outcome else {
             panic!("测试构建不访问系统凭据库，必须返回本地密文");
         };
 
         assert!(!ciphertext.contains("plain-text-secret"));
-        let loaded = load_secret(&account, Some(&ciphertext))
-            .expect("应能读回")
-            .expect("应存在机密");
-        assert_eq!(loaded.expose_secret(), "plain-text-secret");
+        let local =
+            std::collections::BTreeMap::from([(LOCAL_SECRETS_KEY.to_string(), ciphertext.clone())]);
+        let loaded = load_connection_secrets(&local).expect("应能读回");
+        assert_eq!(
+            encode_secrets_payload(&loaded).expect("应能编码"),
+            encode_secrets_payload(&secrets).expect("应能编码"),
+            "全部机密必须完整往返"
+        );
     }
 
-    /// 验证既没有凭据库条目也没有本地密文时返回 `None`，而不是报错或返回空串。
+    /// 验证没有任何来源时返回空集合，而不是报错或伪造内容。
     #[test]
-    fn load_secret_without_any_source_returns_none() {
-        let account = account_for_link(99, "svn_password");
-        assert!(load_secret(&account, None).expect("应无错误").is_none());
+    fn load_secrets_without_any_source_returns_empty() {
+        let loaded = load_connection_secrets(&std::collections::BTreeMap::new()).expect("应无错误");
+        assert!(loaded.is_empty());
+    }
+
+    /// 验证旧版「一机密一份本地密文」的布局会被合并为单条机密集合。
+    #[test]
+    fn legacy_per_secret_local_ciphertext_is_merged() {
+        let first_account = account_for_link(7, "smb_password");
+        let second_account = account_for_link(8, "ssh_password");
+        let local = std::collections::BTreeMap::from([
+            (
+                first_account.clone(),
+                encrypt_local("legacy-one").expect("应能加密"),
+            ),
+            (
+                second_account.clone(),
+                encrypt_local("legacy-two").expect("应能加密"),
+            ),
+        ]);
+
+        let loaded = load_connection_secrets(&local).expect("旧版布局应可合并读取");
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded.get(&first_account).map(|s| s.expose_secret()),
+            Some("legacy-one")
+        );
+        assert_eq!(
+            loaded.get(&second_account).map(|s| s.expose_secret()),
+            Some("legacy-two")
+        );
+    }
+
+    /// 验证机密集合的编码可被自身解析，且空集合也能往返。
+    #[test]
+    fn secrets_payload_round_trips_including_empty_set() {
+        let secrets = sample_secrets();
+        let payload = encode_secrets_payload(&secrets).expect("应能编码");
+        assert_eq!(
+            encode_secrets_payload(&decode_secrets_payload(&payload).expect("应能解析"))
+                .expect("应能编码"),
+            payload
+        );
+
+        let empty = ConnectionSecrets::new();
+        let payload = encode_secrets_payload(&empty).expect("应能编码空集合");
+        assert!(
+            decode_secrets_payload(&payload)
+                .expect("应能解析")
+                .is_empty()
+        );
+        assert!(
+            decode_secrets_payload("not-json").is_err(),
+            "损坏载荷必须报错"
+        );
     }
 
     /// 验证损坏密文会被拒绝，并给出可操作的提示。

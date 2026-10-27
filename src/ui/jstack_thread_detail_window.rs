@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Jstack 线程详情独立窗口。
 //! 创建日期：2026-06-16
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：在无系统标题栏窗口中展示线程完整堆栈，并支持在不同快照间切换同名线程。
 
@@ -526,7 +526,7 @@ impl Render for JstackThreadDetailWindow {
                             .p(px(WINDOW_CONTENT_PADDING))
                             .rounded(px(WINDOW_CONTENT_RADIUS))
                             .bg(rgb(theme.content))
-                            .shadow(window_content_shadows())
+                            .shadow(window_content_shadows(theme.mode))
                             .child(div().size_full().flex().flex_col().overflow_hidden().child(
                                 render_detail_body(
                                     &theme,

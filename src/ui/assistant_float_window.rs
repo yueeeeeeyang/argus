@@ -1,6 +1,6 @@
 //! 文件职责：渲染日志助手浮动独立窗口。
 //! 创建日期：2026-09-24
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：在主窗口右侧空间充足时以独立浮动窗口承载日志助手面板，窗口骨架与文件预览窗口一致。
 
@@ -184,7 +184,7 @@ impl Render for AssistantFloatWindow {
                             .p(px(WINDOW_CONTENT_PADDING))
                             .rounded(px(WINDOW_CONTENT_RADIUS))
                             .bg(rgb(self.theme.content))
-                            .shadow(window_content_shadows())
+                            .shadow(window_content_shadows(self.theme.mode))
                             .child(
                                 div()
                                     .size_full()

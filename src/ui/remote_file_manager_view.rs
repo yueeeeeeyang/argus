@@ -1,6 +1,6 @@
 //! 文件职责：渲染 SFTP、SMB、Git、SVN 通用远程文件管理标签页。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：展示通用远程目录、仓库版本控件、协议能力工具栏和虚拟化文件列表。
 
@@ -20,6 +20,7 @@ use crate::remote::remote_file::{
     RemoteFileSortDirection, RemoteFileSortField, RemoteFileStatus,
 };
 use crate::theme::AppTheme;
+use crate::ui::components::connection_lost::render_connection_lost_panel;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
@@ -60,6 +61,30 @@ pub(crate) fn render(
             .child("文件管理会话不存在")
             .into_any_element();
     };
+    // 连接断开/失败后整窗展示状态面板：保留旧目录列表会让用户无法判断是卡顿还是断开。
+    if matches!(
+        session.status,
+        RemoteFileStatus::Disconnected | RemoteFileStatus::Failed
+    ) {
+        let protocol = session.backend.label();
+        let status_label = if session.status == RemoteFileStatus::Disconnected {
+            format!("{protocol} 连接已断开")
+        } else {
+            format!("{protocol} 连接失败")
+        };
+        let message = session.message.clone();
+        return render_connection_lost_panel(
+            "remote-file-connection-lost",
+            &status_label,
+            message,
+            &theme,
+            cx.listener(move |app, _, _, cx| {
+                app.reconnect_remote_file_session(session_id, cx);
+                cx.notify();
+            }),
+        )
+        .into_any_element();
+    }
     let entries = session.sorted_entries.clone();
     let sort_field = session.sort_field;
     let sort_direction = session.sort_direction;

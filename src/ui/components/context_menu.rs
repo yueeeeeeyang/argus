@@ -116,6 +116,11 @@ pub(crate) enum MenuAction {
     ExpandAllSearchResults,
     /// 收起全部搜索结果文件分组。
     CollapseAllSearchResults,
+    /// 把选中的来源文件另存到用户指定的目标目录。
+    SaveSourceAs {
+        /// 右键触发另存的来源节点 ID。
+        source_id: SourceId,
+    },
     /// 打开 Jstack 线程日志分析页签。
     OpenJstackAnalysis {
         /// 右键触发分析的来源节点 ID。
@@ -203,6 +208,7 @@ impl MenuAction {
             Self::CloseAllTabs => "close-all-tabs".to_string(),
             Self::ExpandAllSearchResults => "expand-all-search-results".to_string(),
             Self::CollapseAllSearchResults => "collapse-all-search-results".to_string(),
+            Self::SaveSourceAs { source_id } => format!("save-source-as-{source_id}"),
             Self::OpenJstackAnalysis { source_id } => {
                 format!("open-jstack-analysis-{source_id}")
             }

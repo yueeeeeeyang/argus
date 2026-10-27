@@ -1,6 +1,6 @@
 //! 文件职责：渲染 Runtime 请求日志分析页签内容。
 //! 创建日期：2026-06-25
-//! 修改日期：2026-06-25
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：展示 Runtime 请求总览、请求详情和 SQL 明细三层可排序表格。
 
@@ -100,8 +100,8 @@ const SQL_FREQUENCY_DETAIL_REQUEST_COLUMN_WIDTH: f32 = 260.0;
 const SQL_FREQUENCY_DETAIL_TIME_COLUMN_WIDTH: f32 = 172.0;
 /// SQL 分析表文本列和指标列之间的固定间隔，避免长 SQL 与耗时数字贴在一起。
 const SQL_ANALYSIS_COLUMN_GAP: f32 = 28.0;
-/// Runtime 过滤栏高度。
-const RUNTIME_FILTER_BAR_HEIGHT: f32 = 44.0;
+/// Runtime 过滤栏输入行高度，与紧凑输入框保持一致。
+const RUNTIME_FILTER_INPUT_ROW_HEIGHT: f32 = 28.0;
 /// Runtime 过滤栏控件间距，需与 `gap_2` 保持一致。
 const RUNTIME_FILTER_GAP: f32 = 8.0;
 /// Runtime 过滤栏关键字输入框宽度。
@@ -110,8 +110,15 @@ const RUNTIME_FILTER_KEYWORD_WIDTH: f32 = 230.0;
 const RUNTIME_FILTER_USERNAME_WIDTH: f32 = 170.0;
 /// Runtime 过滤栏时间输入框宽度。
 const RUNTIME_FILTER_TIME_WIDTH: f32 = 190.0;
-/// Runtime 时间选择器浮层顶部位置，略低于过滤栏底部以贴合输入框。
-const RUNTIME_TIME_PICKER_TOP: f32 = RUNTIME_FILTER_BAR_HEIGHT - 2.0;
+/// Runtime 结果类型选择器上下内边距。
+const RUNTIME_RESULT_TYPE_SELECTOR_PADDING: f32 = 8.0;
+/// Runtime 结果类型按钮高度。
+const RUNTIME_RESULT_TYPE_BUTTON_HEIGHT: f32 = 26.0;
+/// Runtime 过滤栏顶部位置：结果类型选择器总高度。
+const RUNTIME_FILTER_BAR_TOP: f32 =
+    RUNTIME_RESULT_TYPE_SELECTOR_PADDING * 2.0 + RUNTIME_RESULT_TYPE_BUTTON_HEIGHT;
+/// Runtime 时间选择器浮层顶部位置：与过滤栏顶部对齐，避免浮层和输入框内部布局耦合。
+const RUNTIME_TIME_PICKER_TOP: f32 = RUNTIME_FILTER_BAR_TOP;
 /// Runtime 表格单元格左右内边距，用于文本命中测试和视觉留白保持一致。
 const RUNTIME_CELL_HORIZONTAL_PADDING: f32 = 0.0;
 /// Runtime SQL 完整文本弹窗宽度。
@@ -150,6 +157,10 @@ pub(crate) fn render(
         .as_ref()
         .map(|handles| handles.runtime_analysis.clone());
     let analysis_focus_for_track = analysis_focus_handle.clone();
+    let picker_focus_handle = app
+        .input_focus_handles
+        .as_ref()
+        .map(|handles| handles.runtime_time_picker.clone());
 
     div()
         .id(SharedString::from(format!(
@@ -189,6 +200,7 @@ pub(crate) fn render(
                 state,
                 result,
                 analysis_focus_handle,
+                picker_focus_handle,
                 &theme,
                 cx,
             )
@@ -318,6 +330,7 @@ fn render_ready_view(
     state: &RuntimeAnalysisState,
     result: &RuntimeAnalysisResult,
     analysis_focus_handle: Option<FocusHandle>,
+    picker_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
@@ -417,6 +430,8 @@ fn render_ready_view(
                 analysis_id,
                 input_kind,
                 state,
+                picker_focus_handle,
+                runtime_filter_focus_handle(app, input_kind),
                 theme,
                 cx,
             ))
@@ -443,7 +458,7 @@ fn render_result_type_selector(
 ) -> impl IntoElement + use<> {
     div()
         .px(px(RUNTIME_VIEW_PADDING))
-        .py(px(8.0))
+        .py(px(RUNTIME_RESULT_TYPE_SELECTOR_PADDING))
         .flex()
         .items_center()
         .gap_1()
@@ -492,7 +507,7 @@ fn render_result_type_button(
     };
     div()
         .id(id)
-        .h(px(26.0))
+        .h(px(RUNTIME_RESULT_TYPE_BUTTON_HEIGHT))
         .px_3()
         .flex()
         .items_center()
@@ -735,6 +750,8 @@ mod tests {
             is_filter_pending: false,
             is_filter_computing: false,
             open_time_picker: None,
+            time_input_offsets: None,
+            picker_time_edit: None,
             cell_selection: None,
             cell_selection_drag: None,
             hovered_sql_cell: None,
@@ -1100,11 +1117,11 @@ mod tests {
         assert_eq!(value.second, 3);
     }
 
-    /// 验证开始和结束时间选择器使用页面级稳定定位，避免浮层和输入框内部布局耦合。
+    /// 验证未测量到实测偏移时，时间选择器回退到过滤栏固定布局的稳定定位。
     #[test]
-    fn runtime_time_picker_positions_match_filter_inputs() {
-        let start_left = runtime_time_picker_left(RuntimeFilterInputKind::StartTime);
-        let end_left = runtime_time_picker_left(RuntimeFilterInputKind::EndTime);
+    fn runtime_time_picker_positions_fall_back_to_fixed_layout() {
+        let start_left = fixed_runtime_time_picker_left(RuntimeFilterInputKind::StartTime);
+        let end_left = fixed_runtime_time_picker_left(RuntimeFilterInputKind::EndTime);
 
         assert_eq!(
             start_left,

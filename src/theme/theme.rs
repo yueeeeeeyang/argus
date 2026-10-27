@@ -1,8 +1,8 @@
 //! 文件职责：定义 Argus 界面使用的主题令牌。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
-//! 主要功能：提供运行期界面颜色、日志级别、代码语法颜色和主题文件损坏时的紧急兜底令牌。
+//! 主要功能：提供运行期界面颜色、日志级别、代码语法颜色、主题模式和主题文件损坏时的紧急兜底令牌。
 
 /// 语法高亮主题令牌，供日志、配置文件、代码预览和 Java 线程栈高亮复用。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,11 +57,43 @@ impl SyntaxTheme {
             exception: 0xf48771,
         }
     }
+
+    /// 构造浅色主题语法高亮紧急兜底令牌；正常路径应优先读取 `themes/light.toml`。
+    pub(crate) fn light() -> Self {
+        Self {
+            comment: 0x8a8a8a,
+            key: 0xd1383d,
+            string: 0x3d9a57,
+            number: 0xd68c27,
+            boolean: 0xd68c27,
+            punctuation: 0x1a1a1a,
+            tag: 0xd68c27,
+            attribute: 0xd1383d,
+            timestamp: 0x518ee4,
+            thread: 0x3b7dd8,
+            class: 0xb0851f,
+            method: 0x3b7dd8,
+            lock: 0x7b5bb6,
+            exception: 0xd1383d,
+        }
+    }
+}
+
+/// 主题模式；决定窗口外观与玻璃板阴影等按模式取值的令牌。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ThemeMode {
+    /// 深色模式。
+    #[default]
+    Dark,
+    /// 浅色模式。
+    Light,
 }
 
 /// 应用主题令牌，正常运行时由主题管理器读取 TOML 后生成。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AppTheme {
+    /// 主题模式；用于选择与明暗相关的呈现策略。
+    pub mode: ThemeMode,
     /// 主窗口背景色。
     pub background: u32,
     /// 自定义标题栏背景色。
@@ -104,6 +136,7 @@ impl AppTheme {
     /// 构造深色主题紧急兜底令牌；正常路径应优先读取 `themes/dark.toml`。
     pub(crate) fn dark() -> Self {
         Self {
+            mode: ThemeMode::Dark,
             background: 0x080808,
             title_bar: 0x080808,
             activity_bar: 0x252526,
@@ -122,6 +155,31 @@ impl AppTheme {
             success: 0x89d185,
             modal_overlay: 0x1e1e1eb8,
             syntax: SyntaxTheme::dark(),
+        }
+    }
+
+    /// 构造浅色主题紧急兜底令牌；正常路径应优先读取 `themes/light.toml`。
+    pub(crate) fn light() -> Self {
+        Self {
+            mode: ThemeMode::Light,
+            background: 0xf2f2f2,
+            title_bar: 0xf2f2f2,
+            activity_bar: 0xeeeeee,
+            side_bar: 0xf2f2f2,
+            content: 0xffffff,
+            status_bar: 0xeeeeee,
+            foreground: 0x1a1a1a,
+            foreground_muted: 0x8a8a8a,
+            border: 0xb8b8b8,
+            selection: 0xb7d4fd,
+            current_line: 0xf5f5f5,
+            debug: 0x1e725c,
+            info: 0x3b7dd8,
+            warning: 0xd68c27,
+            error: 0xd1383d,
+            success: 0x3d9a57,
+            modal_overlay: 0x1a1a1a66,
+            syntax: SyntaxTheme::light(),
         }
     }
 }

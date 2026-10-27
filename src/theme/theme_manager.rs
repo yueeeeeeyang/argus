@@ -1,6 +1,6 @@
 //! 文件职责：实现 Argus 主题文件加载与校验管理。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-16
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：从内置 TOML 和 `~/.argus/themes` 读取主题令牌，解析为运行期 AppTheme。
 
@@ -12,14 +12,16 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::config::paths::argus_theme_dir;
-use crate::theme::{AppTheme, SyntaxTheme};
+use crate::theme::{AppTheme, SyntaxTheme, ThemeMode};
 
 /// 内置深色主题 TOML 内容，使用 include_str 保证打包后仍可读取。
 const BUILTIN_DARK_THEME_TOML: &str = include_str!("../../themes/dark.toml");
+/// 内置浅色主题 TOML 内容，使用 include_str 保证打包后仍可读取。
+const BUILTIN_LIGHT_THEME_TOML: &str = include_str!("../../themes/light.toml");
 /// 内置主题在设置下拉框和持久化配置中使用的稳定 ID。
 pub(crate) const BUILTIN_DARK_THEME_ID: &str = "dark.toml";
-/// 深色主题模式标识。
-const DARK_MODE: &str = "dark";
+/// 内置浅色主题的稳定 ID。
+pub(crate) const BUILTIN_LIGHT_THEME_ID: &str = "light.toml";
 
 /// 主题加载错误，区分 TOML 解析和颜色令牌校验失败。
 #[derive(Debug, Error)]
@@ -48,7 +50,7 @@ pub(crate) enum ThemeError {
 /// 主题管理器，负责持有内置主题和用户主题加载警告。
 #[derive(Clone, Debug)]
 pub(crate) struct ThemeManager {
-    /// 按主题 ID 索引的内置主题；当前内置主题仅保留暗色。
+    /// 按主题 ID 索引的内置主题；包含内置深色与浅色主题。
     builtin_themes: HashMap<String, AppTheme>,
     /// 用户主题集合，从 `~/.argus/themes/*.toml` 扫描得到。
     user_themes: Vec<LoadedUserTheme>,
@@ -70,7 +72,7 @@ pub(crate) struct LoadedUserTheme {
 pub(crate) struct ThemeOption {
     /// 选项 ID；内置主题和用户主题都使用文件名。
     pub id: String,
-    /// 展示文案；只显示主题文件主名，不显示 `.toml` 扩展名。
+    /// 展示文案；内置主题使用固定展示名，用户主题使用主题文件主名（不含 `.toml`）。
     pub label: String,
 }
 
@@ -175,10 +177,16 @@ impl ThemeManager {
 
     /// 返回可在设置下拉框中展示的主题列表。
     pub(crate) fn theme_options(&self) -> Vec<ThemeOption> {
-        let mut options = vec![ThemeOption {
-            id: BUILTIN_DARK_THEME_ID.to_string(),
-            label: theme_label_from_id(BUILTIN_DARK_THEME_ID),
-        }];
+        let mut options = vec![
+            ThemeOption {
+                id: BUILTIN_DARK_THEME_ID.to_string(),
+                label: "Dark".to_string(),
+            },
+            ThemeOption {
+                id: BUILTIN_LIGHT_THEME_ID.to_string(),
+                label: "Light".to_string(),
+            },
+        ];
         options.extend(self.user_themes.iter().map(|theme| ThemeOption {
             id: theme.id.clone(),
             label: theme_label_from_id(&theme.id),
@@ -187,15 +195,18 @@ impl ThemeManager {
     }
 
     /// 将配置文件或旧版本设置值规范化为当前可用主题 ID。
+    ///
+    /// 历史值映射：`light` 指向内置浅色主题，`system` 与 `dark` 指向内置深色主题
+    /// （应用不跟随系统外观，系统模式统一回落深色）。
     pub(crate) fn resolve_theme_id(&self, value: &str) -> String {
         let trimmed = value.trim();
-        if trimmed.is_empty()
-            || matches!(
-                trimmed.to_ascii_lowercase().as_str(),
-                "system" | "light" | "dark"
-            )
-        {
+        if trimmed.is_empty() {
             return BUILTIN_DARK_THEME_ID.to_string();
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "light" => return BUILTIN_LIGHT_THEME_ID.to_string(),
+            "system" | "dark" => return BUILTIN_DARK_THEME_ID.to_string(),
+            _ => {}
         }
 
         if self.builtin_themes.contains_key(trimmed)
@@ -235,11 +246,24 @@ impl ThemeManager {
             .unwrap_or_else(|_| AppTheme::dark())
     }
 
+    /// 从内置浅色 TOML 构造主题；解析失败时退回硬编码浅色兜底令牌。
+    pub(crate) fn builtin_light_theme() -> AppTheme {
+        parse_theme_toml(BUILTIN_LIGHT_THEME_TOML)
+            .map(|(_, theme)| theme)
+            .unwrap_or_else(|_| AppTheme::light())
+    }
+
     /// 加载内置主题；这里是正常主题路径，只有 TOML 被破坏时才进入硬编码紧急 fallback。
     fn load_builtin_themes() -> HashMap<String, AppTheme> {
         let mut themes = HashMap::new();
-        let dark = Self::builtin_dark_theme();
-        themes.insert(BUILTIN_DARK_THEME_ID.to_string(), dark);
+        themes.insert(
+            BUILTIN_DARK_THEME_ID.to_string(),
+            Self::builtin_dark_theme(),
+        );
+        themes.insert(
+            BUILTIN_LIGHT_THEME_ID.to_string(),
+            Self::builtin_light_theme(),
+        );
         themes
     }
 
@@ -285,6 +309,7 @@ impl ThemeManager {
                         continue;
                     };
                     if file_name == BUILTIN_DARK_THEME_ID
+                        || file_name == BUILTIN_LIGHT_THEME_ID
                         || self.user_themes.iter().any(|theme| theme.id == file_name)
                     {
                         self.warnings.push(format!(
@@ -334,16 +359,21 @@ impl Default for ThemeManager {
 /// 返回值：主题文件元信息和运行期主题令牌。
 fn parse_theme_toml(text: &str) -> Result<(ThemeFile, AppTheme), ThemeError> {
     let file = toml::from_str::<ThemeFile>(text)?;
-    let Some(_canonical_mode) = canonical_mode(&file.mode) else {
+    let Some(canonical_mode) = canonical_mode(&file.mode) else {
         return Err(ThemeError::UnsupportedMode {
             name: file.name,
             mode: file.mode,
         });
     };
-    let syntax_fallback = SyntaxTheme::dark();
+    // 缺失语法令牌时按主题模式回退：浅色主题缺省使用浅色语法配色，避免深色语法色落到浅色底上。
+    let syntax_fallback = match canonical_mode {
+        ThemeMode::Light => SyntaxTheme::light(),
+        ThemeMode::Dark => SyntaxTheme::dark(),
+    };
     let syntax = parse_syntax_theme(file.syntax.as_ref(), syntax_fallback)?;
 
     let theme = AppTheme {
+        mode: canonical_mode,
         background: parse_hex_color("colors.background", &file.colors.background)?,
         title_bar: parse_hex_color("colors.title_bar", &file.colors.title_bar)?,
         activity_bar: parse_hex_color("colors.activity_bar", &file.colors.activity_bar)?,
@@ -449,9 +479,10 @@ fn apply_optional_color(
 }
 
 /// 尝试规范化主题模式，不认识的值返回 None 交给调用方决定是否报错。
-fn canonical_mode(mode: &str) -> Option<&'static str> {
+fn canonical_mode(mode: &str) -> Option<ThemeMode> {
     match mode.trim().to_ascii_lowercase().as_str() {
-        "dark" => Some(DARK_MODE),
+        "dark" => Some(ThemeMode::Dark),
+        "light" => Some(ThemeMode::Light),
         _ => None,
     }
 }
@@ -471,6 +502,112 @@ mod tests {
         assert_eq!(theme.content, AppTheme::dark().content);
         assert_eq!(theme.modal_overlay, AppTheme::dark().modal_overlay);
         assert_eq!(theme.syntax.comment, AppTheme::dark().syntax.comment);
+    }
+
+    /// 验证内置浅色 TOML 解析结果等价于当前代码中的浅色 fallback，且声明为浅色模式。
+    #[test]
+    fn builtin_light_toml_matches_current_light_colors() {
+        let (file, theme) =
+            parse_theme_toml(BUILTIN_LIGHT_THEME_TOML).expect("内置浅色主题应可解析");
+
+        assert_eq!(canonical_mode(&file.mode), Some(ThemeMode::Light));
+        assert_eq!(theme.background, AppTheme::light().background);
+        assert_eq!(theme.content, AppTheme::light().content);
+        assert_eq!(theme.foreground, AppTheme::light().foreground);
+        assert_eq!(theme.modal_overlay, AppTheme::light().modal_overlay);
+        assert_eq!(theme.syntax.key, AppTheme::light().syntax.key);
+        assert_eq!(theme.syntax.exception, AppTheme::light().syntax.exception);
+    }
+
+    /// 验证浅色主题的背板与玻璃板保持足够色差，保证窗口留白在浅色下依然可见。
+    ///
+    /// 回归背景：背板与玻璃板过近（#fafafa 与 #ffffff）时，浅色主题的白色面板四周
+    /// 8px 窗口留白在视觉上消失，模态框顶部与主窗口内容区看起来贴边。
+    #[test]
+    fn light_theme_surfaces_stay_separated() {
+        let theme = ThemeManager::builtin_light_theme();
+        let channel = |color: u32, shift: u32| ((color >> shift) & 0xff) as i32;
+        let max_diff = (0..3)
+            .map(|index| {
+                let shift = 16 - index * 8;
+                (channel(theme.content, shift) - channel(theme.background, shift)).abs()
+            })
+            .max()
+            .unwrap_or(0);
+
+        assert!(
+            max_diff >= 10,
+            "浅色主题背板与玻璃板至少相差 10 级灰度，实际 {max_diff}"
+        );
+    }
+
+    /// 验证内置主题列表包含深色与浅色，且展示名固定为 Dark / Light。
+    #[test]
+    fn builtin_themes_include_dark_and_light_options() {
+        let manager = ThemeManager::load_with_user_theme_dir(Path::new("__missing_theme_dir__"));
+        let options = manager.theme_options();
+
+        assert_eq!(options[0].id, BUILTIN_DARK_THEME_ID);
+        assert_eq!(options[0].label, "Dark");
+        assert_eq!(options[1].id, BUILTIN_LIGHT_THEME_ID);
+        assert_eq!(options[1].label, "Light");
+        assert_eq!(
+            manager.label_for_theme_id(BUILTIN_LIGHT_THEME_ID),
+            "Light".to_string()
+        );
+    }
+
+    /// 验证历史主题模式值映射到对应内置主题 ID。
+    #[test]
+    fn resolve_theme_id_maps_legacy_mode_values() {
+        let manager = ThemeManager::load_with_user_theme_dir(Path::new("__missing_theme_dir__"));
+
+        assert_eq!(manager.resolve_theme_id(""), BUILTIN_DARK_THEME_ID);
+        assert_eq!(manager.resolve_theme_id("system"), BUILTIN_DARK_THEME_ID);
+        assert_eq!(manager.resolve_theme_id("dark"), BUILTIN_DARK_THEME_ID);
+        assert_eq!(manager.resolve_theme_id("light"), BUILTIN_LIGHT_THEME_ID);
+        assert_eq!(
+            manager.resolve_theme_id(BUILTIN_LIGHT_THEME_ID),
+            BUILTIN_LIGHT_THEME_ID
+        );
+        assert_eq!(
+            manager.resolve_theme_id("unknown.toml"),
+            BUILTIN_DARK_THEME_ID
+        );
+    }
+
+    /// 验证浅色用户主题缺少 syntax 段时回退浅色语法配色，而不是深色语法配色。
+    #[test]
+    fn missing_syntax_tokens_use_light_fallback_for_light_theme() {
+        let text = r##"
+name = "Legacy Light"
+mode = "light"
+
+[colors]
+background = "#fafafa"
+title_bar = "#fafafa"
+activity_bar = "#f5f5f5"
+side_bar = "#fafafa"
+content = "#ffffff"
+status_bar = "#f5f5f5"
+foreground = "#1a1a1a"
+foreground_muted = "#8a8a8a"
+border = "#b8b8b8"
+selection = "#b7d4fd"
+current_line = "#f5f5f5"
+modal_overlay = "#1a1a1a66"
+
+[log_levels]
+debug = "#1e725c"
+info = "#3b7dd8"
+warning = "#d68c27"
+error = "#d1383d"
+success = "#3d9a57"
+"##;
+        let (_, theme) = parse_theme_toml(text).expect("浅色旧主题缺少 syntax 段也应可解析");
+
+        assert_eq!(theme.syntax.key, SyntaxTheme::light().key);
+        assert_eq!(theme.syntax.exception, SyntaxTheme::light().exception);
     }
 
     /// 验证 6 位和 8 位十六进制颜色都能解析。
@@ -574,7 +711,9 @@ success = "#89d185"
         let options = manager.theme_options();
 
         assert_eq!(options[0].id, BUILTIN_DARK_THEME_ID);
-        assert_eq!(options[0].label, "dark");
+        assert_eq!(options[0].label, "Dark");
+        assert_eq!(options[1].id, BUILTIN_LIGHT_THEME_ID);
+        assert_eq!(options[1].label, "Light");
         assert!(
             options
                 .iter()

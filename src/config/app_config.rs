@@ -1,6 +1,6 @@
 //! 文件职责：定义应用运行期配置与持久化设置模型。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：提供 AI、外观、日志加载、日志搜索、链接和编码设置的默认值及 TOML 模型。
 
@@ -85,6 +85,9 @@ pub(crate) struct AppConfig {
     /// 编码配置，后续日志读取模块会据此选择默认解码策略。
     #[serde(default)]
     pub encoding: EncodingConfig,
+    /// 终端输入配置，控制 Option 键等本地按键语义。
+    #[serde(default)]
+    pub terminal: TerminalConfig,
 }
 
 impl AppConfig {
@@ -93,17 +96,12 @@ impl AppConfig {
     /// 返回值：所有数值型配置均被限制在当前 UI 可展示范围内，避免坏配置破坏界面状态。
     pub(crate) fn normalized(mut self) -> Self {
         self.ai.normalize();
-        self.appearance.theme_mode = match self.appearance.theme_mode.trim() {
-            "" => "dark.toml".to_string(),
-            value
-                if matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "system" | "light" | "dark"
-                ) =>
-            {
-                "dark.toml".to_string()
-            }
-            value => value.to_string(),
+        // 历史值映射：`light` 指向内置浅色主题，`system` 与 `dark` 指向内置深色主题。
+        let theme_mode = self.appearance.theme_mode.trim().to_string();
+        self.appearance.theme_mode = match theme_mode.to_ascii_lowercase().as_str() {
+            "" | "system" | "dark" => "dark.toml".to_string(),
+            "light" => "light.toml".to_string(),
+            _ => theme_mode,
         };
         self.appearance.log_content_font_size =
             self.appearance.log_content_font_size.clamp(12.0, 20.0);
@@ -132,6 +130,23 @@ impl Default for AppConfig {
             log_display: LogDisplayConfig::default(),
             connections: ConnectionConfig::default(),
             encoding: EncodingConfig::default(),
+            terminal: TerminalConfig::default(),
+        }
+    }
+}
+
+/// 终端输入配置，控制本地按键语义。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct TerminalConfig {
+    /// Option/Alt 与普通字符组合时发送 ESC 前缀（「Option 键作为 Meta」）。
+    pub option_as_meta: bool,
+}
+
+impl Default for TerminalConfig {
+    /// 构造默认终端配置：Option 保持平台组合字符语义，与 macOS 终端默认行为一致。
+    fn default() -> Self {
+        Self {
+            option_as_meta: false,
         }
     }
 }
@@ -353,11 +368,12 @@ mod tests {
             encoding: EncodingConfig {
                 selected: String::new(),
             },
+            terminal: TerminalConfig::default(),
         }
         .normalized();
 
         assert_eq!(config.appearance.log_content_font_size, 20.0);
-        assert_eq!(config.appearance.theme_mode, "dark.toml");
+        assert_eq!(config.appearance.theme_mode, "light.toml");
         assert_eq!(config.loader.max_archive_depth, 8);
         assert_eq!(config.log_search.quick_keywords, "ERROR, WARN");
         let rules = &config.log_display.jstack_thread_filter_rules;
@@ -382,6 +398,22 @@ mod tests {
     #[test]
     fn default_log_content_font_size_is_twelve() {
         assert_eq!(AppearanceConfig::default().log_content_font_size, 12.0);
+    }
+
+    /// 验证主题模式历史值映射到内置主题 ID，自定义文件名保持原样。
+    #[test]
+    fn normalized_maps_legacy_theme_modes() {
+        let mapped = |value: &str| {
+            let mut config = AppConfig::default();
+            config.appearance.theme_mode = value.to_string();
+            config.normalized().appearance.theme_mode
+        };
+
+        assert_eq!(mapped(""), "dark.toml");
+        assert_eq!(mapped("system"), "dark.toml");
+        assert_eq!(mapped("dark"), "dark.toml");
+        assert_eq!(mapped("light"), "light.toml");
+        assert_eq!(mapped(" custom.toml "), "custom.toml");
     }
 
     /// 验证日志搜索配置默认没有快搜关键字，避免新用户误触发搜索。

@@ -1,6 +1,6 @@
 //! 文件职责：渲染 SSH 终端标签页的右侧内容面板。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：展示连接状态、远程终端输出，并将键盘输入转发给终端会话。
 
@@ -20,7 +20,11 @@ use crate::remote::terminal::{
     TerminalCellStyle, TerminalColor, TerminalGridPosition, TerminalScreenLine,
     TerminalScreenSnapshot, TerminalSessionState, TerminalStatus, TerminalTextSelection,
 };
+use crate::remote::terminal_input::{
+    TerminalKeyModifiers, TerminalMouseButton, TerminalMouseEvent, TerminalMouseEventKind,
+};
 use crate::theme::AppTheme;
+use crate::ui::components::connection_lost::render_connection_lost_panel;
 
 /// 终端正文行高。
 pub(crate) const TERMINAL_LINE_HEIGHT: f32 = 18.0;
@@ -63,10 +67,51 @@ pub(crate) fn render(
             .child("终端会话不存在")
             .into_any_element();
     };
+    // 连接断开/失败后整窗展示状态面板：保留旧终端画面会让用户无法判断是卡顿还是断开。
+    if matches!(
+        session.status,
+        TerminalStatus::Disconnected | TerminalStatus::Failed
+    ) {
+        let status_label = if session.status == TerminalStatus::Disconnected {
+            "SSH 连接已断开"
+        } else {
+            "SSH 连接失败"
+        };
+        let message = session.message.clone();
+        return render_connection_lost_panel(
+            "ssh-terminal-connection-lost",
+            status_label,
+            message,
+            &theme,
+            cx.listener(move |app, _, _, cx| {
+                app.reconnect_terminal_session(session_id, cx);
+                cx.notify();
+            }),
+        )
+        .into_any_element();
+    }
     let focus_handle = app
         .input_focus_handles
         .as_ref()
         .map(|handles| handles.terminal.clone());
+    // 焦点事件（1004）：与上次上报状态不同时在当前更新周期结束时回写，避免在渲染期间修改应用状态。
+    let is_terminal_focused = app
+        .input_focus_handles
+        .as_ref()
+        .is_some_and(|handles| handles.terminal.is_focused(window));
+    if session.reported_focus != Some(is_terminal_focused) {
+        let entity = cx.entity();
+        window.defer(cx, move |window, cx| {
+            entity.update(cx, |app, cx| {
+                let is_focused = app
+                    .input_focus_handles
+                    .as_ref()
+                    .is_some_and(|handles| handles.terminal.is_focused(window));
+                app.report_terminal_focus(session_id, is_focused);
+                cx.notify();
+            });
+        });
+    }
 
     div()
         .id("ssh-terminal-view")
@@ -115,6 +160,7 @@ fn render_terminal_body(
         .input_focus_handles
         .as_ref()
         .is_some_and(|handles| handles.terminal.is_focused(window));
+    let current_cell_size = session.cell_size();
     let entity = cx.entity();
 
     div()
@@ -128,19 +174,32 @@ fn render_terminal_body(
                 let metrics = terminal_metrics(window);
                 let desired_rows = terminal_rows_for_bounds(bounds, metrics.line_height);
                 let desired_cols = terminal_cols_for_bounds(bounds, metrics.cell_width);
-                if desired_rows == current_rows && desired_cols == current_cols {
+                let desired_cell_size = (
+                    f32::from(metrics.line_height).round() as u16,
+                    f32::from(metrics.cell_width).round() as u16,
+                );
+                if desired_rows == current_rows
+                    && desired_cols == current_cols
+                    && Some(desired_cell_size) == current_cell_size
+                {
                     return;
                 }
                 let entity = entity.clone();
                 window.on_next_frame(move |_, cx| {
                     entity.update(cx, |app, cx| {
                         app.resize_terminal_session(session_id, desired_rows, desired_cols);
+                        app.set_terminal_cell_size(
+                            session_id,
+                            f32::from(desired_cell_size.0),
+                            f32::from(desired_cell_size.1),
+                        );
                         cx.notify();
                     });
                 });
             }
         })
         .id("ssh-terminal-body")
+        .debug_selector(|| "ssh-terminal-body".to_string())
         .relative()
         .flex_1()
         .min_h(px(0.0))
@@ -148,13 +207,47 @@ fn render_terminal_body(
         .bg(rgb(theme.content))
         .cursor(CursorStyle::IBeam)
         .track_scroll(&viewport_handle)
-        .on_scroll_wheel(cx.listener(move |app, event: &ScrollWheelEvent, _, cx| {
-            cx.stop_propagation();
-            let line_delta = terminal_scroll_line_delta(event);
-            if app.scroll_terminal_scrollback(session_id, line_delta) {
-                cx.notify();
-            }
-        }))
+        .on_scroll_wheel(
+            cx.listener(move |app, event: &ScrollWheelEvent, window, cx| {
+                cx.stop_propagation();
+                let line_delta = terminal_scroll_line_delta(event);
+                // 远端鼠标模式开启时滚轮按鼠标事件上报；按住 Shift 保留本地回滚。
+                if app.terminal_forwards_mouse(session_id, event.modifiers.shift) {
+                    let horizontal_delta = terminal_scroll_horizontal_delta(event);
+                    let direction = if line_delta > 0.0 {
+                        TerminalMouseButton::WheelUp
+                    } else if line_delta < 0.0 {
+                        TerminalMouseButton::WheelDown
+                    } else if horizontal_delta > 0.0 {
+                        TerminalMouseButton::WheelLeft
+                    } else if horizontal_delta < 0.0 {
+                        TerminalMouseButton::WheelRight
+                    } else {
+                        return;
+                    };
+                    let metrics = terminal_metrics(window);
+                    if let Some((col, row)) =
+                        terminal_mouse_cell_from_pointer(app, session_id, event.position, metrics)
+                    {
+                        app.send_terminal_mouse_event(
+                            session_id,
+                            TerminalMouseEvent {
+                                kind: TerminalMouseEventKind::Press,
+                                button: Some(direction),
+                                modifiers: terminal_key_modifiers(event.modifiers),
+                                col,
+                                row,
+                            },
+                        );
+                        cx.notify();
+                    }
+                    return;
+                }
+                if app.scroll_terminal_scrollback(session_id, line_delta) {
+                    cx.notify();
+                }
+            }),
+        )
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, _, cx| {
@@ -171,6 +264,22 @@ fn render_terminal_body(
                     handles.terminal.focus(window);
                 }
                 let metrics = terminal_metrics(window);
+                // 远端鼠标模式开启时把按下事件交给远端程序；Shift 保留本地选择。
+                if app.terminal_forwards_mouse(session_id, event.modifiers.shift) {
+                    if let Some((col, row)) =
+                        terminal_mouse_cell_from_pointer(app, session_id, event.position, metrics)
+                    {
+                        app.forward_terminal_mouse_press(
+                            session_id,
+                            TerminalMouseButton::Left,
+                            terminal_key_modifiers(event.modifiers),
+                            col,
+                            row,
+                        );
+                        cx.notify();
+                    }
+                    return;
+                }
                 if let Some(position) =
                     terminal_position_from_pointer(app, session_id, event.position, metrics)
                 {
@@ -179,7 +288,52 @@ fn render_terminal_body(
                 }
             }),
         )
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                if !app.terminal_forwards_mouse(session_id, event.modifiers.shift) {
+                    return;
+                }
+                let metrics = terminal_metrics(window);
+                if let Some((col, row)) =
+                    terminal_mouse_cell_from_pointer(app, session_id, event.position, metrics)
+                {
+                    cx.stop_propagation();
+                    app.forward_terminal_mouse_press(
+                        session_id,
+                        TerminalMouseButton::Middle,
+                        terminal_key_modifiers(event.modifiers),
+                        col,
+                        row,
+                    );
+                    cx.notify();
+                }
+            }),
+        )
         .on_mouse_move(cx.listener(move |app, event: &MouseMoveEvent, window, cx| {
+            // 远端鼠标模式：拖动时上报移动事件；AnyMotion 模式还上报未按键的悬停移动。
+            if app.terminal_forwards_mouse(session_id, event.modifiers.shift)
+                && (event.dragging() || app.terminal_mouse_reports_any_motion(session_id))
+            {
+                let button = event.pressed_button.and_then(gpui_mouse_button_to_terminal);
+                let metrics = terminal_metrics(window);
+                if let Some((col, row)) =
+                    terminal_mouse_cell_from_pointer(app, session_id, event.position, metrics)
+                {
+                    app.send_terminal_mouse_event(
+                        session_id,
+                        TerminalMouseEvent {
+                            kind: TerminalMouseEventKind::Motion,
+                            button,
+                            modifiers: terminal_key_modifiers(event.modifiers),
+                            col,
+                            row,
+                        },
+                    );
+                }
+                return;
+            }
+
             if !event.dragging() {
                 return;
             }
@@ -218,10 +372,15 @@ fn render_terminal_body(
         }))
         .on_mouse_up(
             MouseButton::Left,
-            cx.listener(move |app, _: &MouseUpEvent, _, cx| {
-                let handled = app.finish_terminal_selection(session_id)
-                    | app.finish_terminal_scrollbar_drag(session_id);
-                if handled {
+            cx.listener(move |app, event: &MouseUpEvent, window, cx| {
+                if handle_terminal_pointer_release(
+                    app,
+                    session_id,
+                    TerminalMouseButton::Left,
+                    event.position,
+                    event.modifiers,
+                    window,
+                ) {
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -229,10 +388,31 @@ fn render_terminal_body(
         )
         .on_mouse_up_out(
             MouseButton::Left,
-            cx.listener(move |app, _: &MouseUpEvent, _, cx| {
-                let handled = app.finish_terminal_selection(session_id)
-                    | app.finish_terminal_scrollbar_drag(session_id);
-                if handled {
+            cx.listener(move |app, event: &MouseUpEvent, window, cx| {
+                if handle_terminal_pointer_release(
+                    app,
+                    session_id,
+                    TerminalMouseButton::Left,
+                    event.position,
+                    event.modifiers,
+                    window,
+                ) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Middle,
+            cx.listener(move |app, event: &MouseUpEvent, window, cx| {
+                if handle_terminal_pointer_release(
+                    app,
+                    session_id,
+                    TerminalMouseButton::Middle,
+                    event.position,
+                    event.modifiers,
+                    window,
+                ) {
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -400,6 +580,12 @@ fn terminal_scroll_line_delta(event: &ScrollWheelEvent) -> f32 {
     f32::from(pixel_delta.y) / TERMINAL_LINE_HEIGHT
 }
 
+/// 把平台滚轮事件转换为终端水平滚动行数；正数表示查看更左侧的内容。
+fn terminal_scroll_horizontal_delta(event: &ScrollWheelEvent) -> f32 {
+    let pixel_delta = event.delta.pixel_delta(px(TERMINAL_LINE_HEIGHT));
+    f32::from(pixel_delta.x) / TERMINAL_LINE_HEIGHT
+}
+
 /// 连接中或失败时，如果屏幕没有远端内容，则展示状态提示。
 fn terminal_placeholder(
     session: &TerminalSessionState,
@@ -448,7 +634,9 @@ fn render_terminal_screen(
         .overflow_hidden()
         .child(
             div()
-                .relative()
+                .absolute()
+                .left_0()
+                .top_0()
                 .w(content_width)
                 .h(content_height)
                 .pt(px(TERMINAL_VERTICAL_PADDING))
@@ -659,6 +847,72 @@ fn render_terminal_scrollbar(
             }),
         )
         .into_any_element()
+}
+
+/// 把鼠标位置转换为 1 基终端鼠标单元格坐标；越界时夹紧到网格内。
+fn terminal_mouse_cell_from_pointer(
+    app: &ArgusApp,
+    session_id: usize,
+    position: gpui::Point<Pixels>,
+    metrics: TerminalMetrics,
+) -> Option<(u16, u16)> {
+    let grid_position = terminal_position_from_pointer(app, session_id, position, metrics)?;
+    let session = app.terminal_sessions.get(&session_id)?;
+    if session.rows == 0 || session.cols == 0 {
+        return None;
+    }
+    let col = grid_position.col.min(session.cols.saturating_sub(1)) + 1;
+    let row = grid_position.row.min(session.rows.saturating_sub(1)) + 1;
+    Some((col, row))
+}
+
+/// 把 GPUI 修饰键转换为终端输入修饰键快照。
+fn terminal_key_modifiers(modifiers: gpui::Modifiers) -> TerminalKeyModifiers {
+    TerminalKeyModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        control: modifiers.control,
+        platform: modifiers.platform,
+        function: modifiers.function,
+    }
+}
+
+/// 把按住状态的 GPUI 鼠标按钮转换为终端鼠标按钮。
+fn gpui_mouse_button_to_terminal(button: MouseButton) -> Option<TerminalMouseButton> {
+    match button {
+        MouseButton::Left => Some(TerminalMouseButton::Left),
+        MouseButton::Middle => Some(TerminalMouseButton::Middle),
+        MouseButton::Right => Some(TerminalMouseButton::Right),
+        _ => None,
+    }
+}
+
+/// 处理终端正文的鼠标释放：远端鼠标转发优先，其次结束本地选择与滚动条拖拽。
+///
+/// 返回值：是否消费了本次事件。
+fn handle_terminal_pointer_release(
+    app: &mut ArgusApp,
+    session_id: usize,
+    button: TerminalMouseButton,
+    position: gpui::Point<Pixels>,
+    modifiers: gpui::Modifiers,
+    window: &mut Window,
+) -> bool {
+    if !app.terminal_has_pending_mouse_button(session_id, button) {
+        return app.finish_terminal_selection(session_id)
+            | app.finish_terminal_scrollbar_drag(session_id);
+    }
+    let metrics = terminal_metrics(window);
+    if let Some((col, row)) = terminal_mouse_cell_from_pointer(app, session_id, position, metrics) {
+        app.forward_terminal_mouse_release(
+            session_id,
+            button,
+            terminal_key_modifiers(modifiers),
+            col,
+            row,
+        );
+    }
+    true
 }
 
 /// 把鼠标位置转换为当前终端屏幕行列。

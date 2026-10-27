@@ -1,6 +1,6 @@
 //! 文件职责：提供应用配置读写管理入口。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：从 `~/.argus/settings.toml` 读取设置，并以原子写入方式持久化用户修改。
 
@@ -13,8 +13,11 @@ use crate::config::app_config::AppConfig;
 use crate::config::paths::argus_settings_file;
 #[cfg(test)]
 use crate::config::paths::assert_isolated_test_path;
+use secrecy::{ExposeSecret as _, SecretString};
+
 use crate::config::secret_store::{
-    SecretWriteOutcome, account_for_link, forget_secret, load_secret, store_secret,
+    ConnectionSecrets, LOCAL_SECRETS_KEY, SecretWriteOutcome, account_for_link,
+    load_connection_secrets, load_legacy_connection_secret, store_connection_secrets,
 };
 use crate::remote::connection::ConnectionSecretSlot;
 
@@ -157,8 +160,12 @@ fn join_config_warnings(warnings: Vec<String>) -> Option<String> {
 
 /// 从凭据库（或本地密文）把连接机密回填到内存字段，并迁移旧版明文。
 ///
-/// 迁移语义：旧版本把密码明文写在 `settings.toml`；这里读到明文后会立即写入凭据库，
+/// 迁移语义：旧版本把密码明文写在 `settings.toml`；这里读到明文后并入合并条目写回凭据库，
 /// 由于机密字段已标记 `skip_serializing`，明文会在下一次保存时从文件中彻底消失。
+///
+/// 授权次数：全部连接机密合并为**单条**凭据库记录，本函数最多触发一次系统授权提示。
+/// 旧版「每机密一个条目」的布局只在合并条目与文件明文都拿不到该机密时才回退读取，
+/// 避免为了迁移而对每个条目各弹一次授权。
 ///
 /// 说明：迁移成功后**保留**内存中的明文值。运行时连接（SSH 终端、SFTP、SMB 等）直接读取
 /// 这些字段，提前清空会让用户在本次会话中无法连接。
@@ -166,42 +173,51 @@ fn join_config_warnings(warnings: Vec<String>) -> Option<String> {
 /// 返回值：需要展示给用户的非致命说明列表。
 fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
     let mut warnings = Vec::new();
-    let mut migrated_link_ids = Vec::new();
+    let mut stored = match load_connection_secrets(&config.connections.secrets) {
+        Ok(secrets) => secrets,
+        Err(error) => {
+            // 读取失败不阻断启动：保留设置文件中的明文，让用户仍能连接。
+            warnings.push(format!("读取系统凭据库中的连接凭据失败：{error}"));
+            ConnectionSecrets::new()
+        }
+    };
+
+    let mut migrated_link_ids: Vec<usize> = Vec::new();
+    let mut adopted_legacy = false;
+    // 只有内容确实发生变化（迁移明文、采纳旧条目，或正在使用本地密文回落）时才写回凭据库，
+    // 避免每次启动都对同一份未变化的机密执行一次无谓写入。
+    let mut needs_write = !config.connections.secrets.is_empty();
 
     for link in &mut config.connections.links {
         let link_id = link.id;
         for (slot, value) in link.secret_slots() {
             let account = account_for_link(link_id, slot.as_str());
-            // 旧明文优先迁移：内存里已有值且凭据库中没有对应条目时写回凭据库。
+
+            // 1) 设置文件里的历史明文优先：它是最可靠的来源，且不触发任何授权提示。
             if let Some(plaintext) = value {
-                match store_secret(&account, &plaintext) {
-                    Ok(SecretWriteOutcome::Keyring) => {
-                        migrated_link_ids.push(link_id);
-                    }
-                    Ok(SecretWriteOutcome::LocalCiphertext(ciphertext)) => {
-                        config
-                            .connections
-                            .secrets
-                            .insert(account.clone(), ciphertext);
-                        migrated_link_ids.push(link_id);
-                    }
-                    Err(error) => {
-                        // 迁移失败必须保留原值并如实上报，绝不能静默丢弃用户密码。
-                        warnings.push(format!(
-                            "连接“{}”的{}未能迁移到系统凭据库：{error}",
-                            link.name,
-                            secret_slot_label(slot)
-                        ));
-                    }
+                if stored
+                    .insert(account.clone(), SecretString::from(plaintext))
+                    .is_none()
+                {
+                    migrated_link_ids.push(link_id);
                 }
+                needs_write = true;
                 continue;
             }
 
-            let local_ciphertext = config.connections.secrets.get(&account).map(String::as_str);
-            match load_secret(&account, local_ciphertext) {
+            // 2) 合并条目里已有该机密，直接回填。
+            if let Some(secret) = stored.get(&account) {
+                link.set_secret_slot(slot, Some(secret.expose_secret().to_string()));
+                continue;
+            }
+
+            // 3) 最后才尝试旧版分散条目：每读一条都可能触发一次系统授权。
+            match load_legacy_connection_secret(&account) {
                 Ok(Some(secret)) => {
-                    use secrecy::ExposeSecret as _;
-                    link.set_secret_slot(slot, Some(secret.expose_secret().to_string()));
+                    link.set_secret_slot(slot, Some(secret.clone()));
+                    stored.insert(account.clone(), SecretString::from(secret));
+                    adopted_legacy = true;
+                    needs_write = true;
                 }
                 Ok(None) => {}
                 Err(error) => warnings.push(format!(
@@ -213,6 +229,23 @@ fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
         }
     }
 
+    // 把合并结果写回凭据库；写入失败时降级为本地密文，绝不丢弃已读到的机密。
+    if needs_write && !stored.is_empty() {
+        match store_connection_secrets(&stored) {
+            Ok(SecretWriteOutcome::Keyring) => {
+                config.connections.secrets.clear();
+            }
+            Ok(SecretWriteOutcome::LocalCiphertext(ciphertext)) => {
+                config.connections.secrets.clear();
+                config
+                    .connections
+                    .secrets
+                    .insert(LOCAL_SECRETS_KEY.to_string(), ciphertext);
+            }
+            Err(error) => warnings.push(format!("连接凭据写回系统凭据库失败：{error}")),
+        }
+    }
+
     migrated_link_ids.sort_unstable();
     migrated_link_ids.dedup();
     if !migrated_link_ids.is_empty() {
@@ -221,44 +254,46 @@ fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
             migrated_link_ids.len()
         ));
     }
+    if adopted_legacy {
+        warnings.push("已把旧版分散保存的连接凭据合并为单条记录，后续只需授权一次".to_string());
+    }
 
     warnings
 }
 
-/// 把所有连接机密交给凭据库或本地加密回落，并清空内存明文。
+/// 把所有连接机密合并成单条记录交给凭据库或本地加密回落，并清空内存明文。
 ///
-/// 返回值：任何一条机密无法保存时返回错误，调用方中止整次保存，避免用户以为已保存成功。
+/// 返回值：机密无法保存时返回错误，调用方中止整次保存，避免用户以为已保存成功。
 fn persist_connection_secrets(config: &mut AppConfig) -> Result<(), ConfigError> {
-    let mut secrets = std::collections::BTreeMap::new();
+    let mut secrets = ConnectionSecrets::new();
 
     for link in &mut config.connections.links {
         let link_id = link.id;
         for (slot, value) in link.secret_slots() {
-            let account = account_for_link(link_id, slot.as_str());
-            match value {
-                Some(plaintext) => match store_secret(&account, &plaintext) {
-                    Ok(SecretWriteOutcome::Keyring) => {}
-                    Ok(SecretWriteOutcome::LocalCiphertext(ciphertext)) => {
-                        secrets.insert(account, ciphertext);
-                    }
-                    Err(error) => {
-                        return Err(ConfigError::Secret(format!(
-                            "连接“{}”的{}保存失败：{error}",
-                            link.name,
-                            secret_slot_label(slot)
-                        )));
-                    }
-                },
-                // 槽位被清空时同步删除凭据库条目，避免删除连接后凭据仍留在系统中。
-                None => {
-                    forget_secret(&account).map_err(ConfigError::Secret)?;
-                }
+            if let Some(plaintext) = value {
+                secrets.insert(
+                    account_for_link(link_id, slot.as_str()),
+                    SecretString::from(plaintext),
+                );
             }
             link.set_secret_slot(slot, None);
         }
     }
 
-    config.connections.secrets = secrets;
+    // 空集合也要写一次：删除最后一个连接后必须把凭据库中的旧记录清掉。
+    match store_connection_secrets(&secrets) {
+        Ok(SecretWriteOutcome::Keyring) => {
+            config.connections.secrets.clear();
+        }
+        Ok(SecretWriteOutcome::LocalCiphertext(ciphertext)) => {
+            config.connections.secrets.clear();
+            config
+                .connections
+                .secrets
+                .insert(LOCAL_SECRETS_KEY.to_string(), ciphertext);
+        }
+        Err(error) => return Err(ConfigError::Secret(error)),
+    }
     Ok(())
 }
 
@@ -296,7 +331,7 @@ mod tests {
     use super::*;
     use crate::config::app_config::{
         AppearanceConfig, EncodingConfig, JstackThreadFilterRule, JstackThreadFilterRuleKind,
-        LoaderConfig, LogDisplayConfig, LogSearchConfig,
+        LoaderConfig, LogDisplayConfig, LogSearchConfig, TerminalConfig,
     };
     use crate::config::paths::{argus_config_dir_from_home, isolated_test_dir, user_home_dir};
     use crate::remote::connection::{
@@ -350,7 +385,9 @@ username = "smbuser"
             "密码无法恢复时链接必须保留，不能被静默丢弃"
         );
         assert!(
-            warnings.iter().any(|warning| warning.contains("读取失败")),
+            warnings
+                .iter()
+                .any(|warning| warning.contains("无法解密") || warning.contains("失败")),
             "无法恢复密码必须如实上报：{warnings:?}"
         );
     }
@@ -440,6 +477,67 @@ password = "legacy-smb-password"
             .as_ref()
             .expect("应保留 SMB");
         assert_eq!(smb.password, "legacy-smb-password");
+    }
+
+    /// 验证全部连接机密合并为单条记录，而不是每个机密一条。
+    ///
+    /// 这是「凭据库只授权一次」的持久化侧保证：条目数必须与机密条数解耦。
+    #[test]
+    fn connection_secrets_are_stored_as_single_entry() {
+        let path = test_settings_path("secret-single-entry");
+        let mut config = AppConfig::default();
+        let mut link = ConnectionLinkConfig {
+            id: 1,
+            parent_id: None,
+            name: "app-01".to_string(),
+            ssh: Some(SshLinkConfig {
+                host: "10.0.0.1".to_string(),
+                port: 22,
+                username: "deploy".to_string(),
+                password: "first-secret".to_string(),
+                private_key_path: None,
+                private_key_passphrase: Some("second-secret".to_string()),
+            }),
+            smb: None,
+            git: None,
+            svn: None,
+        };
+        link.set_secret_slot(
+            crate::remote::connection::ConnectionSecretSlot::SshPassword,
+            Some("first-secret".to_string()),
+        );
+        config.connections.links.push(link);
+
+        ConfigManager::save_to_path(&path, &config).expect("应能保存");
+
+        let saved = fs::read_to_string(&path).expect("应能读取设置文件");
+        assert!(
+            !saved.contains("first-secret") && !saved.contains("second-secret"),
+            "明文不得出现在设置文件中：{saved}"
+        );
+        let reparsed: AppConfig = toml::from_str(&saved).expect("应能重新解析");
+        assert_eq!(
+            reparsed.connections.secrets.len(),
+            1,
+            "两条机密必须合并为单条记录：{:?}",
+            reparsed.connections.secrets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            reparsed
+                .connections
+                .secrets
+                .contains_key(crate::config::secret_store::LOCAL_SECRETS_KEY),
+            "合并记录必须使用保留键"
+        );
+
+        // 重新加载后两条机密都能还原，证明合并没有丢失内容。
+        let (reloaded, _warnings) = ConfigManager::load_from_path(&path).expect("应能重新加载配置");
+        let ssh = reloaded.connections.links[0]
+            .ssh
+            .as_ref()
+            .expect("应保留 SSH 链接");
+        assert_eq!(ssh.password, "first-secret");
+        assert_eq!(ssh.private_key_passphrase.as_deref(), Some("second-secret"));
     }
 
     /// 验证保存后的设置文件收紧为仅所有者可读写（0600）。
@@ -689,6 +787,9 @@ private_key_passphrase = " phrase "
             },
             encoding: EncodingConfig {
                 selected: "GBK".to_string(),
+            },
+            terminal: TerminalConfig {
+                option_as_meta: true,
             },
         };
 

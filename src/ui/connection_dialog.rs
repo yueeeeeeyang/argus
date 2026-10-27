@@ -1,6 +1,6 @@
 //! 文件职责：渲染链接工作区的目录、链接和确认模态框。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-16
 //! 作者：Argus 开发团队
 //! 主要功能：提供目录与多协议链接表单、统一删除确认样式，并展示首次连接主机指纹确认。
 
@@ -1811,6 +1811,7 @@ fn dialog_header(
 ) -> impl IntoElement {
     div()
         .h(px(CONNECTION_WINDOW_HEADER_HEIGHT))
+        .flex_none()
         .px_5()
         .flex()
         .items_center()

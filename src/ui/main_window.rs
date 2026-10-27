@@ -1,12 +1,13 @@
 //! 文件职责：组合 Argus 主窗口的整体布局。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-28
+//! 修改日期：2026-10-16
 //! 作者：Argus 开发团队
 //! 主要功能：渲染标题栏、来源侧栏、日志内容区、右侧 Agent 助手、AI 分析弹窗和设置模态框。
 
 use crate::app::{ArgusApp, AssistantPanelMode};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
+use crate::theme::ThemeMode;
 use crate::ui::{
     agent_dialog, ai_settings_editor, archive_password_dialog, components::context_menu,
     connection_dialog, custom_title_bar, log_content_view, log_search_dialog, remote_file_dialog,
@@ -41,27 +42,49 @@ const WINDOW_CONTENT_SHADOW_PRIMARY_BLUR: f32 = 4.0;
 const WINDOW_CONTENT_SHADOW_SECONDARY_OFFSET_Y: f32 = 1.0;
 /// 玻璃板次投影模糊半径（像素）。
 const WINDOW_CONTENT_SHADOW_SECONDARY_BLUR: f32 = 2.0;
-/// 玻璃板投影不透明度；投影使用中性黑，与主题配色无关。
-const WINDOW_CONTENT_SHADOW_OPACITY: f32 = 0.30;
 /// 玻璃板边缘描边宽度（像素）；用向外扩散、零模糊的投影实现外描边。
 const WINDOW_CONTENT_EDGE_WIDTH: f32 = 0.5;
-/// 玻璃板边缘描边不透明度；描边使用中性白，在深色背景上勾出板面轮廓。
-const WINDOW_CONTENT_EDGE_OPACITY: f32 = 0.16;
 /// 玻璃板顶部高光向上偏移（像素）；用零模糊投影在板面顶边形成一条亮线。
 const WINDOW_CONTENT_TOP_HIGHLIGHT_OFFSET_Y: f32 = -0.5;
-/// 玻璃板顶部高光不透明度；高光使用中性白，模拟玻璃边缘受光。
-const WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY: f32 = 0.06;
+
+/// 深色主题主投影/次投影不透明度；对应 opencode v2 深色 `--v2-elevation-raised` 的 30% 黑。
+const DARK_WINDOW_CONTENT_SHADOW_OPACITY: f32 = 0.30;
+/// 深色主题外描边不透明度；描边使用中性白，在深色背景上勾出板面轮廓。
+const DARK_WINDOW_CONTENT_EDGE_OPACITY: f32 = 0.16;
+/// 深色主题顶部高光不透明度；高光使用中性白，模拟玻璃边缘受光。
+const DARK_WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY: f32 = 0.06;
+/// 浅色主题主投影不透明度；对应 opencode v2 浅色 `--v2-elevation-raised` 的 4% 黑。
+const LIGHT_WINDOW_CONTENT_SHADOW_PRIMARY_OPACITY: f32 = 0.04;
+/// 浅色主题次投影不透明度；对应 opencode v2 浅色取值的 8% 黑。
+const LIGHT_WINDOW_CONTENT_SHADOW_SECONDARY_OPACITY: f32 = 0.08;
+/// 浅色主题次投影扩散半径（像素）；opencode v2 浅色取值使用 -1px 收窄近处投影。
+const LIGHT_WINDOW_CONTENT_SHADOW_SECONDARY_SPREAD: f32 = -1.0;
+/// 浅色主题外描边不透明度；描边使用中性黑，在浅色背景上勾出板面轮廓。
+const LIGHT_WINDOW_CONTENT_EDGE_OPACITY: f32 = 0.12;
 
 /// 构造内容玻璃板的凸起阴影层。
 ///
-/// 数值参考 opencode v2 客户端内容面板的 `--v2-elevation-raised`（深色主题取值）：
-/// 两层向下投影把板面从窗口背景上抬起，0.5px 白色外描边勾出板面轮廓，
-/// 顶部 0.5px 白色亮线模拟玻璃边缘受光。阴影颜色为中性黑/白，不依赖主题配色；
+/// 参数说明：
+/// - `mode`：当前主题模式；深色与浅色分别对应 opencode v2 客户端内容面板
+///   `--v2-elevation-raised` 的深色/浅色取值。
+///
+/// 说明：深色主题用两层 30% 黑投影把板面从窗口背景上抬起，0.5px 白色外描边勾出
+/// 板面轮廓，顶部 0.5px 白色亮线模拟玻璃边缘受光；浅色主题改用 4% / 8% 黑投影与
+/// 0.5px 12% 黑外描边，避免深色投影在浅色背景上形成厚重边缘（顶部高光在浅色底上
+/// 不可见，因此不绘制）。阴影颜色为中性黑/白，不依赖主题配色；
 /// 顺序与 CSS 阴影列表一致，越靠后绘制的层级越靠上。
-pub(crate) fn window_content_shadows() -> Vec<BoxShadow> {
-    let shadow_color = hsla(0.0, 0.0, 0.0, WINDOW_CONTENT_SHADOW_OPACITY);
-    let edge_color = hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_EDGE_OPACITY);
-    let top_highlight_color = hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY);
+pub(crate) fn window_content_shadows(mode: ThemeMode) -> Vec<BoxShadow> {
+    match mode {
+        ThemeMode::Dark => dark_window_content_shadows(),
+        ThemeMode::Light => light_window_content_shadows(),
+    }
+}
+
+/// 深色主题的玻璃板阴影。
+fn dark_window_content_shadows() -> Vec<BoxShadow> {
+    let shadow_color = hsla(0.0, 0.0, 0.0, DARK_WINDOW_CONTENT_SHADOW_OPACITY);
+    let edge_color = hsla(0.0, 0.0, 1.0, DARK_WINDOW_CONTENT_EDGE_OPACITY);
+    let top_highlight_color = hsla(0.0, 0.0, 1.0, DARK_WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY);
 
     vec![
         BoxShadow {
@@ -87,6 +110,34 @@ pub(crate) fn window_content_shadows() -> Vec<BoxShadow> {
             offset: point(px(0.0), px(WINDOW_CONTENT_TOP_HIGHLIGHT_OFFSET_Y)),
             blur_radius: px(0.0),
             spread_radius: px(0.0),
+        },
+    ]
+}
+
+/// 浅色主题的玻璃板阴影。
+fn light_window_content_shadows() -> Vec<BoxShadow> {
+    let primary_color = hsla(0.0, 0.0, 0.0, LIGHT_WINDOW_CONTENT_SHADOW_PRIMARY_OPACITY);
+    let secondary_color = hsla(0.0, 0.0, 0.0, LIGHT_WINDOW_CONTENT_SHADOW_SECONDARY_OPACITY);
+    let edge_color = hsla(0.0, 0.0, 0.0, LIGHT_WINDOW_CONTENT_EDGE_OPACITY);
+
+    vec![
+        BoxShadow {
+            color: primary_color,
+            offset: point(px(0.0), px(WINDOW_CONTENT_SHADOW_PRIMARY_OFFSET_Y)),
+            blur_radius: px(WINDOW_CONTENT_SHADOW_PRIMARY_BLUR),
+            spread_radius: px(0.0),
+        },
+        BoxShadow {
+            color: secondary_color,
+            offset: point(px(0.0), px(WINDOW_CONTENT_SHADOW_SECONDARY_OFFSET_Y)),
+            blur_radius: px(WINDOW_CONTENT_SHADOW_SECONDARY_BLUR),
+            spread_radius: px(LIGHT_WINDOW_CONTENT_SHADOW_SECONDARY_SPREAD),
+        },
+        BoxShadow {
+            color: edge_color,
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(WINDOW_CONTENT_EDGE_WIDTH),
         },
     ]
 }
@@ -203,6 +254,7 @@ pub(crate) fn render(
                 .child(
                     div()
                         .flex_1()
+                        .min_w(px(0.0))
                         .h_full()
                         .pt(px(WINDOW_CONTENT_RING_ALLOWANCE))
                         .pl(px(WINDOW_CONTENT_INSET))
@@ -211,16 +263,20 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .size_full()
+                                .min_w(px(0.0))
                                 .rounded(px(WINDOW_CONTENT_RADIUS))
                                 .bg(rgb(theme.content))
-                                // 凸起质感：多层阴影把板面从窗口背景上抬起，并用 0.5px 亮色
-                                // 外描边与顶部亮线勾出玻璃边缘（见 `window_content_shadows`）。
-                                .shadow(window_content_shadows())
+                                // 凸起质感：阴影按主题模式取 opencode v2 的 raised 层级，
+                                // 深色用亮色外描边、浅色用低透明度暗色外描边（见 `window_content_shadows`）。
+                                .shadow(window_content_shadows(theme.mode))
                                 .debug_selector(|| "window-content-panel".to_string())
                                 .flex()
                                 .flex_col()
                                 // 主内容区保留 8px 内部留白，保证内容不盖住玻璃板圆角。
                                 .child(
+                                    // 该容器保持宽度确定，不能加 min_w(0)：宽度一旦进入固有尺寸
+                                    // 计算，子视图里带 min_w(0) 的嵌套行会被按 min-content 收窄，
+                                    // 文本换行撑高自身并挤掉下方内容（曾导致请求详情列表消失）。
                                     div()
                                         .flex_1()
                                         .min_h(px(0.0))
@@ -333,7 +389,7 @@ fn animated_assistant_panel(
                                 .p(px(WINDOW_CONTENT_PADDING))
                                 .rounded(px(WINDOW_CONTENT_RADIUS))
                                 .bg(rgb(theme.content))
-                                .shadow(window_content_shadows())
+                                .shadow(window_content_shadows(theme.mode))
                                 .child(panel),
                         ),
                 )
@@ -436,8 +492,8 @@ mod tests {
     /// 验证玻璃板阴影沿用 opencode v2 内容面板 `--v2-elevation-raised`（深色）的配方：
     /// 两层向下黑色投影 + 0.5px 白色外描边 + 顶部 0.5px 白色亮线，共四层且顺序固定。
     #[test]
-    fn window_content_shadows_match_reference_elevation() {
-        let shadows = window_content_shadows();
+    fn dark_window_content_shadows_match_reference_elevation() {
+        let shadows = window_content_shadows(ThemeMode::Dark);
         assert_eq!(shadows.len(), 4, "阴影应由两层投影、外描边和顶部高光组成");
 
         let primary = &shadows[0];
@@ -461,17 +517,56 @@ mod tests {
         assert_eq!(top_highlight.spread_radius, px(0.0));
 
         // 投影为中性黑，描边与顶部高光为中性白，且层级越靠上不透明度越低。
-        let shadow_color = hsla(0.0, 0.0, 0.0, WINDOW_CONTENT_SHADOW_OPACITY);
+        let shadow_color = hsla(0.0, 0.0, 0.0, DARK_WINDOW_CONTENT_SHADOW_OPACITY);
         assert_eq!(shadows[0].color, shadow_color);
         assert_eq!(shadows[1].color, shadow_color);
         assert_eq!(
             shadows[2].color,
-            hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_EDGE_OPACITY)
+            hsla(0.0, 0.0, 1.0, DARK_WINDOW_CONTENT_EDGE_OPACITY)
         );
         assert_eq!(
             shadows[3].color,
-            hsla(0.0, 0.0, 1.0, WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY)
+            hsla(0.0, 0.0, 1.0, DARK_WINDOW_CONTENT_TOP_HIGHLIGHT_OPACITY)
         );
         assert!(shadows[3].color.a < shadows[2].color.a);
+    }
+
+    /// 验证浅色主题使用 opencode v2 浅色 `--v2-elevation-raised`：
+    /// 4% / 8% 黑投影（次投影 -1px 收窄）+ 0.5px 12% 黑外描边，且不再绘制顶部白色高光。
+    #[test]
+    fn light_window_content_shadows_use_soft_elevation() {
+        let shadows = window_content_shadows(ThemeMode::Light);
+        assert_eq!(shadows.len(), 3, "浅色抬起效果不包含不可见的顶部高光");
+
+        let primary = &shadows[0];
+        assert_eq!(primary.offset, point(px(0.0), px(2.0)));
+        assert_eq!(primary.blur_radius, px(4.0));
+        assert_eq!(
+            primary.color,
+            hsla(0.0, 0.0, 0.0, LIGHT_WINDOW_CONTENT_SHADOW_PRIMARY_OPACITY)
+        );
+
+        let secondary = &shadows[1];
+        assert_eq!(secondary.offset, point(px(0.0), px(1.0)));
+        assert_eq!(secondary.blur_radius, px(2.0));
+        assert_eq!(secondary.spread_radius, px(-1.0));
+        assert_eq!(
+            secondary.color,
+            hsla(0.0, 0.0, 0.0, LIGHT_WINDOW_CONTENT_SHADOW_SECONDARY_OPACITY)
+        );
+
+        let edge = &shadows[2];
+        assert_eq!(edge.offset, point(px(0.0), px(0.0)));
+        assert_eq!(edge.blur_radius, px(0.0));
+        assert_eq!(edge.spread_radius, px(0.5), "外描边依靠 0.5px 扩散实现");
+        assert_eq!(
+            edge.color,
+            hsla(0.0, 0.0, 0.0, LIGHT_WINDOW_CONTENT_EDGE_OPACITY)
+        );
+
+        // 浅色投影必须明显轻于深色配方，避免在浅色背景上形成厚重暗边。
+        let dark_shadows = window_content_shadows(ThemeMode::Dark);
+        assert!(shadows[0].color.a < dark_shadows[0].color.a);
+        assert!(shadows[2].color.a < dark_shadows[2].color.a);
     }
 }

@@ -1,18 +1,19 @@
 //! 文件职责：提供自绘日期时间选择器组件。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-06-26
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：为 Runtime 日志过滤提供类似 Web 日期时间选择器的日历面板、时间微调和快捷按钮。
 
 use crate::app::{
     ArgusApp, RuntimeDateTimePart, RuntimeDateTimeQuickAction, RuntimeFilterInputKind,
+    RuntimePickerTimeEdit,
 };
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use gpui::{
-    Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, SharedString, div, prelude::*,
-    px, rgb,
+    Context, FocusHandle, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    SharedString, div, prelude::*, px, rgb,
 };
 
 /// 日期时间选择器浮层宽度，兼顾日历网格和时间操作按钮。
@@ -53,16 +54,31 @@ struct DateTimePickerDay {
 }
 
 /// 渲染 Runtime 使用的日期时间选择器浮层。
+///
+/// 参数说明：
+/// - `value`：浮层当前展示的年月日时分秒。
+/// - `picker_time_edit`：正在直接键入数字的时间字段；为空表示未进入字段编辑。
+/// - `focus_handle`：浮层真实键盘焦点句柄；时分秒字段获得焦点后由此承接数字键输入。
+/// - `filter_focus_handle`：对应时间过滤输入框的真实焦点；结束字段编辑后焦点交还给它。
 pub(crate) fn render_datetime_picker(
     analysis_id: usize,
     input_kind: RuntimeFilterInputKind,
     title: &'static str,
     value: DateTimePickerValue,
+    picker_time_edit: Option<RuntimePickerTimeEdit>,
     left: f32,
     top: f32,
+    focus_handle: Option<FocusHandle>,
+    filter_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
+    let editing_part = picker_time_edit.as_ref().map(|edit| edit.part);
+    let editing_digits = picker_time_edit
+        .as_ref()
+        .map(|edit| edit.digits.clone())
+        .unwrap_or_default();
+
     div()
         .id(SharedString::from(format!(
             "runtime-datetime-picker-{analysis_id}-{input_kind:?}"
@@ -82,6 +98,27 @@ pub(crate) fn render_datetime_picker(
         .shadow_lg()
         .occlude()
         .text_color(rgb(theme.foreground))
+        .debug_selector(|| "runtime-time-picker-panel".to_string())
+        .when_some(focus_handle.clone(), |this, focus_handle| {
+            this.track_focus(&focus_handle)
+        })
+        .focusable()
+        .on_key_down(cx.listener({
+            let filter_focus_handle = filter_focus_handle.clone();
+            move |app, event: &KeyDownEvent, window, cx| {
+                cx.stop_propagation();
+                app.handle_runtime_picker_time_key(analysis_id, &event.keystroke, Some(cx));
+                // 回车与 Esc 结束字段编辑后把真实焦点交还时间过滤输入框，用户可继续编辑完整时间文本。
+                if matches!(
+                    event.keystroke.key.to_lowercase().as_str(),
+                    "enter" | "escape"
+                ) && let Some(filter_focus_handle) = filter_focus_handle.as_ref()
+                {
+                    filter_focus_handle.focus(window);
+                }
+                cx.notify();
+            }
+        }))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -178,6 +215,9 @@ pub(crate) fn render_datetime_picker(
                     input_kind,
                     RuntimeDateTimePart::Hour,
                     format!("{:02}", value.hour),
+                    (editing_part == Some(RuntimeDateTimePart::Hour))
+                        .then_some(editing_digits.as_str()),
+                    focus_handle.as_ref(),
                     theme,
                     cx,
                 ))
@@ -187,6 +227,9 @@ pub(crate) fn render_datetime_picker(
                     input_kind,
                     RuntimeDateTimePart::Minute,
                     format!("{:02}", value.minute),
+                    (editing_part == Some(RuntimeDateTimePart::Minute))
+                        .then_some(editing_digits.as_str()),
+                    focus_handle.as_ref(),
                     theme,
                     cx,
                 ))
@@ -196,6 +239,9 @@ pub(crate) fn render_datetime_picker(
                     input_kind,
                     RuntimeDateTimePart::Second,
                     format!("{:02}", value.second),
+                    (editing_part == Some(RuntimeDateTimePart::Second))
+                        .then_some(editing_digits.as_str()),
+                    focus_handle.as_ref(),
                     theme,
                     cx,
                 )),
@@ -240,6 +286,7 @@ pub(crate) fn render_datetime_picker(
                 .child(render_datetime_confirm_button(
                     analysis_id,
                     "确定",
+                    filter_focus_handle.clone(),
                     theme,
                     cx,
                 )),
@@ -398,15 +445,31 @@ fn datetime_picker_days(value: &DateTimePickerValue) -> Vec<DateTimePickerDay> {
         .collect()
 }
 
-/// 渲染时间部分的加减控件，保留日历式选择器中常见的紧凑时间编辑区。
+/// 渲染时间部分的加减控件与可直接输入的数值框。
+///
+/// 参数说明：
+/// - `editing_digits`：该字段正处于键盘直接输入状态时传入已输入的数字草稿；`None` 表示未编辑。
+/// - `focus_handle`：浮层焦点句柄；点击数值框时把真实键盘焦点移到浮层，数字键即可直接输入。
+///
+/// 说明：数值框在编辑期间显示数字草稿（空草稿显示当前值并高亮），点击后按数字键覆盖式输入，
+/// 上方 +/- 按钮保持原有步进调整能力。
 fn render_time_part_control(
     analysis_id: usize,
     input_kind: RuntimeFilterInputKind,
     part: RuntimeDateTimePart,
     value: String,
+    editing_digits: Option<&str>,
+    focus_handle: Option<&FocusHandle>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
+    let is_editing = editing_digits.is_some();
+    let display_value = match editing_digits.filter(|digits| !digits.is_empty()) {
+        Some(digits) => digits.to_string(),
+        None => value,
+    };
+    let focus_handle = focus_handle.cloned();
+
     div()
         .flex_1()
         .min_w(px(0.0))
@@ -426,6 +489,14 @@ fn render_time_part_control(
         ))
         .child(
             div()
+                .id(SharedString::from(format!(
+                    "runtime-time-field-{analysis_id}-{input_kind:?}-{part:?}"
+                )))
+                .debug_selector({
+                    let selector =
+                        format!("runtime-time-field-{analysis_id}-{input_kind:?}-{part:?}");
+                    move || selector.clone()
+                })
                 .w(px(32.0))
                 .h(px(24.0))
                 .flex()
@@ -433,15 +504,25 @@ fn render_time_part_control(
                 .justify_center()
                 .rounded_sm()
                 .border_1()
-                .border_color(rgb(theme.border))
+                .border_color(rgb(if is_editing { theme.info } else { theme.border }))
                 .bg(rgb(theme.content))
+                .cursor_text()
                 .child(
                     div()
                         .text_size(px(12.0))
                         .line_height(px(24.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(value),
-                ),
+                        .when(is_editing, |this| this.bg(rgb(theme.selection)))
+                        .child(display_value),
+                )
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    cx.stop_propagation();
+                    if let Some(focus_handle) = focus_handle.as_ref() {
+                        focus_handle.focus(window);
+                    }
+                    app.begin_runtime_picker_time_edit(analysis_id, part);
+                    cx.notify();
+                })),
         )
         .child(render_time_step_button(
             format!("runtime-time-step-up-{analysis_id}-{input_kind:?}-{part:?}"),
@@ -517,10 +598,11 @@ fn render_datetime_quick_button(
         }))
 }
 
-/// 渲染日期时间选择器确认按钮。
+/// 渲染日期时间选择器确认按钮；确认关闭浮层并把焦点交还时间过滤输入框。
 fn render_datetime_confirm_button(
     analysis_id: usize,
     label: &'static str,
+    filter_focus_handle: Option<FocusHandle>,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
@@ -540,8 +622,11 @@ fn render_datetime_confirm_button(
         .text_size(px(11.0))
         .line_height(px(24.0))
         .child(label)
-        .on_click(cx.listener(move |app, _, _, cx| {
+        .on_click(cx.listener(move |app, _, window, cx| {
             cx.stop_propagation();
+            if let Some(filter_focus_handle) = filter_focus_handle.as_ref() {
+                filter_focus_handle.focus(window);
+            }
             app.close_runtime_time_picker(analysis_id);
             cx.notify();
         }))

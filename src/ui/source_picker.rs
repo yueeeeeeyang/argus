@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义跨平台日志来源选择器模态框。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：提供主窗口模态框中的目录浏览、目录/文件/压缩包多选和确认加载入口。
 
@@ -266,6 +266,8 @@ fn render_window_content(
                 .flex_none()
                 .flex()
                 .flex_col()
+                // 侧栏背景贴住模态框左缘，必须自带左圆角，否则方角会盖住外壳圆角形成尖角。
+                .rounded_l_lg()
                 .bg(rgb(theme.side_bar))
                 .child(render_sidebar_title(&theme))
                 .child(render_locations(snapshot, &theme, app_handle)),
@@ -294,7 +296,7 @@ fn render_window_content(
                                 .p(px(WINDOW_CONTENT_PADDING))
                                 .rounded(px(WINDOW_CONTENT_RADIUS))
                                 .bg(rgb(theme.content))
-                                .shadow(window_content_shadows())
+                                .shadow(window_content_shadows(theme.mode))
                                 .flex()
                                 .flex_col()
                                 .overflow_hidden()
@@ -310,7 +312,10 @@ fn render_window_content(
         )
 }
 
-/// 渲染左侧标题，使侧栏背景从模态框顶部连续延伸到底部。
+/// 渲染左侧标题。
+///
+/// 不重复绘制侧栏背景：父容器已绘制带左圆角的侧栏底色，子元素再画方角底色会从
+/// 圆角外溢出，形成直角缺口（GPUI 的 `overflow_hidden` 只能矩形裁剪）。
 fn render_sidebar_title(theme: &AppTheme) -> impl IntoElement + use<> {
     div()
         .h(px(SOURCE_PICKER_HEADER_HEIGHT))
@@ -318,7 +323,6 @@ fn render_sidebar_title(theme: &AppTheme) -> impl IntoElement + use<> {
         .px_4()
         .flex()
         .items_center()
-        .bg(rgb(theme.side_bar))
         .child(
             div()
                 .flex()
@@ -382,7 +386,6 @@ fn render_locations(
         .gap_1()
         .px_4()
         .py(px(SOURCE_PICKER_CONTENT_PADDING))
-        .bg(rgb(theme.side_bar))
         .child(
             div()
                 .h(px(28.0))

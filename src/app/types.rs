@@ -1,6 +1,6 @@
 //! 文件职责：提取应用通用类型定义。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：定义工作区、设置分类、标签页、文本输入目标和占位数据等跨功能域共享类型。
 
@@ -43,6 +43,8 @@ pub(crate) enum SettingsSection {
     LogSearch,
     /// 日志加载设置，包含压缩包和符号链接策略。
     LogLoading,
+    /// 终端设置，包含 Option 键等本地按键语义。
+    Terminal,
 }
 
 impl SettingsSection {
@@ -58,6 +60,7 @@ impl SettingsSection {
             Self::LogDisplay => "日志显示",
             Self::LogSearch => "日志搜索",
             Self::LogLoading => "日志加载",
+            Self::Terminal => "终端",
         }
     }
 }
@@ -155,6 +158,15 @@ pub(crate) enum RuntimeDateTimeQuickAction {
     Clear,
 }
 
+/// Runtime 日期时间选择器中被键盘直接编辑的时间字段状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimePickerTimeEdit {
+    /// 正在编辑的时间部分（时/分/秒）。
+    pub part: RuntimeDateTimePart,
+    /// 已输入的数字草稿；为空表示等待输入，下一次按键从新数字开始。
+    pub digits: String,
+}
+
 /// 应用内所有自绘单行输入框的原生文本输入目标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AppTextInputTarget {
@@ -224,6 +236,8 @@ pub(crate) struct AppInputFocusHandles {
     pub runtime_filter_start_time: FocusHandle,
     /// Runtime 结束时间过滤输入框焦点。
     pub runtime_filter_end_time: FocusHandle,
+    /// Runtime 日期时间选择器时分秒字段的直接输入焦点。
+    pub runtime_time_picker: FocusHandle,
 }
 
 /// 过滤规则编辑器草稿；编辑期间只改草稿，保存或关闭窗口时才写回配置。

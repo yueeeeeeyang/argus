@@ -1,6 +1,6 @@
 //! 文件职责：渲染带语法高亮的远程文件只读预览独立窗口。
 //! 创建日期：2026-07-03
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-15
 //! 作者：Argus 开发团队
 //! 主要功能：以项目统一编辑器样式展示远程文本、代码高亮、行号，并支持文本拖拽选中、自动滚动、复制与全选。
 
@@ -655,7 +655,7 @@ impl Render for FilePreviewWindow {
                             .p(px(WINDOW_CONTENT_PADDING))
                             .rounded(px(WINDOW_CONTENT_RADIUS))
                             .bg(rgb(self.theme.content))
-                            .shadow(window_content_shadows())
+                            .shadow(window_content_shadows(self.theme.mode))
                             .child(
                                 div()
                                     .size_full()

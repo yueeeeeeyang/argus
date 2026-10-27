@@ -2,7 +2,7 @@
 <!--
   文件职责：macOS Argus.app 打包用 Info.plist 模板。
   创建日期：2026-06-15
-  修改日期：2026-07-07
+  修改日期：2026-10-15
   作者：Argus 开发团队
   主要功能：声明应用基础信息、URL 打开能力和 Finder Open With 可识别的文档类型。
 -->
@@ -26,9 +26,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.10</string>
+	<string>1.1.13</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.10</string>
+	<string>1.1.13</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
 	<key>NSHighResolutionCapable</key>

@@ -149,6 +149,8 @@ impl ArgusApp {
                 is_filter_pending: false,
                 is_filter_computing: false,
                 open_time_picker: None,
+                time_input_offsets: None,
+                picker_time_edit: None,
                 cell_selection: None,
                 cell_selection_drag: None,
                 hovered_sql_cell: None,
@@ -1256,6 +1258,7 @@ impl ArgusApp {
         }
         for state in self.runtime_analyses.values_mut() {
             state.open_time_picker = None;
+            state.picker_time_edit = None;
         }
         if let Some(state) = self.runtime_analyses.get_mut(&analysis_id) {
             state.open_time_picker = Some(input_kind);
@@ -1266,10 +1269,11 @@ impl ArgusApp {
     ///
     /// 返回值：是否关闭了一个已打开的面板。
     pub(crate) fn close_runtime_time_picker(&mut self, analysis_id: usize) -> bool {
-        self.runtime_analyses
-            .get_mut(&analysis_id)
-            .and_then(|state| state.open_time_picker.take())
-            .is_some()
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return false;
+        };
+        state.picker_time_edit = None;
+        state.open_time_picker.take().is_some()
     }
 
     /// 使用快捷动作设置 Runtime 时间过滤输入框。
@@ -1285,6 +1289,8 @@ impl ArgusApp {
             self.clear_runtime_filter_input(analysis_id, input_kind, cx);
             return;
         }
+        // 快捷动作会整体重设时间：清除字段数字草稿，下一次键入从完整数值重新开始。
+        self.reset_runtime_picker_time_edit_digits(analysis_id);
 
         let now = Local::now();
         let datetime = match action {
@@ -1313,6 +1319,8 @@ impl ArgusApp {
         delta: i32,
         cx: Option<&mut Context<Self>>,
     ) {
+        // 程序化调整后清除数字草稿：下一次键入从完整数值重新开始，避免半截草稿与按钮结果串档。
+        self.reset_runtime_picker_time_edit_digits(analysis_id);
         let is_end = input_kind == RuntimeFilterInputKind::EndTime;
         let current = self
             .runtime_filter_input(analysis_id, input_kind)
@@ -1320,6 +1328,193 @@ impl ArgusApp {
             .unwrap_or_else(|| default_runtime_filter_datetime(is_end));
         let adjusted = adjust_runtime_datetime_part(current, part, delta);
         self.set_runtime_filter_time_value(analysis_id, input_kind, adjusted, is_end, cx);
+    }
+
+    /// 点击时间选择器中的时分秒字段，进入数字直接输入状态。
+    ///
+    /// 参数说明：
+    /// - `analysis_id`：Runtime 分析页 ID。
+    /// - `part`：被点击的时间部分；仅时、分、秒支持直接输入。
+    ///
+    /// 说明：进入字段编辑后撤掉时间过滤输入框的业务焦点，避免浮层字段与过滤栏同时显示光标。
+    pub(crate) fn begin_runtime_picker_time_edit(
+        &mut self,
+        analysis_id: usize,
+        part: RuntimeDateTimePart,
+    ) {
+        if !matches!(
+            part,
+            RuntimeDateTimePart::Hour | RuntimeDateTimePart::Minute | RuntimeDateTimePart::Second
+        ) {
+            return;
+        }
+        let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
+            return;
+        };
+        state.picker_time_edit = Some(RuntimePickerTimeEdit {
+            part,
+            digits: String::new(),
+        });
+        clear_runtime_filter_input_focus(&mut state.filter_start_time_input);
+        clear_runtime_filter_input_focus(&mut state.filter_end_time_input);
+    }
+
+    /// 结束时间选择器字段的直接输入状态。
+    pub(crate) fn end_runtime_picker_time_edit(&mut self, analysis_id: usize) {
+        if let Some(state) = self.runtime_analyses.get_mut(&analysis_id) {
+            state.picker_time_edit = None;
+        }
+    }
+
+    /// 清除时间选择器字段的数字草稿，已提交的数值保持不变。
+    fn reset_runtime_picker_time_edit_digits(&mut self, analysis_id: usize) {
+        if let Some(edit) = self
+            .runtime_analyses
+            .get_mut(&analysis_id)
+            .and_then(|state| state.picker_time_edit.as_mut())
+        {
+            edit.digits.clear();
+        }
+    }
+
+    /// 处理时间选择器时分秒字段的直接键盘输入。
+    ///
+    /// 规则：
+    /// - 数字键即时写入过滤值：一位数字按原值提交（如 `8` → 08），两位数字按字段上限夹取
+    ///   （如分钟 `75` → 59）并自动跳到下一个字段；
+    /// - 退格/删除只清除数字草稿，不改动已提交的数值；
+    /// - 上/下方向键等价于点击 +/- 按钮；
+    /// - 回车与 Esc 结束字段编辑，浮层保持打开。
+    pub(crate) fn handle_runtime_picker_time_key(
+        &mut self,
+        analysis_id: usize,
+        keystroke: &Keystroke,
+        cx: Option<&mut Context<Self>>,
+    ) {
+        let Some((edit_part, edit_digits)) = self
+            .runtime_analyses
+            .get(&analysis_id)
+            .and_then(|state| state.picker_time_edit.as_ref())
+            .map(|edit| (edit.part, edit.digits.clone()))
+        else {
+            return;
+        };
+        let Some(input_kind) = self
+            .runtime_analyses
+            .get(&analysis_id)
+            .and_then(|state| state.open_time_picker)
+        else {
+            return;
+        };
+
+        let key = keystroke.key.to_lowercase();
+        match key.as_str() {
+            "enter" | "escape" => self.end_runtime_picker_time_edit(analysis_id),
+            "backspace" | "delete" => {
+                if let Some(edit) = self
+                    .runtime_analyses
+                    .get_mut(&analysis_id)
+                    .and_then(|state| state.picker_time_edit.as_mut())
+                {
+                    edit.digits.pop();
+                }
+            }
+            "up" | "arrowup" => {
+                self.adjust_runtime_filter_time(analysis_id, input_kind, edit_part, 1, cx)
+            }
+            "down" | "arrowdown" => {
+                self.adjust_runtime_filter_time(analysis_id, input_kind, edit_part, -1, cx)
+            }
+            _ => {
+                if keystroke.modifiers.control
+                    || keystroke.modifiers.alt
+                    || keystroke.modifiers.platform
+                    || keystroke.modifiers.function
+                {
+                    return;
+                }
+                let Some(digit) = keystroke
+                    .key_char
+                    .as_deref()
+                    .filter(|chars| chars.chars().count() == 1)
+                    .and_then(|chars| chars.chars().next())
+                    .filter(char::is_ascii_digit)
+                else {
+                    return;
+                };
+                self.input_runtime_picker_time_digit(
+                    analysis_id,
+                    input_kind,
+                    edit_part,
+                    digit,
+                    &edit_digits,
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// 键入一位数字：更新数字草稿、即时提交字段值，并在两位数字输入完成后跳到下一个字段。
+    fn input_runtime_picker_time_digit(
+        &mut self,
+        analysis_id: usize,
+        input_kind: RuntimeFilterInputKind,
+        part: RuntimeDateTimePart,
+        digit: char,
+        digits: &str,
+        cx: Option<&mut Context<Self>>,
+    ) {
+        // 已输入两位后重新开始一段新数字，与原生日期时间控件的覆盖式输入一致。
+        let mut next_digits = if digits.chars().count() >= 2 {
+            String::new()
+        } else {
+            digits.to_string()
+        };
+        next_digits.push(digit);
+        let Ok(value) = next_digits.parse::<u32>() else {
+            return;
+        };
+        let is_end = input_kind == RuntimeFilterInputKind::EndTime;
+        let current = self
+            .runtime_filter_input(analysis_id, input_kind)
+            .and_then(|input| parse_runtime_filter_datetime_value(&input.value, is_end))
+            .unwrap_or_else(|| default_runtime_filter_datetime(is_end));
+        let (hour, minute, second) = match part {
+            RuntimeDateTimePart::Hour => (value.min(23), current.minute(), current.second()),
+            RuntimeDateTimePart::Minute => (current.hour(), value.min(59), current.second()),
+            RuntimeDateTimePart::Second => (current.hour(), current.minute(), value.min(59)),
+            RuntimeDateTimePart::Month => return,
+        };
+        let Some(naive) = current.date_naive().and_hms_opt(hour, minute, second) else {
+            return;
+        };
+        let Some(datetime) = Local.from_local_datetime(&naive).single() else {
+            return;
+        };
+        self.set_runtime_filter_time_value(analysis_id, input_kind, datetime, is_end, cx);
+        // 字段编辑期间编辑焦点保持在选择器字段上，过滤输入框不显示光标。
+        if let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) {
+            clear_runtime_filter_input_focus(input);
+        }
+        // 两位数字输入完成后自动跳到下一个字段；秒字段保持在原地并重新开始草稿。
+        if let Some(edit) = self
+            .runtime_analyses
+            .get_mut(&analysis_id)
+            .and_then(|state| state.picker_time_edit.as_mut())
+        {
+            if next_digits.chars().count() == 2 {
+                edit.part = match part {
+                    RuntimeDateTimePart::Hour => RuntimeDateTimePart::Minute,
+                    RuntimeDateTimePart::Minute | RuntimeDateTimePart::Second => {
+                        RuntimeDateTimePart::Second
+                    }
+                    RuntimeDateTimePart::Month => return,
+                };
+                edit.digits.clear();
+            } else {
+                edit.digits = next_digits;
+            }
+        }
     }
 
     /// 设置 Runtime 时间过滤输入框的日期部分，并保留当前时分秒。
@@ -1346,6 +1541,8 @@ impl ArgusApp {
         ) {
             return;
         }
+        // 日期点选只更新日期部分：清除字段数字草稿，避免半截草稿续接到新日期上。
+        self.reset_runtime_picker_time_edit_digits(analysis_id);
         let is_end = input_kind == RuntimeFilterInputKind::EndTime;
         let current = self
             .runtime_filter_input(analysis_id, input_kind)
@@ -1415,6 +1612,8 @@ impl ArgusApp {
         input_kind: RuntimeFilterInputKind,
         cx: Option<&mut Context<Self>>,
     ) {
+        // 清空输入后字段数字草稿一并失效，下一次键入从默认时间重新开始。
+        self.reset_runtime_picker_time_edit_digits(analysis_id);
         let Some(input) = self.runtime_filter_input_mut(analysis_id, input_kind) else {
             return;
         };
@@ -1819,5 +2018,16 @@ impl ArgusApp {
         input.cursor = cursor;
         input.marked_range = None;
         input.selection_drag = None;
+    }
+
+    /// 记录过滤栏时间输入框横向偏移（渲染层实测），供日期时间选择器对齐输入框。
+    pub(crate) fn set_runtime_time_input_offsets(
+        &mut self,
+        analysis_id: usize,
+        offsets: (f32, f32),
+    ) {
+        if let Some(state) = self.runtime_analyses.get_mut(&analysis_id) {
+            state.time_input_offsets = Some(offsets);
+        }
     }
 }

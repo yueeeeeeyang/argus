@@ -1,0 +1,59 @@
+# 文件职责：定义 Argus 内置浅色主题令牌。
+# 创建日期：2026-10-15
+# 修改日期：2026-10-15
+# 作者：Argus 开发团队
+# 主要功能：参考 OpenCode V2 内置 opencode 主题的浅色配色，生成 Argus 浅色界面令牌。
+
+name = "Light"
+mode = "light"
+description = "参考 OpenCode V2 内置 opencode 主题浅色配色的浅色主题。"
+
+# 配色映射（opencode 语义令牌 -> Argus 令牌）：
+# background/title_bar/side_bar = grey.200（窗口与模态框背板）；activity_bar/status_bar = grey.300；
+# content = grey.50（白色玻璃板）；current_line = grey.100（板内行高亮）；
+# foreground = text.base；foreground_muted = text.muted；border = border.base；
+# selection = interactive.700；modal_overlay = text.base + 40% 透明。
+# 背板比玻璃板深两级，保证白色面板四周的窗口留白在浅色主题下同样可见。
+[colors]
+background = "#f2f2f2"
+title_bar = "#f2f2f2"
+activity_bar = "#eeeeee"
+side_bar = "#f2f2f2"
+content = "#ffffff"
+status_bar = "#eeeeee"
+foreground = "#1a1a1a"
+foreground_muted = "#8a8a8a"
+border = "#b8b8b8"
+selection = "#b7d4fd"
+current_line = "#f5f5f5"
+modal_overlay = "#1a1a1a66"
+
+# 日志级别映射：debug = diff.text.added，info = interactive.200，
+# warning = accent.200 / text.feedback.warning，error = text.feedback.error，
+# success = text.feedback.success。
+[log_levels]
+debug = "#1e725c"
+info = "#3b7dd8"
+warning = "#d68c27"
+error = "#d1383d"
+success = "#3d9a57"
+
+# 语法高亮映射：comment = syntax.comment，key/attribute = syntax.variable，
+# string = syntax.string，number/boolean/tag = syntax.keyword/number，
+# timestamp = interactive.300，thread/method = syntax.function，
+# class = syntax.type，lock = hue.purple.200，exception = text.feedback.error。
+[syntax]
+comment = "#8a8a8a"
+key = "#d1383d"
+string = "#3d9a57"
+number = "#d68c27"
+boolean = "#d68c27"
+punctuation = "#1a1a1a"
+tag = "#d68c27"
+attribute = "#d1383d"
+timestamp = "#518ee4"
+thread = "#3b7dd8"
+class = "#b0851f"
+method = "#3b7dd8"
+lock = "#7b5bb6"
+exception = "#d1383d"
