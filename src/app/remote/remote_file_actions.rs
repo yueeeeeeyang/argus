@@ -1,6 +1,6 @@
 //! 文件职责：实现 SFTP、SMB、Git、SVN 通用远程文件管理标签、事件回收、文件操作和输入框交互。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：从 SSH/SMB/Git/SVN 链接打开通用文件管理，并按协议能力约束浏览、预览、下载和写操作。
 
@@ -163,7 +163,7 @@ impl ArgusApp {
                 matches!(tab.kind, TabKind::RemoteFileManager { session_id: id } if id == session_id)
             })
         {
-            self.active_tab_id = tab.id;
+            self.active_tab_id = Some(tab.id);
             self.workspace = Workspace::Connections;
             self.placeholder_notice = format!("已聚焦 {} 仓库文件管理", backend.label());
             return;
@@ -1165,24 +1165,15 @@ impl ArgusApp {
         let Some(session) = self.remote_file_sessions.get(&session_id) else {
             return;
         };
-        let tab_id = if self.tabs.len() == 1 && matches!(self.tabs[0].kind, TabKind::Empty) {
-            self.tabs[0].id
-        } else {
-            let next_id = self.next_tab_id;
-            self.next_tab_id += 1;
-            self.tabs.push(ArgusTab {
-                id: next_id,
-                title: String::new(),
-                kind: TabKind::Empty,
-            });
-            next_id
-        };
-
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.title = session.title.clone();
-            tab.kind = TabKind::RemoteFileManager { session_id };
-        }
-        self.active_tab_id = tab_id;
+        // 没有选择日志时不会再有占位标签，创建页签一律新建。
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(ArgusTab {
+            id: tab_id,
+            title: session.title.clone(),
+            kind: TabKind::RemoteFileManager { session_id },
+        });
+        self.active_tab_id = Some(tab_id);
     }
 
     /// 应用通用远程文件 worker 回传事件。

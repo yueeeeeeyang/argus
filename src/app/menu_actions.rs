@@ -121,7 +121,9 @@ impl ArgusApp {
                         tab.title.clone(),
                         MenuAction::ActivateTab { tab_id: tab.id },
                     )
-                    .selected(tab.id == self.active_tab_id)
+                    .selected(Some(tab.id) == self.active_tab_id)
+                    // 行尾关闭按钮：不切换标签，直接关闭对应标签。
+                    .with_trailing_action(MenuAction::CloseTab { tab_id: tab.id })
                 })
                 .collect(),
             ActiveMenuKind::SearchResultsPanel => vec![
@@ -333,6 +335,30 @@ impl ArgusApp {
         }
 
         self.close_active_menu();
+    }
+
+    /// 执行菜单行尾快捷操作。
+    ///
+    /// 与主操作的区别：标签下拉菜单的行尾关闭按钮只关闭对应标签，并保留下拉菜单，
+    /// 便于连续关闭多个标签。
+    pub(crate) fn handle_menu_trailing_action_with_context(
+        &mut self,
+        action: MenuAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            MenuAction::CloseTab { tab_id } => {
+                // `close_tab` 内部会收起当前菜单；这里恢复标签下拉菜单。
+                let tab_overflow_menu = self
+                    .active_menu
+                    .clone()
+                    .filter(|menu| matches!(menu.kind, ActiveMenuKind::TabOverflow));
+                self.close_tab_with_context(tab_id, cx);
+                // 关闭最后一个标签后不再恢复空的标签下拉菜单。
+                self.active_menu = tab_overflow_menu.filter(|_| !self.tabs.is_empty());
+            }
+            other => self.handle_menu_action_with_context(other, cx),
+        }
     }
 
     /// 执行需要 GPUI 上下文的菜单动作；普通动作复用无上下文分发。

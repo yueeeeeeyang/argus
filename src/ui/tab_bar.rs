@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义标题栏中的日志标签区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-25
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：展示可切换标签、右键菜单和多标签溢出下拉入口。
 
@@ -92,18 +92,14 @@ pub(crate) fn render(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let theme = app.theme.clone();
-    // “未选择日志”占位页签不参与渲染：没有真实日志时标签栏只保留拖拽空白和右侧按钮。
-    let tabs = app
-        .tabs
-        .iter()
-        .filter(|tab| !matches!(tab.kind, TabKind::Empty))
-        .cloned()
-        .collect::<Vec<_>>();
+    // 没有选择日志时不会创建占位标签；这里直接渲染真实标签列表。
+    let tabs = app.tabs.clone();
+    let has_tabs = !tabs.is_empty();
     let active_tab_id = app.active_tab_id;
     let hovered_tab_id = app.hovered_tab_id;
     let active_index = tabs
         .iter()
-        .position(|tab| tab.id == active_tab_id)
+        .position(|tab| Some(tab.id) == active_tab_id)
         .unwrap_or(0);
     let layout = calculate_tab_layout(&tabs, active_index, available_tab_bar_width(app, window));
     let overflow_selected = matches!(
@@ -155,7 +151,9 @@ pub(crate) fn render(
         // 拖拽空白兼作标签区与右侧下拉按钮之间的最小间距：标签未铺满时它吸收剩余宽度，
         // 下拉按钮与助手面板按钮因此始终固定在标题栏右侧。
         .child(tab_drag_area(cx))
-        .child(render_overflow_button(overflow_selected, &theme, cx))
+        .when(has_tabs, |this| {
+            this.child(render_overflow_button(overflow_selected, &theme, cx))
+        })
         .child(render_assistant_panel_button(app, &theme, cx))
 }
 
@@ -302,14 +300,14 @@ fn fit_tab_widths(ideal_widths: &[f32], available_width: f32) -> Vec<f32> {
 fn render_tab(
     tab: crate::app::ArgusTab,
     tab_width: f32,
-    active_tab_id: usize,
+    active_tab_id: Option<usize>,
     hovered_tab_id: Option<usize>,
     is_loading: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let tab_id = tab.id;
-    let is_active = tab_id == active_tab_id;
+    let is_active = Some(tab_id) == active_tab_id;
     let is_hovered = hovered_tab_id == Some(tab_id);
     let should_show_close = is_active || is_hovered;
     // 标签统一为标题栏内的灰色矩形块，与下方内容玻璃板之间留出窗口背景色间距。
@@ -390,7 +388,7 @@ fn render_tab(
         )
         .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
             cx.stop_propagation();
-            if event.standard_click() && app.active_tab_id != tab_id {
+            if event.standard_click() && app.active_tab_id != Some(tab_id) {
                 app.activate_tab_with_context(tab_id, cx);
                 cx.notify();
             }
@@ -570,13 +568,13 @@ mod tests {
                 path: "/tmp/app.log".to_string(),
             },
         }];
-        app.active_tab_id = 1;
+        app.active_tab_id = Some(1);
         app
     }
 
-    /// 验证“未选择日志”占位页签不在标签栏渲染，标签区只剩拖拽空白与右侧按钮。
+    /// 验证没有打开任何标签时不渲染页签，标签区只剩拖拽空白与右侧按钮。
     #[gpui::test]
-    fn empty_placeholder_tab_is_hidden(cx: &mut TestAppContext) {
+    fn no_tabs_render_no_tab_entries(cx: &mut TestAppContext) {
         let (_app, cx) = cx.add_window_view(|_, _| {
             let config_dir = isolated_test_dir("tab-bar-empty");
             ArgusApp::new_with_config_manager(ConfigManager::new(config_dir.join("settings.toml")))
@@ -584,11 +582,15 @@ mod tests {
 
         assert!(
             cx.debug_bounds("tab-1").is_none(),
-            "占位页签不应渲染在标签栏"
+            "没有标签时不应渲染任何页签"
         );
         assert!(
             cx.debug_bounds("tab-bar-drag-area").is_some(),
-            "没有占位页签时仍应保留标题栏拖拽空白"
+            "没有标签时仍应保留标题栏拖拽空白"
+        );
+        assert!(
+            cx.debug_bounds("tab-overflow-slot").is_none(),
+            "没有标签时不应显示标签下拉按钮"
         );
     }
 
@@ -659,7 +661,10 @@ mod tests {
             .map(|(index, title)| ArgusTab {
                 id: index + 1,
                 title: (*title).to_string(),
-                kind: TabKind::Empty,
+                kind: TabKind::LogSource {
+                    source_id: SourceId(index + 1),
+                    path: format!("/tmp/{title}"),
+                },
             })
             .collect()
     }

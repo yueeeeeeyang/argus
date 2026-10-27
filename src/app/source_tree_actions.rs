@@ -1,6 +1,6 @@
 //! 文件职责：提取来源树选择、展开折叠、完整加载回填和按节点密码重试等方法到独立子模块。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：维护来源树语义状态、整树替换式加载回填、加密压缩包子树重试、单文件另存为，并通知助手真实来源内容版本变化。
 
@@ -373,7 +373,7 @@ impl ArgusApp {
 
         // 日志来源替换只影响日志分析域；SSH 终端和远程文件管理会话继续保留，
         // 方便用户加载日志后仍能通过原页签返回正在进行的连接工作。
-        let mut retained_connection_tabs = self
+        let retained_connection_tabs = self
             .tabs
             .iter()
             .filter(|tab| {
@@ -384,22 +384,12 @@ impl ArgusApp {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let empty_tab_id = if retained_connection_tabs.is_empty() {
-            self.next_tab_id = 2;
-            1
-        } else {
-            let tab_id = self.next_tab_id;
-            self.next_tab_id += 1;
-            tab_id
-        };
-        retained_connection_tabs.push(ArgusTab {
-            id: empty_tab_id,
-            title: "未选择日志".to_string(),
-            kind: TabKind::Empty,
-        });
+        let previous_active_tab_id = self.active_tab_id;
         self.tabs = retained_connection_tabs;
-        self.active_tab_id = empty_tab_id;
-        self.ensure_log_tab_view_state(empty_tab_id);
+        // 没有选择日志时不再补占位标签：保留原激活页签（若仍存在），否则激活最后一个连接页签。
+        self.active_tab_id = previous_active_tab_id
+            .filter(|tab_id| self.tabs.iter().any(|tab| tab.id == *tab_id))
+            .or_else(|| self.tabs.last().map(|tab| tab.id));
 
         self.is_source_tree_search_open = false;
         self.source_tree_search_input.value.clear();

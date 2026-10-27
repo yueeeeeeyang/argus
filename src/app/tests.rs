@@ -1,6 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-10-16
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -146,6 +146,26 @@ fn connection_source_panel_width_is_independent_from_log_width() {
 
     app.workspace = Workspace::LogAnalysis;
     assert_eq!(app.current_source_panel_width(), SOURCE_PANEL_DEFAULT_WIDTH);
+}
+
+/// 在测试应用中直接创建一个日志标签并激活，返回标签 ID。
+///
+/// 说明：正式启动和关闭全部标签后都不再保留占位标签，依赖“已存在标签”的单元
+/// 测试需要用它显式创建标签。
+fn push_test_log_tab(app: &mut ArgusApp, title: &str) -> usize {
+    let tab_id = app.next_tab_id;
+    app.next_tab_id += 1;
+    app.tabs.push(ArgusTab {
+        id: tab_id,
+        title: title.to_string(),
+        kind: TabKind::LogSource {
+            source_id: SourceId(tab_id),
+            path: format!("/tmp/{title}"),
+        },
+    });
+    app.active_tab_id = Some(tab_id);
+    app.ensure_log_tab_view_state(tab_id);
+    tab_id
 }
 
 /// 构造带样例来源树的应用状态，避免单元测试依赖正式启动空态。
@@ -921,7 +941,7 @@ fn sftp_file_manager_tabs_allow_multiple_same_link() {
     ));
     assert_eq!(app.tabs[0].title, "SFTP - 测试服务器");
     assert_eq!(app.tabs[1].title, "SFTP - 测试服务器");
-    assert_eq!(app.active_tab_id, app.tabs[1].id);
+    assert_eq!(app.active_tab_id, Some(app.tabs[1].id));
 }
 
 /// 验证关闭 SFTP 文件管理标签会断开并清理对应会话。
@@ -930,18 +950,22 @@ fn close_sftp_tab_disconnects_session() {
     let mut app = test_app();
     let link_id = add_test_ssh_link(&mut app);
     let receiver = insert_test_sftp_session(&mut app, 1, link_id);
-    app.tabs[0].title = "SFTP - 测试服务器".to_string();
-    app.tabs[0].kind = TabKind::RemoteFileManager { session_id: 1 };
-    app.active_tab_id = app.tabs[0].id;
+    app.tabs = vec![ArgusTab {
+        id: 1,
+        title: "SFTP - 测试服务器".to_string(),
+        kind: TabKind::RemoteFileManager { session_id: 1 },
+    }];
+    app.next_tab_id = 2;
+    app.active_tab_id = Some(1);
 
-    app.close_tab(app.tabs[0].id);
+    app.close_tab(1);
 
     assert!(app.remote_file_sessions.is_empty());
     assert!(matches!(
         receiver.try_recv(),
         Ok(crate::remote::remote_file::RemoteFileCommand::Disconnect)
     ));
-    assert!(matches!(app.tabs[0].kind, TabKind::Empty));
+    assert!(app.tabs.is_empty(), "关闭最后一个标签后不应保留占位标签");
 }
 
 /// 验证 SFTP 删除入口只允许普通文件和目录，避免误删符号链接等特殊条目。
@@ -1507,18 +1531,18 @@ fn activating_existing_analysis_tab_closes_search_results_panel() {
     let mut app = app_with_placeholder_sources();
     let app_log_id = source_id_by_label(&app, "app.log");
     app.select_source(app_log_id);
-    let log_tab_id = app.active_tab_id;
+    let log_tab_id = app.active_tab_id.expect("应有激活标签");
 
     let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
     app.create_jstack_analysis_tab_state(targets)
         .expect("应能创建 Jstack 分析 tab");
-    let analysis_tab_id = app.active_tab_id;
+    let analysis_tab_id = app.active_tab_id.expect("应有激活标签");
     app.activate_tab(log_tab_id);
     app.log_search.message = Some("搜索结果面板仍在展示".to_string());
 
     app.activate_tab(analysis_tab_id);
 
-    assert_eq!(app.active_tab_id, analysis_tab_id);
+    assert_eq!(app.active_tab_id, Some(analysis_tab_id));
     assert!(!app.should_show_log_search_results());
     assert!(app.log_search.message.is_none());
     assert_eq!(app.placeholder_notice, "已切换到 Jstack分析");
@@ -1530,18 +1554,18 @@ fn closing_active_tab_into_analysis_closes_search_results_panel() {
     let mut app = app_with_placeholder_sources();
     let app_log_id = source_id_by_label(&app, "app.log");
     app.select_source(app_log_id);
-    let log_tab_id = app.active_tab_id;
+    let log_tab_id = app.active_tab_id.expect("应有激活标签");
 
     let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
     app.create_jstack_analysis_tab_state(targets)
         .expect("应能创建 Jstack 分析 tab");
-    let analysis_tab_id = app.active_tab_id;
+    let analysis_tab_id = app.active_tab_id.expect("应有激活标签");
     app.activate_tab(log_tab_id);
     app.log_search.message = Some("搜索结果面板仍在展示".to_string());
 
     app.close_tab(log_tab_id);
 
-    assert_eq!(app.active_tab_id, analysis_tab_id);
+    assert_eq!(app.active_tab_id, Some(analysis_tab_id));
     assert!(!app.should_show_log_search_results());
     assert!(app.log_search.message.is_none());
 }
@@ -1552,18 +1576,18 @@ fn keeping_analysis_tab_closes_search_results_panel() {
     let mut app = app_with_placeholder_sources();
     let app_log_id = source_id_by_label(&app, "app.log");
     app.select_source(app_log_id);
-    let log_tab_id = app.active_tab_id;
+    let log_tab_id = app.active_tab_id.expect("应有激活标签");
 
     let targets = app.runtime_targets_from_source_ids(&[app_log_id]);
     app.create_runtime_analysis_tab_state(targets)
         .expect("应能创建 Runtime 分析 tab");
-    let analysis_tab_id = app.active_tab_id;
+    let analysis_tab_id = app.active_tab_id.expect("应有激活标签");
     app.activate_tab(log_tab_id);
     app.log_search.message = Some("搜索结果面板仍在展示".to_string());
 
     app.close_other_tabs(analysis_tab_id);
 
-    assert_eq!(app.active_tab_id, analysis_tab_id);
+    assert_eq!(app.active_tab_id, Some(analysis_tab_id));
     assert!(!app.should_show_log_search_results());
     assert!(app.log_search.message.is_none());
 }
@@ -2126,7 +2150,7 @@ fn disconnected_terminal_shows_reconnect_panel(cx: &mut gpui::TestAppContext) {
             title: "测试服务器".to_string(),
             kind: TabKind::SshTerminal { session_id: 7 },
         }];
-        app.active_tab_id = 4;
+        app.active_tab_id = Some(4);
     });
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
 
@@ -2161,7 +2185,7 @@ fn disconnected_remote_file_session_shows_reconnect_panel(cx: &mut gpui::TestApp
             title: "SFTP 测试服务器".to_string(),
             kind: TabKind::RemoteFileManager { session_id: 9 },
         }];
-        app.active_tab_id = 5;
+        app.active_tab_id = Some(5);
     });
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
 
@@ -2276,7 +2300,7 @@ fn terminal_keys_follow_remote_input_mode(cx: &mut gpui::TestAppContext) {
             title: "测试服务器".to_string(),
             kind: TabKind::SshTerminal { session_id: 7 },
         }];
-        app.active_tab_id = 4;
+        app.active_tab_id = Some(4);
 
         // 普通方向键：CSI；PageDown 与 Ctrl+A 分别走编辑键区与控制字节。
         app.handle_terminal_key(
@@ -2356,7 +2380,7 @@ fn terminal_mouse_forwarding_follows_remote_mode(cx: &mut gpui::TestAppContext) 
             title: "测试服务器".to_string(),
             kind: TabKind::SshTerminal { session_id: 7 },
         }];
-        app.active_tab_id = 4;
+        app.active_tab_id = Some(4);
 
         // 远端未开启鼠标模式：本地选择语义，不产生字节。
         assert!(!app.terminal_forwards_mouse(7, false));
@@ -2461,7 +2485,7 @@ fn connected_terminal_view_renders_body(cx: &mut gpui::TestAppContext) {
             title: "测试服务器".to_string(),
             kind: TabKind::SshTerminal { session_id: 7 },
         }];
-        app.active_tab_id = 4;
+        app.active_tab_id = Some(4);
     });
     cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(800.0)));
 
@@ -2688,7 +2712,7 @@ fn closing_runtime_analysis_tab_clears_analysis_state() {
     let (analysis_id, _) = app
         .create_runtime_analysis_tab_state(targets)
         .expect("应能创建 Runtime 分析 tab");
-    let tab_id = app.active_tab_id;
+    let tab_id = app.active_tab_id.expect("应有激活标签");
 
     app.close_tab(tab_id);
 
@@ -3077,7 +3101,7 @@ fn closing_jstack_analysis_tab_clears_analysis_state() {
     let (analysis_id, _) = app
         .create_jstack_analysis_tab_state(targets)
         .expect("应能创建 Jstack 分析 tab");
-    let tab_id = app.active_tab_id;
+    let tab_id = app.active_tab_id.expect("应有激活标签");
 
     app.close_tab(tab_id);
 
@@ -3094,12 +3118,13 @@ fn new_app_starts_with_empty_source_tree() {
     assert!(app.visible_source_ids().is_empty());
 }
 
-/// 验证正式启动时内容区只保留空标签，不注入样例日志标签。
+/// 验证正式启动时不创建任何标签页，内容区按未选择日志渲染空态。
 #[test]
-fn new_app_starts_with_empty_log_tab() {
+fn new_app_starts_without_tabs() {
     let app = test_app();
 
-    assert_eq!(app.active_tab_title(), "未选择日志");
+    assert!(app.tabs.is_empty(), "启动时不应创建占位标签");
+    assert_eq!(app.active_tab_id, None);
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
 }
 
@@ -3156,10 +3181,10 @@ fn selecting_same_log_reuses_existing_tab() {
     let app_log_id = source_id_by_label(&app, "app.log");
 
     app.select_source(app_log_id);
-    let tab_id = app.active_tab_id;
+    let tab_id = app.active_tab_id.expect("应有激活标签");
     app.select_source(app_log_id);
 
-    assert_eq!(app.active_tab_id, tab_id);
+    assert_eq!(app.active_tab_id, Some(tab_id));
     assert_eq!(app.tabs.len(), 1);
     assert!(matches!(
         app.active_tab_kind(),
@@ -3197,10 +3222,11 @@ fn log_search_shortcut_requires_log_text_focus() {
     app.select_source(app_log_id);
     assert!(!app.is_active_log_view_focused());
 
-    app.focus_log_text_view(app.active_tab_id);
+    let tab_id = app.active_tab_id.expect("应有激活标签");
+    app.focus_log_text_view(tab_id);
     assert!(app.is_active_log_view_focused());
 
-    app.close_tab(app.active_tab_id);
+    app.close_tab(tab_id);
     assert!(!app.is_active_log_view_focused());
 }
 
@@ -3244,7 +3270,7 @@ fn log_search_opens_and_closes_as_main_window_modal(cx: &mut gpui::TestAppContex
 #[test]
 fn toggling_log_line_marker_adds_and_removes_line() {
     let mut app = test_app();
-    let tab_id = app.active_tab_id;
+    let tab_id = push_test_log_tab(&mut app, "app.log");
 
     app.toggle_log_line_marker(tab_id, 9);
     assert!(
@@ -3265,7 +3291,7 @@ fn toggling_log_line_marker_adds_and_removes_line() {
 #[test]
 fn toggling_log_line_marker_clears_last_jump_cache() {
     let mut app = test_app();
-    let tab_id = app.active_tab_id;
+    let tab_id = push_test_log_tab(&mut app, "app.log");
     app.toggle_log_line_marker(tab_id, 9);
     app.log_tab_view_state_mut(tab_id)
         .expect("测试应用应存在默认日志视图状态")
@@ -3286,14 +3312,15 @@ fn closing_tab_clears_line_markers_for_that_tab() {
     let app_log_id = source_id_by_label(&app, "app.log");
 
     app.select_source(app_log_id);
-    let tab_id = app.active_tab_id;
+    let tab_id = app.active_tab_id.expect("应有激活标签");
     app.toggle_log_line_marker(tab_id, 2);
     app.close_tab(tab_id);
 
     assert!(
-        app.log_tab_view_state(tab_id)
-            .is_some_and(|state| state.line_markers.is_empty())
+        app.log_tab_view_state(tab_id).is_none(),
+        "关闭标签后应释放该标签的视图状态（含打点）"
     );
+    assert!(app.tabs.is_empty());
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
 }
 
@@ -3306,7 +3333,7 @@ fn activating_log_tab_syncs_single_source_tree_selection() {
     let error_log_id = source_id_by_label(&app, "error.log");
 
     app.select_source(app_log_id);
-    let app_tab_id = app.active_tab_id;
+    let app_tab_id = app.active_tab_id.expect("应有激活标签");
     app.select_source(error_log_id);
     if app
         .source_registry
@@ -3321,7 +3348,7 @@ fn activating_log_tab_syncs_single_source_tree_selection() {
 
     app.activate_tab(app_tab_id);
 
-    assert_eq!(app.active_tab_id, app_tab_id);
+    assert_eq!(app.active_tab_id, Some(app_tab_id));
     assert!(
         app.source_registry
             .node(app_log_id)
@@ -3353,13 +3380,13 @@ fn activating_log_tab_preserves_multi_source_search_selection() {
     let nested_log_id = source_id_by_label(&app, "nested.log");
 
     app.select_source(app_log_id);
-    let app_tab_id = app.active_tab_id;
+    let app_tab_id = app.active_tab_id.expect("应有激活标签");
     app.select_source(error_log_id);
     app.selected_search_source_ids = BTreeSet::from([error_log_id, nested_log_id]);
 
     app.activate_tab(app_tab_id);
 
-    assert_eq!(app.active_tab_id, app_tab_id);
+    assert_eq!(app.active_tab_id, Some(app_tab_id));
     assert!(
         app.source_registry
             .node(app_log_id)
@@ -3372,32 +3399,32 @@ fn activating_log_tab_preserves_multi_source_search_selection() {
     );
 }
 
-/// 验证关闭当前标签后会激活相邻标签，关闭最后一个标签会回到空标签。
+/// 验证关闭当前标签后会激活相邻标签，关闭最后一个标签后不再保留占位标签。
 #[test]
-fn close_tab_activates_neighbor_and_keeps_one_empty_tab() {
+fn close_tab_activates_neighbor_and_drops_last_tab() {
     let mut app = app_with_placeholder_sources();
     let app_log_id = source_id_by_label(&app, "app.log");
     let error_log_id = source_id_by_label(&app, "error.log");
     app.select_source(app_log_id);
     app.select_source(error_log_id);
-    let error_tab_id = app.active_tab_id;
+    let error_tab_id = app.active_tab_id.expect("应有激活标签");
 
     app.close_tab(error_tab_id);
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.active_tab_title(), "app.log");
 
-    let last_tab_id = app.active_tab_id;
+    let last_tab_id = app.active_tab_id.expect("应有激活标签");
     app.close_tab(last_tab_id);
-    assert_eq!(app.tabs.len(), 1);
+    assert!(app.tabs.is_empty(), "关闭最后一个标签后不应保留占位标签");
+    assert_eq!(app.active_tab_id, None);
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert_eq!(app.active_tab_title(), "未选择日志");
 }
 
 /// 验证标签右键菜单会记录目标标签和窗口锚点。
 #[test]
 fn tab_context_menu_records_target_tab_and_anchor() {
     let mut app = test_app();
-    let target_tab_id = app.active_tab_id;
+    let target_tab_id = push_test_log_tab(&mut app, "app.log");
     let anchor = gpui::point(gpui::px(120.0), gpui::px(40.0));
 
     app.open_tab_context_menu(target_tab_id, anchor);
@@ -3420,26 +3447,26 @@ fn close_other_tabs_keeps_target_tab_active() {
     let error_log_id = source_id_by_label(&app, "error.log");
 
     app.select_source(app_log_id);
-    let app_tab_id = app.active_tab_id;
+    let app_tab_id = app.active_tab_id.expect("应有激活标签");
     app.select_source(error_log_id);
     app.close_other_tabs(app_tab_id);
 
     assert_eq!(app.tabs.len(), 1);
-    assert_eq!(app.active_tab_id, app_tab_id);
+    assert_eq!(app.active_tab_id, Some(app_tab_id));
     assert_eq!(app.active_tab_title(), "app.log");
 }
 
-/// 验证关闭全部标签后仍保留一个空标签承接界面。
+/// 验证关闭全部标签后不保留任何标签页。
 #[test]
-fn close_all_tabs_keeps_single_empty_tab() {
+fn close_all_tabs_removes_all_tabs() {
     let mut app = app_with_placeholder_sources();
     let app_log_id = source_id_by_label(&app, "app.log");
 
     app.select_source(app_log_id);
     app.close_all_tabs();
 
-    assert_eq!(app.tabs.len(), 1);
-    assert_eq!(app.active_tab_title(), "未选择日志");
+    assert!(app.tabs.is_empty(), "关闭全部标签后不应保留占位标签");
+    assert_eq!(app.active_tab_id, None);
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
 }
 
@@ -3451,14 +3478,152 @@ fn overflow_menu_action_activates_tab_and_closes_menu() {
     let error_log_id = source_id_by_label(&app, "error.log");
 
     app.select_source(app_log_id);
-    let app_tab_id = app.active_tab_id;
+    let app_tab_id = app.active_tab_id.expect("应有激活标签");
     app.select_source(error_log_id);
     app.open_tab_overflow_menu(gpui::point(gpui::px(200.0), gpui::px(40.0)));
     app.handle_menu_action(MenuAction::ActivateTab { tab_id: app_tab_id });
 
-    assert_eq!(app.active_tab_id, app_tab_id);
+    assert_eq!(app.active_tab_id, Some(app_tab_id));
     assert_eq!(app.active_tab_title(), "app.log");
     assert!(app.active_menu.is_none());
+}
+
+/// 验证没有打开任何标签时内容区展示空状态，关闭最后一个标签后同样回到空状态。
+#[gpui::test]
+fn no_tabs_show_content_empty_state(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    assert!(
+        cx.debug_bounds("log-content-empty-state").is_some(),
+        "启动时没有任何标签，内容区应展示空状态"
+    );
+
+    app.update(cx, |app, _| {
+        let app_log_id = source_id_by_label(app, "app.log");
+        app.select_source(app_log_id);
+        let tab_id = app.active_tab_id.expect("打开日志后应有激活标签");
+        assert_eq!(app.tabs.len(), 1, "打开日志应创建且只创建一个标签");
+        app.close_tab(tab_id);
+        assert!(app.tabs.is_empty(), "关闭最后一个标签后不应保留占位标签");
+        assert_eq!(app.active_tab_id, None);
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    assert!(
+        cx.debug_bounds("log-content-empty-state").is_some(),
+        "关闭最后一个标签后内容区应回到空状态"
+    );
+    assert!(
+        cx.debug_bounds("tab-1").is_none(),
+        "关闭最后一个标签后标签栏不应再渲染页签"
+    );
+}
+
+/// 验证标签下拉菜单每行右侧都有关闭按钮：点击后关闭对应标签并保持菜单打开。
+#[gpui::test]
+fn tab_overflow_menu_close_button_closes_tab_and_keeps_menu(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    app.update(cx, |app, _| {
+        app.tabs = vec![
+            ArgusTab {
+                id: 1,
+                title: "thread_101.log".to_string(),
+                kind: TabKind::LogSource {
+                    source_id: SourceId(101),
+                    path: "/tmp/thread_101.log".to_string(),
+                },
+            },
+            ArgusTab {
+                id: 2,
+                title: "thread_094.log".to_string(),
+                kind: TabKind::LogSource {
+                    source_id: SourceId(94),
+                    path: "/tmp/thread_094.log".to_string(),
+                },
+            },
+            ArgusTab {
+                id: 3,
+                title: "thread_093.log".to_string(),
+                kind: TabKind::LogSource {
+                    source_id: SourceId(93),
+                    path: "/tmp/thread_093.log".to_string(),
+                },
+            },
+        ];
+        app.active_tab_id = Some(1);
+        app.open_tab_overflow_menu(gpui::point(gpui::px(200.0), gpui::px(40.0)));
+        // 每个条目都携带行尾关闭动作，避免只有部分行能快捷关闭。
+        let entries = app.active_menu_entries();
+        assert_eq!(entries.len(), 3, "下拉菜单应列出全部标签");
+        for (entry, tab_id) in entries.iter().zip([1, 2, 3]) {
+            assert_eq!(
+                entry.trailing_action,
+                Some(MenuAction::CloseTab { tab_id }),
+                "标签 {tab_id} 的行尾关闭动作应指向自身"
+            );
+        }
+    });
+    // 再铺一帧，让菜单进入最新渲染帧后再读取按钮边界。
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    for selector in [
+        "context-menu-trailing-close-tab-1",
+        "context-menu-trailing-close-tab-2",
+        "context-menu-trailing-close-tab-3",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "下拉菜单每一行右侧都应渲染关闭按钮：缺少 {selector}"
+        );
+    }
+
+    let close_button = cx
+        .debug_bounds("context-menu-trailing-close-tab-3")
+        .expect("应渲染第三个标签的关闭按钮");
+    cx.simulate_click(close_button.center(), gpui::Modifiers::default());
+
+    app.update(cx, |app, _| {
+        assert!(
+            app.tabs.iter().all(|tab| tab.id != 3),
+            "点击行尾关闭按钮应关闭对应标签"
+        );
+        assert_eq!(app.tabs.len(), 2, "只应关闭被点击的标签");
+        assert_eq!(app.active_tab_id, Some(1), "关闭按钮不应切换当前标签");
+        assert!(
+            matches!(
+                app.active_menu.as_ref().map(|menu| &menu.kind),
+                Some(ActiveMenuKind::TabOverflow)
+            ),
+            "关闭标签后下拉菜单应保持打开，便于连续关闭"
+        );
+    });
+
+    // 连续关闭剩余标签：菜单持续可用，关闭最后一个标签后菜单自动收起。
+    for remaining in [1, 2] {
+        cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+        cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+        let selector: &'static str = if remaining == 1 {
+            "context-menu-trailing-close-tab-1"
+        } else {
+            "context-menu-trailing-close-tab-2"
+        };
+        let close_button = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("剩余标签 {remaining} 仍应有行尾关闭按钮"));
+        cx.simulate_click(close_button.center(), gpui::Modifiers::default());
+    }
+
+    app.update(cx, |app, _| {
+        assert!(app.tabs.is_empty(), "连续关闭后不应残留标签");
+        assert_eq!(app.active_tab_id, None);
+        assert!(
+            app.active_menu.is_none(),
+            "没有标签时标签下拉菜单应自动收起"
+        );
+    });
 }
 
 /// 验证日志内容字号会被限制在外观设置允许范围内。
@@ -3554,7 +3719,7 @@ fn applying_new_load_report_replaces_old_log_workspace() {
             path: "old.log".to_string(),
         },
     });
-    app.active_tab_id = 2;
+    app.active_tab_id = Some(2);
     app.next_tab_id = 3;
     app.open_source_tree_search();
     app.update_source_tree_search_query("old".to_string());
@@ -3585,10 +3750,10 @@ fn applying_new_load_report_replaces_old_log_workspace() {
     });
 
     assert_eq!(visible_labels(&app), vec!["new.log"]);
-    assert_eq!(app.tabs.len(), 1);
-    assert_eq!(app.active_tab_title(), "未选择日志");
+    assert!(app.tabs.is_empty(), "替换来源后不应保留日志标签或占位标签");
+    assert_eq!(app.active_tab_id, None);
     assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert_eq!(app.next_tab_id, 2);
+    assert_eq!(app.next_tab_id, 3);
     assert!(!app.is_source_tree_search_open);
     assert!(app.source_tree_search_input.value.is_empty());
     assert!(app.filtered_source_ids.is_empty());
@@ -3621,7 +3786,7 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
             },
         },
     ];
-    app.active_tab_id = 5;
+    app.active_tab_id = Some(5);
     app.next_tab_id = 10;
 
     app.apply_load_report(crate::loader::SourceTreeScanResult {
@@ -3629,7 +3794,7 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
         warnings: Vec::new(),
     });
 
-    assert_eq!(app.tabs.len(), 3);
+    assert_eq!(app.tabs.len(), 2, "替换来源后只保留连接页签");
     assert!(
         app.tabs.iter().any(|tab| {
             tab.id == 4 && matches!(tab.kind, TabKind::SshTerminal { session_id: 7 })
@@ -3639,9 +3804,12 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
         tab.id == 5 && matches!(tab.kind, TabKind::RemoteFileManager { session_id: 9 })
     }));
     assert!(!app.tabs.iter().any(|tab| tab.id == 8));
-    assert!(matches!(app.active_tab_kind(), TabKind::Empty));
-    assert_eq!(app.active_tab_id, 10);
-    assert_eq!(app.next_tab_id, 11);
+    assert!(matches!(
+        app.active_tab_kind(),
+        TabKind::RemoteFileManager { session_id: 9 }
+    ));
+    assert_eq!(app.active_tab_id, Some(5), "应保留原激活的连接页签");
+    assert_eq!(app.next_tab_id, 10, "不再为占位标签分配 ID");
     assert!(app.terminal_sessions.contains_key(&7));
     assert!(app.remote_file_sessions.contains_key(&9));
 
@@ -3668,7 +3836,7 @@ fn applying_new_load_report_keeps_connection_tabs_and_sessions() {
         app.active_tab_kind(),
         TabKind::LogSource { source_id, .. } if source_id == app_log_id
     ));
-    assert_eq!(app.active_tab_id, 10);
+    assert_eq!(app.active_tab_id, Some(10));
     assert_eq!(app.next_tab_id, 11);
     assert!(app.terminal_sessions.contains_key(&7));
     assert!(app.remote_file_sessions.contains_key(&9));
@@ -3707,7 +3875,7 @@ fn activating_hidden_log_tab_keeps_source_tree_filter_and_updates_selection() {
     let error_log_id = source_id_by_label(&app, "error.log");
 
     app.select_source(app_log_id);
-    let app_tab_id = app.active_tab_id;
+    let app_tab_id = app.active_tab_id.expect("应有激活标签");
     app.select_source(error_log_id);
     app.open_source_tree_search();
     app.update_source_tree_search_query("error".to_string());
@@ -3716,7 +3884,7 @@ fn activating_hidden_log_tab_keeps_source_tree_filter_and_updates_selection() {
 
     app.activate_tab(app_tab_id);
 
-    assert_eq!(app.active_tab_id, app_tab_id);
+    assert_eq!(app.active_tab_id, Some(app_tab_id));
     assert!(app.is_source_tree_search_open);
     assert_eq!(app.source_tree_search_input.value, "error");
     assert!(!app.visible_source_ids().contains(&app_log_id));
@@ -3816,7 +3984,7 @@ fn source_tree_search_triple_click_selects_whole_line() {
 #[test]
 fn log_word_selection_supports_common_log_tokens() {
     let mut app = test_app();
-    let tab_id = app.active_tab_id;
+    let tab_id = push_test_log_tab(&mut app, "app.log");
     let line = "中文 thread_001.zip java.lang.Class";
 
     app.select_log_word_at(tab_id, 0, line, 0);
@@ -3848,7 +4016,7 @@ fn log_word_selection_supports_common_log_tokens() {
 #[test]
 fn log_triple_click_selects_whole_display_line() {
     let mut app = test_app();
-    let tab_id = app.active_tab_id;
+    let tab_id = push_test_log_tab(&mut app, "app.log");
 
     app.select_log_text_line(tab_id, 7, "abc\tdef");
     let selection = app
@@ -4059,7 +4227,7 @@ fn new_source_load_unloads_previous_workspace_immediately(cx: &mut gpui::TestApp
                 path: "logs/app.log".to_string(),
             },
         });
-        app.active_tab_id = 2;
+        app.active_tab_id = Some(2);
         app.next_tab_id = 3;
     });
 
@@ -4079,7 +4247,10 @@ fn new_source_load_unloads_previous_workspace_immediately(cx: &mut gpui::TestApp
             app.source_load_progress.is_some(),
             "应进入带进度展示的加载状态"
         );
-        assert_eq!(app.tabs.len(), 1, "旧日志标签应立即关闭");
+        assert!(
+            app.tabs.is_empty(),
+            "旧日志标签应立即关闭，且不保留占位标签"
+        );
         assert!(matches!(app.active_tab_kind(), TabKind::Empty));
     });
 }
@@ -4473,7 +4644,7 @@ fn content_panel_keeps_right_inset_across_tab_kinds(cx: &mut gpui::TestAppContex
             title: "测试服务器".to_string(),
             kind: TabKind::SshTerminal { session_id: 7 },
         }];
-        app.active_tab_id = 4;
+        app.active_tab_id = Some(4);
         app.workspace = Workspace::Connections;
     });
 
@@ -4496,7 +4667,7 @@ fn content_panel_keeps_right_inset_across_tab_kinds(cx: &mut gpui::TestAppContex
             title: "Runtime分析".to_string(),
             kind: TabKind::RuntimeAnalysis { analysis_id },
         }];
-        app.active_tab_id = 11;
+        app.active_tab_id = Some(11);
     });
     for width in [760.0_f32, 1200.0] {
         cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.0)));
@@ -4517,7 +4688,7 @@ fn content_panel_keeps_right_inset_across_tab_kinds(cx: &mut gpui::TestAppContex
             title: "SFTP".to_string(),
             kind: TabKind::RemoteFileManager { session_id: 9 },
         }];
-        app.active_tab_id = 12;
+        app.active_tab_id = Some(12);
     });
     for width in [760.0_f32, 1200.0] {
         cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.0)));

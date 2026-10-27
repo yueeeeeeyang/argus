@@ -1,6 +1,6 @@
 //! 文件职责：提供通用上下文菜单与下拉菜单组件。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：按窗口坐标渲染可滚动菜单，并将菜单项动作分发给应用状态。
 
@@ -10,6 +10,8 @@ use crate::app::ArgusApp;
 use crate::loader::SourceId;
 use crate::remote::connection::ConnectionNodeId;
 use crate::theme::AppTheme;
+use crate::ui::components::icon::ArgusIcon;
+use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use gpui::{
     Context, Corner, IntoElement, Pixels, Point, SharedString, UniformListScrollHandle, anchored,
     div, prelude::*, px, rgb, rgba, uniform_list,
@@ -269,6 +271,8 @@ pub(crate) struct MenuEntry {
     pub is_selected: bool,
     /// 是否为破坏性操作，用于后续可选的颜色强调。
     pub is_danger: bool,
+    /// 行尾快捷操作；有值时在条目右侧渲染关闭图标按钮（标签下拉菜单用）。
+    pub trailing_action: Option<MenuAction>,
 }
 
 impl MenuEntry {
@@ -279,7 +283,16 @@ impl MenuEntry {
             action,
             is_selected: false,
             is_danger: false,
+            trailing_action: None,
         }
+    }
+
+    /// 设置行尾快捷操作按钮。
+    ///
+    /// 行尾操作不会关闭菜单，便于在标签下拉菜单里连续关闭多个标签。
+    pub(crate) fn with_trailing_action(mut self, action: MenuAction) -> Self {
+        self.trailing_action = Some(action);
+        self
     }
 
     /// 标记菜单项为当前选中项。
@@ -409,6 +422,8 @@ fn render_menu_entry(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let action = entry.action.clone();
+    let trailing_action = entry.trailing_action.clone();
+    let app_entity = cx.entity();
     let background = if entry.is_selected {
         theme.current_line
     } else {
@@ -438,6 +453,35 @@ fn render_menu_entry(
         .text_size(px(12.5))
         .text_color(rgb(foreground))
         .child(div().flex_1().truncate().child(entry.label))
+        .when_some(trailing_action, |this, trailing_action| {
+            let trailing_entity = app_entity.clone();
+            let trailing_suffix = trailing_action.id_suffix();
+            this.child(
+                div()
+                    .flex_none()
+                    .debug_selector(move || format!("context-menu-trailing-{trailing_suffix}"))
+                    .child(render_icon_button(
+                        SharedString::from(format!(
+                            "context-menu-trailing-{}-button",
+                            trailing_action.id_suffix()
+                        )),
+                        ArgusIcon::Close,
+                        "关闭标签",
+                        false,
+                        IconButtonSize::Tiny,
+                        theme,
+                        move |_, _, cx| {
+                            // 阻止冒泡，避免同时触发条目的激活动作。
+                            cx.stop_propagation();
+                            let action = trailing_action.clone();
+                            trailing_entity.update(cx, |app, cx| {
+                                app.handle_menu_trailing_action_with_context(action, cx);
+                                cx.notify();
+                            });
+                        },
+                    )),
+            )
+        })
         .on_click(cx.listener(move |app, _, _, cx| {
             cx.stop_propagation();
             app.handle_menu_action_with_context(action.clone(), cx);

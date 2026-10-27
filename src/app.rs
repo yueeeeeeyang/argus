@@ -1,6 +1,6 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析、助手面板及远程连接状态。
 
@@ -382,8 +382,8 @@ pub(crate) struct ArgusApp {
     pub last_source_selection_anchor: Option<SourceId>,
     /// 当前打开的标签页。
     pub tabs: Vec<ArgusTab>,
-    /// 当前激活的标签 ID。
-    pub active_tab_id: usize,
+    /// 当前激活的标签 ID；没有打开任何标签时为 `None`。
+    pub active_tab_id: Option<usize>,
     /// 下一个占位标签 ID。
     pub next_tab_id: usize,
     /// 当前鼠标悬停的标签 ID，用于控制未激活标签的边框和关闭按钮。
@@ -559,13 +559,10 @@ impl ArgusApp {
             jstack_cell_hover_preview: None,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,
-            tabs: vec![ArgusTab {
-                id: 1,
-                title: "未选择日志".to_string(),
-                kind: TabKind::Empty,
-            }],
-            active_tab_id: 1,
-            next_tab_id: 2,
+            // 启动时不创建任何标签：没有选择日志就没有标签页。
+            tabs: Vec::new(),
+            active_tab_id: None,
+            next_tab_id: 1,
             hovered_tab_id: None,
             active_menu: None,
             tab_menu_scroll: UniformListScrollHandle::new(),
@@ -657,7 +654,7 @@ impl ArgusApp {
     pub(crate) fn active_tab_title(&self) -> &str {
         self.tabs
             .iter()
-            .find(|tab| tab.id == self.active_tab_id)
+            .find(|tab| Some(tab.id) == self.active_tab_id)
             .map(|tab| tab.title.as_str())
             .unwrap_or("未命名日志")
     }
@@ -793,7 +790,7 @@ impl ArgusApp {
             })
             .map(|tab| tab.id)
         {
-            self.active_tab_id = tab_id;
+            self.active_tab_id = Some(tab_id);
             self.ensure_log_tab_view_state(tab_id);
             self.log_read_states
                 .entry(source_id)
@@ -803,39 +800,18 @@ impl ArgusApp {
             return;
         }
 
-        // 日志来源替换后可能同时保留连接页签和一个空日志页签；优先复用当前空页签，
-        // 避免首次打开日志时把“未选择日志”占位永久留在混合标签栏中。
-        let reusable_empty_tab_id = self
-            .active_tab()
-            .filter(|tab| matches!(tab.kind, TabKind::Empty))
-            .map(|tab| tab.id)
-            .or_else(|| {
-                self.tabs
-                    .iter()
-                    .find(|tab| matches!(tab.kind, TabKind::Empty))
-                    .map(|tab| tab.id)
-            });
-        let tab_id = if let Some(empty_tab_id) = reusable_empty_tab_id {
-            empty_tab_id
-        } else {
-            let next_id = self.next_tab_id;
-            self.next_tab_id += 1;
-            self.tabs.push(ArgusTab {
-                id: next_id,
-                title: String::new(),
-                kind: TabKind::Empty,
-            });
-            next_id
-        };
-
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.title = selected_node.label.clone();
-            tab.kind = TabKind::LogSource {
+        // 没有匹配的已有标签时始终新建标签；没有选择日志时也不再保留占位标签。
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(ArgusTab {
+            id: tab_id,
+            title: selected_node.label.clone(),
+            kind: TabKind::LogSource {
                 source_id,
                 path: path.clone(),
-            };
-        }
-        self.active_tab_id = tab_id;
+            },
+        });
+        self.active_tab_id = Some(tab_id);
         self.ensure_log_tab_view_state(tab_id);
         self.log_read_states
             .entry(source_id)
@@ -1526,11 +1502,11 @@ impl ArgusApp {
     /// 切换到指定标签页。
     pub(crate) fn activate_tab(&mut self, tab_id: usize) {
         let _span = PerfSpan::new("activate_tab");
-        if self.active_tab_id == tab_id {
+        if self.active_tab_id == Some(tab_id) {
             return;
         }
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
-            self.active_tab_id = tab_id;
+            self.active_tab_id = Some(tab_id);
             self.close_log_search_results_for_active_analysis_tab();
             self.sync_source_tree_selection_from_active_tab();
             self.placeholder_notice = format!("已切换到 {}", self.active_tab_title());
@@ -1601,32 +1577,9 @@ impl ArgusApp {
         }
     }
 
-    /// 关闭指定标签页，至少保留一个空标签。
+    /// 关闭指定标签页；最后一个标签关闭后不再保留占位标签。
     pub(crate) fn close_tab(&mut self, tab_id: usize) {
         self.close_active_menu();
-
-        if self.tabs.len() == 1 {
-            if let Some(tab) = self.tabs.first_mut() {
-                tab.title = "未选择日志".to_string();
-                tab.kind = TabKind::Empty;
-            }
-            self.active_tab_id = self.tabs[0].id;
-            self.log_read_states.clear();
-            self.log_reader_generations.clear();
-            self.log_tab_view_states.clear();
-            self.jstack_analyses.clear();
-            self.next_jstack_analysis_id = 1;
-            self.runtime_analyses.clear();
-            self.next_runtime_analysis_id = 1;
-            self.disconnect_all_terminal_sessions();
-            self.disconnect_all_remote_file_sessions();
-            self.ensure_log_tab_view_state(self.active_tab_id);
-            self.reset_log_text_selection();
-            self.log_scrollbar_drag = None;
-            self.reset_log_search_runtime_state();
-            self.placeholder_notice = "已清空最后一个标签".to_string();
-            return;
-        }
 
         let closed_index = self
             .tabs
@@ -1652,11 +1605,21 @@ impl ArgusApp {
         {
             self.log_scrollbar_drag = None;
         }
-        if self.active_tab_id == tab_id {
-            let next_index = closed_index.min(self.tabs.len().saturating_sub(1));
-            self.active_tab_id = self.tabs[next_index].id;
+        if self.active_tab_id == Some(tab_id) {
+            // 优先接替右侧邻居，没有右侧邻居时回退到左侧最后一个；没有剩余标签则为 None。
+            self.active_tab_id = self
+                .tabs
+                .get(closed_index.min(self.tabs.len().saturating_sub(1)))
+                .map(|tab| tab.id);
             self.close_log_search_results_for_active_analysis_tab();
             self.sync_source_tree_selection_from_active_tab();
+        }
+        if self.tabs.is_empty() {
+            self.reset_log_text_selection();
+            self.log_scrollbar_drag = None;
+            self.reset_log_search_runtime_state();
+            self.placeholder_notice = "已关闭最后一个标签".to_string();
+            return;
         }
         self.placeholder_notice = "已关闭标签页".to_string();
     }
@@ -1686,7 +1649,7 @@ impl ArgusApp {
         self.retain_runtime_analysis_for_tab_kind(&kept_kind);
         self.retain_terminal_session_for_tab_kind(&kept_kind);
         self.retain_remote_file_session_for_tab_kind(&kept_kind);
-        self.active_tab_id = tab_id;
+        self.active_tab_id = Some(tab_id);
         self.close_log_search_results_for_active_analysis_tab();
         self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
@@ -1704,15 +1667,9 @@ impl ArgusApp {
         self.close_other_tabs(tab_id);
     }
 
-    /// 关闭全部标签，并创建一个新的空标签保持界面可用。
+    /// 关闭全部标签；关闭后不再保留占位标签。
     pub(crate) fn close_all_tabs(&mut self) {
-        let empty_tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
-        self.tabs = vec![ArgusTab {
-            id: empty_tab_id,
-            title: "未选择日志".to_string(),
-            kind: TabKind::Empty,
-        }];
+        self.tabs.clear();
         self.log_read_states.clear();
         self.log_reader_generations.clear();
         self.log_tab_view_states.clear();
@@ -1722,8 +1679,7 @@ impl ArgusApp {
         self.next_runtime_analysis_id = 1;
         self.disconnect_all_terminal_sessions();
         self.disconnect_all_remote_file_sessions();
-        self.ensure_log_tab_view_state(empty_tab_id);
-        self.active_tab_id = empty_tab_id;
+        self.active_tab_id = None;
         self.hovered_tab_id = None;
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
@@ -1738,7 +1694,8 @@ impl ArgusApp {
     }
 
     pub(crate) fn active_tab(&self) -> Option<&ArgusTab> {
-        self.tabs.iter().find(|tab| tab.id == self.active_tab_id)
+        let active_tab_id = self.active_tab_id?;
+        self.tabs.iter().find(|tab| tab.id == active_tab_id)
     }
 
     /// 返回当前激活标签类型；缺失时按空标签兜底。

@@ -102,24 +102,15 @@ impl ArgusApp {
         } else {
             "Runtime分析".to_string()
         };
-        let tab_id = if self.tabs.len() == 1 && matches!(self.tabs[0].kind, TabKind::Empty) {
-            self.tabs[0].id
-        } else {
-            let next_id = self.next_tab_id;
-            self.next_tab_id += 1;
-            self.tabs.push(ArgusTab {
-                id: next_id,
-                title: String::new(),
-                kind: TabKind::Empty,
-            });
-            next_id
-        };
-
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.title = title.clone();
-            tab.kind = TabKind::RuntimeAnalysis { analysis_id };
-        }
-        self.active_tab_id = tab_id;
+        // 没有选择日志时不会再有占位标签，创建页签一律新建。
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(ArgusTab {
+            id: tab_id,
+            title: title.clone(),
+            kind: TabKind::RuntimeAnalysis { analysis_id },
+        });
+        self.active_tab_id = Some(tab_id);
         self.close_log_search_results_for_active_analysis_tab();
         self.log_tab_view_states.remove(&tab_id);
 

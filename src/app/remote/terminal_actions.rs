@@ -1,6 +1,6 @@
 //! 文件职责：实现 SSH 终端标签的创建、事件回收、主机指纹确认和输入转发。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：把链接树中的 SSH 链接接入右侧终端面板，并负责关闭标签时释放后台会话。
 
@@ -700,24 +700,15 @@ impl ArgusApp {
         let Some(session) = self.terminal_sessions.get(&session_id) else {
             return;
         };
-        let tab_id = if self.tabs.len() == 1 && matches!(self.tabs[0].kind, TabKind::Empty) {
-            self.tabs[0].id
-        } else {
-            let next_id = self.next_tab_id;
-            self.next_tab_id += 1;
-            self.tabs.push(ArgusTab {
-                id: next_id,
-                title: String::new(),
-                kind: TabKind::Empty,
-            });
-            next_id
-        };
-
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.title = session.title.clone();
-            tab.kind = TabKind::SshTerminal { session_id };
-        }
-        self.active_tab_id = tab_id;
+        // 没有选择日志时不会再有占位标签，创建页签一律新建。
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(ArgusTab {
+            id: tab_id,
+            title: session.title.clone(),
+            kind: TabKind::SshTerminal { session_id },
+        });
+        self.active_tab_id = Some(tab_id);
     }
 
     /// 应用 SSH worker 回传事件。

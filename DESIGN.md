@@ -934,11 +934,13 @@ Jstack 线程详情等独立窗口复用同一套阴影函数。
 工作区 `Workspace` 有两个取值：**日志分析**（默认）与**链接**。二者各自维护来源侧栏宽度、
 来源树滚动与选中状态。
 
-标签页在主窗口内以 `Vec<ArgusTab>` + `active_tab_id` 管理，按 `TabKind` 分派内容：
+标签页在主窗口内以 `Vec<ArgusTab>` + `active_tab_id: Option<usize>` 管理，按 `TabKind`
+分派内容。没有打开任何标签时标签列表为空，**不再创建“未选择日志”占位页签**；内容区按空
+状态渲染，标签下拉按钮一并隐藏：
 
 | `TabKind` | 内容 |
 |-----------|------|
-| `Empty` | 空标签占位（没有真实日志时不渲染占位页签） |
+| `Empty` | 无激活标签时的内容态（空状态），不会作为页签存在 |
 | `LogSource` | 日志正文（行虚拟化，大文件按需读取） |
 | `JstackAnalysis` | Jstack 线程快照分析视图 |
 | `RuntimeAnalysis` | Runtime 请求与 SQL 分析视图 |

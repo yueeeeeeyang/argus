@@ -1,6 +1,6 @@
 //! 文件职责：维护日志搜索对话框、后台搜索任务、来源树多选和结果跳转逻辑。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-07-16
+//! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
 //! 主要功能：把真实日志搜索能力接入 ArgusApp，同时保持搜索 UI 状态与日志读取状态解耦。
 
@@ -678,7 +678,10 @@ impl ArgusApp {
         source_id: SourceId,
         handle: &crate::log_io::log_file_reader::LogReaderHandle,
     ) -> CurrentLogMatchPosition {
-        let Some(state) = self.log_tab_view_states.get(&self.active_tab_id) else {
+        let Some(active_tab_id) = self.active_tab_id else {
+            return CurrentLogMatchPosition::default();
+        };
+        let Some(state) = self.log_tab_view_states.get(&active_tab_id) else {
             return CurrentLogMatchPosition::default();
         };
 
@@ -2754,7 +2757,7 @@ mod tests {
                     path: "logs/app.log".to_string(),
                 },
             });
-            app.active_tab_id = 1;
+            app.active_tab_id = Some(1);
             app.next_tab_id = 2;
             app.log_search.directory_input.value = "logs".to_string();
 
@@ -2798,7 +2801,7 @@ mod tests {
                 path: log_path.display().to_string(),
             },
         }];
-        app.active_tab_id = 1;
+        app.active_tab_id = Some(1);
         app.ensure_log_tab_view_state(1);
         app.log_read_states
             .insert(first_id, LogOpenState::Ready(handle));
@@ -2845,7 +2848,7 @@ mod tests {
                 path: "logs/app.log".to_string(),
             },
         }];
-        app.active_tab_id = 1;
+        app.active_tab_id = Some(1);
         app.ensure_log_tab_view_state(1);
         app.log_search.quick_match_count = 3;
         app.log_search.quick_matches = vec![
