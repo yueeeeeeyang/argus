@@ -1,6 +1,6 @@
 //! 文件职责：使用内置 HTTP 客户端实现 Subversion WebDAV/DeltaV 仓库的只读访问。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：发现 SVN HTTPv2 修订资源、枚举目录、读取文件，并安全处理认证与重定向。
 
@@ -748,6 +748,84 @@ mod tests {
   <D:response><D:href>/svn/repo/!svn/rvr/42/src/</D:href><D:propstat><D:prop><D:displayname>src</D:displayname><D:resourcetype><D:collection/></D:resourcetype><D:getlastmodified>Wed, 21 Oct 2015 07:28:00 GMT</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
   <D:response><D:href>/svn/repo/!svn/rvr/42/README.md</D:href><D:propstat><D:prop><D:displayname>README.md</D:displayname><D:resourcetype/><D:getcontentlength>9</D:getcontentlength><D:creationdate>2026-07-15T08:00:00Z</D:creationdate></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
 </D:multistatus>"#
+    }
+
+    /// 验证 DAV 传输完成 HTTPv2 发现、目录枚举、文件读取与 404 语义。
+    ///
+    /// 该用例覆盖 HTTP 客户端真实请求链路：OPTIONS 头解析、PROPFIND 207 解析、
+    /// GET 正文读取，以及 404 映射为 `None` 的 stat 语义。
+    #[test]
+    fn httpv2_session_reads_directory_and_maps_not_found() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("应创建测试运行时");
+        let server = runtime.block_on(async { MockServer::start().await });
+        let base = server.uri();
+        let multistatus = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response><D:href>{base}/repo/!svn/rvr/42/</D:href><D:propstat><D:prop><D:displayname>repo</D:displayname><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>{base}/repo/!svn/rvr/42/hello.txt</D:href><D:propstat><D:prop><D:displayname>hello.txt</D:displayname><D:resourcetype/><D:getcontentlength>6</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+</D:multistatus>"#
+        );
+
+        runtime.block_on(async {
+            Mock::given(method("OPTIONS"))
+                .and(path("/repo"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("SVN-Youngest-Rev", "42")
+                        .insert_header("SVN-Repository-Root", "/repo")
+                        .insert_header("SVN-Rev-Root-Stub", "/repo/!svn/rvr"),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("PROPFIND"))
+                .and(path("/repo/!svn/rvr/42"))
+                .respond_with(ResponseTemplate::new(207).set_body_string(multistatus))
+                .mount(&server)
+                .await;
+            Mock::given(method("PROPFIND"))
+                .and(path("/repo/!svn/rvr/42/missing"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repo/!svn/rvr/42/hello.txt"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello\n".to_vec()))
+                .mount(&server)
+                .await;
+        });
+
+        let config = SvnLinkConfig {
+            url: format!("{base}/repo"),
+            ..SvnLinkConfig::default()
+        };
+        let mut session = HttpSvnSession::open(&config).expect("应完成 HTTPv2 能力发现");
+        assert_eq!(session.latest_revision().expect("应返回缓存的最新修订"), 42);
+
+        let entries = session.list_directory("", 42).expect("应列出目录");
+        assert_eq!(entries.len(), 1, "目录根自身不应作为条目返回");
+        assert_eq!(entries[0].name, "hello.txt");
+        assert_eq!(entries[0].kind, RemoteFileEntryKind::RegularFile);
+        assert_eq!(entries[0].size, Some(6));
+
+        let bytes = session
+            .read_file_bytes("hello.txt", 42, 1024)
+            .expect("应读取文件正文");
+        assert_eq!(bytes, b"hello\n");
+
+        assert!(
+            session
+                .stat("missing", 42)
+                .expect("404 应映射为 None")
+                .is_none(),
+            "不存在的资源不应报错"
+        );
     }
 
     /// 验证 DAV multistatus 能区分自身、目录和普通文件，并解析大小与时间。

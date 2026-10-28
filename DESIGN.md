@@ -675,7 +675,7 @@ NUL 判定为二进制并明确提示。
 | Scheme | 实现 | 说明 |
 |--------|------|------|
 | `svn://`、`svn+ssh://` | `svn` crate（纯 Rust ra_svn） | SSH 隧道由 `russh` 建立 |
-| `http://`、`https://` | 内置 HTTPv2 DAV 客户端（`ureq`） | `OPTIONS`、`PROPFIND`、`GET` |
+| `http://`、`https://` | 内置 HTTPv2 DAV 客户端（`ureq` 2.x） | `OPTIONS`、`PROPFIND`、`GET`；`ureq` 3 的 HTTP/1.1 方法白名单拒绝 WebDAV 方法，暂不能升级 |
 
 - **版本选择**：`HEAD` 或非负修订号；HEAD 在建立连接时解析为具体修订；切换版本后回到仓库根；
 - **SSH 安全**：known_hosts 落在 `~/.argus/svn_known_hosts`，显式关闭 agent、默认身份与
