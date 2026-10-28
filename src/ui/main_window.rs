@@ -9,9 +9,9 @@ use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::theme::ThemeMode;
 use crate::ui::{
-    agent_dialog, ai_settings_editor, archive_password_dialog, components::context_menu,
-    connection_dialog, custom_title_bar, log_content_view, log_search_dialog, remote_file_dialog,
-    settings_window, source_panel, source_picker, source_resizer,
+    ai_settings_editor, archive_password_dialog, components::context_menu, connection_dialog,
+    custom_title_bar, log_content_view, log_search_dialog, remote_file_dialog, settings_window,
+    source_panel, source_picker, source_resizer,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, Context, ExternalPaths,
@@ -308,9 +308,6 @@ pub(crate) fn render(
         })
         .when_some(app.source_picker_modal.clone(), |this, modal| {
             this.child(source_picker::render_source_picker_modal(modal, &theme, cx))
-        })
-        .when_some(app.ai_agent_launch_modal.clone(), |this, modal| {
-            this.child(agent_dialog::render_agent_launch_modal(modal, &theme, cx))
         })
         .when_some(app.connection_directory_modal.clone(), |this, modal| {
             this.child(connection_dialog::render_connection_directory_modal(

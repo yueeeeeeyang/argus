@@ -12,6 +12,7 @@ use crate::infra::text_selection::{
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
+use crate::ui::components::scrollbar::{scroll_area_hover_handler, with_scrollbar_visibility};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, FocusHandle, Hsla, InputHandler,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -80,12 +81,24 @@ pub(crate) struct TextareaScrollState {
     scrollbar_drag: Rc<RefCell<Option<TextareaScrollbarDrag>>>,
     /// 最近一次自动跟随光标的内容签名，避免用户手动滚动后被每帧强制拉回光标。
     last_caret_sync: Rc<RefCell<Option<TextareaCaretSyncSignature>>>,
+    /// 对话输入框最后一次测量到的文本区宽度；用于按真实可用宽度自动换行。
+    wrap_width: Rc<Cell<f32>>,
 }
 
 impl TextareaScrollState {
     /// 创建空文本域滚动状态。
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// 返回最近一次测得的自动换行宽度；0 表示尚未完成首帧测量。
+    fn wrap_width(&self) -> f32 {
+        self.wrap_width.get()
+    }
+
+    /// 记录文本区真实宽度；宽度变化时下一帧重新排版。
+    fn set_wrap_width(&self, width: f32) {
+        self.wrap_width.set(width);
     }
 }
 
@@ -153,7 +166,6 @@ pub(crate) struct Input {
 }
 
 /// 多行文本域渲染配置；业务输入状态由调用方维护。
-#[derive(Clone)]
 pub(crate) struct Textarea {
     /// 文本域稳定元素 ID。
     pub id: &'static str,
@@ -193,6 +205,8 @@ pub(crate) struct Textarea {
     pub trailing_accessory_selected: bool,
     /// 系统文本输入桥接配置；为空时退回按键事件输入。
     pub native_input: Option<NativeInput>,
+    /// 对话样式底栏左侧内容（例如模型选择）；为空时底栏只保留右侧操作按钮。
+    pub footer_leading: Option<AnyElement>,
 }
 
 /// 多行文本域视觉变体。
@@ -433,9 +447,12 @@ pub(crate) fn render_textarea(
 ) -> impl IntoElement {
     let font_size = 13.0_f32;
     let line_height = 18.0_f32;
-    let vertical_padding = 8.0_f32;
-    let horizontal_padding = 8.0_f32;
+    // 对话输入采用更宽松的内边距，贴近 OpenCode v2 的悬浮输入框。
+    let is_composer = textarea.style == TextareaStyle::Composer;
+    let vertical_padding = if is_composer { 10.0_f32 } else { 8.0_f32 };
+    let horizontal_padding = if is_composer { 12.0_f32 } else { 8.0_f32 };
     let trailing_button_size = 24.0_f32;
+    let footer_leading = textarea.footer_leading;
     let visible_lines = textarea.visible_lines.max(3);
     let height = line_height * visible_lines as f32 + vertical_padding * 2.0;
     // 普通清除按钮失焦后隐藏；对话发送按钮可由调用方声明始终可见。
@@ -482,14 +499,26 @@ pub(crate) fn render_textarea(
         .as_ref()
         .map(|native_input| native_input.focus_handle.clone());
     let runtime_focus_handle_for_scroll_sync = runtime_focus_handle_for_text.clone();
-    let content_lines = textarea_text_lines(if !has_user_content {
-        &display_text
-    } else {
-        &textarea.value
-    });
+    let scroll_state = textarea.scroll_state.clone();
+    // 对话输入框按真实可用宽度自动换行；首帧测量完成前先按无换行排版。
+    let wrap_width = is_composer
+        .then(|| scroll_state.wrap_width())
+        .filter(|width| *width > 0.0);
+    let content_lines = textarea_visual_lines(
+        if !has_user_content {
+            &display_text
+        } else {
+            &textarea.value
+        },
+        wrap_width,
+        font_size,
+    );
     let content_line_count = content_lines.len().max(visible_lines);
     let content_height = content_line_count as f32 * line_height;
-    let content_width = if !has_user_content {
+    let content_width = if is_composer {
+        // 换行模式不建立横向内容宽度，文本始终按视口宽度折行。
+        0.0
+    } else if !has_user_content {
         // 占位文案只用于提示，不属于用户内容，不能让空文本框出现横向滚动条。
         0.0
     } else {
@@ -499,11 +528,17 @@ pub(crate) fn render_textarea(
             .fold(0.0_f32, f32::max)
     };
     let scroll_handle = textarea.scroll_handle.clone();
+    if is_composer {
+        // 换行模式不保留任何横向偏移，避免历史横向滚动把文本推出可视区。
+        let offset = scroll_handle.offset();
+        if offset.x != px(0.0) {
+            scroll_handle.set_offset(point(px(0.0), offset.y));
+        }
+    }
     let scroll_handle_for_viewport = scroll_handle.clone();
     let scroll_handle_for_wheel = scroll_handle.clone();
     let scroll_handle_for_pointer = scroll_handle.clone();
     let scroll_handle_for_bars = scroll_handle.clone();
-    let scroll_state = textarea.scroll_state.clone();
     if !has_user_content {
         // 清空内容后同步清除旧偏移和拖拽态，避免上一段长文本的滚动信息残留到占位状态。
         scroll_handle.set_offset(point(px(0.0), px(0.0)));
@@ -522,6 +557,10 @@ pub(crate) fn render_textarea(
     div()
         .id(textarea.id)
         .debug_selector(move || format!("textarea-{}", textarea.id))
+        .on_hover(scroll_area_hover_handler(format!(
+            "textarea-{}",
+            textarea.id
+        )))
         .w_full()
         .relative()
         .bg(rgb(theme.content))
@@ -531,13 +570,10 @@ pub(crate) fn render_textarea(
         .when(textarea.style == TextareaStyle::Composer, |this| {
             this.flex()
                 .flex_col()
-                .rounded_lg()
+                .rounded(px(12.0))
                 .border_1()
-                .border_color(rgb(if textarea.is_focused {
-                    theme.info
-                } else {
-                    theme.border
-                }))
+                // 对话输入框保持固定边框，不随聚焦/悬停高亮，避免输入时出现跳动色框。
+                .border_color(rgb(theme.border))
                 .shadow_lg()
         })
         // 文本域自身可滚动；允许外层滚动命中后，滚到边界时页面仍能继续响应同方向滚轮。
@@ -553,13 +589,9 @@ pub(crate) fn render_textarea(
         .when(!textarea.is_disabled, |this| {
             let element = this
                 .focusable()
-                .hover({
-                    let hover_border_color = if textarea.style == TextareaStyle::Composer {
-                        theme.info
-                    } else {
-                        theme.foreground_muted
-                    };
-                    move |this| this.border_color(rgb(hover_border_color))
+                .when(textarea.style != TextareaStyle::Composer, |this| {
+                    let hover_border_color = theme.foreground_muted;
+                    this.hover(move |this| this.border_color(rgb(hover_border_color)))
                 })
                 .on_key_down(move |event, window, cx| {
                     if native_input_for_key.is_some() && is_plain_text_key(event) {
@@ -649,6 +681,7 @@ pub(crate) fn render_textarea(
                                                     runtime_focus_handle_for_scroll_sync,
                                                     scroll_handle,
                                                     scroll_state_for_sync,
+                                                    wrap_width,
                                                 ))
                                                 .child(render_textarea_text(
                                                     textarea.id,
@@ -664,6 +697,12 @@ pub(crate) fn render_textarea(
                                                     text_color,
                                                     theme.selection,
                                                     theme.foreground,
+                                                    wrap_width,
+                                                    if is_composer {
+                                                        Some(scroll_state.clone())
+                                                    } else {
+                                                        None
+                                                    },
                                                 )),
                                         ),
                                 )
@@ -679,6 +718,7 @@ pub(crate) fn render_textarea(
                                     on_pointer_select,
                                     native_input_for_pointer,
                                     scroll_handle_for_pointer,
+                                    wrap_width,
                                 ))
                                 .children(render_textarea_scrollbars(
                                     textarea.id,
@@ -693,27 +733,40 @@ pub(crate) fn render_textarea(
                         ),
                 ),
         )
-        // 对话编辑器的发送按钮收进独立底栏，彻底退出文本输入区域。
-        .when_some(composer_accessory, |this, accessory| {
-            let on_trailing_click = on_trailing_click.clone();
-            this.child(
-                div()
-                    .flex_none()
-                    .px(px(4.0))
-                    .pb(px(4.0))
-                    .flex()
-                    .justify_end()
-                    .child(render_icon_button(
-                        accessory.id,
-                        accessory.icon,
-                        accessory.tooltip,
-                        textarea.trailing_accessory_selected,
-                        IconButtonSize::Tiny,
-                        theme,
-                        move |event, window, cx| (on_trailing_click)(event, window, cx),
-                    )),
-            )
-        })
+        // 对话编辑器的底部栏位于输入框内部：左侧放模型选择，右侧放发送/停止按钮。
+        .when(
+            is_composer && (footer_leading.is_some() || composer_accessory.is_some()),
+            |this| {
+                let on_trailing_click = on_trailing_click.clone();
+                this.child(
+                    div()
+                        .flex_none()
+                        .px(px(8.0))
+                        .pb(px(8.0))
+                        .pt(px(2.0))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .when_some(footer_leading, |this, leading| this.child(leading)),
+                        )
+                        .when_some(composer_accessory, |this, accessory| {
+                            this.child(render_icon_button(
+                                accessory.id,
+                                accessory.icon,
+                                accessory.tooltip,
+                                textarea.trailing_accessory_selected,
+                                IconButtonSize::Tiny,
+                                theme,
+                                move |event, window, cx| (on_trailing_click)(event, window, cx),
+                            ))
+                        }),
+                )
+            },
+        )
         // 普通样式的辅助按钮悬浮在文本区右上角，右侧留白避开贴边纵向滚动条。
         .when_some(default_accessory, |this, accessory| {
             let on_trailing_click = on_trailing_click.clone();
@@ -1292,6 +1345,7 @@ fn render_textarea_scroll_sync(
     runtime_focus_handle: Option<FocusHandle>,
     scroll_handle: ScrollHandle,
     scroll_state: TextareaScrollState,
+    wrap_width: Option<f32>,
 ) -> impl IntoElement {
     div()
         .id((textarea_id, 15usize))
@@ -1334,6 +1388,7 @@ fn render_textarea_scroll_sync(
                         font_size,
                         line_height,
                         cursor_index,
+                        wrap_width,
                         window,
                     );
                     let current_offset = scroll_handle.offset();
@@ -1522,8 +1577,6 @@ fn render_textarea_scrollbar_thumb(
         .absolute()
         .rounded_full()
         .bg(rgb(color))
-        .opacity(0.55)
-        .hover(|this| this.opacity(0.8))
         .cursor_pointer()
         // 滚动条滑块只阻断点击拖拽，滚轮仍交给文本域或外层页面处理。
         .block_mouse_except_scroll();
@@ -1542,100 +1595,99 @@ fn render_textarea_scrollbar_thumb(
             .h(metrics.thumb_length)
     };
 
-    thumb
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |thumb_bounds, _, window: &mut Window, _| {
-                    window.on_mouse_event({
-                        let scroll_state = scroll_state.clone();
-                        move |event: &MouseDownEvent, phase, window, cx| {
-                            if !phase.bubble()
-                                || event.button != MouseButton::Left
-                                || !thumb_bounds.contains(&event.position)
-                            {
-                                return;
-                            }
+    let thumb = thumb.child(
+        canvas(
+            |_, _, _| (),
+            move |thumb_bounds, _, window: &mut Window, _| {
+                window.on_mouse_event({
+                    let scroll_state = scroll_state.clone();
+                    move |event: &MouseDownEvent, phase, window, cx| {
+                        if !phase.bubble()
+                            || event.button != MouseButton::Left
+                            || !thumb_bounds.contains(&event.position)
+                        {
+                            return;
+                        }
 
-                            let pointer = if is_horizontal {
-                                event.position.x
-                            } else {
-                                event.position.y
-                            };
-                            let thumb_start = if is_horizontal {
-                                thumb_bounds.origin.x
-                            } else {
-                                thumb_bounds.origin.y
-                            };
-                            scroll_state
-                                .scrollbar_drag
-                                .replace(Some(TextareaScrollbarDrag {
-                                    axis,
-                                    cursor_offset: pointer - thumb_start,
-                                }));
+                        let pointer = if is_horizontal {
+                            event.position.x
+                        } else {
+                            event.position.y
+                        };
+                        let thumb_start = if is_horizontal {
+                            thumb_bounds.origin.x
+                        } else {
+                            thumb_bounds.origin.y
+                        };
+                        scroll_state
+                            .scrollbar_drag
+                            .replace(Some(TextareaScrollbarDrag {
+                                axis,
+                                cursor_offset: pointer - thumb_start,
+                            }));
+                        cx.stop_propagation();
+                        window.refresh();
+                    }
+                });
+
+                window.on_mouse_event({
+                    let scroll_state = scroll_state.clone();
+                    move |event: &MouseUpEvent, phase, window, cx| {
+                        // 捕获阶段收尾拖拽：冒泡路径上的停传播可能吞掉抬起事件，
+                        // 漏收会让滑块永久停留在拖拽态。
+                        if !phase.capture() || event.button != MouseButton::Left {
+                            return;
+                        }
+
+                        let handled = scroll_state.scrollbar_drag.borrow().is_some();
+                        if handled {
+                            scroll_state.scrollbar_drag.replace(None);
                             cx.stop_propagation();
                             window.refresh();
                         }
-                    });
+                    }
+                });
 
-                    window.on_mouse_event({
-                        let scroll_state = scroll_state.clone();
-                        move |event: &MouseUpEvent, phase, window, cx| {
-                            // 捕获阶段收尾拖拽：冒泡路径上的停传播可能吞掉抬起事件，
-                            // 漏收会让滑块永久停留在拖拽态。
-                            if !phase.capture() || event.button != MouseButton::Left {
-                                return;
-                            }
-
-                            let handled = scroll_state.scrollbar_drag.borrow().is_some();
-                            if handled {
-                                scroll_state.scrollbar_drag.replace(None);
-                                cx.stop_propagation();
-                                window.refresh();
-                            }
+                window.on_mouse_event({
+                    let scroll_state = scroll_state.clone();
+                    let scroll_handle = scroll_handle.clone();
+                    move |event: &MouseMoveEvent, phase, window, cx| {
+                        if !phase.bubble() || !event.dragging() {
+                            return;
                         }
-                    });
 
-                    window.on_mouse_event({
-                        let scroll_state = scroll_state.clone();
-                        let scroll_handle = scroll_handle.clone();
-                        move |event: &MouseMoveEvent, phase, window, cx| {
-                            if !phase.bubble() || !event.dragging() {
-                                return;
-                            }
-
-                            let Some(drag) = *scroll_state.scrollbar_drag.borrow() else {
-                                return;
-                            };
-                            if drag.axis != axis {
-                                return;
-                            }
-
-                            let pointer = if is_horizontal {
-                                event.position.x - viewport_bounds.left()
-                            } else {
-                                event.position.y - viewport_bounds.top()
-                            };
-                            let scroll = textarea_scroll_for_scrollbar_drag(
-                                pointer,
-                                drag.cursor_offset,
-                                metrics,
-                            );
-                            let current = scroll_handle.offset();
-                            if is_horizontal {
-                                scroll_handle.set_offset(point(-scroll, current.y));
-                            } else {
-                                scroll_handle.set_offset(point(current.x, -scroll));
-                            }
-                            cx.stop_propagation();
-                            window.refresh();
+                        let Some(drag) = *scroll_state.scrollbar_drag.borrow() else {
+                            return;
+                        };
+                        if drag.axis != axis {
+                            return;
                         }
-                    });
-                },
-            )
-            .size_full(),
+
+                        let pointer = if is_horizontal {
+                            event.position.x - viewport_bounds.left()
+                        } else {
+                            event.position.y - viewport_bounds.top()
+                        };
+                        let scroll = textarea_scroll_for_scrollbar_drag(
+                            pointer,
+                            drag.cursor_offset,
+                            metrics,
+                        );
+                        let current = scroll_handle.offset();
+                        if is_horizontal {
+                            scroll_handle.set_offset(point(-scroll, current.y));
+                        } else {
+                            scroll_handle.set_offset(point(current.x, -scroll));
+                        }
+                        cx.stop_propagation();
+                        window.refresh();
+                    }
+                });
+            },
         )
-        .into_any_element()
+        .size_full(),
+    );
+    with_scrollbar_visibility(thumb, &format!("textarea-{textarea_id}"), 0.55).into_any_element()
 }
 
 /// 根据轨道范围、视口长度和最大滚动距离计算滚动条滑块位置。
@@ -1698,6 +1750,7 @@ struct TextareaLine {
 }
 
 /// 渲染文本域多行文本、跨行选区、marked text 和光标。
+#[allow(clippy::too_many_arguments)]
 fn render_textarea_text(
     textarea_id: &'static str,
     value: &str,
@@ -1712,6 +1765,8 @@ fn render_textarea_text(
     text_color: u32,
     selection_background: u32,
     cursor_color: u32,
+    wrap_width: Option<f32>,
+    wrap_state: Option<TextareaScrollState>,
 ) -> impl IntoElement {
     let value = value.to_string();
     let display_text = display_text.to_string();
@@ -1721,9 +1776,10 @@ fn render_textarea_text(
     } else {
         value.clone()
     };
-    let lines = textarea_text_lines(&painted_text);
+    let lines = textarea_visual_lines(&painted_text, wrap_width, font_size);
     let lines_for_canvas = lines.clone();
     let lines_for_caret = lines.clone();
+    let wrap_state_for_canvas = wrap_state.clone();
     let value_for_canvas = value.clone();
     let painted_text_for_canvas = painted_text.clone();
     let selection_range_for_canvas = selection_range.clone();
@@ -1737,6 +1793,15 @@ fn render_textarea_text(
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window: &mut Window, cx| {
+                    if let Some(state) = wrap_state_for_canvas.as_ref() {
+                        // 预留 4px，避免估算宽度与真实字形宽度之间的差异造成行尾裁切。
+                        let measured_width = (f32::from(bounds.size.width) - 4.0).max(1.0);
+                        if (state.wrap_width() - measured_width).abs() > 0.5 {
+                            state.set_wrap_width(measured_width);
+                            // 首帧只拿到真实宽度；下一帧用新宽度重新计算折行和高度。
+                            window.request_animation_frame();
+                        }
+                    }
                     let is_effectively_focused = effective_input_focus(
                         is_focused,
                         runtime_focus_handle_for_canvas.as_ref(),
@@ -1803,6 +1868,7 @@ fn render_textarea_text(
                 line_height,
                 runtime_focus_handle,
                 cursor_color,
+                wrap_width,
             ))
         })
 }
@@ -1816,6 +1882,7 @@ fn render_textarea_caret(
     line_height: f32,
     runtime_focus_handle: Option<FocusHandle>,
     cursor_color: u32,
+    _wrap_width: Option<f32>,
 ) -> impl IntoElement {
     div()
         .id((textarea_id, 11usize))
@@ -1878,6 +1945,7 @@ fn render_textarea_pointer_layer(
     on_pointer_select: Rc<impl Fn(&InputPointerEvent, &mut Window, &mut App) + 'static>,
     native_input: Option<NativeInput>,
     scroll_handle: ScrollHandle,
+    wrap_width: Option<f32>,
 ) -> impl IntoElement {
     div()
         .id((textarea_id, 13usize))
@@ -1902,6 +1970,7 @@ fn render_textarea_pointer_layer(
                             marked_range.clone(),
                             bounds,
                             scroll_handle.offset(),
+                            wrap_width,
                             window,
                             cx,
                         );
@@ -1939,6 +2008,7 @@ fn render_textarea_pointer_layer(
                                 event.position,
                                 bounds,
                                 scroll_handle.offset(),
+                                wrap_width,
                                 window,
                             );
                             on_pointer_select(
@@ -1996,6 +2066,7 @@ fn render_textarea_pointer_layer(
                                 event.position,
                                 bounds,
                                 scroll_handle.offset(),
+                                wrap_width,
                                 window,
                             );
                             on_pointer_select(
@@ -2293,6 +2364,7 @@ impl InputHandler for NativeInputHandler {
 }
 
 /// 在文本域绘制阶段安装系统输入处理器。
+#[allow(clippy::too_many_arguments)]
 fn install_native_textarea_handler(
     native_input: &NativeInput,
     value: String,
@@ -2303,6 +2375,7 @@ fn install_native_textarea_handler(
     marked_range: Option<Range<usize>>,
     bounds: Bounds<Pixels>,
     scroll_offset: gpui::Point<Pixels>,
+    wrap_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -2317,6 +2390,7 @@ fn install_native_textarea_handler(
             marked_range,
             bounds,
             scroll_offset,
+            wrap_width,
             on_edit: native_input.on_edit.clone(),
         },
         cx,
@@ -2341,6 +2415,8 @@ struct NativeTextareaInputHandler {
     bounds: Bounds<Pixels>,
     /// 当前滚动内容相对可见视口的偏移，GPUI 向右/下滚动时为负值。
     scroll_offset: gpui::Point<Pixels>,
+    /// 对话输入框的自动换行宽度；普通文本域为空。
+    wrap_width: Option<f32>,
     /// 编辑写回回调。
     on_edit: NativeEditCallback,
 }
@@ -2418,7 +2494,7 @@ impl NativeTextareaInputHandler {
         range: Range<usize>,
         window: &mut Window,
     ) -> Option<Bounds<Pixels>> {
-        let lines = textarea_text_lines(&self.value);
+        let lines = textarea_visual_lines(&self.value, self.wrap_width, self.font_size);
         let (line_index, column) = textarea_cursor_line_and_column(&lines, range.start);
         let line = lines.get(line_index)?;
         let color = window.text_style().color;
@@ -2543,6 +2619,7 @@ impl InputHandler for NativeTextareaInputHandler {
             point,
             self.bounds,
             self.scroll_offset,
+            self.wrap_width,
             window,
         );
         Some(utf16_range_for_character_range(&self.value, character_index..character_index).start)
@@ -2583,6 +2660,55 @@ fn textarea_text_lines(value: &str) -> Vec<TextareaLine> {
         end: character_count(value),
     });
     lines
+}
+
+/// 按给定像素宽度把逻辑行拆成自动换行后的视觉行。
+fn textarea_visual_lines(
+    value: &str,
+    wrap_width: Option<f32>,
+    font_size: f32,
+) -> Vec<TextareaLine> {
+    let logical_lines = textarea_text_lines(value);
+    let Some(wrap_width) = wrap_width.filter(|width| *width > 0.0) else {
+        return logical_lines;
+    };
+    let mut visual_lines = Vec::with_capacity(logical_lines.len());
+    for line in logical_lines {
+        if line.text.is_empty() {
+            visual_lines.push(line);
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_start = line.start;
+        let mut current_width = 0.0_f32;
+        let mut current_chars = 0usize;
+        for character in line.text.chars() {
+            let character_width = if character.is_ascii() {
+                font_size * 0.62
+            } else {
+                font_size
+            };
+            if !current.is_empty() && current_width + character_width > wrap_width {
+                visual_lines.push(TextareaLine {
+                    text: std::mem::take(&mut current),
+                    start: current_start,
+                    end: current_start + current_chars,
+                });
+                current_start += current_chars;
+                current_width = 0.0;
+                current_chars = 0;
+            }
+            current.push(character);
+            current_width += character_width;
+            current_chars += 1;
+        }
+        visual_lines.push(TextareaLine {
+            text: current,
+            start: current_start,
+            end: current_start + current_chars,
+        });
+    }
+    visual_lines
 }
 
 /// 把完整文本范围转换为当前行内范围；空交集返回 `None`。
@@ -2636,9 +2762,10 @@ fn textarea_caret_local_position(
     font_size: f32,
     line_height: f32,
     cursor_index: usize,
+    wrap_width: Option<f32>,
     window: &mut Window,
 ) -> (Pixels, Pixels) {
-    let lines = textarea_text_lines(value);
+    let lines = textarea_visual_lines(value, wrap_width, font_size);
     let (line_index, column) = textarea_cursor_line_and_column(&lines, cursor_index);
     let line_text = lines
         .get(line_index)
@@ -2738,9 +2865,10 @@ fn textarea_character_index_from_pointer(
     pointer: gpui::Point<Pixels>,
     viewport_bounds: Bounds<Pixels>,
     scroll_offset: gpui::Point<Pixels>,
+    wrap_width: Option<f32>,
     window: &mut Window,
 ) -> usize {
-    let lines = textarea_text_lines(value);
+    let lines = textarea_visual_lines(value, wrap_width, font_size);
     if lines.is_empty() {
         return 0;
     }
@@ -2908,6 +3036,26 @@ mod tests {
         let scroll = input_scroll_x_reveal(px(308.0), px(300.0), px(500.0), px(200.0));
 
         assert_eq!(scroll, px(292.0));
+    }
+
+    /// 验证对话输入框按宽度拆出视觉行，且所有字符范围连续覆盖原文。
+    #[test]
+    fn textarea_visual_lines_wrap_long_text_without_gaps() {
+        let font_size = 13.0_f32;
+        let value = "a".repeat(100);
+        let lines = textarea_visual_lines(&value, Some(100.0), font_size);
+
+        assert!(lines.len() > 1, "长行应按宽度拆成多行");
+        assert_eq!(lines[0].start, 0);
+        assert_eq!(lines.last().map(|line| line.end), Some(100));
+        for pair in lines.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "视觉行范围必须连续");
+        }
+        assert_eq!(
+            textarea_visual_lines(&value, None, font_size).len(),
+            1,
+            "未启用换行时保持单逻辑行"
+        );
     }
 
     /// 文本域关闭或重新渲染时即使遇到旧行范围，也不能因范围相减导致崩溃。

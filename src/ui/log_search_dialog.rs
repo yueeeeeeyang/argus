@@ -27,7 +27,10 @@ use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::modal_dialog::{
     ModalDialog, ModalFrame, render_modal_dialog_with_frame,
 };
-use crate::ui::components::scrollbar::{scrollbar_metrics, scrollbar_scroll_for_drag};
+use crate::ui::components::scrollbar::{
+    scroll_area_hover_handler, scrollbar_metrics, scrollbar_scroll_for_drag,
+    with_scrollbar_visibility,
+};
 use crate::ui::input_native::app_native_input;
 
 /// 搜索对话框模态框宽度。
@@ -985,6 +988,7 @@ fn render_keyword_history_overlay(
         .child(
             div()
                 .id("log-search-keyword-history-scroll")
+                .on_hover(scroll_area_hover_handler("keyword-history".to_string()))
                 .max_h(max_height)
                 .overflow_y_scroll()
                 .track_scroll(&scroll_handle)
@@ -1038,7 +1042,7 @@ fn render_keyword_history_scrollbar(
     ) {
         Some(metrics) => {
             let scroll_handle = scroll_handle.clone();
-            div()
+            let thumb = div()
                 .absolute()
                 .top(metrics.thumb_start)
                 .right(px(KEYWORD_HISTORY_SCROLLBAR_PADDING))
@@ -1046,10 +1050,7 @@ fn render_keyword_history_scrollbar(
                 .h(metrics.thumb_length)
                 .rounded_lg()
                 .bg(rgb(theme.foreground_muted))
-                .opacity(0.48)
-                .hover(|this| this.opacity(0.78))
                 .cursor_pointer()
-                .occlude()
                 .child(
                     canvas(
                         |_, _, _| (),
@@ -1121,8 +1122,8 @@ fn render_keyword_history_scrollbar(
                         },
                     )
                     .size_full(),
-                )
-                .into_any_element()
+                );
+            with_scrollbar_visibility(thumb, "keyword-history", 0.48).into_any_element()
         }
         None => {
             // 首帧哨兵：滚动句柄完成布局前占位，布局完成后若已溢出则触发一次重绘以显示滑块。

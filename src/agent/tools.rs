@@ -4,8 +4,10 @@
 //! 主要功能：工作区来源清单、越界拒绝的文件读取和白名单加确认闸门的 bash 执行。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+use regex::Regex;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,8 +40,12 @@ pub(crate) const BASH_APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 /// 只读命令白名单；按 argv[0] 判定，白名单外命令一律转用户确认。
 const READONLY_COMMAND_WHITELIST: &[&str] = &[
     "ls", "cat", "grep", "head", "tail", "wc", "find", "sort", "uniq", "awk", "sed", "cut", "tr",
-    "echo", "pwd", "stat", "file", "du", "df",
+    "echo", "pwd", "stat", "file", "du", "df", "cd",
 ];
+/// 对话工具中允许自动执行的只读重定向：丢弃输出或合并输出，不写入工作区文件。
+static SAFE_REDIRECTION_PATTERN: OnceLock<Regex> = OnceLock::new();
+/// 单层只读 for 循环；循环变量仅用于拼接路径或 echo 文本时可直接放行。
+static READONLY_FOR_LOOP_PATTERN: OnceLock<Regex> = OnceLock::new();
 
 /// 工具统一错误；错误文本面向模型，使用英文且不包含凭据或大段日志原文。
 #[derive(Debug, thiserror::Error)]
@@ -478,10 +484,12 @@ impl Tool for BashTool {
     fn description(&self) -> String {
         "Run a shell command with the workspace directory as the working directory. Read-only \
         whitelisted commands (ls, cat, grep, head, tail, wc, find, sort, uniq, awk, sed, cut, \
-        tr, echo, pwd, stat, file, du, df) run automatically when every path argument stays \
-        inside the workspace; anything else (other binaries, redirections, writes or outside \
-        paths) requires explicit user approval and is denied after 60 seconds without an \
-        answer. Keep commands read-only: this is an analysis environment."
+        tr, echo, pwd, stat, file, du, df, cd) run automatically when every path argument stays \
+        inside the workspace. Safe read-only redirections such as 2>/dev/null and 2>&1 are \
+        allowed, and find -exec/-execdir may invoke another read-only whitelisted command. \
+        Anything else (other binaries, writes, destructive find actions or outside paths) \
+        requires explicit user approval and is denied after 60 seconds without an answer. \
+        Keep commands read-only: this is an analysis environment."
             .to_string()
     }
 
@@ -636,7 +644,13 @@ pub(crate) fn reject_pending_bash_approvals(context: &AgentOperationContext, rea
 /// 不得包含重定向或命令替换等元操作、全部路径形态参数都必须落在工作目录内；
 /// 任一条件不满足即转用户确认。
 pub(crate) fn classify_bash_command(command: &str, workspace_root: &Path) -> BashClassification {
-    for segment in split_command_segments(command) {
+    if let Some(classification) = classify_readonly_for_loop(command, workspace_root) {
+        return classification;
+    }
+    // 安全重定向不影响沙箱边界；先从只用于分类的副本中移除，执行仍使用原始命令。
+    let classification_command = strip_safe_redirections(command);
+    let mut current_dir = workspace_root.to_path_buf();
+    for segment in split_command_segments(&classification_command) {
         if let Some(reason) = segment_meta_operations(&segment) {
             return BashClassification::NeedsApproval(reason);
         }
@@ -653,10 +667,7 @@ pub(crate) fn classify_bash_command(command: &str, workspace_root: &Path) -> Bas
         let Some(command_word) = tokens.next().map(String::as_str) else {
             continue;
         };
-        let command_name = Path::new(command_word)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| command_word.to_string());
+        let command_name = command_basename(command_word);
         if !READONLY_COMMAND_WHITELIST.contains(&command_name.as_str()) {
             return BashClassification::NeedsApproval(format!(
                 "command \"{command_name}\" is outside the read-only whitelist"
@@ -666,11 +677,174 @@ pub(crate) fn classify_bash_command(command: &str, workspace_root: &Path) -> Bas
         if let Some(reason) = destructive_whitelisted_usage(&command_name, &rest) {
             return BashClassification::NeedsApproval(reason);
         }
-        if let Some(reason) = out_of_workspace_argument(&rest, workspace_root) {
+        if command_name == "cd" {
+            match resolve_cd_target(&rest, workspace_root, &current_dir) {
+                Ok(next_dir) => current_dir = next_dir,
+                Err(reason) => return BashClassification::NeedsApproval(reason),
+            }
+            continue;
+        }
+        // echo 只输出文本，不访问路径；避免把消息中的斜杠误判为越界路径。
+        if command_name == "echo" {
+            continue;
+        }
+        if let Some(reason) = out_of_workspace_argument(&rest, workspace_root, &current_dir) {
             return BashClassification::NeedsApproval(reason);
         }
     }
     BashClassification::AutoRun
+}
+
+/// 识别并校验单层只读 for 循环；循环体内只允许白名单只读命令。
+fn classify_readonly_for_loop(command: &str, workspace_root: &Path) -> Option<BashClassification> {
+    let pattern = READONLY_FOR_LOOP_PATTERN.get_or_init(|| {
+        Regex::new(
+            r"(?s)^\s*(?P<prefix>(?:.*?&&\s*)?)for\s+(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s+in\s+(?P<items>[^;]+);\s*do\s+(?P<body>.*?);\s*done\s*$",
+        )
+        .expect("只读 for 循环正则必须有效")
+    });
+    let captures = pattern.captures(command)?;
+    let prefix = captures.name("prefix").map_or("", |value| value.as_str());
+    if !prefix.trim().is_empty() {
+        let prefix = prefix.trim().trim_end_matches("&&").trim_end();
+        if let BashClassification::NeedsApproval(reason) =
+            classify_bash_command(prefix, workspace_root)
+        {
+            return Some(BashClassification::NeedsApproval(format!(
+                "for loop prefix: {reason}"
+            )));
+        }
+    }
+
+    let var = captures.name("var")?.as_str();
+    let items = captures.name("items")?.as_str();
+    let item_words = items.split_whitespace().collect::<Vec<_>>();
+    if item_words.is_empty() {
+        return Some(BashClassification::NeedsApproval(
+            "for loop has no items".to_string(),
+        ));
+    }
+    if item_words
+        .iter()
+        .any(|item| item.contains('$') || item.contains('`') || item.starts_with('~'))
+    {
+        return Some(BashClassification::NeedsApproval(
+            "for loop items contain expansion or home directory".to_string(),
+        ));
+    }
+    if let Some(reason) = out_of_workspace_argument(&item_words, workspace_root, workspace_root) {
+        return Some(BashClassification::NeedsApproval(reason));
+    }
+
+    let body = captures.name("body")?.as_str();
+    let placeholder = "__argus_loop_value__";
+    let expanded_body = body
+        .replace(&format!("${{{var}}}"), placeholder)
+        .replace(&format!("${var}"), placeholder);
+    if expanded_body.contains('$') || expanded_body.contains('`') {
+        return Some(BashClassification::NeedsApproval(
+            "for loop body contains unsupported expansion".to_string(),
+        ));
+    }
+    match classify_bash_command(&expanded_body, workspace_root) {
+        BashClassification::AutoRun => Some(BashClassification::AutoRun),
+        BashClassification::NeedsApproval(_) => Some(BashClassification::NeedsApproval(
+            "for loop body is not read-only".to_string(),
+        )),
+    }
+}
+
+/// 移除允许自动执行的安全重定向，仅用于分类副本。
+fn strip_safe_redirections(command: &str) -> String {
+    let pattern = SAFE_REDIRECTION_PATTERN.get_or_init(|| {
+        Regex::new(
+            r"(?x)(?:\b[012]\s*|&)>>?\s*/dev/null|\b[012]?\s*>\s*&\s*[12]|[012]?\s*<\s*/dev/null",
+        )
+        .expect("安全重定向正则必须有效")
+    });
+    pattern.replace_all(command, " ").into_owned()
+}
+
+/// 解析 cd 目标；只允许一个位于工作区内的路径，禁止无参数和 OLDPWD 简写。
+fn resolve_cd_target(
+    args: &[&str],
+    workspace_root: &Path,
+    current_dir: &Path,
+) -> Result<PathBuf, String> {
+    if args.is_empty() {
+        return Err("cd without a target leaves the workspace directory".to_string());
+    }
+    if args.len() != 1 {
+        return Err("cd with multiple targets is not supported".to_string());
+    }
+    let target = args[0];
+    if matches!(target, "-" | "--") {
+        return Err("cd -/-- would leave the workspace directory".to_string());
+    }
+    resolve_bash_workspace_path(target, workspace_root, current_dir)
+        .ok_or_else(|| format!("argument \"{target}\" leaves the workspace directory"))
+}
+
+/// 将命令参数解析为工作区内的绝对路径；相对路径以当前目录为基准。
+fn resolve_bash_workspace_path(
+    argument: &str,
+    workspace_root: &Path,
+    current_dir: &Path,
+) -> Option<PathBuf> {
+    let argument = unquote_shell_token(argument);
+    if argument.is_empty() || argument.starts_with('~') {
+        return None;
+    }
+    let candidate = if Path::new(argument).is_absolute() {
+        PathBuf::from(argument)
+    } else {
+        current_dir.join(argument)
+    };
+    let normalized = normalize_lexical_path(&candidate);
+    let normalized_root = normalize_lexical_path(workspace_root);
+    normalized
+        .starts_with(normalized_root)
+        .then_some(normalized)
+}
+
+/// 去除参数首尾成对的引号；路径判定必须按 shell 去引号后的语义进行。
+fn unquote_shell_token(argument: &str) -> &str {
+    let bytes = argument.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        &argument[1..argument.len() - 1]
+    } else {
+        argument
+    }
+}
+
+/// 词法规范化路径中的 `.` 和 `..`，不做文件系统访问。
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                normalized.push(component.as_os_str());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
+}
+
+/// 返回命令词的文件名部分，用于白名单判定。
+fn command_basename(command_word: &str) -> String {
+    let command_word = unquote_shell_token(command_word);
+    Path::new(command_word)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| command_word.to_string())
 }
 
 /// 检测段内的重定向与命令替换；引号内的字符不参与判定。
@@ -698,7 +872,8 @@ fn split_command_segments(command: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
-    for character in command.chars() {
+    let mut characters = command.chars();
+    while let Some(character) = characters.next() {
         match quote {
             Some(open) if character == open => {
                 quote = None;
@@ -706,6 +881,13 @@ fn split_command_segments(command: &str) -> Vec<String> {
             }
             Some(_) => current.push(character),
             None => match character {
+                '\\' => {
+                    // 保留 shell 转义序列；`find -exec ... \;` 的分号不能被当作命令分隔符。
+                    current.push(character);
+                    if let Some(escaped) = characters.next() {
+                        current.push(escaped);
+                    }
+                }
                 '\'' | '"' => {
                     quote = Some(character);
                     current.push(character);
@@ -772,17 +954,18 @@ fn is_env_assignment(token: &str) -> bool {
 /// 白名单命令仍会改动文件或派生执行的参数形态。
 fn destructive_whitelisted_usage(command_name: &str, args: &[&str]) -> Option<String> {
     match command_name {
+        "cd" => {
+            if args.is_empty() || args.iter().any(|arg| matches!(*arg, "-" | "--")) {
+                Some("cd target would leave the workspace directory".to_string())
+            } else {
+                None
+            }
+        }
         "sed" => args
             .iter()
             .find(|arg| **arg == "-i" || arg.starts_with("--in-place"))
             .map(|_| "sed in-place editing modifies files".to_string()),
-        "find" => args
-            .iter()
-            .find(|arg| {
-                matches!(**arg, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")
-                    || arg.starts_with("-fprint")
-            })
-            .map(|arg| format!("find action \"{arg}\" modifies files or spawns commands")),
+        "find" => find_destructive_action(args),
         "sort" => args
             .iter()
             .find(|arg| **arg == "-o" || arg.starts_with("--output"))
@@ -795,48 +978,78 @@ fn destructive_whitelisted_usage(command_name: &str, args: &[&str]) -> Option<St
     }
 }
 
+/// 检查 find 的写文件动作与派生子命令；-exec/-execdir 仅允许嵌套白名单只读命令。
+fn find_destructive_action(args: &[&str]) -> Option<String> {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index] {
+            "-delete" => return Some("find -delete modifies files".to_string()),
+            "-ok" | "-okdir" => {
+                return Some(format!(
+                    "find action \"{}\" requires interactive confirmation",
+                    args[index]
+                ));
+            }
+            argument if argument.starts_with("-fprint") || argument == "-fls" => {
+                return Some(format!("find action \"{argument}\" writes files"));
+            }
+            action @ ("-exec" | "-execdir") => {
+                let Some(inner_command) = args.get(index + 1) else {
+                    return Some(format!("find {action} is missing a command"));
+                };
+                let inner_name = command_basename(inner_command);
+                if !READONLY_COMMAND_WHITELIST.contains(&inner_name.as_str()) {
+                    return Some(format!(
+                        "find {action} spawns non-whitelisted command \"{inner_name}\""
+                    ));
+                }
+                let Some(terminator) = args[index + 2..]
+                    .iter()
+                    .position(|argument| matches!(*argument, ";" | "\\;" | "+"))
+                else {
+                    return Some(format!("find {action} is missing a terminator"));
+                };
+                let inner_args = &args[index + 2..index + 2 + terminator];
+                if let Some(reason) = destructive_whitelisted_usage(&inner_name, inner_args) {
+                    return Some(format!("find {action} inner command: {reason}"));
+                }
+                index += terminator + 2;
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// 检查参数中路径形态的 token 是否全部落在工作目录内。
-fn out_of_workspace_argument(args: &[&str], workspace_root: &Path) -> Option<String> {
+fn out_of_workspace_argument(
+    args: &[&str],
+    workspace_root: &Path,
+    current_dir: &Path,
+) -> Option<String> {
     for arg in args {
-        let looks_like_path = arg.starts_with('/')
-            || arg.starts_with("./")
-            || arg.starts_with("../")
-            || arg.starts_with('~')
-            || *arg == "."
-            || *arg == ".."
-            || arg.contains('/');
+        let unquoted = unquote_shell_token(arg);
+        let looks_like_path = unquoted.starts_with('/')
+            || unquoted.starts_with("./")
+            || unquoted.starts_with("../")
+            || unquoted.starts_with('~')
+            || unquoted == "."
+            || unquoted == ".."
+            || unquoted.contains('/');
         if !looks_like_path {
             continue;
         }
-        if arg.starts_with('~') {
+        if unquoted.starts_with('~') {
             return Some(format!(
-                "argument \"{arg}\" expands to the user home directory"
+                "argument \"{unquoted}\" expands to the user home directory"
             ));
         }
-        let expanded = arg
-            .strip_prefix("./")
-            .map(|rest| format!("{}/{}", workspace_root.display(), rest))
-            .unwrap_or_else(|| arg.to_string());
-        let mut resolved = workspace_root.to_path_buf();
-        let mut escaped = false;
-        for component in Path::new(&expanded).components() {
-            match component {
-                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                    resolved = PathBuf::new();
-                    resolved.push(component.as_os_str());
-                }
-                std::path::Component::ParentDir => {
-                    if !resolved.pop() {
-                        escaped = true;
-                        break;
-                    }
-                }
-                std::path::Component::CurDir => {}
-                other => resolved.push(other.as_os_str()),
-            }
-        }
-        if escaped || !resolved.starts_with(workspace_root) {
-            return Some(format!("argument \"{arg}\" leaves the workspace directory"));
+        if resolve_bash_workspace_path(unquoted, workspace_root, current_dir).is_none() {
+            return Some(format!(
+                "argument \"{unquoted}\" leaves the workspace directory"
+            ));
         }
     }
     None
@@ -867,8 +1080,6 @@ mod tests {
         (
             Arc::new(AgentOperationContext {
                 scope: Arc::new(SourceScopeSnapshot {
-                    session_id: "test".to_string(),
-                    root_label: "logs".to_string(),
                     workspace_root: workspace.to_path_buf(),
                     preferred_encoding: "UTF-8".to_string(),
                     sources: Arc::new(Vec::new()),
@@ -901,6 +1112,12 @@ mod tests {
             "FOO=1 BAR=2 wc -l logs/app.log",
             "df -h",
             "du -sh logs",
+            "grep -n ERROR logs/app.log 2>/dev/null | head -20",
+            "cd \"logs dir/2026-10-27\" && grep -rli -E \"pool exhausted|connection\" sqllog/27 2>/dev/null | head -20",
+            "cd \"logs dir/2026-10-27\" && find . -name \"resin.properties\" -exec grep -n -i -E \"max-active|maxActive\" {} \\; | head -40",
+            "find . -name \"*.log\" -exec head -20 {} \\;",
+            "cd logs && cd .. && ls",
+            "cd \"logs dir/2026-10-27\" && for d in runtime sqllog monitorThread event system monitorlog; do echo \"=== $d ===\"; ls -1 \"$d\" | head -8; done",
         ] {
             assert_eq!(
                 classify_bash_command(command, &root),
@@ -927,6 +1144,15 @@ mod tests {
             "echo $(rm x)",
             "cat ~/secret.key",
             "cat ../outside.log",
+            "cat \"../outside.log\"",
+            "cd ..",
+            "cd",
+            "cd -",
+            "find . -exec rm {} \\;",
+            "find . -exec sh -c 'rm -rf /' \\;",
+            "find . -ok rm {} \\;",
+            "for d in logs; do rm -rf \"$d\"; done",
+            "for d in /etc; do echo \"$d\"; done",
             "ls\nrm -rf /",
             "grep ERROR logs/app.log && rm x",
             "python3 analyze.py",

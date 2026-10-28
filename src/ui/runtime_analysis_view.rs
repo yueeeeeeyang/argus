@@ -44,7 +44,8 @@ use crate::ui::components::input::{
 use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
 use crate::ui::components::scrollbar::{
-    ScrollbarMetrics, scrollbar_metrics, scrollbar_scroll_for_drag,
+    ScrollbarMetrics, scroll_area_hover_handler, scrollbar_metrics, scrollbar_scroll_for_drag,
+    with_scrollbar_visibility,
 };
 use crate::ui::input_native::app_native_input;
 use gpui::{
@@ -166,6 +167,7 @@ pub(crate) fn render(
         .id(SharedString::from(format!(
             "runtime-analysis-view-{analysis_id}"
         )))
+        .on_hover(scroll_area_hover_handler("runtime".to_string()))
         .size_full()
         .flex()
         .flex_col()
@@ -600,7 +602,7 @@ fn render_runtime_scrollbar_thumb(
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
     let entity = cx.entity();
-    div()
+    let thumb = div()
         .absolute()
         .top(track_top_offset + metrics.thumb_start)
         .right(px(RUNTIME_SCROLLBAR_PADDING))
@@ -608,10 +610,7 @@ fn render_runtime_scrollbar_thumb(
         .h(metrics.thumb_length)
         .rounded_lg()
         .bg(rgb(theme.foreground_muted))
-        .opacity(0.48)
-        .hover(|this| this.opacity(0.78))
         .cursor_pointer()
-        .occlude()
         .child(
             canvas(
                 |_, _, _| (),
@@ -701,8 +700,8 @@ fn render_runtime_scrollbar_thumb(
                 },
             )
             .size_full(),
-        )
-        .into_any_element()
+        );
+    with_scrollbar_visibility(thumb, "runtime", 0.48).into_any_element()
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
-//! 主要功能：将稳定的业务语义、快搜、智能分析和面板开关图标映射到 icondata Lucide 图标常量。
+//! 主要功能：将稳定的业务语义、快搜、智能助手和面板开关图标映射到 icondata Lucide 图标常量。
 
 use gpui::{IntoElement, prelude::*, px, rgb, svg};
 use icondata::Icon;
@@ -78,6 +78,8 @@ pub(crate) enum ArgusIcon {
     FileDown,
     /// 保存设置或编辑结果。
     Save,
+    /// 复制文本。
+    Copy,
     /// 重命名。
     Rename,
     /// 删除。
@@ -160,6 +162,7 @@ impl ArgusIcon {
             Self::Download,
             Self::FileDown,
             Self::Save,
+            Self::Copy,
             Self::Rename,
             Self::Trash,
             Self::Collapse,
@@ -226,6 +229,7 @@ impl ArgusIcon {
             Self::Download => "icons/download.svg",
             Self::FileDown => "icons/file-down.svg",
             Self::Save => "icons/save.svg",
+            Self::Copy => "icons/copy.svg",
             Self::Rename => "icons/rename.svg",
             Self::Trash => "icons/trash.svg",
             Self::Collapse => "icons/collapse.svg",
@@ -318,6 +322,7 @@ impl ArgusIcon {
             Self::Download => icondata::LuDownload,
             Self::FileDown => icondata::LuFileDown,
             Self::Save => icondata::LuSave,
+            Self::Copy => icondata::LuCopy,
             Self::Rename => icondata::LuPencil,
             Self::Trash => icondata::LuTrash2,
             Self::Collapse => icondata::LuChevronDown,

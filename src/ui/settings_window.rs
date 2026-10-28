@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-12
 //! 修改日期：2026-10-27
 //! 作者：Argus 开发团队
-//! 主要功能：以主窗口模态框展示分类设置，并提供智能分析、系统提示词和 Jstack 过滤规则编辑入口。
+//! 主要功能：以主窗口模态框展示分类设置，并提供智能助手、系统提示词和 Jstack 过滤规则编辑入口。
 
 use std::sync::Arc;
 
@@ -102,11 +102,11 @@ struct SettingsModalSnapshot {
     selected_section: SettingsSection,
     /// 当前选中的主题 ID。
     selected_theme_id: String,
-    /// 可供智能分析会话选择的模型配置列表。
+    /// 可供智能助手会话选择的模型配置列表。
     ai_model_profiles: Vec<AiModelProfile>,
     /// 自定义日志类型说明列表。
     ai_log_profiles: Vec<LogTypeProfile>,
-    /// 用户可编辑的默认专业系统提示词。
+    /// 用户可编辑的默认助手系统提示词。
     ai_system_prompt: String,
     /// 当前选中主题展示文案。
     selected_theme_label: String,
@@ -592,7 +592,7 @@ fn render_settings_sidebar(
                 .child(
                     div()
                         .mt_3()
-                        .child(settings_navigation_group_label("智能分析", theme)),
+                        .child(settings_navigation_group_label("智能助手", theme)),
                 )
                 .child(settings_navigation_item(
                     SettingsSection::AiModel,
@@ -762,7 +762,7 @@ fn render_selected_settings_section(
     }
 }
 
-/// 渲染智能分析分组下的模型配置页面。
+/// 渲染智能助手分组下的模型配置页面。
 fn render_ai_model_section(
     snapshot: &SettingsModalSnapshot,
     app_handle: &Entity<ArgusApp>,
@@ -800,7 +800,7 @@ fn render_ai_model_section(
             ))
             .when(snapshot.ai_model_profiles.is_empty(), |this| {
                 this.child(ai_settings_empty_row(
-                    "尚未配置模型，新增后才能使用智能分析。",
+                    "尚未配置模型，新增后才能使用智能助手。",
                     &list_theme,
                 ))
             })
@@ -867,7 +867,7 @@ fn render_ai_model_section(
     .into_any_element()
 }
 
-/// 渲染智能分析分组下的日志类型说明页面。
+/// 渲染智能助手分组下的日志类型说明页面。
 fn render_ai_log_profiles_section(
     snapshot: &SettingsModalSnapshot,
     app_handle: &Entity<ArgusApp>,
@@ -961,7 +961,7 @@ fn render_ai_log_profiles_section(
     .into_any_element()
 }
 
-/// 渲染智能分析分组下的默认系统提示词入口。
+/// 渲染智能助手分组下的默认系统提示词入口。
 fn render_ai_system_prompt_section(
     snapshot: &SettingsModalSnapshot,
     app_handle: &Entity<ArgusApp>,
@@ -973,7 +973,7 @@ fn render_ai_system_prompt_section(
         "系统提示词",
         ArgusIcon::FileText,
         setting_group(theme).child(setting_row(
-            "默认专业提示",
+            "默认助手提示",
             ai_settings_entry_control(
                 format!("已配置 {character_count} 个字符"),
                 "编辑",
@@ -993,7 +993,7 @@ fn render_ai_system_prompt_section(
     .into_any_element()
 }
 
-/// 渲染智能分析分组下的 Skill 管理页面。
+/// 渲染智能助手分组下的 Skill 管理页面。
 fn render_ai_skills_section(
     snapshot: &SettingsModalSnapshot,
     app_handle: &Entity<ArgusApp>,
@@ -1234,7 +1234,7 @@ fn ai_settings_empty_row(message: &'static str, theme: &AppTheme) -> impl IntoEl
         .child(message)
 }
 
-/// 渲染智能分析设置行右侧的摘要和配置按钮。
+/// 渲染智能助手设置行右侧的摘要和配置按钮。
 fn ai_settings_entry_control(
     summary: String,
     button_label: &'static str,
@@ -1645,6 +1645,7 @@ fn render_jstack_filter_rule_editor_textarea(
                 trailing_accessory_always_visible: false,
                 trailing_accessory_selected: false,
                 native_input: Some(native_input),
+                footer_leading: None,
             },
             theme,
             move |event: &KeyDownEvent, _, cx| {

@@ -24,7 +24,9 @@ const TAB_OVERFLOW_MENU_WIDTH: f32 = 220.0;
 /// 搜索结果面板菜单宽度，仅包含展开/收起两项批量动作。
 const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
 /// 来源树右键菜单宽度，容纳 Jstack 和 Runtime 分析中文动作。
-const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
+pub(crate) const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
+/// 智能助手选择二级菜单宽度，容纳带序号的页签名称。
+pub(crate) const SOURCE_ASSISTANT_PICKER_MENU_WIDTH: f32 = 168.0;
 /// 链接树右键菜单宽度，容纳编辑和删除动作。
 const CONNECTION_TREE_CONTEXT_MENU_WIDTH: f32 = 152.0;
 /// 新增链接类型下拉菜单宽度，容纳 SSH/SMB/Git/SVN 四种连接类型。
@@ -36,7 +38,7 @@ const REMOTE_FILE_ENTRY_CONTEXT_MENU_WIDTH: f32 = 132.0;
 /// Git 版本下拉菜单宽度，兼顾较长分支和标签名。
 const REPOSITORY_VERSION_MENU_WIDTH: f32 = 260.0;
 /// 菜单项固定行高，供 `uniform_list` 稳定计算滚动范围。
-const MENU_ROW_HEIGHT: f32 = 34.0;
+pub(crate) const MENU_ROW_HEIGHT: f32 = 34.0;
 /// 菜单项水平内边距，和标签页右键菜单保持一致的舒展感。
 const MENU_ENTRY_HORIZONTAL_PADDING: f32 = 12.0;
 /// 菜单最大高度，超出后只在菜单内部滚动。
@@ -58,6 +60,11 @@ pub(crate) enum ActiveMenuKind {
     SearchResultsPanel,
     /// 来源树右键菜单，动作作用于被点击的日志候选节点或当前多选集合。
     SourceTree {
+        /// 被右键点击的来源节点 ID。
+        source_id: SourceId,
+    },
+    /// 来源树“添加到智能助手”的二级菜单。
+    SourceTreeAssistantPicker {
         /// 被右键点击的来源节点 ID。
         source_id: SourceId,
     },
@@ -131,6 +138,18 @@ pub(crate) enum MenuAction {
     /// 打开 Runtime 请求日志分析页签。
     OpenRuntimeAnalysis {
         /// 右键触发分析的来源节点 ID。
+        source_id: SourceId,
+    },
+    /// 把来源节点作为“@”引用添加到指定智能助手；`None` 表示新建助手。
+    AddSourceToAssistant {
+        /// 右键触发的来源节点 ID。
+        source_id: SourceId,
+        /// 目标助手页签 ID；为空时新建。
+        session_id: Option<usize>,
+    },
+    /// 打开智能助手选择二级菜单。
+    OpenAssistantPicker {
+        /// 右键触发的来源节点 ID。
         source_id: SourceId,
     },
     /// 编辑链接目录或 SSH 链接。
@@ -217,6 +236,16 @@ impl MenuAction {
             Self::OpenRuntimeAnalysis { source_id } => {
                 format!("open-runtime-analysis-{source_id}")
             }
+            Self::AddSourceToAssistant {
+                source_id,
+                session_id,
+            } => format!(
+                "add-source-to-assistant-{source_id}-{}",
+                session_id.map_or_else(|| "new".to_string(), |id| id.to_string())
+            ),
+            Self::OpenAssistantPicker { source_id } => {
+                format!("open-assistant-picker-{source_id}")
+            }
             Self::EditConnectionNode { node_id } => format!("edit-connection-node-{node_id}"),
             Self::DeleteConnectionNode { node_id } => {
                 format!("delete-connection-node-{node_id}")
@@ -275,6 +304,8 @@ pub(crate) struct MenuEntry {
     pub trailing_action: Option<MenuAction>,
     /// 菜单项图标；`None` 时只显示文字。
     pub icon: Option<ArgusIcon>,
+    /// 是否展开二级菜单；为 true 时在行尾展示向右箭头。
+    pub has_submenu: bool,
 }
 
 impl MenuEntry {
@@ -287,6 +318,7 @@ impl MenuEntry {
             is_danger: false,
             trailing_action: None,
             icon: None,
+            has_submenu: false,
         }
     }
 
@@ -315,6 +347,12 @@ impl MenuEntry {
         self.is_danger = true;
         self
     }
+
+    /// 标记菜单项会展开二级菜单。
+    pub(crate) fn with_submenu(mut self) -> Self {
+        self.has_submenu = true;
+        self
+    }
 }
 
 /// 渲染当前活动菜单；由主窗口根节点叠加调用。
@@ -335,6 +373,7 @@ pub(crate) fn render_active_menu(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> 
         ActiveMenuKind::TabOverflow => TAB_OVERFLOW_MENU_WIDTH,
         ActiveMenuKind::SearchResultsPanel => SEARCH_RESULTS_MENU_WIDTH,
         ActiveMenuKind::SourceTree { .. } => SOURCE_TREE_CONTEXT_MENU_WIDTH,
+        ActiveMenuKind::SourceTreeAssistantPicker { .. } => SOURCE_ASSISTANT_PICKER_MENU_WIDTH,
         ActiveMenuKind::ConnectionTree { .. } => CONNECTION_TREE_CONTEXT_MENU_WIDTH,
         ActiveMenuKind::ConnectionLinkCreate => CONNECTION_LINK_CREATE_MENU_WIDTH,
         ActiveMenuKind::TerminalContext { .. } => TERMINAL_CONTEXT_MENU_WIDTH,
@@ -479,6 +518,9 @@ fn render_menu_entry(
             )
         })
         .child(div().flex_1().truncate().child(entry.label))
+        .when(entry.has_submenu, |this| {
+            this.child(render_icon(ArgusIcon::Expand, theme.foreground_muted, 12.0))
+        })
         .when_some(trailing_action, |this, trailing_action| {
             let trailing_entity = app_entity.clone();
             let trailing_suffix = trailing_action.id_suffix();
@@ -501,16 +543,16 @@ fn render_menu_entry(
                             cx.stop_propagation();
                             let action = trailing_action.clone();
                             trailing_entity.update(cx, |app, cx| {
-                                app.handle_menu_trailing_action_with_context(action, cx);
+                                app.handle_menu_trailing_action_with_context(action, None, cx);
                                 cx.notify();
                             });
                         },
                     )),
             )
         })
-        .on_click(cx.listener(move |app, _, _, cx| {
+        .on_click(cx.listener(move |app, _, window, cx| {
             cx.stop_propagation();
-            app.handle_menu_action_with_context(action.clone(), cx);
+            app.handle_menu_action_with_context(action.clone(), Some(window), cx);
             cx.notify();
         }))
 }

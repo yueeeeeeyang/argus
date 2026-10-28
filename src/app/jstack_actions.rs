@@ -316,7 +316,7 @@ impl ArgusApp {
             kind: TabKind::JstackAnalysis { analysis_id },
         });
         self.active_tab_id = Some(tab_id);
-        self.close_log_search_results_for_active_analysis_tab();
+        self.close_log_search_results_for_active_non_log_tab();
         self.log_tab_view_states.remove(&tab_id);
 
         let generation = 1;

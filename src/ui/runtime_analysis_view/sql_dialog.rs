@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::components::scrollbar::scroll_area_hover_handler;
 
 pub(crate) fn render_runtime_sql_text_dialog(
     analysis_id: usize,
@@ -155,6 +156,7 @@ pub(crate) fn render_sql_dialog_code_block(
         .child(
             div()
                 .id("runtime-sql-dialog-code-scroll")
+                .on_hover(scroll_area_hover_handler("runtime".to_string()))
                 .overflow_y_scroll()
                 .scrollbar_width(px(6.0))
                 .track_scroll(&scroll_handle)

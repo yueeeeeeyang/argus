@@ -151,6 +151,27 @@ impl ArgusApp {
                         .with_icon(ArgusIcon::Timer),
                     );
                 }
+                let assistant_tabs = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| matches!(tab.kind, TabKind::Assistant { .. }))
+                    .collect::<Vec<_>>();
+                let assistant_action = if assistant_tabs.len() > 1 {
+                    MenuAction::OpenAssistantPicker { source_id }
+                } else {
+                    MenuAction::AddSourceToAssistant {
+                        source_id,
+                        session_id: assistant_tabs.first().map(|tab| tab.id),
+                    }
+                };
+                let has_assistant_picker =
+                    matches!(assistant_action, MenuAction::OpenAssistantPicker { .. });
+                let mut add_entry = MenuEntry::new("添加到智能助手", assistant_action)
+                    .with_icon(ArgusIcon::SmartAnalysis);
+                if has_assistant_picker {
+                    add_entry = add_entry.with_submenu();
+                }
+                entries.push(add_entry);
                 // 另存为放在菜单最后，避免分析类入口被文件操作打断。
                 if self.source_is_exportable_file(source_id) {
                     entries.push(
@@ -160,6 +181,21 @@ impl ArgusApp {
                 }
                 entries
             }
+            ActiveMenuKind::SourceTreeAssistantPicker { source_id } => self
+                .tabs
+                .iter()
+                .filter(|tab| matches!(tab.kind, TabKind::Assistant { .. }))
+                .map(|tab| {
+                    MenuEntry::new(
+                        tab.title.clone(),
+                        MenuAction::AddSourceToAssistant {
+                            source_id,
+                            session_id: Some(tab.id),
+                        },
+                    )
+                    .with_icon(ArgusIcon::SmartAnalysis)
+                })
+                .collect(),
             ActiveMenuKind::ConnectionTree { node_id } => {
                 if self.config.connections.is_directory(node_id) {
                     // 目录菜单直接提供四种协议的新建入口；父目录由右键选中的节点推导。
@@ -313,6 +349,9 @@ impl ArgusApp {
             MenuAction::OpenRuntimeAnalysis { .. } => {
                 self.placeholder_notice = "Runtime 分析需要从界面菜单触发".to_string();
             }
+            MenuAction::AddSourceToAssistant { .. } | MenuAction::OpenAssistantPicker { .. } => {
+                self.placeholder_notice = "添加到智能助手需要从来源树右键菜单触发".to_string();
+            }
             MenuAction::EditConnectionNode { .. } => {
                 self.placeholder_notice = "连接编辑需要从界面菜单触发".to_string();
             }
@@ -365,6 +404,7 @@ impl ArgusApp {
     pub(crate) fn handle_menu_trailing_action_with_context(
         &mut self,
         action: MenuAction,
+        window: Option<&mut gpui::Window>,
         cx: &mut Context<Self>,
     ) {
         match action {
@@ -378,7 +418,7 @@ impl ArgusApp {
                 // 关闭最后一个标签后不再恢复空的标签下拉菜单。
                 self.active_menu = tab_overflow_menu.filter(|_| !self.tabs.is_empty());
             }
-            other => self.handle_menu_action_with_context(other, cx),
+            other => self.handle_menu_action_with_context(other, window, cx),
         }
     }
 
@@ -386,6 +426,7 @@ impl ArgusApp {
     pub(crate) fn handle_menu_action_with_context(
         &mut self,
         action: MenuAction,
+        window: Option<&mut gpui::Window>,
         cx: &mut Context<Self>,
     ) {
         match action {
@@ -415,6 +456,16 @@ impl ArgusApp {
             }
             MenuAction::OpenRuntimeAnalysis { source_id } => {
                 self.open_runtime_analysis_tab(source_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::OpenAssistantPicker { source_id } => {
+                self.open_assistant_picker_menu(source_id);
+            }
+            MenuAction::AddSourceToAssistant {
+                source_id,
+                session_id,
+            } => {
+                self.add_source_to_assistant(source_id, session_id, window, cx);
                 self.close_active_menu();
             }
             MenuAction::EditConnectionNode { node_id } => {

@@ -1,10 +1,11 @@
 //! 文件职责：组织 Argus AI Agent 的领域模块和公共入口。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-09-14
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
-//! 主要功能：导出凭据、通用智能体循环、来源快照和模型能力探测所需类型。
+//! 主要功能：导出凭据、通用智能体循环、智能助手装配、来源快照和模型能力探测所需类型。
 
 pub(crate) mod agent_loop;
+pub(crate) mod assistant;
 pub(crate) mod credential;
 pub(crate) mod model_gateway;
 pub(crate) mod runtime;
@@ -13,7 +14,7 @@ pub(crate) mod skills;
 pub(crate) mod source_scan;
 pub(crate) mod tools;
 
-pub(crate) use agent_loop::{AgentLoopNote, AgentLoopRequest, run_agent_loop};
+pub(crate) use assistant::{AssistantHistoryTurn, AssistantRunRequest, run_assistant_turn};
 pub(crate) use credential::{load_api_key, save_api_key};
 pub(crate) use model_gateway::probe_model_capabilities;
 pub(crate) use runtime::agent_runtime;
@@ -22,9 +23,7 @@ pub(crate) use session::{
     AgentTraceKind, AgentUserMessage, AgentUserMessageStatus, BashApprovalDecision,
     SourceScopeSnapshot,
 };
-pub(crate) use source_scan::{
-    AgentLogProfileMatchSummary, AgentSourcePreparation, prepare_agent_source_scope,
-};
+pub(crate) use source_scan::prepare_agent_source_scope;
 
 #[cfg(test)]
 mod architecture_tests {

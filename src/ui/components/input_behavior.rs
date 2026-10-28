@@ -29,12 +29,14 @@ pub(crate) enum LocalInputAction {
 /// 参数说明：
 /// - `input`：当前输入状态。
 /// - `keystroke`：GPUI 归一化按键。
-/// - `multiline`：是否允许普通 Enter 插入换行；多行提交使用 Cmd/Ctrl+Enter。
+/// - `multiline`：是否为多行输入；多行时由 `enter_submits` 决定普通 Enter 的行为。
+/// - `enter_submits`：多行输入中普通 Enter 是否提交；为 false 时使用 Cmd/Ctrl+Enter 提交。
 /// - `cx`：用于读写系统剪贴板。
 pub(crate) fn handle_local_input_key(
     input: &mut TextInputState,
     keystroke: &Keystroke,
     multiline: bool,
+    enter_submits: bool,
     cx: &mut App,
 ) -> LocalInputAction {
     if let Some(action) = handle_clipboard(input, keystroke, multiline, cx) {
@@ -43,6 +45,11 @@ pub(crate) fn handle_local_input_key(
     match keystroke.key.as_str() {
         "escape" => LocalInputAction::Close,
         "enter" if multiline && keystroke.modifiers.secondary() => LocalInputAction::Submit,
+        "enter" if multiline && keystroke.modifiers.shift => {
+            insert_text(input, "\n");
+            LocalInputAction::Changed
+        }
+        "enter" if multiline && enter_submits => LocalInputAction::Submit,
         "enter" if multiline => {
             insert_text(input, "\n");
             LocalInputAction::Changed
@@ -218,4 +225,53 @@ fn clear_selection(input: &mut TextInputState) {
     input.selection_anchor = None;
     input.marked_range = None;
     input.selection_drag = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext};
+
+    /// 构造 Enter 按键，区分普通回车与 Shift+Enter。
+    fn enter_keystroke(shift: bool) -> Keystroke {
+        Keystroke {
+            key: "enter".to_string(),
+            modifiers: Modifiers {
+                shift,
+                ..Modifiers::default()
+            },
+            key_char: None,
+        }
+    }
+
+    /// 验证聊天输入 Enter 提交、Shift+Enter 换行；设置类多行输入保持 Enter 换行。
+    #[gpui::test]
+    fn chat_enter_submits_and_shift_enter_inserts_newline(cx: &mut TestAppContext) {
+        let mut chat_input = TextInputState::from_value("你好".to_string());
+        let mut settings_input = TextInputState::from_value("规则".to_string());
+        cx.update(|app| {
+            assert_eq!(
+                handle_local_input_key(&mut chat_input, &enter_keystroke(false), true, true, app),
+                LocalInputAction::Submit
+            );
+            assert_eq!(chat_input.value, "你好");
+            assert_eq!(
+                handle_local_input_key(&mut chat_input, &enter_keystroke(true), true, true, app),
+                LocalInputAction::Changed
+            );
+            assert_eq!(chat_input.value, "你好\n");
+
+            assert_eq!(
+                handle_local_input_key(
+                    &mut settings_input,
+                    &enter_keystroke(false),
+                    true,
+                    false,
+                    app
+                ),
+                LocalInputAction::Changed
+            );
+            assert_eq!(settings_input.value, "规则\n");
+        });
+    }
 }

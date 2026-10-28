@@ -1,10 +1,9 @@
 //! 文件职责：bash 命令审批确认卡片组件。
 //! 创建日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：供智能分析窗口使用的审批状态模型和内联确认卡片渲染。
+//! 主要功能：提供审批状态模型和内联确认卡片渲染。
 
 use gpui::{App, ClickEvent, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
-use std::time::SystemTime;
 
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::theme::AppTheme;
@@ -19,31 +18,6 @@ pub(crate) enum BashApprovalStatus {
     Approved,
     /// 已拒绝执行；携带界面展示的中文原因。
     Denied(String),
-}
-
-/// 会话内的 bash 审批卡片状态；模型经工具等待用户决定。
-#[derive(Clone, Debug)]
-pub(crate) struct BashApprovalCard {
-    /// 审批请求标识。
-    pub request_id: String,
-    /// 待审批的完整命令。
-    pub command: String,
-    /// 卡片创建时间；用于与消息按时间顺序交错展示。
-    pub created_at: SystemTime,
-    /// 当前审批状态。
-    pub status: BashApprovalStatus,
-}
-
-impl BashApprovalCard {
-    /// 创建一条等待答复的审批卡片。
-    pub(crate) fn pending(request_id: String, command: String) -> Self {
-        Self {
-            request_id,
-            command,
-            created_at: SystemTime::now(),
-            status: BashApprovalStatus::Pending,
-        }
-    }
 }
 
 /// 把工具侧审批结论原因映射为界面展示的中文说明。

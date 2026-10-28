@@ -121,12 +121,12 @@ Argus 围绕 GPUI 的 `Entity`、`Context`、`Render` 与事件订阅能力组�
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────┘ │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────┐ │
 │  │ 设置窗口     │  │ 分析结果视图  │  │ 远程会话视图  │  │ 独立窗口 │ │
-│  │settings_window│ │jstack/runtime│  │terminal/remote│ │4 类辅助  │ │
+│  │settings_window│ │jstack/runtime│  │terminal/remote│ │3 类辅助  │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────┘ │
 ├─────────────────────────────────────────────────────────────────────┤
 │                     UI 组件层 (src/ui/components)                    │
 │  输入框 │ 弹窗 │ 下拉框 │ 右键菜单 │ 滚动条 │ 图标按钮 │ Markdown     │
-│  日期选择 │ bash 审批卡片 │ 加载动画 │ 窗口标题栏                      │
+│  日期选择 │ bash 审批卡片 │ 加载动画 │ 图标与颜色                      │
 ├─────────────────────────────────────────────────────────────────────┤
 │                     应用状态层 (src/app.rs + src/app/*)               │
 │  ArgusApp 单一根状态实体；按域拆分的 impl 模块：日志搜索、来源树、      │
@@ -527,11 +527,12 @@ AI 层是**运行在物化工作目录上的通用智能体**，不包含任何�
 AI 层：src/agent/agent_loop.rs 通用单轮模型循环
   ├─ preamble = 英文安全骨架 + <CONFIGURED_SYSTEM_PROMPT> + <SKILLS>
   └─ 工具 = list_loaded_sources + read_file + bash（均限定工作目录）
-产品入口：agent_window（来源树「智能分析」独立窗口）
+产品入口：assistant_tab（来源树「智能助手」对话页签）
 Skill：src/agent/skills.rs，仅用户导入
 ```
 
-智能分析窗口直接复用通用智能体循环与 Skill 集，不再维护主窗口内的交互助手会话。
+智能助手页签直接复用通用智能体循环与 Skill 集；每次点击入口创建独立会话，不自动发起分析。
+普通问候和一般问题直接回答，只有用户明确需要日志或诊断帮助时才调用工作区工具。
 
 #### 4.5.2 工具契约（`src/agent/tools.rs`）
 
@@ -546,14 +547,17 @@ Skill：src/agent/skills.rs，仅用户导入
 #### 4.5.3 安全骨架与 bash 审批
 
 **只读白名单自动执行**：`ls cat grep head tail wc find sort uniq awk sed cut tr echo pwd
-stat file du df`。校验按段（管道、`;`、`&&`、`||`、换行）解析，每段首词必须是白名单命令，
-并跳过段首环境变量赋值。
+stat file du df cd`。校验按段（管道、`;`、`&&`、`||`、换行）解析，并跟踪 `cd` 后的当前目录；
+每段首词必须是白名单命令，全部路径形态参数落在工作目录内。`2>/dev/null`、`2>&1` 等只读
+重定向直接放行；`find -exec/-execdir` 仅允许嵌套另一个只读白名单命令；单层只读
+`for` 循环在循环项安全且循环体全部为只读命令时也会放行。
 
-**一律转人工审批**的形态：`sed -i`、`find -delete`/`-exec` 族、`sort -o`、`awk system()`、
-输出重定向 `>`、命令替换 `$(`/反引号、`~`，以及任何越出工作目录的路径形态参数。
+**一律转人工审批**的形态：`sed -i`、`find -delete`/`-fprint`/`-ok`、`find -exec` 派生的
+非白名单命令、`sort -o`、`awk system()`、写文件重定向、命令替换 `$(`/反引号、`~`，
+以及任何越出工作目录的路径形态参数。
 
 **审批通道**：工具挂起等待 oneshot；`AgentEvent::BashApprovalRequired` 携带完整命令，
-两个界面渲染内联确认卡片（`src/ui/components/bash_approval.rs`）。**60 s 未答复、会话取消
+智能助手页渲染内联确认卡片（`src/ui/components/bash_approval.rs`）。**60 s 未答复、会话取消
 或界面关闭都按拒绝收敛**，并发布结论事件固化卡片状态。
 
 **系统提示词**：英文书写、位于最高层，不可被用户提示词、日志内容或工具输出覆盖；声明
@@ -807,13 +811,12 @@ SSH/SMB/SVN 密码、Git 访问令牌与私钥口令**不再写入 `settings.tom
 | `context_menu` | 右键上下文菜单 | 分组与图标 |
 | `dropdown` | 下拉选择 | 主题、编码、排序字段等复用 |
 | `icon` / `icon_button` | 图标与图标按钮 | 通用界面使用 Lucide 单色图标；日志来源树与链接目录树共用 Material Icon Theme 5.38.1 彩色子集（与 BaoCode Fast IDE 同版本）：按精确文件名 → 压缩包/日志特判 → 最长扩展名解析文件图标；目录统一使用第一版的棕色 `folder-base` / `folder-base-open`，链接树按协议使用 `console`（SSH）/ `database`（SMB）/ `git` / `changelog`（SVN）；16px，因 GPUI `svg()` 为单色蒙版，图标以 64×64 透明 PNG 经 `img()` 渲染，MIT 许可见 `assets/icons/material/LICENSE`，重新生成脚本为 `scripts/generate_material_icons.sh`、悬停提示与尺寸分级 |
-| `scrollbar` | 自定义滚动条 | 虚拟列表与正文区共享拖拽语义 |
+| `scrollbar` | 自定义滚动条 | 鼠标进入可滚动区域时显示，离开后立即隐藏；虚拟列表与正文区共享拖拽语义 |
 | `datetime_picker` | 日期时间选择 | Runtime 分析时间范围过滤 |
 | `bash_approval` | bash 审批卡片 | 展示完整命令与判定原因，批准/拒绝并固化结论 |
 | `connection_lost` | 连接断开状态面板 | 整窗展示断开/失败原因与重连按钮，终端与远程文件管理共用 |
 | `markdown` | Markdown 渲染 | 驱动 AI 消息正文展示 |
 | `loading_spinner` | 加载动画 | 统一等待态 |
-| `window_title_bar` | 子窗口标题栏 | 独立窗口复用 |
 
 **说明**：早期文档中列举的 `ActivityBar`、`StatusBar`、`VirtualList`、`TreeView`、
 `SearchBox`、`SplitPane` 等组件**已不存在或从未实现**。当前主窗口没有独立的左侧活动栏
@@ -834,7 +837,7 @@ SSH/SMB/SVN 密码、Git 访问令牌与私钥口令**不再写入 `settings.tom
 `main_window.rs`（主窗口装配）、`custom_title_bar.rs`（标题栏）、`tab_bar.rs`（标签栏）、
 `source_panel.rs` / `dir_tree_panel.rs`（来源树与侧栏）、`toolbar.rs`（侧栏上下文工具栏）、
 `source_picker.rs`（自定义来源选择器）、`settings_window.rs`（设置）、
-`ai_settings_editor.rs`（模型与提示词配置）、`agent_window.rs`（智能分析窗口）、
+`ai_settings_editor.rs`（模型与提示词配置）、`assistant_tab.rs`（智能助手页签）、
 `jstack_analysis_view.rs` /
 `jstack_thread_detail_window.rs`、`runtime_analysis_view/`、`log_search_dialog.rs`、
 `connection_dialog.rs` / `connection_tree_panel.rs` / `terminal_view.rs` /
@@ -900,7 +903,7 @@ XML、JSON、YAML、Java、JavaScript、CSS、JSP、SQL、Shell，另有不做�
 ├────────────────┬────────────────────────────────────────────────────┤
 │ 来源侧栏        │  ╭──────────────────────────────────────────────╮  │
 │ [加载][过滤]    │  │  1 │ 2024-01-15 10:23:45 [INFO] ...          │  │
-│ [全收][智能分析]│  │  2 │ 2024-01-15 10:23:46 [DEBUG] ...         │  │
+│ [全收][智能助手]│  │  2 │ 2024-01-15 10:23:46 [DEBUG] ...         │  │
 │ ┌ logs         │  │  3 │ 2024-01-15 10:23:47 [WARN] ...          │  │
 │ │  app.log     │  │  4 │ 2024-01-15 10:23:48 [ERROR] ...         │  │
 │ │  error.log   │  │                                            │  │
@@ -935,7 +938,7 @@ XML、JSON、YAML、Java、JavaScript、CSS、JSP、SQL、Shell，另有不做�
    链接工作区各自记忆侧栏宽度；宽度拖拽命中区与内容玻璃板左缘重合（侧栏背景与窗口背景
    同色，视觉分界线是玻璃板左侧边框），纵向只覆盖内容区，命中区透明不改变外观；
 5. **内容区玻璃板**：内容区以圆角玻璃板形态浮在窗口背景上，用阴影与亮色外描边构成层级；
-6. **侧栏上下文工具**：加载日志、过滤、全部收起、智能分析等操作放在侧栏工具区，
+6. **侧栏上下文工具**：加载日志、过滤、全部收起、智能助手等操作放在侧栏工具区，
    不单独占用整行工具栏；
 7. **紧凑间距**：控件间距控制在 2–4 px，最大化信息密度。
 
@@ -977,8 +980,9 @@ XML、JSON、YAML、Java、JavaScript、CSS、JSP、SQL、Shell，另有不做�
 | `RuntimeAnalysis` | Runtime 请求与 SQL 分析视图 |
 | `SshTerminal` | SSH 终端 |
 | `RemoteFileManager` | 远程文件管理（SFTP / SMB / Git / SVN 共用） |
+| `Assistant` | 智能助手对话页签；每次入口创建独立会话，标题自动编号；支持全文选择复制 |
 
-**独立原生窗口**共 4 类：智能分析窗口、Jstack 线程详情、文件预览、Jstack 过滤规则编辑器。
+**独立原生窗口**共 3 类：Jstack 线程详情、文件预览、Jstack 过滤规则编辑器。
 其余（设置、AI 设置编辑器、来源选择器、连接对话框、日志搜索、压缩包密码弹窗、
 bash 审批卡片）都是主窗口元素树中的覆盖层。
 
@@ -1133,7 +1137,7 @@ generation 校验是否为过期结果。
 | **虚拟列表** | 只渲染可见范围 | 内存与 GPU 负载随视口稳定 |
 | **增量渲染** | GPUI 自动仅重绘变更区域 | 减少绘制调用 |
 | **高亮缓存** | 高亮区间按行缓存并合并 | 避免重复匹配 |
-| **滚动条轻量化** | 自定义滚动条共享拖拽语义，节流刷新 | 减少高频重绘 |
+| **滚动条轻量化** | 自定义滚动条共享拖拽语义，仅在悬停可滚动区域时显示 | 减少高频重绘，避免长期占用内容边缘 |
 | **事件合并** | AI 事件批量取用（≤128）并加极短合并窗口 | 流式输出不阻塞主线程 |
 
 ### 7.4 搜索与分析
@@ -1259,7 +1263,7 @@ argus/
     │   │   ├── mod.rs                              # 模块声明
     │   │   ├── remote_file_actions.rs              # 远程文件管理动作
     │   │   └── terminal_actions.rs                 # SSH 终端动作
-    │   ├── agent_actions.rs                        # 智能分析窗口编排
+    │   ├── assistant_actions.rs                   # 智能助手页签创建与模型同步
     │   ├── constants.rs                            # UI 时序与尺寸常量
     │   ├── jstack_actions.rs                       # Jstack 分析编排与取消
     │   ├── jstack_state.rs                         # Jstack 分析与任务状态
@@ -1377,8 +1381,7 @@ argus/
     │   │   ├── markdown.rs                         # Markdown 渲染
     │   │   ├── mod.rs
     │   │   ├── modal_dialog.rs                     # 模态对话框容器
-    │   │   ├── scrollbar.rs                        # 自定义滚动条
-    │   │   └── window_title_bar.rs                 # 子窗口标题栏
+    │   │   └── scrollbar.rs                        # 自定义滚动条
     │   ├── log_content_view/                       # 内容区分片
     │   │   ├── log_lines.rs                        # 标签类型分派与正文
     │   │   ├── scrollbars.rs                       # 内存文档滚动条
@@ -1391,9 +1394,8 @@ argus/
     │   │   ├── sql_dialog.rs                       # SQL 原文弹窗
     │   │   ├── table_parts.rs                      # 表格构件
     │   │   └── tables.rs                           # 三类结果表
-    │   ├── agent_dialog.rs                         # 智能分析启动对话框
-    │   ├── agent_window.rs                         # 智能分析独立窗口
     │   ├── ai_settings_editor.rs                   # 模型与提示词配置
+    │   ├── assistant_tab.rs                        # 智能助手对话页签
     │   ├── archive_password_dialog.rs              # 压缩包密码弹窗
     │   ├── connection_dialog.rs                    # 链接新增/编辑
     │   ├── connection_tree_panel.rs                # 链接树

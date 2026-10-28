@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-12
 //! 修改日期：2026-09-24
 //! 作者：Argus 开发团队
-//! 主要功能：维护设置模态框、智能分析设置和 Jstack 过滤规则编辑器，并统一持久化相关偏好。
+//! 主要功能：维护设置模态框、智能助手设置和 Jstack 过滤规则编辑器，并统一持久化相关偏好。
 
 use std::borrow::Borrow;
 use std::ops::Range;
@@ -80,14 +80,14 @@ impl ArgusApp {
         );
     }
 
-    /// 按指定类型创建智能分析设置子对话框，并阻止多个编辑器相互覆盖草稿。
+    /// 按指定类型创建智能助手设置子对话框，并阻止多个编辑器相互覆盖草稿。
     fn open_ai_settings_editor(
         &mut self,
         kind: crate::ui::ai_settings_editor::AiSettingsEditorKind,
         cx: &mut Context<Self>,
     ) {
         if self.ai_settings_editor_modal.is_some() {
-            self.placeholder_notice = "智能分析配置对话框已经打开".to_string();
+            self.placeholder_notice = "智能助手配置对话框已经打开".to_string();
             return;
         }
         let app = cx.entity();
@@ -103,7 +103,7 @@ impl ArgusApp {
     /// 关闭 AI 配置编辑器，不保存尚未提交的草稿。
     pub(crate) fn close_ai_settings_editor(&mut self) {
         self.ai_settings_editor_modal = None;
-        self.placeholder_notice = "已关闭智能分析配置对话框".to_string();
+        self.placeholder_notice = "已关闭智能助手配置对话框".to_string();
     }
 
     /// 校验并持久化 AI 非敏感配置和可选 API Key。
@@ -111,6 +111,7 @@ impl ArgusApp {
         &mut self,
         mut config: crate::config::AiConfig,
         credential: Option<(String, String)>,
+        cx: &mut Context<Self>,
     ) -> Result<(), String> {
         config.normalize();
         if !config.model_profiles.is_empty() {
@@ -135,6 +136,15 @@ impl ArgusApp {
             crate::config::ai_config::validate_ai_base_url(&credential_base_url)?;
             crate::agent::save_api_key(&credential_base_url, api_key.trim())?;
         }
+        let mut next_app_config = self.config.clone();
+        next_app_config.ai = config;
+        self.config_manager
+            .save(&next_app_config)
+            .map_err(|error| format!("保存智能助手设置失败：{error}"))?;
+        self.config = next_app_config;
+        self.ai_settings_editor_modal = None;
+        self.placeholder_notice = "智能助手设置已保存".to_string();
+        self.refresh_assistant_model_configuration(cx);
         Ok(())
     }
 

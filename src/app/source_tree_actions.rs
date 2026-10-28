@@ -360,6 +360,8 @@ impl ArgusApp {
         self.log_read_states.clear();
         self.log_reader_generations.clear();
         self.log_tab_view_states.clear();
+        // 智能助手依赖当前日志工作目录；来源整体替换后丢弃旧会话，避免继续访问已删除的物化目录。
+        self.assistant_tabs.clear();
         self.jstack_analyses.clear();
         self.next_jstack_analysis_id = 1;
         self.runtime_analyses.clear();

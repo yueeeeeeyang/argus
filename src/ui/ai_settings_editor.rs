@@ -1,8 +1,8 @@
-//! 文件职责：渲染智能分析的模型配置、日志类型说明与默认系统提示词子对话框。
+//! 文件职责：渲染智能助手的模型配置、日志类型说明与默认系统提示词子对话框。
 //! 创建日期：2026-07-15
 //! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
-//! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、原文授权、日志类型匹配规则、分析说明和专业提示词。
+//! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、原文授权、日志类型匹配规则、分析说明和助手提示词。
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement,
@@ -26,7 +26,9 @@ use crate::ui::components::input::{
 };
 use crate::ui::components::input_behavior::{LocalInputAction, handle_local_input_key};
 use crate::ui::components::modal_dialog::{MODAL_BOTTOM_PADDING, ModalDialog, render_modal_dialog};
-use crate::ui::components::scrollbar::scrollbar_metrics;
+use crate::ui::components::scrollbar::{
+    scroll_area_hover_handler, scrollbar_metrics, with_scrollbar_visibility,
+};
 
 /// 模型配置对话框宽度；保持在常规表单对话框范围内，避免三项输入被无意义拉宽。
 const AI_MODEL_EDITOR_WIDTH: f32 = 680.0;
@@ -36,7 +38,7 @@ const AI_MODEL_EDITOR_HEIGHT: f32 = 520.0;
 const AI_LOG_PROFILE_EDITOR_WIDTH: f32 = 680.0;
 /// 单项日志类型说明对话框高度。
 const AI_LOG_PROFILE_EDITOR_HEIGHT: f32 = 600.0;
-/// 默认系统提示词编辑对话框宽度，给较长的专业指令保留可读行宽。
+/// 默认系统提示词编辑对话框宽度，给较长的助手指令保留可读行宽。
 const AI_SYSTEM_PROMPT_EDITOR_WIDTH: f32 = 760.0;
 /// 默认系统提示词编辑对话框高度。
 const AI_SYSTEM_PROMPT_EDITOR_HEIGHT: f32 = 620.0;
@@ -52,7 +54,7 @@ const AI_EDITOR_SCROLLBAR_THUMB_WIDTH: f32 = 4.0;
 const AI_EDITOR_SCROLLBAR_PADDING: f32 = 2.0;
 /// 编辑器纵向滚动条滑块最小高度。
 const AI_EDITOR_SCROLLBAR_MIN_THUMB: f32 = 18.0;
-/// 智能分析设置子对话框类型。
+/// 智能助手设置子对话框类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiSettingsEditorKind {
     /// 新增模型，或按设置列表索引编辑现有模型。
@@ -178,7 +180,7 @@ struct ProfileDraft {
 /// 完整 AI 配置草稿。
 #[derive(Clone)]
 struct AiSettingsDraft {
-    /// 可供智能分析选择的模型配置草稿。
+    /// 可供智能助手选择的模型配置草稿。
     models: Vec<ModelDraft>,
     /// 当前单项模型编辑索引。
     selected_model: Option<usize>,
@@ -190,7 +192,7 @@ struct AiSettingsDraft {
     request_timeout_seconds: u64,
     /// 单次模型请求失败后的最大自动重试次数。
     max_retry_attempts: TextInputState,
-    /// 用户可编辑的专业分析系统提示词。
+    /// 用户可编辑的助手系统提示词。
     system_prompt: TextInputState,
     /// 被禁用的 Skill 名称；编辑入口在设置的 Skill 管理分区，这里保持透传。
     disabled_skills: Vec<String>,
@@ -563,7 +565,7 @@ impl AiSettingsEditor {
         let Some(input) = self.input_mut(field) else {
             return;
         };
-        match handle_local_input_key(input, &event.keystroke, multiline, cx) {
+        match handle_local_input_key(input, &event.keystroke, multiline, false, cx) {
             LocalInputAction::Close => self.close(cx),
             LocalInputAction::Changed | LocalInputAction::Submit => {
                 self.error_message = None;
@@ -624,7 +626,7 @@ impl AiSettingsEditor {
             .and_then(|index| self.draft.models.get(index))
             .map(|model| (model.base_url.value.clone(), model.api_key.value.clone()));
         let result = self.app.update(cx, |app, app_cx| {
-            let result = app.save_ai_settings(config, credential);
+            let result = app.save_ai_settings(config, credential, app_cx);
             app_cx.notify();
             result
         });
@@ -725,7 +727,7 @@ impl AiSettingsEditor {
         }
         let config = self.draft.to_config();
         let result = self.app.update(cx, |app, app_cx| {
-            let result = app.save_ai_settings(config, None);
+            let result = app.save_ai_settings(config, None, app_cx);
             app_cx.notify();
             result
         });
@@ -864,8 +866,7 @@ impl Render for AiSettingsEditor {
                                             .to_string()
                                     }
                                     AiSettingsEditorKind::SystemPrompt => {
-                                        "提示词只补充专业角色，不能覆盖固定流程和安全规则"
-                                            .to_string()
+                                        "提示词只补充角色与领域知识，不能覆盖安全规则".to_string()
                                     }
                                 }
                             })),
@@ -947,6 +948,7 @@ fn render_model_configuration(
     let scroll_handle = editor.model_scroll.clone();
     let content = div()
         .id("ai-model-editor-scroll")
+        .on_hover(scroll_area_hover_handler("ai-settings".to_string()))
         .size_full()
         .overflow_y_scroll()
         .scrollbar_width(px(AI_EDITOR_SCROLLBAR_WIDTH))
@@ -982,7 +984,7 @@ fn render_model_configuration(
                         ))
                         .child(labeled_input(
                             "配置名称",
-                            "用于设置列表和发起智能分析时选择模型。",
+                            "用于设置列表和发起智能助手会话时选择模型。",
                             render_local_input(
                                 entity.clone(),
                                 AiDraftField::ModelName,
@@ -1120,7 +1122,7 @@ fn render_model_configuration(
                 )
                 .child(editor_section_heading(
                     "数据发送",
-                    "智能分析默认只使用来源元数据和本地聚合结果。",
+                    "智能助手默认只使用来源元数据和本地聚合结果。",
                     theme,
                 ))
                 .child(
@@ -1180,6 +1182,7 @@ fn render_log_profile_configuration(
         .child(
             div()
                 .id("ai-profile-editor-scroll")
+                .on_hover(scroll_area_hover_handler("ai-settings".to_string()))
                 .size_full()
                 .overflow_y_scroll()
                 .scrollbar_width(px(AI_EDITOR_SCROLLBAR_WIDTH))
@@ -1503,8 +1506,8 @@ fn render_profile_editor(
 
 /// 渲染全局默认系统提示词编辑页。
 ///
-/// 可编辑内容只作为低优先级专业指令注入；编排器中的固定分析流程、最高思考模式、工具权限和
-/// 强制证据校验不在此处展示或开放修改，避免配置误操作削弱安全边界。
+/// 可编辑内容只作为低优先级助手指令注入；编排器中的工具权限、工作区边界和强制证据校验
+/// 不在此处展示或开放修改，避免配置误操作削弱安全边界。
 fn render_system_prompt_configuration(
     editor: &AiSettingsEditor,
     entity: Entity<AiSettingsEditor>,
@@ -1520,8 +1523,8 @@ fn render_system_prompt_configuration(
         .flex_col()
         .gap_4()
         .child(editor_section_heading(
-            "专业分析提示",
-            "用于补充角色、领域知识和表达偏好；新安装与旧配置会自动采用内置默认值。",
+            "助手提示词",
+            "用于补充角色、领域知识和表达偏好；默认提示词先理解意图，仅在需要时查阅日志。",
             theme,
         ))
         .child(
@@ -1536,7 +1539,7 @@ fn render_system_prompt_configuration(
                     editor.system_prompt_scroll.clone(),
                     editor.system_prompt_scroll_state.clone(),
                     "ai-system-prompt",
-                    "填写专业角色、领域知识和输出偏好",
+                    "填写角色、领域知识和输出偏好",
                     16,
                     theme,
                 ))
@@ -1722,6 +1725,7 @@ fn render_local_textarea(
             trailing_accessory_always_visible: false,
             trailing_accessory_selected: false,
             native_input: Some(native_input),
+            footer_leading: None,
         },
         theme,
         move |event, _, app_cx| {
@@ -1784,7 +1788,7 @@ fn render_editor_vertical_scrollbar(
             .right_0()
             .bottom_0()
             .w(px(AI_EDITOR_SCROLLBAR_WIDTH))
-            .child(
+            .child(with_scrollbar_visibility(
                 div()
                     .absolute()
                     .top(metrics.thumb_start)
@@ -1792,9 +1796,10 @@ fn render_editor_vertical_scrollbar(
                     .w(px(AI_EDITOR_SCROLLBAR_THUMB_WIDTH))
                     .h(metrics.thumb_length)
                     .rounded_lg()
-                    .bg(rgb(theme.foreground_muted))
-                    .opacity(0.48),
-            )
+                    .bg(rgb(theme.foreground_muted)),
+                "ai-settings",
+                0.48,
+            ))
             .into_any_element();
     }
 

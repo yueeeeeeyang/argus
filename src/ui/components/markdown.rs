@@ -100,8 +100,123 @@ pub(crate) fn render_markdown(
     style: MarkdownStyle,
     theme: &AppTheme,
 ) -> AnyElement {
-    let document = parse_markdown(markdown);
+    // 模型常在列表项内部用空行分隔行内片段，CommonMark 会把它们拆成多个段落。
+    // 展示前合并列表项内的空行，并转义孤立的 + / - / *，避免被误解析成嵌套列表。
+    let normalized = normalize_markdown_for_display(markdown);
+    let document = parse_markdown(&normalized);
     render_markdown_children(&document.children, style, theme)
+}
+
+/// 把 Markdown 转成适合“选择复制”模式的纯文本，保留段落、列表和代码块边界。
+pub(crate) fn markdown_plain_text(markdown: &str) -> String {
+    let normalized = normalize_markdown_for_display(markdown);
+    let document = parse_markdown(&normalized);
+    let mut text = String::new();
+    append_plain_markdown(&document, &mut text);
+    text.trim().to_string()
+}
+
+/// `markdown_plain_text` 的递归实现。
+fn append_plain_markdown(node: &MarkdownNode, output: &mut String) {
+    match &node.kind {
+        MarkdownNodeKind::Paragraph | MarkdownNodeKind::Heading(_) => {
+            output.push_str(&inline_text_and_spans(node).0);
+            output.push_str("\n\n");
+        }
+        MarkdownNodeKind::CodeBlock(_) => {
+            output.push_str(collect_plain_text(node).trim_end());
+            output.push_str("\n\n");
+        }
+        MarkdownNodeKind::ListItem => {
+            output.push_str("- ");
+            for child in &node.children {
+                append_plain_markdown(child, output);
+            }
+        }
+        MarkdownNodeKind::List(_) => {
+            for child in &node.children {
+                append_plain_markdown(child, output);
+            }
+            output.push('\n');
+        }
+        MarkdownNodeKind::Text(text) | MarkdownNodeKind::Code(text) => output.push_str(text),
+        MarkdownNodeKind::SoftBreak | MarkdownNodeKind::HardBreak => output.push(' '),
+        MarkdownNodeKind::TaskMarker(is_checked) => {
+            output.push_str(if *is_checked { "[x] " } else { "[ ] " });
+        }
+        _ => {
+            for child in &node.children {
+                append_plain_markdown(child, output);
+            }
+        }
+    }
+}
+
+/// 合并模型输出中列表项内部的空行，保留列表项之间的正常分段。
+fn normalize_markdown_for_display(markdown: &str) -> String {
+    let lines = markdown.split('\n').collect::<Vec<_>>();
+    let mut normalized = Vec::with_capacity(lines.len());
+    let mut in_fence = false;
+    let mut inside_list_item = false;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            normalized.push((*line).to_string());
+            continue;
+        }
+        if in_fence {
+            normalized.push((*line).to_string());
+            continue;
+        }
+        if trimmed.is_empty() {
+            let next = lines[index + 1..]
+                .iter()
+                .find(|candidate| !candidate.trim().is_empty());
+            let next_is_indented = next
+                .map(|candidate| leading_indent(candidate) > 0)
+                .unwrap_or(false);
+            if inside_list_item && next_is_indented {
+                continue;
+            }
+            normalized.push(String::new());
+            if !next_is_indented {
+                inside_list_item = false;
+            }
+            continue;
+        }
+        if is_list_item_line(line) {
+            inside_list_item = true;
+        } else if leading_indent(line) == 0 && !trimmed.starts_with('>') {
+            inside_list_item = false;
+        }
+        if inside_list_item && matches!(trimmed, "+" | "-" | "*") {
+            let indent = leading_indent(line);
+            normalized.push(format!("{}\\{}", " ".repeat(indent), trimmed));
+        } else {
+            normalized.push((*line).to_string());
+        }
+    }
+    normalized.join("\n")
+}
+
+/// 返回行首缩进的空格数；Tab 按 4 个空格估算。
+fn leading_indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .map(|character| if character == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// 判断一行是否以列表标记开头。
+fn is_list_item_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("+ ")
+        || trimmed.split_once(". ").is_some_and(|(prefix, _)| {
+            !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit())
+        })
 }
 
 /// 使用 CommonMark 和常用 GFM 扩展构造展示树；流式输入即使语法尚未闭合也由解析器安全降级。
@@ -567,7 +682,8 @@ fn append_inline(
             return;
         }
         MarkdownNodeKind::HardBreak => {
-            append_inline_text("\n", style, text, spans);
+            // 模型常用硬换行分隔行内片段；对话消息中统一按空格合并，避免碎片化换行。
+            append_inline_text(" ", style, text, spans);
             return;
         }
         MarkdownNodeKind::TaskMarker(is_checked) => {
@@ -734,5 +850,61 @@ mod tests {
         assert!(text.contains("仍在流式输出"));
         assert!(text.contains("<script>"));
         assert!(text.contains("alert('x')"));
+    }
+}
+
+#[cfg(test)]
+mod display_normalization_tests {
+    use super::{
+        MarkdownNodeKind, inline_text_and_spans, markdown_plain_text,
+        normalize_markdown_for_display, parse_markdown,
+    };
+
+    /// 验证列表项内部由空行分隔的行内片段会被合并，孤立 + 号不会被当作嵌套列表。
+    #[test]
+    fn fragmented_list_blank_lines_are_merged_for_display() {
+        let fragmented = "1. 数据库连接池\n\n   ：沿\n\n   `event/*dbPoolWarning*`\n\n   +\n\n   `pool_20261027_*.log`\n\n   看是否有耗尽或等待\n";
+        let normalized = normalize_markdown_for_display(fragmented);
+
+        assert!(!normalized.contains("\n\n"), "列表项内部空行应合并");
+        assert!(normalized.contains("\\+"), "孤立加号应转义为普通文本");
+        let document = parse_markdown(&normalized);
+        assert!(
+            !document.children.iter().any(|node| {
+                node.children.iter().any(|list| {
+                    list.children.iter().any(|item| {
+                        item.children
+                            .iter()
+                            .any(|child| matches!(child.kind, MarkdownNodeKind::List(_)))
+                    })
+                })
+            }),
+            "加号不应再生成空的嵌套列表"
+        );
+    }
+
+    /// 验证选择复制使用的纯文本保留段落和列表内容。
+    #[test]
+    fn markdown_plain_text_keeps_paragraphs_and_lists() {
+        let text = markdown_plain_text("**重点**：连接池\n\n- 数据库\n- JVM");
+        assert!(text.contains("重点：连接池"));
+        assert!(text.contains("- 数据库"));
+        assert!(text.contains("- JVM"));
+    }
+
+    /// 验证 fenced code block 内的空行和标记保持原样。
+    #[test]
+    fn fenced_code_blocks_are_not_normalized() {
+        let markdown = "```text\na\n\n+\n\n```\n";
+        assert_eq!(normalize_markdown_for_display(markdown), markdown);
+    }
+
+    /// 验证模型输出的硬换行在对话正文中按空格合并。
+    #[test]
+    fn hard_breaks_are_rendered_as_spaces() {
+        let document = parse_markdown("第一行  \n第二行");
+        let paragraph = &document.children[0];
+        let (text, _) = inline_text_and_spans(paragraph);
+        assert_eq!(text, "第一行 第二行");
     }
 }

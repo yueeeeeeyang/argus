@@ -5,7 +5,9 @@
 //! 主要功能：根据视口、内容长度和当前滚动量计算滑块位置与拖拽换算，供各处自绘滚动条复用，
 //!          消除关键字历史、线程详情、Runtime 表格、Jstack 被动滚动条之间的重复实现。
 
-use gpui::{Pixels, px};
+use gpui::{Pixels, Styled, px};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// 自绘滚动条滑块的几何指标。
 ///
@@ -72,4 +74,62 @@ pub(crate) fn scrollbar_scroll_for_drag(
         (pointer - cursor_offset).clamp(metrics.track_start, metrics.track_start + movable_length);
     let ratio = (thumb_start - metrics.track_start) / movable_length;
     metrics.max_scroll * ratio
+}
+
+/// 当前各滚动区域是否处于鼠标悬停状态。
+static SCROLLBAR_HOVER_STATES: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+/// 更新某个滚动区域的悬停状态；返回状态是否发生变化。
+pub(crate) fn set_scrollbar_hover(id: &str, hovered: bool) -> bool {
+    let states = SCROLLBAR_HOVER_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut states) = states.lock() else {
+        return false;
+    };
+    let previous = states.insert(id.to_string(), hovered).unwrap_or(false);
+    previous != hovered
+}
+
+/// 返回某个滚动区域当前是否处于鼠标悬停状态。
+pub(crate) fn scrollbar_hovered(id: &str) -> bool {
+    SCROLLBAR_HOVER_STATES
+        .get()
+        .and_then(|states| states.lock().ok())
+        .and_then(|states| states.get(id).copied())
+        .unwrap_or(false)
+}
+
+/// 构造滚动区域悬停监听器：进入区域显示滚动条，离开立即隐藏。
+pub(crate) fn scroll_area_hover_handler(
+    id: String,
+) -> impl Fn(&bool, &mut gpui::Window, &mut gpui::App) + 'static {
+    move |is_hovered, window, _| {
+        if set_scrollbar_hover(&id, *is_hovered) {
+            window.refresh();
+        }
+    }
+}
+
+/// 按悬停状态设置滚动条透明度；鼠标离开滚动区域时立即隐藏。
+pub(crate) fn with_scrollbar_visibility<E: Styled>(thumb: E, id: &str, base_opacity: f32) -> E {
+    thumb.opacity(if scrollbar_hovered(id) {
+        base_opacity
+    } else {
+        0.0
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证悬停状态按滚动区域独立记录，并在状态变化时反馈。
+    #[test]
+    fn scrollbar_hover_state_tracks_each_area() {
+        assert!(!set_scrollbar_hover("scrollbar-test-a", false));
+        assert!(set_scrollbar_hover("scrollbar-test-a", true));
+        assert!(scrollbar_hovered("scrollbar-test-a"));
+        assert!(!scrollbar_hovered("scrollbar-test-b"));
+        assert!(set_scrollbar_hover("scrollbar-test-a", false));
+        assert!(!scrollbar_hovered("scrollbar-test-a"));
+    }
 }

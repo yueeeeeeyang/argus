@@ -17,51 +17,18 @@ use uuid::Uuid;
 use crate::config::{AiConfig, LogTypeProfile};
 use crate::loader::{SourceId, SourceRegistry};
 
-/// 来源快照的选择范围。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AgentScopeSelection {
-    /// 根据当前选中节点解析一个根。
-    SelectedRoot(Option<SourceId>),
-}
-
 /// Agent 会话状态机中的稳定状态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AgentSessionStatus {
-    /// 会话已经创建，尚未开始模型调用。
-    Created,
-    /// 正在枚举来源和识别日志类型。
-    Profiling,
     /// 正在执行模型分析循环。
     Investigating,
     /// 已完成分析。
     Completed,
-    /// 正在响应用户取消。
-    Cancelling,
     /// 已取消且不再运行后台任务。
     Cancelled,
     /// 因配置、模型或工具错误结束。
     Failed,
-}
-
-impl AgentSessionStatus {
-    /// 返回状态是否已经进入不可恢复终态。
-    pub(crate) fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
-    }
-
-    /// 返回适合界面展示的中文状态。
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Created => "已创建",
-            Self::Profiling => "识别日志",
-            Self::Investigating => "分析中",
-            Self::Completed => "已完成",
-            Self::Cancelling => "正在取消",
-            Self::Cancelled => "已取消",
-            Self::Failed => "失败",
-        }
-    }
 }
 
 /// Agent 轨迹条目类型。
@@ -69,16 +36,8 @@ impl AgentSessionStatus {
 pub(crate) enum AgentTraceKind {
     /// 会话状态变化。
     Status,
-    /// 模型开始或完成一轮推理。
-    Model,
-    /// 模型流式返回的思考过程。
-    Reasoning,
-    /// 模型流式返回的可见正文。
-    Output,
     /// 结构化工具开始或完成。
     Tool,
-    /// 用户追加提示及消费回执。
-    User,
     /// 非致命警告或终止错误。
     Warning,
 }
@@ -157,14 +116,10 @@ impl AgentUserMessage {
 /// 单个会话可访问的日志来源快照。
 #[derive(Clone, Debug)]
 pub(crate) struct SnapshotSource {
-    /// 末级展示名，不包含真实父目录。
-    pub file_name: String,
     /// 工作目录内相对路径（正斜杠分隔）；模型通过该路径调用 read_file 与 bash。
     pub workspace_path: String,
     /// 工作目录内的真实绝对路径。
     pub absolute_path: PathBuf,
-    /// 日志类型规则使用的原始根内相对路径；多根展示前缀不得改变用户既有匹配语义。
-    pub profile_match_path: String,
     /// 名称规则选出的主日志配置 ID。
     pub profile_id: Option<String>,
     /// 已知文件大小。
@@ -185,10 +140,6 @@ pub(crate) struct LogProfileSnapshot {
 /// 当前 Agent 会话不可变来源范围和读取配置。
 #[derive(Clone, Debug)]
 pub(crate) struct SourceScopeSnapshot {
-    /// 随机会话 ID。
-    pub session_id: String,
-    /// 来源根展示名称。
-    pub root_label: String,
     /// 当前日志工作目录根；全部工具执行都被限制在该目录内。
     pub workspace_root: PathBuf,
     /// 用户选择的兜底解码编码；read_file 按来源检测优先。
@@ -202,15 +153,17 @@ pub(crate) struct SourceScopeSnapshot {
 }
 
 impl SourceScopeSnapshot {
-    /// 按明确范围选择固化来源树；固定分析使用选中节点所属的单根。
-    pub(crate) fn from_registry_selection(
+    /// 固化来源注册表中的全部已加载根；智能助手按全来源范围工作。
+    pub(crate) fn from_all_loaded_roots(
         registry: &SourceRegistry,
-        selection: AgentScopeSelection,
         config: &AiConfig,
         workspace_root: &Path,
         preferred_encoding: &str,
     ) -> Result<Self, String> {
-        let root_ids = resolve_scope_root_ids(registry, selection)?;
+        let root_ids = registry.root_ids().to_vec();
+        if root_ids.is_empty() {
+            return Err("请先加载日志".to_string());
+        }
         let root_labels = root_ids
             .iter()
             .filter_map(|root_id| registry.node(*root_id).map(|root| root.label.clone()))
@@ -246,10 +199,8 @@ impl SourceScopeSnapshot {
             let profile_id = select_profile(&config.log_profiles, &node.label, &inner_path)
                 .map(|profile| profile.profile_id.clone());
             sources.push(SnapshotSource {
-                file_name: node.label.clone(),
                 absolute_path: workspace_root.join(&workspace_path),
                 workspace_path,
-                profile_match_path: inner_path,
                 profile_id,
                 size: node.metadata.size,
             });
@@ -264,12 +215,6 @@ impl SourceScopeSnapshot {
             .collect::<BTreeSet<_>>();
         profile_snapshots.retain(|profile_id, _| matched_profile_ids.contains(profile_id.as_str()));
         Ok(Self {
-            session_id: Uuid::new_v4().to_string(),
-            root_label: if root_labels.len() == 1 {
-                root_labels[0].clone()
-            } else {
-                format!("全部已加载来源（{} 个根）", root_labels.len())
-            },
             workspace_root: workspace_root.to_path_buf(),
             preferred_encoding: preferred_encoding.to_string(),
             sources: Arc::new(sources),
@@ -323,10 +268,6 @@ pub(crate) struct AgentBudgetSnapshot {
     pub reasoning_tokens: u64,
     /// 最近一次模型请求的输入 Token；服务端未返回 usage 时为空。
     pub latest_input_tokens: Option<u64>,
-    /// 已扫描来源的保守核算字节数；工具完成后会纳入读取器报告的真实值。
-    pub local_scan_bytes: u64,
-    /// 已向模型返回日志原文字节数。
-    pub raw_log_bytes: u64,
     /// 已运行墙钟秒数。
     pub elapsed_seconds: u64,
 }
@@ -411,6 +352,15 @@ pub(crate) enum AgentEvent {
     UserMessageConsumed(String),
     /// 用户提示在最终回答或取消边界到达过晚，未进入模型上下文。
     UserMessageRejected(String, String),
+    /// 智能助手一轮回答完成，并携带实际进入模型的用户消息。
+    AssistantCompleted {
+        /// 模型最终可见正文。
+        output: String,
+        /// 初始问题和在模型边界成功消费的补充消息。
+        accepted_user_messages: Vec<String>,
+        /// 构造本轮模型历史时是否因上下文容量移除了较早轮次。
+        history_was_trimmed: bool,
+    },
     /// 可恢复模型故障即将重试；界面应丢弃本次尝试尚未完成的流式正文。
     AssistantAttemptReset,
     /// bash 工具请求用户审批一条命令；界面渲染确认卡片并回传决定。
@@ -473,28 +423,6 @@ impl AgentOperationContext {
         let _ = self
             .event_sender
             .try_send(AgentEvent::Trace(AgentTraceEntry::new(kind, title, detail)));
-    }
-}
-
-/// 把来源选择解析为稳定根 ID 列表；全部来源模式保持注册表原始根顺序。
-fn resolve_scope_root_ids(
-    registry: &SourceRegistry,
-    selection: AgentScopeSelection,
-) -> Result<Vec<SourceId>, String> {
-    match selection {
-        AgentScopeSelection::SelectedRoot(Some(source_id)) => registry
-            .root_id_for(source_id)
-            .map(|root_id| vec![root_id])
-            .ok_or_else(|| "当前选中来源不存在，无法确定 AI 分析范围".to_string()),
-        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().len() == 1 => {
-            Ok(vec![registry.root_ids()[0]])
-        }
-        AgentScopeSelection::SelectedRoot(None) if registry.root_ids().is_empty() => {
-            Err("请先加载日志".to_string())
-        }
-        AgentScopeSelection::SelectedRoot(None) => {
-            Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string())
-        }
     }
 }
 
@@ -561,11 +489,6 @@ fn relative_path_from_root(
     }
     labels.reverse();
     labels.join("/")
-}
-
-/// 创建供 UI 和后台任务共同持有的取消令牌。
-pub(crate) fn new_cancellation_token() -> CancellationToken {
-    CancellationToken::new()
 }
 
 /// 按 UTF-8 字符边界把文本裁剪到指定字节数，并在发生裁剪时追加省略号。
@@ -734,9 +657,8 @@ mod tests {
             log_profiles: vec![matched.clone(), unmatched],
             ..AiConfig::default()
         };
-        let snapshot = SourceScopeSnapshot::from_registry_selection(
+        let snapshot = SourceScopeSnapshot::from_all_loaded_roots(
             &registry,
-            AgentScopeSelection::SelectedRoot(None),
             &config,
             workspace_root.path(),
             "UTF-8",

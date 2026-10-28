@@ -22,7 +22,8 @@ use crate::platform::custom_titlebar;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::scrollbar::{
-    ScrollbarMetrics, scrollbar_metrics, scrollbar_scroll_for_drag,
+    ScrollbarMetrics, scroll_area_hover_handler, scrollbar_metrics, scrollbar_scroll_for_drag,
+    with_scrollbar_visibility,
 };
 use crate::ui::custom_title_bar::{TITLE_BAR_HEIGHT, platform_window_controls};
 use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
@@ -797,6 +798,7 @@ fn render_stack_content(
         .flex_1()
         .min_h(px(0.0))
         .overflow_hidden()
+        .on_hover(scroll_area_hover_handler("jstack-detail".to_string()))
         .bg(rgb(theme.content))
         .child(
             div()
@@ -967,10 +969,7 @@ fn render_detail_scrollbar_thumb(
         .absolute()
         .rounded_lg()
         .bg(rgb(theme.foreground_muted))
-        .opacity(0.5)
-        .hover(|this| this.opacity(0.8))
-        .cursor_pointer()
-        .occlude();
+        .cursor_pointer();
 
     thumb = if is_horizontal {
         thumb
@@ -986,100 +985,99 @@ fn render_detail_scrollbar_thumb(
             .h(metrics.thumb_length)
     };
 
-    thumb
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |thumb_bounds, _, window: &mut Window, _| {
-                    window.on_mouse_event({
-                        let entity = entity.clone();
-                        move |event: &MouseDownEvent, phase, _, cx| {
-                            if !phase.bubble()
-                                || event.button != MouseButton::Left
-                                || !thumb_bounds.contains(&event.position)
-                            {
-                                return;
-                            }
-
-                            cx.stop_propagation();
-                            entity.update(cx, |view, _| {
-                                let pointer = if is_horizontal {
-                                    event.position.x
-                                } else {
-                                    event.position.y
-                                };
-                                let thumb_start = if is_horizontal {
-                                    thumb_bounds.origin.x
-                                } else {
-                                    thumb_bounds.origin.y
-                                };
-                                view.scrollbar_drag = Some(DetailScrollbarDrag {
-                                    axis,
-                                    cursor_offset: pointer - thumb_start,
-                                });
-                            });
-                            cx.notify(entity.entity_id());
+    let thumb = thumb.child(
+        canvas(
+            |_, _, _| (),
+            move |thumb_bounds, _, window: &mut Window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, phase, _, cx| {
+                        if !phase.bubble()
+                            || event.button != MouseButton::Left
+                            || !thumb_bounds.contains(&event.position)
+                        {
+                            return;
                         }
-                    });
 
-                    window.on_mouse_event({
-                        let entity = entity.clone();
-                        move |event: &MouseUpEvent, phase, _, cx| {
-                            if !phase.bubble() || event.button != MouseButton::Left {
-                                return;
-                            }
-
-                            let handled = entity.update(cx, |view, _| {
-                                let handled = view.scrollbar_drag.is_some();
-                                view.scrollbar_drag = None;
-                                handled
+                        cx.stop_propagation();
+                        entity.update(cx, |view, _| {
+                            let pointer = if is_horizontal {
+                                event.position.x
+                            } else {
+                                event.position.y
+                            };
+                            let thumb_start = if is_horizontal {
+                                thumb_bounds.origin.x
+                            } else {
+                                thumb_bounds.origin.y
+                            };
+                            view.scrollbar_drag = Some(DetailScrollbarDrag {
+                                axis,
+                                cursor_offset: pointer - thumb_start,
                             });
-                            if handled {
-                                cx.stop_propagation();
-                                cx.notify(entity.entity_id());
-                            }
-                        }
-                    });
+                        });
+                        cx.notify(entity.entity_id());
+                    }
+                });
 
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                        if !phase.bubble() || !event.dragging() {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseUpEvent, phase, _, cx| {
+                        if !phase.bubble() || event.button != MouseButton::Left {
                             return;
                         }
 
                         let handled = entity.update(cx, |view, _| {
-                            let Some(drag) = view.scrollbar_drag else {
-                                return false;
-                            };
-                            if drag.axis != axis {
-                                return false;
-                            }
-
-                            let pointer = if is_horizontal {
-                                event.position.x - viewport_bounds.left()
-                            } else {
-                                event.position.y - viewport_bounds.top()
-                            };
-                            let scroll =
-                                scrollbar_scroll_for_drag(pointer, drag.cursor_offset, &metrics);
-                            let current = scroll_handle.offset();
-                            if is_horizontal {
-                                scroll_handle.set_offset(point(-scroll, current.y));
-                            } else {
-                                scroll_handle.set_offset(point(current.x, -scroll));
-                            }
-                            true
+                            let handled = view.scrollbar_drag.is_some();
+                            view.scrollbar_drag = None;
+                            handled
                         });
-
                         if handled {
                             cx.stop_propagation();
                             cx.notify(entity.entity_id());
                         }
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if !phase.bubble() || !event.dragging() {
+                        return;
+                    }
+
+                    let handled = entity.update(cx, |view, _| {
+                        let Some(drag) = view.scrollbar_drag else {
+                            return false;
+                        };
+                        if drag.axis != axis {
+                            return false;
+                        }
+
+                        let pointer = if is_horizontal {
+                            event.position.x - viewport_bounds.left()
+                        } else {
+                            event.position.y - viewport_bounds.top()
+                        };
+                        let scroll =
+                            scrollbar_scroll_for_drag(pointer, drag.cursor_offset, &metrics);
+                        let current = scroll_handle.offset();
+                        if is_horizontal {
+                            scroll_handle.set_offset(point(-scroll, current.y));
+                        } else {
+                            scroll_handle.set_offset(point(current.x, -scroll));
+                        }
+                        true
                     });
-                },
-            )
-            .size_full(),
+
+                    if handled {
+                        cx.stop_propagation();
+                        cx.notify(entity.entity_id());
+                    }
+                });
+            },
         )
-        .into_any_element()
+        .size_full(),
+    );
+    with_scrollbar_visibility(thumb, "jstack-detail", 0.5).into_any_element()
 }
 
 /// 计算堆栈内容真实宽度，保证横向滚动条可以覆盖最长堆栈行。

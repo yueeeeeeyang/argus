@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::components::scrollbar::scroll_area_hover_handler;
 
 pub(crate) fn render_content_body(
     app: &mut ArgusApp,
@@ -19,6 +20,17 @@ pub(crate) fn render_content_body(
         TabKind::RemoteFileManager { session_id } => {
             remote_file_manager_view::render(app, session_id, cx).into_any_element()
         }
+        TabKind::Assistant { session_id } => app
+            .assistant_tab(session_id)
+            .map(|tab| tab.into_any_element())
+            .unwrap_or_else(|| {
+                render_empty_state(
+                    "智能助手不可用",
+                    "该助手会话已经关闭，请从左侧工具栏重新打开智能助手。",
+                    app,
+                    theme,
+                )
+            }),
         TabKind::LogSource { source_id, path } => {
             let tab_id = app.active_tab().map(|tab| tab.id).unwrap_or_default();
             render_log_source_content(app, theme, tab_id, source_id, &path, cx)
@@ -277,6 +289,7 @@ pub(crate) fn render_in_memory_log(
         .flex_1()
         .overflow_hidden()
         .bg(rgb(theme.content))
+        .on_hover(scroll_area_hover_handler("log-content".to_string()))
         .focusable()
         .on_click(cx.listener(move |app, _, _, cx| {
             app.focus_log_text_view(tab_id);
@@ -470,6 +483,7 @@ pub(crate) fn render_paged_log(
         .flex_1()
         .overflow_hidden()
         .bg(rgb(theme.content))
+        .on_hover(scroll_area_hover_handler("log-content".to_string()))
         .focusable()
         .track_scroll(&paged_viewport_handle)
         .on_click(cx.listener(move |app, _, _, cx| {

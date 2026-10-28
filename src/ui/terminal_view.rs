@@ -25,6 +25,7 @@ use crate::remote::terminal_input::{
 };
 use crate::theme::AppTheme;
 use crate::ui::components::connection_lost::render_connection_lost_panel;
+use crate::ui::components::scrollbar::{scroll_area_hover_handler, with_scrollbar_visibility};
 
 /// 终端正文行高。
 pub(crate) const TERMINAL_LINE_HEIGHT: f32 = 18.0;
@@ -205,6 +206,7 @@ fn render_terminal_body(
         .min_h(px(0.0))
         .overflow_hidden()
         .bg(rgb(theme.content))
+        .on_hover(scroll_area_hover_handler("terminal".to_string()))
         .cursor(CursorStyle::IBeam)
         .track_scroll(&viewport_handle)
         .on_scroll_wheel(
@@ -822,20 +824,17 @@ fn render_terminal_scrollbar(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
-    div()
+    let thumb = div()
         .id(SharedString::from(format!(
             "terminal-scrollbar-{session_id}"
         )))
         .absolute()
-        .occlude()
         .top(metrics.thumb_start)
         .right(px(TERMINAL_SCROLLBAR_PADDING))
         .w(px(TERMINAL_SCROLLBAR_WIDTH))
         .h(metrics.thumb_length)
         .rounded_lg()
         .bg(rgb(theme.foreground_muted))
-        .opacity(0.38)
-        .hover(|this| this.opacity(0.72))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |app, event: &MouseDownEvent, _, cx| {
@@ -845,8 +844,8 @@ fn render_terminal_scrollbar(
                 app.begin_terminal_scrollbar_drag(session_id, cursor_offset);
                 cx.notify();
             }),
-        )
-        .into_any_element()
+        );
+    with_scrollbar_visibility(thumb, "terminal", 0.38).into_any_element()
 }
 
 /// 把鼠标位置转换为 1 基终端鼠标单元格坐标；越界时夹紧到网格内。

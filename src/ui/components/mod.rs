@@ -18,4 +18,3 @@ pub(crate) mod markdown;
 pub(crate) mod material_icon;
 pub(crate) mod modal_dialog;
 pub(crate) mod scrollbar;
-pub(crate) mod window_title_bar;

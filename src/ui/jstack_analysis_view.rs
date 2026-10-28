@@ -24,6 +24,7 @@ use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::loading_spinner::render_loading_spinner;
+use crate::ui::components::scrollbar::{scroll_area_hover_handler, with_scrollbar_visibility};
 use crate::ui::highlight_colors::{HighlightColorContext, color_for_highlight_token};
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, HighlightStyle, IntoElement, KeyDownEvent,
@@ -134,6 +135,7 @@ pub(crate) fn render(
         .id(SharedString::from(format!(
             "jstack-analysis-view-{analysis_id}"
         )))
+        .on_hover(scroll_area_hover_handler("jstack".to_string()))
         .size_full()
         .flex()
         .flex_col()
@@ -1207,26 +1209,22 @@ fn render_passive_scrollbar(
     let thumb = div()
         .absolute()
         .rounded_lg()
-        .bg(rgb(theme.foreground_muted))
-        .opacity(0.48)
-        .hover(|this| this.opacity(0.78));
+        .bg(rgb(theme.foreground_muted));
 
-    Some(
-        if is_horizontal {
-            thumb
-                .left(thumb_start)
-                .bottom(px(JSTACK_SCROLLBAR_PADDING))
-                .w(thumb_length)
-                .h(px(JSTACK_SCROLLBAR_THUMB_SIZE))
-        } else {
-            thumb
-                .top(thumb_start)
-                .right(px(JSTACK_SCROLLBAR_PADDING))
-                .w(px(JSTACK_SCROLLBAR_THUMB_SIZE))
-                .h(thumb_length)
-        }
-        .into_any_element(),
-    )
+    let thumb = if is_horizontal {
+        thumb
+            .left(thumb_start)
+            .bottom(px(JSTACK_SCROLLBAR_PADDING))
+            .w(thumb_length)
+            .h(px(JSTACK_SCROLLBAR_THUMB_SIZE))
+    } else {
+        thumb
+            .top(thumb_start)
+            .right(px(JSTACK_SCROLLBAR_PADDING))
+            .w(px(JSTACK_SCROLLBAR_THUMB_SIZE))
+            .h(thumb_length)
+    };
+    Some(with_scrollbar_visibility(thumb, "jstack", 0.48).into_any_element())
 }
 
 /// 返回状态颜色，使用固定语义色避免主题变化破坏状态识别。

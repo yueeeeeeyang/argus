@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::components::scrollbar::{scroll_area_hover_handler, with_scrollbar_visibility};
 
 pub(crate) fn render_search_results_panel(
     app: &ArgusApp,
@@ -41,6 +42,7 @@ pub(crate) fn render_search_results_panel(
     div()
         .id("log-search-results-panel")
         .relative()
+        .on_hover(scroll_area_hover_handler("search-results".to_string()))
         .h(px(app.log_search.result_panel_height))
         .flex_none()
         .flex()
@@ -531,10 +533,7 @@ pub(crate) fn render_search_result_scrollbar_thumb(
         )))
         .absolute()
         .rounded_lg()
-        .bg(rgb(theme.foreground_muted))
-        .opacity(0.42)
-        .hover(|this| this.opacity(0.76))
-        .occlude();
+        .bg(rgb(theme.foreground_muted));
 
     thumb = if is_horizontal {
         thumb
@@ -550,98 +549,96 @@ pub(crate) fn render_search_result_scrollbar_thumb(
             .h(metrics.thumb_length)
     };
 
-    thumb
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |thumb_bounds, _, window: &mut Window, _| {
-                    window.on_mouse_event({
-                        let entity = entity.clone();
-                        move |event: &MouseDownEvent, phase, _, cx| {
-                            if !phase.bubble()
-                                || event.button != MouseButton::Left
-                                || !thumb_bounds.contains(&event.position)
-                            {
-                                return;
-                            }
-                            cx.stop_propagation();
-                            entity.update(cx, |app, _| {
-                                let pointer = if is_horizontal {
-                                    event.position.x
-                                } else {
-                                    event.position.y
-                                };
-                                let thumb_start = if is_horizontal {
-                                    thumb_bounds.origin.x
-                                } else {
-                                    thumb_bounds.origin.y
-                                };
-                                app.log_search.result_scrollbar_drag =
-                                    Some(SearchResultScrollbarDrag {
-                                        axis,
-                                        cursor_offset: pointer - thumb_start,
-                                    });
-                            });
-                            cx.notify(entity.entity_id());
+    let thumb = thumb.child(
+        canvas(
+            |_, _, _| (),
+            move |thumb_bounds, _, window: &mut Window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, phase, _, cx| {
+                        if !phase.bubble()
+                            || event.button != MouseButton::Left
+                            || !thumb_bounds.contains(&event.position)
+                        {
+                            return;
                         }
-                    });
+                        cx.stop_propagation();
+                        entity.update(cx, |app, _| {
+                            let pointer = if is_horizontal {
+                                event.position.x
+                            } else {
+                                event.position.y
+                            };
+                            let thumb_start = if is_horizontal {
+                                thumb_bounds.origin.x
+                            } else {
+                                thumb_bounds.origin.y
+                            };
+                            app.log_search.result_scrollbar_drag =
+                                Some(SearchResultScrollbarDrag {
+                                    axis,
+                                    cursor_offset: pointer - thumb_start,
+                                });
+                        });
+                        cx.notify(entity.entity_id());
+                    }
+                });
 
-                    window.on_mouse_event({
-                        let entity = entity.clone();
-                        move |event: &MouseUpEvent, phase, _, cx| {
-                            if !phase.bubble() || event.button != MouseButton::Left {
-                                return;
-                            }
-                            let handled = entity.update(cx, |app, _| {
-                                let handled = app.log_search.result_scrollbar_drag.is_some();
-                                app.log_search.result_scrollbar_drag = None;
-                                handled
-                            });
-                            if handled {
-                                cx.stop_propagation();
-                                cx.notify(entity.entity_id());
-                            }
-                        }
-                    });
-
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                        if !phase.bubble() || !event.dragging() {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseUpEvent, phase, _, cx| {
+                        if !phase.bubble() || event.button != MouseButton::Left {
                             return;
                         }
                         let handled = entity.update(cx, |app, _| {
-                            let Some(drag) = app.log_search.result_scrollbar_drag else {
-                                return false;
-                            };
-                            if drag.axis != axis {
-                                return false;
-                            }
-                            let pointer = if is_horizontal {
-                                event.position.x - viewport_bounds.left()
-                            } else {
-                                event.position.y - viewport_bounds.top()
-                            };
-                            let movable =
-                                (metrics.track_length - metrics.thumb_length).max(px(1.0));
-                            let thumb_start = (pointer - drag.cursor_offset)
-                                .clamp(metrics.track_start, metrics.track_start + movable);
-                            let ratio = (thumb_start - metrics.track_start) / movable;
-                            let scroll = metrics.max_scroll * ratio;
-                            let current = scroll_handle.offset();
-                            if is_horizontal {
-                                scroll_handle.set_offset(point(-scroll, current.y));
-                            } else {
-                                scroll_handle.set_offset(point(current.x, -scroll));
-                            }
-                            true
+                            let handled = app.log_search.result_scrollbar_drag.is_some();
+                            app.log_search.result_scrollbar_drag = None;
+                            handled
                         });
                         if handled {
                             cx.stop_propagation();
                             cx.notify(entity.entity_id());
                         }
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if !phase.bubble() || !event.dragging() {
+                        return;
+                    }
+                    let handled = entity.update(cx, |app, _| {
+                        let Some(drag) = app.log_search.result_scrollbar_drag else {
+                            return false;
+                        };
+                        if drag.axis != axis {
+                            return false;
+                        }
+                        let pointer = if is_horizontal {
+                            event.position.x - viewport_bounds.left()
+                        } else {
+                            event.position.y - viewport_bounds.top()
+                        };
+                        let movable = (metrics.track_length - metrics.thumb_length).max(px(1.0));
+                        let thumb_start = (pointer - drag.cursor_offset)
+                            .clamp(metrics.track_start, metrics.track_start + movable);
+                        let ratio = (thumb_start - metrics.track_start) / movable;
+                        let scroll = metrics.max_scroll * ratio;
+                        let current = scroll_handle.offset();
+                        if is_horizontal {
+                            scroll_handle.set_offset(point(-scroll, current.y));
+                        } else {
+                            scroll_handle.set_offset(point(current.x, -scroll));
+                        }
+                        true
                     });
-                },
-            )
-            .size_full(),
+                    if handled {
+                        cx.stop_propagation();
+                        cx.notify(entity.entity_id());
+                    }
+                });
+            },
         )
-        .into_any_element()
+        .size_full(),
+    );
+    with_scrollbar_visibility(thumb, "search-results", 0.42).into_any_element()
 }

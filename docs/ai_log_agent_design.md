@@ -7,7 +7,7 @@
 
 # Argus 通用智能体设计（v3，当前实现）
 
-本文档描述 Argus 智能分析的现行架构：日志加载时物化到工作目录，AI 层是在该目录上
+本文档描述 Argus 智能助手的现行架构：日志加载时物化到工作目录，AI 层是在该目录上
 运行的通用智能体（bash + 文件读取工具），产品功能由 Skill 知识注入提供，不再包含
 任何硬编码的诊断流程、结构化报告或专用分析工具。
 
@@ -26,7 +26,7 @@ v3 方案的用户决策（已确认）：
 - **工作目录物化**：加载时把普通来源复制、压缩包解压进临时工作目录；左侧目录树直接
   显示工作目录真实结构；浏览器与 AI 全部只读普通文件。
 - **通用智能体**：不硬编码任何诊断逻辑；内置 bash + 文件读取工具，只允许在工作目录
-  内执行；白名单外命令弹窗确认。智能分析窗口是其上的薄壳，不保留旧行为。
+  内执行；白名单外命令弹窗确认。智能助手页签是其上的薄壳，不保留旧行为。
 - **Skill 体系**：方法论以用户导入的知识文本注入，与代码解耦；不提供内置 Skill。
 
 ## 二、总体架构
@@ -45,11 +45,11 @@ v3 方案的用户决策（已确认）：
 AI 层：src/agent/agent_loop.rs 通用单轮模型循环
   ├─ preamble = 安全骨架 + <CONFIGURED_SYSTEM_PROMPT> + <SKILLS>
   └─ 工具 = list_loaded_sources + read_file + bash（均限定工作目录）
-产品入口：agent_window（智能分析独立窗口）
+产品入口：assistant_tab（智能助手对话页签）
 Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/skills/ 落盘
 ```
 
-智能分析窗口直接复用通用智能体循环与 Skill 集。
+智能助手页签直接复用通用智能体循环与 Skill 集。系统提示与安全骨架要求助手先理解用户意图：问候、闲聊和一般问题直接回答，只有用户明确需要日志或诊断帮助时才调用工作区工具。
 
 ## 三、工作目录物化
 
@@ -68,7 +68,7 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 ### 4.1 统一循环（`agent/agent_loop.rs`）
 
 `AgentLoopRequest` 携带问题、中立历史、配置快照、工作区清单、凭据与实时通道；
-`AgentLoopNote` 标识智能分析入口（影响开场状态事件）。循环职责：
+智能助手每次发送前重新固化全部已加载来源。循环职责：
 
 - reqwest/DeepSeek/OpenAI 兼容客户端构建；官方 DeepSeek 端点附加 thinking 参数；
 - 指数退避重试（1s 起步、30s 封顶）；只有 HTTP 408/429/5xx、底层连接错误和流意外结束可重试，
@@ -82,7 +82,7 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 ### 4.2 工作区清单（`agent/session.rs`）
 
-会话启动时从注册表 + 工作目录直接固化 `SourceScopeSnapshot`（不触发文件系统扫描；
+每轮发送前从注册表 + 工作目录直接固化 `SourceScopeSnapshot`（不触发文件系统扫描；
 来源树在加载时已一次性完整初始化）：每个日志文件携带工作目录相对路径（正斜杠）、
 真实绝对路径、命中日志类型的名称与说明全文、已知大小；另携带工作目录根、兜底解码
 编码与原文授权开关。模型引用的路径与工具实际解析的路径保持同一坐标系。
@@ -97,12 +97,14 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 3. **`bash { command, timeout_ms? }`**：cwd=工作目录，`kill_on_drop`；默认 60s、上限
    300s；stdout/stderr 各自截断（96/32 KiB）并遮蔽；非零退出码如实返回。
    - **白名单自动执行**（只读命令）：`ls cat grep head tail wc find sort uniq awk sed
-     cut tr echo pwd stat file du df`——按段（管道/`;`/`&&`/换行）解析 argv[0]，跳过
-     段首环境变量赋值；sed `-i`、find `-delete/-exec` 族、sort `-o`、awk `system()`、
-     重定向 `>`、命令替换 `$(`/反引号、`~` 与任何越出工作目录的路径形态参数，一律转
-     用户确认。
+     cut tr echo pwd stat file du df cd`——按段（管道/`;`/`&&`/换行）解析 argv[0]，跳过
+     段首环境变量赋值，并跟踪 `cd` 后的当前目录；`2>/dev/null`、`2>&1` 等只读重定向直接
+     放行；`find -exec/-execdir` 仅允许嵌套白名单只读命令；单层只读 `for` 循环在循环项安全且
+     循环体全部为只读命令时也会放行。sed `-i`、find `-delete`/
+     `-fprint`/`-ok`、写文件重定向、命令替换 `$(`/反引号、`~` 与任何越出工作目录的路径
+     形态参数，一律转用户确认。
    - **确认通道**：工具挂起等待 oneshot；`AgentEvent::BashApprovalRequired` 携带完整
-     命令，两个界面渲染内联确认卡片（批准/拒绝）；60s 未答复、会话取消或界面关闭都
+     命令，界面渲染内联确认卡片（批准/拒绝）；60s 未答复、会话取消或界面关闭都
      按拒绝收敛，并发布 `BashApprovalOutcome` 固化卡片状态。
    - **授权语义如实告知**：`allow_raw_log_content=false` 无法过滤 bash 输出，在安全
      骨架中降级为指令级约束。
@@ -130,16 +132,20 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 ## 六、界面与交互
 
-- **智能分析独立窗口**（`ui/agent_window.rs`）：消息瀑布流（问题/轨迹/工具组/思考/
-  正文/bash 审批卡片按时间交错）；顶部用量栏；底部追加提示（门闩线性化，会话结束
-  拒绝残留）；发起新分析时旧窗口已终态则关闭重建，运行中拒绝并发。
-- **bash 审批卡片**（`ui/components/bash_approval.rs`，两处共用）：完整命令、白名单
-  外原因提示、批准/拒绝按钮与结论固化。
+- **智能助手页签**（`ui/assistant_tab.rs`）：消息瀑布流（问题/轨迹/工具组/思考/正文/
+  bash 审批卡片按时间交错）；顶部状态栏右侧显示 Token 用量；底部输入框内部容纳模型
+  选择；输入框自动换行且不出现横向滚动条，Enter 发送、Shift+Enter 换行；输入独立 `@`
+  弹出工作区目录/文件候选。标题栏「选择复制文本」把整段对话转为只读可选文本；
+  自绘滚动条在鼠标进入可滚动区域时显示，离开后立即隐藏。每次点击
+  入口创建独立会话并自动编号，初始空闲且不自动分析；一轮完成后保留中立历史，可继续
+  发送下一轮。来源树右键菜单可把节点作为 `@` 引用添加到指定助手。
+- **bash 审批卡片**（`ui/components/bash_approval.rs`）：完整命令、白名单外原因提示、
+  批准/拒绝按钮与结论固化。
 
 ## 七、测试方案
 
 每阶段 `cargo fmt && cargo clippy --all-targets && cargo test` 全绿（当前 `cargo test` 通过
-583 项；统计口径为 `cargo test` 报告的通过用例数，该数字随测试增补变化，以实际运行为准）。
+665 项；统计口径为 `cargo test` 报告的通过用例数，该数字随测试增补变化，以实际运行为准）。
 重点覆盖：
 
 - 物化器：复制/解压/zip slip/重名冲突/嵌套/GZIP 命名/密码包追加（loader 模块）；
@@ -149,7 +155,7 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
   拒绝、退出码与输出截断；
 - Skill：frontmatter 解析与拒绝条件、默认集筛选、禁用过滤、目录/ZIP 导入、同名冲突、
   注入边界与预算截断；
-- 手动冒烟：大包加载与浏览、密码包解锁、智能分析窗口问答与 bash 审批弹窗、Skill
+- 手动冒烟：大包加载与浏览、密码包解锁、智能助手页签问答与 bash 审批弹窗、Skill
   全流程、Windows 删除重试。
 
 ## 八、与旧设计（v2）的差异

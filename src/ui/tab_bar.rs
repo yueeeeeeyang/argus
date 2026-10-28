@@ -96,6 +96,8 @@ pub(crate) fn render(
     let has_tabs = !tabs.is_empty();
     let active_tab_id = app.active_tab_id;
     let hovered_tab_id = app.hovered_tab_id;
+    // 任意菜单打开时都关闭标签悬浮提示，避免提示层遮挡菜单内容。
+    let is_any_menu_open = app.active_menu.is_some();
     let active_index = tabs
         .iter()
         .position(|tab| Some(tab.id) == active_tab_id)
@@ -139,6 +141,7 @@ pub(crate) fn render(
                                 active_tab_id,
                                 hovered_tab_id,
                                 is_loading,
+                                is_any_menu_open,
                                 &theme,
                                 cx,
                             )
@@ -271,7 +274,10 @@ fn is_tab_loading(app: &ArgusApp, kind: &TabKind) -> bool {
             .is_some_and(|state| {
                 matches!(state.task_state, RuntimeAnalysisTaskState::Loading { .. })
             }),
-        TabKind::Empty | TabKind::SshTerminal { .. } | TabKind::RemoteFileManager { .. } => false,
+        TabKind::Empty
+        | TabKind::SshTerminal { .. }
+        | TabKind::RemoteFileManager { .. }
+        | TabKind::Assistant { .. } => false,
     }
 }
 
@@ -303,6 +309,7 @@ impl Render for TabTitleTooltip {
     /// 渲染紧凑 tooltip 内容。
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .debug_selector(|| "tab-title-tooltip".to_string())
             .max_w(px(360.0))
             .px_2()
             .py_1()
@@ -324,6 +331,7 @@ fn render_tab(
     active_tab_id: Option<usize>,
     hovered_tab_id: Option<usize>,
     is_loading: bool,
+    is_any_menu_open: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
@@ -389,12 +397,15 @@ fn render_tab(
                 )
                 .child(render_tab_close_slot(tab_id, should_show_close, theme, cx)),
         )
-        .tooltip(move |_, cx| {
-            cx.new(|_| TabTitleTooltip {
-                title: tooltip_title.clone(),
-                theme: tooltip_theme.clone(),
+        // 菜单打开后不再挂载提示，元素重绘时会同步移除已显示的提示层。
+        .when(!is_any_menu_open, |this| {
+            this.tooltip(move |_, cx| {
+                cx.new(|_| TabTitleTooltip {
+                    title: tooltip_title.clone(),
+                    theme: tooltip_theme.clone(),
+                })
+                .into()
             })
-            .into()
         })
         .on_hover(cx.listener(move |app, is_hovered: &bool, _, cx| {
             if app.set_hovered_tab(tab_id, *is_hovered) {
@@ -592,6 +603,38 @@ mod tests {
         assert!(
             cx.debug_bounds("tab-overflow-slot").is_none(),
             "没有标签时不应显示标签下拉按钮"
+        );
+    }
+
+    /// 验证标签悬浮提示在右键菜单打开后立即隐藏，避免遮挡菜单。
+    #[gpui::test]
+    fn tab_title_tooltip_hides_when_context_menu_opens(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, _| visual_test_app());
+        let tab_bounds = cx.debug_bounds("tab-1").expect("应渲染默认标签");
+        let position = tab_bounds.center();
+
+        cx.simulate_mouse_move(position, None, Modifiers::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("tab-title-tooltip").is_some(),
+            "鼠标悬浮标签后应显示完整名称"
+        );
+
+        app.update(cx, |app, cx| {
+            app.open_tab_context_menu(1, point(px(120.0), px(40.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|_, cx| app.read(cx).active_menu.is_some()),
+            "应打开标签右键菜单"
+        );
+        assert!(
+            cx.debug_bounds("tab-title-tooltip").is_none(),
+            "右键菜单打开后应立即隐藏完整名称提示"
         );
     }
 

@@ -275,7 +275,7 @@ fn source_tree_context_menu_shows_analysis_actions_for_supported_sources() {
         app.active_menu.as_ref().map(|menu| &menu.kind),
         Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == app_log_id
     ));
-    assert_eq!(app.active_menu_entries().len(), 2);
+    assert_eq!(app.active_menu_entries().len(), 3);
     assert!(matches!(
         app.active_menu_entries()[0].action,
         MenuAction::OpenJstackAnalysis { source_id } if source_id == app_log_id
@@ -283,6 +283,13 @@ fn source_tree_context_menu_shows_analysis_actions_for_supported_sources() {
     assert!(matches!(
         app.active_menu_entries()[1].action,
         MenuAction::OpenRuntimeAnalysis { source_id } if source_id == app_log_id
+    ));
+    assert!(matches!(
+        app.active_menu_entries()[2].action,
+        MenuAction::AddSourceToAssistant {
+            source_id,
+            session_id: None
+        } if source_id == app_log_id
     ));
 
     app.close_active_menu();
@@ -292,7 +299,7 @@ fn source_tree_context_menu_shows_analysis_actions_for_supported_sources() {
         app.active_menu.as_ref().map(|menu| &menu.kind),
         Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == logs_dir_id
     ));
-    assert_eq!(app.active_menu_entries().len(), 2);
+    assert_eq!(app.active_menu_entries().len(), 3);
     assert!(matches!(
         app.active_menu_entries()[0].action,
         MenuAction::OpenJstackAnalysis { source_id } if source_id == logs_dir_id
@@ -300,6 +307,13 @@ fn source_tree_context_menu_shows_analysis_actions_for_supported_sources() {
     assert!(matches!(
         app.active_menu_entries()[1].action,
         MenuAction::OpenRuntimeAnalysis { source_id } if source_id == logs_dir_id
+    ));
+    assert!(matches!(
+        app.active_menu_entries()[2].action,
+        MenuAction::AddSourceToAssistant {
+            source_id,
+            session_id: None
+        } if source_id == logs_dir_id
     ));
 }
 
@@ -687,7 +701,7 @@ fn connection_tree_directory_menu_create_dialog_uses_right_clicked_parent(
             gpui::point(gpui::px(1.0), gpui::px(1.0)),
         );
 
-        app.handle_menu_action_with_context(MenuAction::NewSshConnectionLink, app_cx);
+        app.handle_menu_action_with_context(MenuAction::NewSshConnectionLink, None, app_cx);
 
         assert!(app.active_menu.is_none());
         let modal = app
@@ -1317,7 +1331,7 @@ fn source_tree_context_menu_shows_analysis_actions_for_archive_directory() {
         app.active_menu.as_ref().map(|menu| &menu.kind),
         Some(ActiveMenuKind::SourceTree { source_id }) if *source_id == archive_dir_id
     ));
-    assert_eq!(app.active_menu_entries().len(), 2);
+    assert_eq!(app.active_menu_entries().len(), 3);
     assert!(matches!(
         app.active_menu_entries()[0].action,
         MenuAction::OpenJstackAnalysis { source_id } if source_id == archive_dir_id
@@ -1325,6 +1339,13 @@ fn source_tree_context_menu_shows_analysis_actions_for_archive_directory() {
     assert!(matches!(
         app.active_menu_entries()[1].action,
         MenuAction::OpenRuntimeAnalysis { source_id } if source_id == archive_dir_id
+    ));
+    assert!(matches!(
+        app.active_menu_entries()[2].action,
+        MenuAction::AddSourceToAssistant {
+            source_id,
+            session_id: None
+        } if source_id == archive_dir_id
     ));
 }
 
@@ -3713,6 +3734,255 @@ fn close_other_tabs_keeps_target_tab_active() {
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.active_tab_id, Some(app_tab_id));
     assert_eq!(app.active_tab_title(), "app.log");
+}
+
+/// 验证保存智能助手设置会写回配置文件，而不是只校验后返回成功。
+#[gpui::test]
+fn save_ai_settings_persists_configuration(cx: &mut gpui::TestAppContext) {
+    let settings_path = isolated_test_dir("save-ai-settings").join("settings.toml");
+    let app =
+        cx.new(|_| ArgusApp::new_with_config_manager(ConfigManager::new(settings_path.clone())));
+    let mut config = app.read_with(cx, |app, _| app.config.ai.clone());
+    config.max_retry_attempts = 3;
+
+    app.update(cx, |app, app_cx| {
+        app.save_ai_settings(config, None, app_cx)
+            .expect("有效配置应保存成功");
+    });
+
+    let saved = ConfigManager::new(settings_path).load();
+    assert_eq!(saved.ai.max_retry_attempts, 3);
+}
+
+/// 验证来源侧栏入口直接创建助手页签并渲染会话页面，不弹出旧问题对话框。
+#[gpui::test]
+fn assistant_toolbar_click_opens_embedded_chat_tab(cx: &mut gpui::TestAppContext) {
+    let mut app = test_app();
+    app.is_source_panel_collapsed = false;
+    let width = app.current_source_panel_width();
+    app.source_panel_animation_from_width = width;
+    app.source_panel_animation_to_width = width;
+    let (app, cx) = cx.add_window_view(|_, _| app);
+
+    let button = cx
+        .debug_bounds("source-smart-analysis")
+        .expect("来源侧栏应渲染智能助手入口");
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.tabs.len(), 1);
+        assert!(matches!(app.active_tab_kind(), TabKind::Assistant { .. }));
+    });
+    assert!(
+        cx.debug_bounds("assistant-tab-root").is_some(),
+        "点击入口后应直接在主内容区渲染智能助手页面"
+    );
+    let usage = cx
+        .debug_bounds("assistant-token-usage")
+        .expect("标题栏右侧应显示 Token 使用量");
+    let composer = cx
+        .debug_bounds("assistant-composer")
+        .expect("应渲染底部输入区");
+    let textarea = cx
+        .debug_bounds("textarea-assistant-message-input")
+        .expect("应渲染助手输入框");
+    let model_selector = cx
+        .debug_bounds("assistant-model-selector")
+        .expect("输入框底部应显示模型选择");
+    assert!(
+        usage.bottom() <= composer.top(),
+        "Token 使用量应位于标题栏，而不是输入区：usage={usage:?}, composer={composer:?}"
+    );
+    assert!(
+        model_selector.top() >= textarea.top()
+            && model_selector.bottom() <= textarea.bottom()
+            && model_selector.left() >= textarea.left()
+            && model_selector.right() <= textarea.right(),
+        "模型选择应位于输入框内部底部：model={model_selector:?}, textarea={textarea:?}"
+    );
+}
+
+/// 验证每次点击智能助手入口都会新增独立页签，并持有各自的会话实体。
+#[gpui::test]
+fn opening_assistant_tabs_creates_independent_sessions(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    app.update(cx, |app, app_cx| {
+        app.open_assistant_tab(app_cx);
+        app.open_assistant_tab(app_cx);
+    });
+
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.tabs.len(), 2);
+        let session_ids = app
+            .tabs
+            .iter()
+            .map(|tab| match tab.kind {
+                TabKind::Assistant { session_id } => session_id,
+                _ => panic!("智能助手入口只应创建助手标签页"),
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(
+            session_ids[0], session_ids[1],
+            "每个助手页签必须拥有独立会话"
+        );
+        assert_eq!(app.assistant_tabs.len(), 2);
+        assert!(
+            session_ids
+                .iter()
+                .all(|id| app.assistant_tabs.contains_key(id))
+        );
+        assert_eq!(app.active_tab_id, Some(session_ids[1]));
+        assert_eq!(
+            app.tabs
+                .iter()
+                .map(|tab| tab.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["智能助手", "智能助手 2"]
+        );
+    });
+
+    let first_tab_id = app.read_with(cx, |app, _| app.tabs[0].id);
+    app.update(cx, |app, _| app.close_tab(first_tab_id));
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            app.assistant_tabs.len(),
+            1,
+            "关闭助手页签应释放对应会话实体"
+        );
+    });
+
+    app.update(cx, |app, app_cx| app.open_assistant_tab(app_cx));
+    app.read_with(cx, |app, _| {
+        assert_eq!(
+            app.tabs
+                .iter()
+                .map(|tab| tab.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["智能助手 2", "智能助手"],
+            "新页签应复用已关闭页签留下的最小序号"
+        );
+    });
+}
+
+/// 验证只有一个智能助手时，来源树菜单直接指向该会话，不展开二级菜单。
+#[gpui::test]
+fn single_assistant_menu_adds_directly(cx: &mut gpui::TestAppContext) {
+    let (app, _path, file_id) = app_with_real_source_file("assistant-add-single");
+    let app = cx.new(|_| app);
+    let session_id = app.update(cx, |app, app_cx| {
+        app.open_assistant_tab(app_cx);
+        app.active_tab_id.expect("应创建助手页签")
+    });
+
+    app.update(cx, |app, _| {
+        app.open_source_tree_context_menu(file_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+        let add_entry = app
+            .active_menu_entries()
+            .into_iter()
+            .find(|entry| entry.label == "添加到智能助手")
+            .expect("来源树菜单应包含添加到智能助手");
+        assert!(!add_entry.has_submenu);
+        assert!(matches!(
+            add_entry.action,
+            MenuAction::AddSourceToAssistant {
+                source_id,
+                session_id: Some(id)
+            } if source_id == file_id && id == session_id
+        ));
+    });
+}
+
+/// 验证没有智能助手时，来源树菜单会新建助手并自动插入“@”引用。
+#[gpui::test]
+fn add_source_to_assistant_creates_tab_and_inserts_mention(cx: &mut gpui::TestAppContext) {
+    let (mut app, path, file_id) = app_with_real_source_file("assistant-add-mention");
+    app.source_workspace_root = path.parent().map(Path::to_path_buf);
+    let app = cx.new(|_| app);
+
+    app.update(cx, |app, app_cx| {
+        app.add_source_to_assistant(file_id, None, None, app_cx);
+    });
+
+    app.read_with(cx, |app, app_cx| {
+        assert_eq!(app.tabs.len(), 1);
+        assert!(matches!(app.active_tab_kind(), TabKind::Assistant { .. }));
+        let session_id = match app.tabs[0].kind {
+            TabKind::Assistant { session_id } => session_id,
+            _ => unreachable!(),
+        };
+        let tab = app
+            .assistant_tabs
+            .get(&session_id)
+            .expect("应创建助手会话")
+            .read(app_cx);
+        assert!(tab.input_text_for_test().contains("@app.log"));
+        assert_eq!(tab.selected_mention_paths_for_test(), vec!["app.log"]);
+    });
+}
+
+/// 验证存在多个智能助手时，来源树菜单提供二级选择并只写入目标会话。
+#[gpui::test]
+fn multiple_assistants_offer_picker_for_add_source(cx: &mut gpui::TestAppContext) {
+    let (mut app, path, file_id) = app_with_real_source_file("assistant-add-picker");
+    app.source_workspace_root = path.parent().map(Path::to_path_buf);
+    let app = cx.new(|_| app);
+    app.update(cx, |app, app_cx| {
+        app.open_assistant_tab(app_cx);
+        app.open_assistant_tab(app_cx);
+    });
+    let session_ids = app.read_with(cx, |app, _| {
+        app.tabs
+            .iter()
+            .filter_map(|tab| match tab.kind {
+                TabKind::Assistant { session_id } => Some(session_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(session_ids.len(), 2);
+
+    app.update(cx, |app, app_cx| {
+        app.open_source_tree_context_menu(file_id, gpui::point(gpui::px(1.0), gpui::px(1.0)));
+        let add_entry = app
+            .active_menu_entries()
+            .into_iter()
+            .find(|entry| entry.label == "添加到智能助手")
+            .expect("来源树菜单应包含添加到智能助手");
+        assert!(matches!(
+            add_entry.action,
+            MenuAction::OpenAssistantPicker { source_id } if source_id == file_id
+        ));
+        assert!(add_entry.has_submenu, "多个助手时应展示二级菜单箭头");
+        app.open_assistant_picker_menu(file_id);
+        assert!(matches!(
+            app.active_menu.as_ref().map(|menu| &menu.kind),
+            Some(ActiveMenuKind::SourceTreeAssistantPicker { source_id }) if *source_id == file_id
+        ));
+        assert_eq!(
+            app.active_menu_entries()
+                .iter()
+                .map(|entry| entry.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["智能助手", "智能助手 2"]
+        );
+        app.add_source_to_assistant(file_id, Some(session_ids[0]), None, app_cx);
+    });
+
+    app.read_with(cx, |app, app_cx| {
+        let first = app
+            .assistant_tabs
+            .get(&session_ids[0])
+            .unwrap()
+            .read(app_cx);
+        let second = app
+            .assistant_tabs
+            .get(&session_ids[1])
+            .unwrap()
+            .read(app_cx);
+        assert!(first.input_text_for_test().contains("@app.log"));
+        assert!(second.input_text_for_test().is_empty());
+    });
 }
 
 /// 验证关闭全部标签后不保留任何标签页。

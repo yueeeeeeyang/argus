@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::components::scrollbar::with_scrollbar_visibility;
 
 pub(crate) fn render_in_memory_scrollbars(
     tab_id: usize,
@@ -173,11 +174,8 @@ pub(crate) fn render_scrollbar_thumb(
             "log-scrollbar-{tab_id}-{axis:?}"
         )))
         .absolute()
-        .occlude()
         .rounded_lg()
-        .bg(rgb(theme.foreground_muted))
-        .opacity(0.38)
-        .hover(|this| this.opacity(0.72));
+        .bg(rgb(theme.foreground_muted));
 
     thumb = if is_horizontal {
         thumb
@@ -193,122 +191,120 @@ pub(crate) fn render_scrollbar_thumb(
             .h(metrics.thumb_length)
     };
 
-    thumb
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |thumb_bounds, _, window: &mut Window, _| {
-                    window.on_mouse_event({
-                        let entity = entity.clone();
-                        move |event: &MouseDownEvent, phase, _, cx| {
-                            if !phase.bubble()
-                                || event.button != MouseButton::Left
-                                || !thumb_bounds.contains(&event.position)
-                            {
-                                return;
-                            }
-                            cx.stop_propagation();
-                            let pointer = if is_horizontal {
-                                event.position.x
-                            } else {
-                                event.position.y
-                            };
-                            let thumb_start = if is_horizontal {
-                                thumb_bounds.left()
-                            } else {
-                                thumb_bounds.top()
-                            };
-                            entity.update(cx, |app, _| {
-                                app.log_scrollbar_drag = Some(LogScrollbarDrag {
-                                    tab_id,
-                                    axis,
-                                    cursor_offset: pointer - thumb_start,
-                                });
-                            });
-                            cx.notify(entity.entity_id());
+    let thumb = thumb.child(
+        canvas(
+            |_, _, _| (),
+            move |thumb_bounds, _, window: &mut Window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, phase, _, cx| {
+                        if !phase.bubble()
+                            || event.button != MouseButton::Left
+                            || !thumb_bounds.contains(&event.position)
+                        {
+                            return;
                         }
-                    });
-
-                    window.on_mouse_event({
-                        let entity = entity.clone();
-                        move |event: &MouseUpEvent, phase, _, cx| {
-                            if !phase.bubble() || event.button != MouseButton::Left {
-                                return;
-                            }
-                            let handled = entity.update(cx, |app, _| {
-                                let handled = app
-                                    .log_scrollbar_drag
-                                    .is_some_and(|drag| drag.tab_id == tab_id && drag.axis == axis);
-                                if handled {
-                                    app.log_scrollbar_drag = None;
-                                }
-                                handled
+                        cx.stop_propagation();
+                        let pointer = if is_horizontal {
+                            event.position.x
+                        } else {
+                            event.position.y
+                        };
+                        let thumb_start = if is_horizontal {
+                            thumb_bounds.left()
+                        } else {
+                            thumb_bounds.top()
+                        };
+                        entity.update(cx, |app, _| {
+                            app.log_scrollbar_drag = Some(LogScrollbarDrag {
+                                tab_id,
+                                axis,
+                                cursor_offset: pointer - thumb_start,
                             });
-                            if handled {
-                                cx.stop_propagation();
-                                cx.notify(entity.entity_id());
-                            }
-                        }
-                    });
+                        });
+                        cx.notify(entity.entity_id());
+                    }
+                });
 
-                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                        if !phase.bubble() || !event.dragging() {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseUpEvent, phase, _, cx| {
+                        if !phase.bubble() || event.button != MouseButton::Left {
                             return;
                         }
                         let handled = entity.update(cx, |app, _| {
-                            let Some(drag) = app.log_scrollbar_drag else {
-                                return false;
-                            };
-                            if drag.tab_id != tab_id || drag.axis != axis {
-                                return false;
+                            let handled = app
+                                .log_scrollbar_drag
+                                .is_some_and(|drag| drag.tab_id == tab_id && drag.axis == axis);
+                            if handled {
+                                app.log_scrollbar_drag = None;
                             }
-                            let pointer = if is_horizontal {
-                                event.position.x - viewport_bounds.left()
-                            } else {
-                                event.position.y - viewport_bounds.top()
-                            };
-                            let movable =
-                                (metrics.track_length - metrics.thumb_length).max(px(1.0));
-                            let thumb_start = (pointer - drag.cursor_offset)
-                                .clamp(metrics.track_start, metrics.track_start + movable);
-                            let ratio = (thumb_start - metrics.track_start) / movable;
-                            let scroll = metrics.max_scroll * ratio;
-
-                            if let Some(source_id) = paged_source_id {
-                                if let Some(state) = app.log_tab_view_state_mut(tab_id) {
-                                    match axis {
-                                        LogScrollbarAxis::Vertical => {
-                                            state.paged_scroll.top_px = f64::from(scroll);
-                                        }
-                                        LogScrollbarAxis::Horizontal => {
-                                            state.paged_scroll.left_px = f64::from(scroll);
-                                        }
-                                    }
-                                }
-                                app.clear_line_marker_jump_cache(tab_id);
-                                let _ = source_id;
-                            } else {
-                                app.clear_line_marker_jump_cache(tab_id);
-                                let current = scroll_handle.offset();
-                                match axis {
-                                    LogScrollbarAxis::Vertical => {
-                                        scroll_handle.set_offset(point(current.x, -scroll));
-                                    }
-                                    LogScrollbarAxis::Horizontal => {
-                                        scroll_handle.set_offset(point(-scroll, current.y));
-                                    }
-                                }
-                            }
-                            true
+                            handled
                         });
                         if handled {
                             cx.stop_propagation();
                             cx.notify(entity.entity_id());
                         }
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if !phase.bubble() || !event.dragging() {
+                        return;
+                    }
+                    let handled = entity.update(cx, |app, _| {
+                        let Some(drag) = app.log_scrollbar_drag else {
+                            return false;
+                        };
+                        if drag.tab_id != tab_id || drag.axis != axis {
+                            return false;
+                        }
+                        let pointer = if is_horizontal {
+                            event.position.x - viewport_bounds.left()
+                        } else {
+                            event.position.y - viewport_bounds.top()
+                        };
+                        let movable = (metrics.track_length - metrics.thumb_length).max(px(1.0));
+                        let thumb_start = (pointer - drag.cursor_offset)
+                            .clamp(metrics.track_start, metrics.track_start + movable);
+                        let ratio = (thumb_start - metrics.track_start) / movable;
+                        let scroll = metrics.max_scroll * ratio;
+
+                        if let Some(source_id) = paged_source_id {
+                            if let Some(state) = app.log_tab_view_state_mut(tab_id) {
+                                match axis {
+                                    LogScrollbarAxis::Vertical => {
+                                        state.paged_scroll.top_px = f64::from(scroll);
+                                    }
+                                    LogScrollbarAxis::Horizontal => {
+                                        state.paged_scroll.left_px = f64::from(scroll);
+                                    }
+                                }
+                            }
+                            app.clear_line_marker_jump_cache(tab_id);
+                            let _ = source_id;
+                        } else {
+                            app.clear_line_marker_jump_cache(tab_id);
+                            let current = scroll_handle.offset();
+                            match axis {
+                                LogScrollbarAxis::Vertical => {
+                                    scroll_handle.set_offset(point(current.x, -scroll));
+                                }
+                                LogScrollbarAxis::Horizontal => {
+                                    scroll_handle.set_offset(point(-scroll, current.y));
+                                }
+                            }
+                        }
+                        true
                     });
-                },
-            )
-            .size_full(),
+                    if handled {
+                        cx.stop_propagation();
+                        cx.notify(entity.entity_id());
+                    }
+                });
+            },
         )
-        .into_any_element()
+        .size_full(),
+    );
+    with_scrollbar_visibility(thumb, "log-content", 0.38).into_any_element()
 }

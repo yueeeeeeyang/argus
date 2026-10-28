@@ -12,6 +12,7 @@ use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::material_icon::{
     MaterialIcon, file_icon_for_name, folder_icon, render_material_icon, zip_icon,
 };
+use crate::ui::components::scrollbar::{scroll_area_hover_handler, with_scrollbar_visibility};
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Render, SharedString, Window, canvas, div, point, prelude::*, px, rgb,
@@ -116,11 +117,13 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
     };
 
     div()
+        .id("source-tree-panel")
         .relative()
         .flex_1()
         .overflow_hidden()
         .pt(px(1.0))
         .pb_2()
+        .on_hover(scroll_area_hover_handler("source-tree".to_string()))
         .when(visible_count == 0, |this| {
             this.child(
                 div()
@@ -435,7 +438,7 @@ fn tree_connection_lines(
 }
 
 /// 渲染来源树自定义纵向滚动条。
-fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
+fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> AnyElement {
     let scroll_state = app.source_tree_scroll.0.borrow();
     let bounds = scroll_state.base_handle.bounds();
     let scroll_offset = scroll_state.base_handle.offset();
@@ -449,7 +452,7 @@ fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElem
 
     let viewport_height = bounds.size.height;
     if viewport_height == px(0.0) || content_height <= viewport_height {
-        return div().id("source-tree-scrollbar");
+        return div().id("source-tree-scrollbar").into_any_element();
     }
 
     let track_padding = px(4.0);
@@ -461,7 +464,7 @@ fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElem
     let thumb_top = track_padding + (track_height - thumb_height) * scroll_ratio;
     let entity = cx.entity();
 
-    div()
+    let thumb = div()
         .id("source-tree-scrollbar")
         .absolute()
         .top(thumb_top)
@@ -470,8 +473,6 @@ fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElem
         .h(thumb_height)
         .rounded_lg()
         .bg(rgb(app.theme.foreground_muted))
-        .opacity(0.45)
-        .hover(|this| this.opacity(0.75))
         .child(
             canvas(
                 |_, _, _| (),
@@ -482,6 +483,7 @@ fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElem
                             if !thumb_bounds.contains(&event.position) {
                                 return;
                             }
+                            cx.stop_propagation();
                             entity.update(cx, |app, _| {
                                 app.source_scrollbar_drag_position =
                                     Some(event.position - thumb_bounds.origin);
@@ -518,7 +520,8 @@ fn render_scrollbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElem
                 },
             )
             .size_full(),
-        )
+        );
+    with_scrollbar_visibility(thumb, "source-tree", 0.45).into_any_element()
 }
 
 /// 根据来源节点类型和名称返回对应 Material Icon Theme 图标。

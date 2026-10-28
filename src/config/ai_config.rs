@@ -31,11 +31,21 @@ pub(crate) const MAX_AI_MAX_RETRY_ATTEMPTS: u32 = 20;
 pub(crate) const AI_RAW_LOG_CONSENT_VERSION: &str = "2026-07-15";
 /// 用户可编辑系统提示词的最大 UTF-8 字节数，避免设置文件和每轮模型上下文异常膨胀。
 pub(crate) const MAX_AI_SYSTEM_PROMPT_BYTES: usize = 32 * 1024;
-/// 新安装和旧配置迁移时使用的专业分析提示词。
+/// 新安装和旧配置迁移时使用的通用助手提示词。
 ///
-/// 该提示词只负责角色、分析质量和表达要求；工具权限、证据校验、固定分析流程等安全规则
-/// 由编排器另行注入，用户修改此字段不能覆盖那些强制规则。
-pub(crate) const DEFAULT_AI_SYSTEM_PROMPT: &str = r#"你是一名资深生产故障分析与日志取证专家。请以可复核、可证伪的方式工作，优先建立事实，再提出假设。
+/// 该提示词只负责角色、交流方式和分析质量；工具权限、证据校验等安全规则由编排器另行
+/// 注入，用户修改此字段不能覆盖那些强制规则。
+pub(crate) const DEFAULT_AI_SYSTEM_PROMPT: &str = r#"你是 Argus 智能助手，主要工作是问题咨询、技术建议和日志分析。你可以回答日常问题、提供建议，也可以在用户明确需要时查阅当前工作区内的日志和文件。
+
+交流要求：
+- 先理解用户意图。问候、闲聊和一般性问题直接回答，不要主动检索日志，也不要假设用户正在排查故障。
+- 只有当用户明确提到日志、文件、报错或诊断需求时，才使用工具查看工作区。
+- 使用准确、简洁的中文，不编造事实；不确定时说明限制或还需要哪些信息。
+- 分析日志时区分直接观察、合理推断和未知信息，不把相关性表述为因果关系。
+- 给出具体、可执行的建议，并说明验证方法。"#;
+
+/// 旧版默认分析提示词；仅在用户未修改默认值时迁移到通用助手提示词。
+const LEGACY_ANALYSIS_SYSTEM_PROMPT: &str = r#"你是一名资深生产故障分析与日志取证专家。请以可复核、可证伪的方式工作，优先建立事实，再提出假设。
 
 分析要求：
 - 明确区分直接观察、合理推断和未知信息，不把相关性表述为因果关系。
@@ -44,6 +54,17 @@ pub(crate) const DEFAULT_AI_SYSTEM_PROMPT: &str = r#"你是一名资深生产故
 - 优先使用确定性统计、聚合和专用分析器缩小范围，再读取最少量的必要上下文。
 - 建议应具体、可执行并包含验证方法；无法确认时明确还需要哪些数据。
 - 使用准确、简洁的中文，不夸大置信度，不隐藏限制。"#;
+
+/// 上一版通用助手默认提示词；身份描述升级后同步迁移。
+const PREVIOUS_GENERAL_SYSTEM_PROMPT: &str = r#"你是 Argus 智能助手，一个通用型桌面助理。你可以回答日常问题、提供建议，也可以在用户明确需要时查阅当前工作区内的日志和文件。
+
+交流要求：
+- 先理解用户意图。问候、闲聊和一般性问题直接回答，不要主动检索日志，也不要假设用户正在排查故障。
+- 只有当用户明确提到日志、文件、报错或诊断需求时，才使用工具查看工作区。
+- 使用准确、简洁的中文，不编造事实；不确定时说明限制或还需要哪些信息。
+- 分析日志时区分直接观察、合理推断和未知信息，不把相关性表述为因果关系。
+- 给出具体、可执行的建议，并说明验证方法。"#;
+
 /// 进程内日志名称正则缓存上限，防止长时间编辑配置导致缓存无限增长。
 const LOG_MATCHER_REGEX_CACHE_LIMIT: usize = 2048;
 /// 已校验日志名称正则的共享缓存；完整来源扫描和命中统计复用同一编译结果。
@@ -58,7 +79,7 @@ pub(crate) struct AiConfig {
     /// 旧版本单模型标识；仅用于向多模型配置迁移，不再由新界面写入。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
-    /// 可供每次智能分析会话选择的模型配置。
+    /// 可供每次智能助手会话选择的模型配置。
     #[serde(default)]
     pub model_profiles: Vec<AiModelProfile>,
     /// 是否允许把经工具裁剪的必要日志原文发送给模型。
@@ -73,7 +94,7 @@ pub(crate) struct AiConfig {
     /// 单次模型请求失败后的最大自动重试次数；0 表示不自动重试。
     #[serde(default = "default_max_retry_attempts")]
     pub max_retry_attempts: u32,
-    /// 用户可编辑的专业分析系统提示词；不可覆盖编排器内置的权限、证据和流程规则。
+    /// 用户可编辑的助手系统提示词；不可覆盖编排器内置的权限、证据和流程规则。
     #[serde(default = "default_ai_system_prompt")]
     pub system_prompt: String,
     /// 被用户禁用的 Skill 名称列表；默认空表示全部启用，保存后下轮会话生效。
@@ -116,7 +137,10 @@ impl AiConfig {
             .max_retry_attempts
             .clamp(MIN_AI_MAX_RETRY_ATTEMPTS, MAX_AI_MAX_RETRY_ATTEMPTS);
         self.system_prompt = self.system_prompt.trim().to_string();
-        if self.system_prompt.is_empty() {
+        if self.system_prompt.is_empty()
+            || self.system_prompt == LEGACY_ANALYSIS_SYSTEM_PROMPT
+            || self.system_prompt == PREVIOUS_GENERAL_SYSTEM_PROMPT
+        {
             self.system_prompt = default_ai_system_prompt();
         }
         // 禁用列表规范化为去重后的非空名称集合，保持与 Skill 名称可比对。
@@ -150,7 +174,7 @@ impl AiConfig {
         }
         self.validate_model_profiles()?;
         if !self.model_profiles.iter().any(|profile| profile.enabled) {
-            return Err("请至少启用一个可用于智能分析的模型".to_string());
+            return Err("请至少启用一个可用于智能助手的模型".to_string());
         }
         self.validate_log_profiles()?;
         self.validate_system_prompt()?;
@@ -708,6 +732,22 @@ mod tests {
         assert_eq!(config.system_prompt, DEFAULT_AI_SYSTEM_PROMPT);
     }
 
+    /// 验证未修改的旧版默认分析提示词会迁移为通用助手提示词。
+    #[test]
+    fn legacy_default_system_prompt_migrates_to_general_assistant_prompt() {
+        for legacy_prompt in [
+            LEGACY_ANALYSIS_SYSTEM_PROMPT,
+            PREVIOUS_GENERAL_SYSTEM_PROMPT,
+        ] {
+            let mut config = AiConfig {
+                system_prompt: legacy_prompt.to_string(),
+                ..AiConfig::default()
+            };
+            config.normalize();
+            assert_eq!(config.system_prompt, DEFAULT_AI_SYSTEM_PROMPT);
+        }
+    }
+
     /// 验证旧版全局关闭值不再覆盖模型可用性，重新保存后也不会继续写出废弃字段。
     #[test]
     fn legacy_global_enabled_flag_is_ignored_after_model_configuration() {
@@ -716,7 +756,7 @@ mod tests {
             "model_profiles": [test_model("已配置模型")]
         }))
         .expect("带旧版全局开关的配置应继续兼容读取");
-        config.validate().expect("有效模型配置应直接启用智能分析");
+        config.validate().expect("有效模型配置应直接启用智能助手");
         let serialized = serde_json::to_value(config).expect("AI 配置应可重新序列化");
         assert!(serialized.get("enabled").is_none());
     }

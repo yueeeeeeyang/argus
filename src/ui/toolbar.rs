@@ -2,7 +2,7 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-10-01
 //! 作者：Argus 开发团队
-//! 主要功能：提供加载日志、过滤、目录树折叠、智能分析、导航和更多上下文操作。
+//! 主要功能：提供加载日志、过滤、目录树折叠、智能助手、导航和更多上下文操作。
 
 use crate::app::{AppTextInputTarget, ArgusApp};
 use crate::theme::AppTheme;
@@ -64,8 +64,8 @@ pub(crate) fn render_source_toolbar(app: &ArgusApp, cx: &mut Context<ArgusApp>) 
         .child(source_icon_button(
             "source-smart-analysis",
             ArgusIcon::SmartAnalysis,
-            "智能分析",
-            // 智能分析会主动扫描未展开目录；入口始终可点击，不再依赖当前是否已有可见日志叶子。
+            "智能助手",
+            // 每次点击都新建独立助手页签；入口不依赖当前是否已有可见日志叶子。
             true,
             &theme,
             cx,
@@ -133,6 +133,7 @@ fn source_icon_button(
 ) -> AnyElement {
     let app_entity = cx.entity();
     div()
+        .debug_selector(move || id.to_string())
         .opacity(if is_enabled { 1.0 } else { 0.4 })
         .child(render_icon_button(
             id,
@@ -167,7 +168,7 @@ fn source_icon_button(
                         });
                     }
                     "全部收起" => app.collapse_all_sources(),
-                    "智能分析" => app.open_ai_agent_launch_dialog(cx),
+                    "智能助手" => app.open_assistant_tab(cx),
                     _ => app.mark_placeholder_action(action_name),
                 }
                 cx.notify();

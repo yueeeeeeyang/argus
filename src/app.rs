@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析及远程连接状态。
 
-mod agent_actions;
+mod assistant_actions;
 mod log_search_actions;
 mod log_text;
 mod placeholder_data;
@@ -79,9 +79,8 @@ use crate::remote::connection::ConnectionNodeId;
 use crate::remote::remote_file::RemoteFileSessionState;
 use crate::remote::terminal::{TerminalSelectionAutoscroll, TerminalSessionState};
 use crate::theme::{AppTheme, ThemeManager, ThemeOption};
-use crate::ui::agent_dialog::AgentLaunchDialog;
-use crate::ui::agent_window::AgentWindow;
 use crate::ui::ai_settings_editor::AiSettingsEditor;
+use crate::ui::assistant_tab::AssistantTab;
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
 use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
 use crate::ui::file_preview_window::FilePreviewWindow;
@@ -196,20 +195,6 @@ fn input_selection_range(input: &TextInputState) -> Option<std::ops::Range<usize
     input.selection_range()
 }
 
-/// 构建无系统标题栏但保留可缩放能力的窗口标题栏选项。
-///
-/// GPUI 在 `titlebar: Some` 时会强制添加关闭/缩放按钮（红绿灯），而 `titlebar: None`
-/// 又会忽略 `is_resizable` 导致窗口不可缩放。这里把红绿灯定位到窗口可视区外，既保留
-/// 可缩放能力，又不显示系统按钮，关闭操作改由标题栏右侧的自定义关闭按钮承担。
-/// 目前仅 Agent 窗口使用此配置；线程详情窗口与文件预览窗口改用与主窗口一致的原生红绿灯。
-pub(crate) fn frameless_resizable_titlebar() -> TitlebarOptions {
-    TitlebarOptions {
-        title: None,
-        appears_transparent: true,
-        traffic_light_position: Some(point(px(-1000.0), px(0.0))),
-    }
-}
-
 /// Skill 管理分区最近一次操作结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SkillManagementMessage {
@@ -299,12 +284,10 @@ pub(crate) struct ArgusApp {
     pub source_picker: SourcePickerState,
     /// 日志来源选择器模态框子视图。
     pub source_picker_modal: Option<Entity<SourcePickerWindow>>,
-    /// AI 初始问题输入模态框子视图。
-    pub ai_agent_launch_modal: Option<Entity<AgentLaunchDialog>>,
-    /// 当前唯一非终态或最近一次 AI 分析独立窗口句柄。
-    pub ai_agent_window_handle: Option<WindowHandle<AgentWindow>>,
     /// AI 模型与日志类型配置编辑器模态框。
     pub ai_settings_editor_modal: Option<Entity<AiSettingsEditor>>,
+    /// 智能助手标签页实体，按会话 ID 独立保存。
+    pub assistant_tabs: HashMap<usize, Entity<AssistantTab>>,
     /// 日志读取状态，以来源 ID 为键复用已打开的 reader。
     pub log_read_states: HashMap<SourceId, LogOpenState>,
     /// 当前已物化的日志工作目录根；随来源替换而失效，由加载流程负责删除。
@@ -490,9 +473,8 @@ impl ArgusApp {
             archive_password_prompt: None,
             source_picker: SourcePickerState::default(),
             source_picker_modal: None,
-            ai_agent_launch_modal: None,
-            ai_agent_window_handle: None,
             ai_settings_editor_modal: None,
+            assistant_tabs: HashMap::new(),
             log_read_states: HashMap::new(),
             source_workspace_root: None,
             has_registered_workspace_close_guard: false,
@@ -1200,6 +1182,10 @@ impl ArgusApp {
             TabKind::RemoteFileManager { session_id } => {
                 self.disconnect_remote_file_session(*session_id);
             }
+            TabKind::Assistant { session_id } => {
+                // 实体 Drop 会取消仍在运行的模型/工具任务。
+                self.assistant_tabs.remove(session_id);
+            }
             TabKind::Empty => {}
         }
     }
@@ -1229,7 +1215,8 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::SshTerminal { .. }
             | TabKind::RemoteFileManager { .. }
-            | TabKind::RuntimeAnalysis { .. } => {
+            | TabKind::RuntimeAnalysis { .. }
+            | TabKind::Assistant { .. } => {
                 self.jstack_analyses.clear();
             }
         }
@@ -1246,7 +1233,8 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::SshTerminal { .. }
-            | TabKind::RemoteFileManager { .. } => {
+            | TabKind::RemoteFileManager { .. }
+            | TabKind::Assistant { .. } => {
                 self.runtime_analyses.clear();
             }
         }
@@ -1260,7 +1248,8 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::RemoteFileManager { .. }
-            | TabKind::RuntimeAnalysis { .. } => None,
+            | TabKind::RuntimeAnalysis { .. }
+            | TabKind::Assistant { .. } => None,
         };
         let sessions_to_disconnect = self
             .terminal_sessions
@@ -1281,7 +1270,8 @@ impl ArgusApp {
             | TabKind::LogSource { .. }
             | TabKind::JstackAnalysis { .. }
             | TabKind::RuntimeAnalysis { .. }
-            | TabKind::SshTerminal { .. } => None,
+            | TabKind::SshTerminal { .. }
+            | TabKind::Assistant { .. } => None,
         };
         let sessions_to_disconnect = self
             .remote_file_sessions
@@ -1291,6 +1281,24 @@ impl ArgusApp {
             .collect::<Vec<_>>();
         for session_id in sessions_to_disconnect {
             self.disconnect_remote_file_session(session_id);
+        }
+    }
+
+    /// 只保留指定智能助手 tab 的独立会话；非助手 tab 会丢弃全部助手实体。
+    fn retain_assistant_tab_for_tab_kind(&mut self, kept_kind: &TabKind) {
+        let kept_session_id = match kept_kind {
+            TabKind::Assistant { session_id } => Some(*session_id),
+            TabKind::Empty
+            | TabKind::LogSource { .. }
+            | TabKind::JstackAnalysis { .. }
+            | TabKind::RuntimeAnalysis { .. }
+            | TabKind::SshTerminal { .. }
+            | TabKind::RemoteFileManager { .. } => None,
+        };
+        if let Some(session_id) = kept_session_id {
+            self.assistant_tabs.retain(|id, _| *id == session_id);
+        } else {
+            self.assistant_tabs.clear();
         }
     }
 
@@ -1507,23 +1515,25 @@ impl ArgusApp {
         }
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = Some(tab_id);
-            self.close_log_search_results_for_active_analysis_tab();
+            self.close_log_search_results_for_active_non_log_tab();
             self.sync_source_tree_selection_from_active_tab();
             self.placeholder_notice = format!("已切换到 {}", self.active_tab_title());
         }
     }
 
-    /// 进入 Jstack 或 Runtime 分析标签时关闭仍在展示的日志搜索结果面板。
+    /// 进入非日志标签时关闭仍在展示的日志搜索结果面板。
     ///
     /// 说明：结果面板由结果、运行中任务或提示消息共同决定是否可见，并没有独立的打开
-    /// 标志；这里只在面板确实可见且当前标签属于分析页时复用完整关闭流程，以同步取消
+    /// 标志；这里只在面板确实可见且当前标签不是日志页时复用完整关闭流程，以同步取消
     /// 搜索任务、清理结果和正文命中高亮，同时保留搜索对话框中的查询条件。
-    fn close_log_search_results_for_active_analysis_tab(&mut self) {
-        let is_analysis_tab = matches!(
+    fn close_log_search_results_for_active_non_log_tab(&mut self) {
+        let is_non_log_tab = matches!(
             self.active_tab_kind(),
-            TabKind::JstackAnalysis { .. } | TabKind::RuntimeAnalysis { .. }
+            TabKind::JstackAnalysis { .. }
+                | TabKind::RuntimeAnalysis { .. }
+                | TabKind::Assistant { .. }
         );
-        if is_analysis_tab && self.should_show_log_search_results() {
+        if is_non_log_tab && self.should_show_log_search_results() {
             self.close_log_search_results_panel();
         }
     }
@@ -1611,7 +1621,7 @@ impl ArgusApp {
                 .tabs
                 .get(closed_index.min(self.tabs.len().saturating_sub(1)))
                 .map(|tab| tab.id);
-            self.close_log_search_results_for_active_analysis_tab();
+            self.close_log_search_results_for_active_non_log_tab();
             self.sync_source_tree_selection_from_active_tab();
         }
         if self.tabs.is_empty() {
@@ -1650,8 +1660,9 @@ impl ArgusApp {
         self.retain_runtime_analysis_for_tab_kind(&kept_kind);
         self.retain_terminal_session_for_tab_kind(&kept_kind);
         self.retain_remote_file_session_for_tab_kind(&kept_kind);
+        self.retain_assistant_tab_for_tab_kind(&kept_kind);
         self.active_tab_id = Some(tab_id);
-        self.close_log_search_results_for_active_analysis_tab();
+        self.close_log_search_results_for_active_non_log_tab();
         self.sync_source_tree_selection_from_active_tab();
         self.hovered_tab_id = None;
         self.log_scrollbar_drag = None;
@@ -1680,6 +1691,7 @@ impl ArgusApp {
         self.next_runtime_analysis_id = 1;
         self.disconnect_all_terminal_sessions();
         self.disconnect_all_remote_file_sessions();
+        self.assistant_tabs.clear();
         self.active_tab_id = None;
         self.hovered_tab_id = None;
         self.reset_log_text_selection();
@@ -1944,7 +1956,8 @@ fn source_id_for_tab_kind(kind: &TabKind) -> Option<SourceId> {
         | TabKind::JstackAnalysis { .. }
         | TabKind::RuntimeAnalysis { .. }
         | TabKind::SshTerminal { .. }
-        | TabKind::RemoteFileManager { .. } => None,
+        | TabKind::RemoteFileManager { .. }
+        | TabKind::Assistant { .. } => None,
     }
 }
 

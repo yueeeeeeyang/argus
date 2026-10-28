@@ -29,13 +29,13 @@ pub(crate) enum SettingsSection {
     About,
     /// 外观设置，包含主题选择。
     Appearance,
-    /// 智能分析分组下的模型配置。
+    /// 智能助手分组下的模型配置。
     AiModel,
-    /// 智能分析分组下的日志类型说明。
+    /// 智能助手分组下的日志类型说明。
     AiLogProfiles,
-    /// 智能分析分组下的默认系统提示词。
+    /// 智能助手分组下的默认系统提示词。
     AiSystemPrompt,
-    /// 智能分析分组下的 Skill 管理。
+    /// 智能助手分组下的 Skill 管理。
     AiSkills,
     /// 日志显示设置，包含字号和 Jstack 过滤规则。
     LogDisplay,
@@ -95,6 +95,11 @@ pub(crate) enum TabKind {
     /// 远程文件管理标签页，可由 SFTP、SMB、Git 或 SVN 后端驱动。
     RemoteFileManager {
         /// 远程文件会话 ID，用于从应用状态表中读取远程文件列表和操作状态。
+        session_id: usize,
+    },
+    /// 智能助手对话标签页。
+    Assistant {
+        /// 助手会话 ID，对应应用持有的独立对话实体。
         session_id: usize,
     },
 }
