@@ -727,6 +727,14 @@ fn form_dialogs_keep_symmetric_vertical_padding(cx: &mut gpui::TestAppContext) {
         30.0,
         "目录表单正文应完整容纳输入行，不应出现微小滚动"
     );
+    let input = cx
+        .debug_bounds("connection-directory-name-input")
+        .expect("应渲染目录名称输入框");
+    assert_eq!(
+        f32::from(input.right()),
+        f32::from(submit.right()),
+        "目录名称输入框右缘应与创建按钮右缘对齐"
+    );
 
     // 空名称提交后追加错误行：外壳只增高一行，按钮仍与下边框保持同一间距。
     let height_without_error = f32::from(container.size.height);
@@ -773,6 +781,14 @@ fn form_dialogs_keep_symmetric_vertical_padding(cx: &mut gpui::TestAppContext) {
         310.0,
         "SSH 表单正文应完整容纳 7 行输入与凭据说明，不应出现滚动"
     );
+    let input = cx
+        .debug_bounds("connection-link-private-key-passphrase-input")
+        .expect("应渲染私钥口令输入框");
+    assert_eq!(
+        f32::from(input.right()),
+        f32::from(submit.right()),
+        "链接表单输入框右缘应与创建按钮右缘对齐"
+    );
 
     // 链接表单校验失败同样只增高一行，按钮保持固定底部间距。
     let height_without_error = f32::from(container.size.height);
@@ -817,6 +833,14 @@ fn form_dialogs_keep_symmetric_vertical_padding(cx: &mut gpui::TestAppContext) {
         f32::from(container.bottom() - submit.bottom()),
         MODAL_BOTTOM_PADDING,
         "密码弹窗按钮与下边框的间距应等于标题到上边框的间距"
+    );
+    let input = cx
+        .debug_bounds("archive-password-input")
+        .expect("应渲染密码输入框");
+    assert_eq!(
+        f32::from(input.right()),
+        f32::from(submit.right()),
+        "密码输入框右缘应与继续按钮右缘对齐"
     );
 
     // 追加错误提示后弹窗同步增高，按钮仍保持同一底部间距。
@@ -3815,6 +3839,57 @@ fn welcome_quick_actions_open_log_and_links(cx: &mut gpui::TestAppContext) {
         );
         assert!(app.active_menu.is_none(), "打开链接不应再弹出新建链接菜单");
     });
+}
+
+/// 验证来源侧栏收起时标题栏图标按钮仍完整展示，只有侧栏自身内容随面板收起。
+#[gpui::test]
+fn collapsed_source_panel_keeps_title_bar_buttons(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    app.read_with(cx, |app, _| {
+        assert!(app.is_source_panel_collapsed, "首次启动侧栏默认收起");
+    });
+    for id in [
+        "title-log-analysis",
+        "title-connection",
+        "title-settings",
+        "title-source-toggle",
+    ] {
+        assert!(
+            cx.debug_bounds(id).is_some(),
+            "侧栏收起时标题栏按钮 {id} 仍应展示"
+        );
+    }
+    assert!(
+        cx.debug_bounds("argus-compact-title-bar").is_some(),
+        "侧栏收起时应使用紧凑标题栏"
+    );
+
+    let toggle = cx
+        .debug_bounds("title-source-toggle")
+        .expect("应渲染侧栏开关按钮");
+    cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    app.read_with(cx, |app, _| {
+        assert!(!app.is_source_panel_collapsed, "点击后侧栏应展开");
+    });
+    for id in [
+        "title-log-analysis",
+        "title-connection",
+        "title-settings",
+        "title-source-toggle",
+    ] {
+        assert!(
+            cx.debug_bounds(id).is_some(),
+            "侧栏展开后标题栏按钮 {id} 仍应展示"
+        );
+    }
+    assert!(
+        cx.debug_bounds("argus-split-title-bar").is_some(),
+        "侧栏展开后应使用分栏标题栏"
+    );
 }
 
 /// 验证已加载来源但未打开标签时展示“请选择日志”提示，不再显示欢迎页，并展开目录树。

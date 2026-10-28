@@ -1,6 +1,6 @@
 //! 文件职责：把用户选择的日志来源物化到独立工作目录。
 //! 创建日期：2026-09-12
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：加载日志时将普通文件/目录复制、压缩包（含嵌套）解压到 `cache/workdirs/<id>/`，
 //! 统一浏览器与 AI 的读取模型为普通文件；提供条目路径清洗和残留工作目录清扫。
@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
+use flate2::read::GzDecoder;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::LoaderConfig;
@@ -490,6 +491,71 @@ fn is_retryable_password_error(error: &anyhow::Error) -> bool {
         })
 }
 
+/// 把 gzip 文件流式解压到目标路径；解码失败与解压后超限按可跳过错误返回。
+///
+/// 参数说明：
+/// - `source`：已落盘的 gzip 原始字节来源。
+/// - `target`：解码后的普通文件目标路径。
+/// - `max_log_bytes`：解压后允许的最大字节数。
+/// - `display_entry`：面向用户展示的条目链路，用于错误信息。
+fn decompress_gzip_to_path(
+    source: &Path,
+    target: &Path,
+    max_log_bytes: u64,
+    display_entry: &str,
+) -> Result<(), MaterializeRootError> {
+    let context = format!("解压条目失败：{display_entry}");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            MaterializeRootError::Fatal(
+                anyhow::Error::new(error)
+                    .context(format!("无法创建物化目录：{}", parent.display())),
+            )
+        })?;
+    }
+    let input = File::open(source).map_err(|error| {
+        MaterializeRootError::Fatal(
+            anyhow::Error::new(error)
+                .context(format!("无法读取 gzip 暂存文件：{}", source.display())),
+        )
+    })?;
+    let mut decoder = GzDecoder::new(input);
+    let mut output = File::create(target).map_err(|error| {
+        MaterializeRootError::Fatal(
+            anyhow::Error::new(error).context(format!("无法创建物化文件：{}", target.display())),
+        )
+    })?;
+    let mut written = 0_u64;
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    loop {
+        let read = decoder.read(&mut buffer).map_err(|error| {
+            MaterializeRootError::EntrySkipped(anyhow::Error::new(error).context(context.clone()))
+        })?;
+        if read == 0 {
+            break;
+        }
+        written = written.saturating_add(read as u64);
+        if written > max_log_bytes {
+            return Err(MaterializeRootError::EntrySkipped(anyhow::anyhow!(
+                "{context}：解压后超过最大日志大小 {}",
+                format_bytes(max_log_bytes)
+            )));
+        }
+        output.write_all(&buffer[..read]).map_err(|error| {
+            MaterializeRootError::Fatal(
+                anyhow::Error::new(error)
+                    .context(format!("无法写入物化文件：{}", target.display())),
+            )
+        })?;
+    }
+    output.flush().map_err(|error| {
+        MaterializeRootError::Fatal(
+            anyhow::Error::new(error).context(format!("无法写入物化文件：{}", target.display())),
+        )
+    })?;
+    Ok(())
+}
+
 /// 把条目流式解压到指定路径；不计数、不上报进度，供普通条目与嵌套容器 scratch 共用。
 ///
 /// 说明：该函数不访问物化器状态，可由并行解压 worker 直接调用；失败时删除半成品文件。
@@ -909,7 +975,7 @@ impl WorkspaceMaterializer<'_> {
                 entry_path,
                 target,
                 display_entry,
-            } => self.extract_nested_gzip(source, &entry_path, &target, &display_entry),
+            } => self.extract_nested_gzip(source, &entry_path, &target, &display_entry, depth),
             NestedEntryJob::Container {
                 entry_path,
                 format,
@@ -1152,12 +1218,16 @@ impl WorkspaceMaterializer<'_> {
     }
 
     /// 解压嵌套单文件 gzip 条目为普通文件（落盘名沿用条目名去掉 `.gz` 的约定）。
+    ///
+    /// 说明：压缩包会话/适配器只提供条目的原始字节，不会替调用方解 gzip；必须先落盘到
+    /// scratch，再用 GZIP 解码器展开。否则会把 gzip 字节改名为 `.log`，打开后全是乱码。
     fn extract_nested_gzip(
         &mut self,
         source: &mut EntrySource<'_>,
         entry_path: &str,
         target: &Path,
         display_entry: &str,
+        depth: usize,
     ) -> Result<(), MaterializeRootError> {
         let file_stem = target
             .file_name()
@@ -1172,7 +1242,80 @@ impl WorkspaceMaterializer<'_> {
             .parent()
             .map(|parent| parent.join(&file_stem))
             .unwrap_or_else(|| PathBuf::from(&file_stem));
-        self.stream_entry_to_file(source, entry_path, &target, display_entry)
+
+        let scratch_dir = self.root.join(".argus-scratch");
+        fs::create_dir_all(&scratch_dir).map_err(|error| {
+            MaterializeRootError::Fatal(
+                anyhow::Error::new(error)
+                    .context(format!("无法创建 gzip 暂存目录：{}", scratch_dir.display())),
+            )
+        })?;
+        let scratch_file = next_scratch_file(&self.root, depth);
+        let streamed =
+            self.stream_entry_to_scratch(source, entry_path, &scratch_file, display_entry);
+        let streamed = match streamed {
+            Ok(streamed) => streamed,
+            Err(error) => {
+                let _ = fs::remove_file(&scratch_file);
+                return Err(error);
+            }
+        };
+        if !streamed {
+            let _ = fs::remove_file(&scratch_file);
+            return Ok(());
+        }
+
+        let result = decompress_gzip_to_path(
+            &scratch_file,
+            &target,
+            self.config.max_log_size_bytes(),
+            display_entry,
+        );
+        let _ = fs::remove_file(&scratch_file);
+        match result {
+            Ok(()) => {
+                self.files_written += 1;
+                if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
+                    self.report_progress(display_entry);
+                }
+                Ok(())
+            }
+            Err(MaterializeRootError::EntrySkipped(error)) => {
+                let _ = fs::remove_file(&target);
+                self.warnings.push(format!("{error}，已跳过"));
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&target);
+                Err(error)
+            }
+        }
+    }
+
+    /// 把条目原始字节流式写入 scratch，不计数、不上报进度。
+    ///
+    /// 返回值：成功返回 `true`；条目级失败记录警告并返回 `false`。
+    fn stream_entry_to_scratch(
+        &mut self,
+        source: &mut EntrySource<'_>,
+        entry_path: &str,
+        target: &Path,
+        display_entry: &str,
+    ) -> Result<bool, MaterializeRootError> {
+        match stream_entry_to_path(
+            source,
+            entry_path,
+            target,
+            display_entry,
+            self.config.max_log_size_bytes(),
+        ) {
+            Ok(()) => Ok(true),
+            Err(MaterializeRootError::EntrySkipped(error)) => {
+                self.warnings.push(format!("{error}，已跳过"));
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// 解压嵌套容器条目：先把容器条目流式落盘到 scratch，再从 scratch 递归解压为同名目录。
@@ -2225,6 +2368,47 @@ mod tests {
         assert!(!workspace.root.join("access.log").is_dir());
         assert_eq!(workspace.roots.len(), 1);
         assert_eq!(workspace.roots[0].path, workspace.root.join("access.log"));
+    }
+
+    /// 验证 zip 内的 gzip 条目会真正解压，而不是把 gzip 原始字节改名为日志。
+    ///
+    /// 回归背景：会话式解压只输出条目原始字节，曾把 `.log.gz` 直接写成 `.log`，
+    /// 用户在来源树中打开后看到满屏二进制乱码。
+    #[test]
+    fn materialize_zip_decompresses_nested_gzip_entry() {
+        let dir = isolated_test_dir("workspace-nested-gzip");
+        fs::create_dir_all(&dir).expect("应创建测试目录");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(b"nested-gzip-line\n")
+            .expect("应写入 gzip 内容");
+        let gz_bytes = encoder.finish().expect("应完成 gzip 编码");
+        let archive = write_test_zip(
+            &dir.join("logs.zip"),
+            &[(
+                "sys-sharding-2026-10-27-*.log.gz/sys-sharding-2026-10-27-1.log.gz",
+                gz_bytes.as_slice(),
+            )],
+        );
+
+        let workspace = materialize_sources(
+            &[archive],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &test_cancellation(),
+            None,
+        )
+        .expect("嵌套 gzip 物化应成功");
+
+        // 模拟用户压缩包的真实结构：外层目录名本身以 `.log.gz` 结尾。
+        let extracted = workspace
+            .root
+            .join("logs/sys-sharding-2026-10-27-*.log.gz/sys-sharding-2026-10-27-1.log");
+        assert_eq!(
+            fs::read(&extracted).expect("应读取解压后的日志"),
+            b"nested-gzip-line\n",
+            "嵌套 gzip 必须解压为文本，而不是把压缩字节改名"
+        );
     }
 
     /// 验证解压不受总量或条目数限制：大条目与大量条目都必须完整展开。

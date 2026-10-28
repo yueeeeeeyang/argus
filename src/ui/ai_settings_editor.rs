@@ -44,6 +44,8 @@ const AI_SYSTEM_PROMPT_EDITOR_HEIGHT: f32 = 620.0;
 const AI_EDITOR_HEADER_HEIGHT: f32 = 56.0;
 /// 编辑器滚动条宽度。
 const AI_EDITOR_SCROLLBAR_WIDTH: f32 = 8.0;
+/// 编辑器滚动区右侧内边距：20px 视觉边距扣除滚动条槽位，保证表单与底部按钮右缘对齐。
+const AI_EDITOR_SCROLL_RIGHT_PADDING: f32 = 12.0;
 /// 编辑器纵向滚动条滑块宽度。
 const AI_EDITOR_SCROLLBAR_THUMB_WIDTH: f32 = 4.0;
 /// 编辑器纵向滚动滑块相对可滚动区域的上下留白。
@@ -950,6 +952,7 @@ fn render_model_configuration(
         .scrollbar_width(px(AI_EDITOR_SCROLLBAR_WIDTH))
         .track_scroll(&scroll_handle)
         .p_5()
+        .pr(px(AI_EDITOR_SCROLL_RIGHT_PADDING))
         .child(
             div()
                 .w_full()
@@ -1182,6 +1185,7 @@ fn render_log_profile_configuration(
                 .scrollbar_width(px(AI_EDITOR_SCROLLBAR_WIDTH))
                 .track_scroll(&profile_editor_scroll)
                 .p_5()
+                .pr(px(AI_EDITOR_SCROLL_RIGHT_PADDING))
                 .child(render_profile_editor(editor, entity.clone(), draft, theme)),
         )
         .child(render_editor_vertical_scrollbar(

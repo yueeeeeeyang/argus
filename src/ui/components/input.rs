@@ -312,8 +312,10 @@ pub(crate) fn render_input(
         .as_ref()
         .map(|native_input| native_input.focus_handle.clone());
 
+    let debug_id = input.id;
     div()
-        .id(input.id)
+        .id(debug_id)
+        .debug_selector(move || debug_id.to_string())
         .h(px(height))
         .w_full()
         .pl(px(horizontal_padding))

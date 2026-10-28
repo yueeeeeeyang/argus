@@ -1,6 +1,6 @@
 //! 文件职责：渲染替代系统默认标题栏的 Obsidian 风格自定义标题栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：适配原生 macOS 交通灯、Windows 窗口控制按钮，并展示操作组和当前标签。
 
@@ -76,6 +76,7 @@ fn render_split_title_bar(
 ) -> impl IntoElement {
     div()
         .id("argus-split-title-bar")
+        .debug_selector(|| "argus-split-title-bar".to_string())
         .h(px(TITLE_BAR_HEIGHT))
         .w_full()
         .flex()
@@ -110,6 +111,7 @@ fn render_compact_title_bar(
 ) -> impl IntoElement {
     div()
         .id("argus-compact-title-bar")
+        .debug_selector(|| "argus-compact-title-bar".to_string())
         .h(px(TITLE_BAR_HEIGHT))
         .w_full()
         .flex()
@@ -169,16 +171,16 @@ fn title_drag_area(id: &'static str, cx: &mut Context<ArgusApp>) -> impl IntoEle
 }
 
 /// 渲染左侧标题栏操作组。
+///
+/// 说明：来源侧栏收起只影响侧栏自身内容，标题栏的工作区、设置与侧栏开关按钮始终保留；
+/// 仅侧栏开关图标与提示随折叠状态切换。
 fn title_control_group(
     app: &ArgusApp,
     is_window_maximized: bool,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
-    if app.is_source_panel_collapsed {
-        return collapsed_title_control_group(is_window_maximized, theme, cx).into_any_element();
-    }
-
+    let is_source_panel_collapsed = app.is_source_panel_collapsed;
     div()
         .h_full()
         .flex()
@@ -204,35 +206,17 @@ fn title_control_group(
         .child(settings_button(app, theme, cx))
         .child(title_action_button(
             "title-source-toggle",
-            ArgusIcon::source_panel_toggle(false),
-            "收起左侧菜单",
+            ArgusIcon::source_panel_toggle(is_source_panel_collapsed),
+            if is_source_panel_collapsed {
+                "展开左侧菜单"
+            } else {
+                "收起左侧菜单"
+            },
             false,
             theme,
             cx,
         ))
         .into_any_element()
-}
-
-/// 渲染来源侧栏折叠后的标题栏控制组，仅保留展开入口。
-fn collapsed_title_control_group(
-    is_window_maximized: bool,
-    theme: &AppTheme,
-    cx: &mut Context<ArgusApp>,
-) -> impl IntoElement {
-    div()
-        .h_full()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(platform_window_controls(is_window_maximized, theme))
-        .child(title_action_button(
-            "title-source-expand",
-            ArgusIcon::source_panel_toggle(true),
-            "展开左侧菜单",
-            false,
-            theme,
-            cx,
-        ))
 }
 
 /// macOS 使用原生交通灯，只渲染等宽安全占位区。
@@ -357,29 +341,36 @@ fn title_action_button(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
-    div().h_full().flex().items_center().child(
-        div()
-            .when(!is_selected, |this| {
-                this.relative().top(px(TITLE_BUTTON_INACTIVE_Y_OFFSET))
-            })
-            .child(render_icon_button(
-                id,
-                icon,
-                action_name,
-                is_selected,
-                IconButtonSize::Small,
-                theme,
-                cx.listener(move |app, _, _, cx| {
-                    match action_name {
-                        "日志分析" => app.switch_workspace(Workspace::LogAnalysis),
-                        "链接" => app.switch_workspace(Workspace::Connections),
-                        "收起左侧菜单" | "展开左侧菜单" => app.toggle_source_panel(),
-                        _ => app.mark_placeholder_action(action_name),
-                    }
-                    cx.notify();
-                }),
-            )),
-    )
+    div()
+        .debug_selector(move || id.to_string())
+        .h_full()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .when(!is_selected, |this| {
+                    this.relative().top(px(TITLE_BUTTON_INACTIVE_Y_OFFSET))
+                })
+                .child(render_icon_button(
+                    id,
+                    icon,
+                    action_name,
+                    is_selected,
+                    IconButtonSize::Small,
+                    theme,
+                    cx.listener(move |app, _, _, cx| {
+                        match action_name {
+                            "日志分析" => app.switch_workspace(Workspace::LogAnalysis),
+                            "链接" => app.switch_workspace(Workspace::Connections),
+                            "收起左侧菜单" | "展开左侧菜单" => {
+                                app.toggle_source_panel()
+                            }
+                            _ => app.mark_placeholder_action(action_name),
+                        }
+                        cx.notify();
+                    }),
+                )),
+        )
 }
 
 /// 渲染标题栏右侧设置入口，点击后打开主窗口设置模态框。
@@ -389,22 +380,27 @@ fn settings_button(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let is_selected = app.is_settings_modal_open;
-    div().h_full().flex().items_center().child(
-        div()
-            .when(!is_selected, |this| {
-                this.relative().top(px(TITLE_BUTTON_INACTIVE_Y_OFFSET))
-            })
-            .child(render_icon_button(
-                "title-settings",
-                ArgusIcon::Settings,
-                "设置",
-                is_selected,
-                IconButtonSize::Small,
-                theme,
-                cx.listener(|app, _, _, cx| {
-                    app.open_settings_modal(cx);
-                    cx.notify();
-                }),
-            )),
-    )
+    div()
+        .debug_selector(|| "title-settings".to_string())
+        .h_full()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .when(!is_selected, |this| {
+                    this.relative().top(px(TITLE_BUTTON_INACTIVE_Y_OFFSET))
+                })
+                .child(render_icon_button(
+                    "title-settings",
+                    ArgusIcon::Settings,
+                    "设置",
+                    is_selected,
+                    IconButtonSize::Small,
+                    theme,
+                    cx.listener(|app, _, _, cx| {
+                        app.open_settings_modal(cx);
+                        cx.notify();
+                    }),
+                )),
+        )
 }

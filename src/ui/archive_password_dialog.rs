@@ -24,6 +24,10 @@ use gpui::{
 
 /// 密码弹窗标题栏高度。
 const ARCHIVE_PASSWORD_DIALOG_HEADER_HEIGHT: f32 = 58.0;
+/// 正文滚动条宽度；滚动条槽位会占用可用宽度。
+const ARCHIVE_PASSWORD_SCROLLBAR_WIDTH: f32 = 6.0;
+/// 正文右侧内边距：20px 视觉边距扣除滚动条槽位，保证输入框与底栏按钮右缘对齐。
+const ARCHIVE_PASSWORD_SCROLL_RIGHT_PADDING: f32 = 14.0;
 /// 正文与底部操作区之间的间距。
 const ARCHIVE_PASSWORD_DIALOG_FOOTER_GAP: f32 = 20.0;
 /// 弹窗高度：标题栏 + 说明行 + 来源行 + 输入行 + 底部操作区 + 底部内边距。
@@ -109,8 +113,9 @@ fn render_dialog_content(
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
-                .scrollbar_width(px(6.0))
+                .scrollbar_width(px(ARCHIVE_PASSWORD_SCROLLBAR_WIDTH))
                 .px_5()
+                .pr(px(ARCHIVE_PASSWORD_SCROLL_RIGHT_PADDING))
                 .flex()
                 .flex_col()
                 .gap_3()

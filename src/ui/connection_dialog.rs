@@ -41,6 +41,10 @@ const CONNECTION_WINDOW_TITLE_ICON_SIZE: f32 = 16.0;
 const CONNECTION_DIRECTORY_MODAL_WIDTH: f32 = 420.0;
 /// 链接表单模态框宽度，沿用改造前独立窗口尺寸。
 const CONNECTION_LINK_MODAL_WIDTH: f32 = 520.0;
+/// 表单滚动区滚动条宽度；滚动条槽位会占用正文可用宽度。
+const CONNECTION_FORM_SCROLLBAR_WIDTH: f32 = 6.0;
+/// 表单滚动区右侧内边距：左右 20px 视觉边距扣除滚动条槽位，保证输入框右缘与底栏按钮对齐。
+const CONNECTION_FORM_SCROLL_RIGHT_PADDING: f32 = 14.0;
 /// 连接弹窗内容根节点 1px 边框在上下两侧占用的高度。
 ///
 /// 边框在布局盒内，计算外壳高度时必须计入，否则正文会被压缩 2px 并出现微小滚动。
@@ -718,8 +722,9 @@ fn render_directory_window_content(
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
-                .scrollbar_width(px(6.0))
+                .scrollbar_width(px(CONNECTION_FORM_SCROLLBAR_WIDTH))
                 .px_5()
+                .pr(px(CONNECTION_FORM_SCROLL_RIGHT_PADDING))
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -974,8 +979,9 @@ fn render_link_window_content(
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
-                .scrollbar_width(px(6.0))
+                .scrollbar_width(px(CONNECTION_FORM_SCROLLBAR_WIDTH))
                 .px_5()
+                .pr(px(CONNECTION_FORM_SCROLL_RIGHT_PADDING))
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -1761,8 +1767,9 @@ fn render_host_key_prompt(
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
-                .scrollbar_width(px(6.0))
+                .scrollbar_width(px(CONNECTION_FORM_SCROLLBAR_WIDTH))
                 .px_5()
+                .pr(px(CONNECTION_FORM_SCROLL_RIGHT_PADDING))
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -1861,8 +1868,9 @@ fn render_delete_prompt(
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
-                .scrollbar_width(px(6.0))
+                .scrollbar_width(px(CONNECTION_FORM_SCROLLBAR_WIDTH))
                 .px_5()
+                .pr(px(CONNECTION_FORM_SCROLL_RIGHT_PADDING))
                 .flex()
                 .flex_col()
                 .gap_3()

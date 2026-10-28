@@ -48,8 +48,9 @@ const TAB_EXTERNAL_LEFT_GAP: f32 = 8.0;
 /// 标题栏右侧固定按钮与窗口右边缘的间距，对应 `custom_title_bar` 中的间距。
 const TAB_EXTERNAL_RIGHT_GAP: f32 = 12.0;
 /// 来源侧栏折叠时，紧凑标题栏在标签栏左侧占用的宽度：
-/// 栏内左内边距 12 + 窗口控制占位 76 + 间距 8 + 展开按钮 28 + 组件间距 8。
-const COMPACT_LEFT_CONTROLS_WIDTH: f32 = 12.0 + 76.0 + 8.0 + 28.0 + 8.0;
+/// 栏内左内边距 12 + 窗口控制占位 76 + 4 个标题栏按钮（工作区/链接/设置/侧栏开关）28×4
+/// + 5 个子项之间的 4 个间距 8×4 + 与标签区的组件间距 8。
+const COMPACT_LEFT_CONTROLS_WIDTH: f32 = 12.0 + 76.0 + 28.0 * 4.0 + 8.0 * 4.0 + 8.0;
 /// 关闭按钮固定占位宽度，避免 hover 时插入按钮撑宽标签。
 const TAB_CLOSE_SLOT_WIDTH: f32 = 18.0;
 /// 标签关闭按钮命中区尺寸，比通用标题栏按钮更紧凑。
@@ -296,6 +297,32 @@ fn fit_tab_widths(ideal_widths: &[f32], available_width: f32) -> Vec<f32> {
     vec![average_width; ideal_widths.len()]
 }
 
+/// 标签标题悬浮提示：标签宽度不足被截断时查看完整名称。
+struct TabTitleTooltip {
+    /// 完整标签标题。
+    title: String,
+    /// 当前主题令牌，保持 tooltip 与应用风格一致。
+    theme: AppTheme,
+}
+
+impl Render for TabTitleTooltip {
+    /// 渲染紧凑 tooltip 内容。
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(360.0))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(self.theme.title_bar))
+            .border_1()
+            .border_color(rgb(self.theme.border))
+            .text_size(px(12.0))
+            .font_weight(gpui::FontWeight::NORMAL)
+            .text_color(rgb(self.theme.foreground))
+            .child(self.title.clone())
+    }
+}
+
 /// 渲染单个可切换、可关闭、可打开右键菜单的标签。
 fn render_tab(
     tab: crate::app::ArgusTab,
@@ -324,6 +351,8 @@ fn render_tab(
     } else {
         theme.foreground_muted
     };
+    let tooltip_title = tab.title.clone();
+    let tooltip_theme = theme.clone();
 
     div()
         .id(SharedString::from(format!("tab-{tab_id}")))
@@ -366,6 +395,13 @@ fn render_tab(
                 )
                 .child(render_tab_close_slot(tab_id, should_show_close, theme, cx)),
         )
+        .tooltip(move |_, cx| {
+            cx.new(|_| TabTitleTooltip {
+                title: tooltip_title.clone(),
+                theme: tooltip_theme.clone(),
+            })
+            .into()
+        })
         .on_hover(cx.listener(move |app, is_hovered: &bool, _, cx| {
             if app.set_hovered_tab(tab_id, *is_hovered) {
                 cx.notify();
