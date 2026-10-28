@@ -36,13 +36,125 @@ pub(crate) fn render_content_body(
                 theme,
             )
         }
-        TabKind::Empty => render_empty_state(
-            "请选择日志来源",
-            "左侧来源树已经接入真实结构，选择日志文件后会在此处显示真实内容。",
-            app,
-            theme,
-        ),
+        // 没有打开任何标签时进入欢迎态：侧栏默认收起，内容面板撑满窗口并给出快捷入口。
+        TabKind::Empty => render_log_welcome(app, theme, cx),
     }
+}
+
+/// 渲染未打开任何日志时的欢迎面板：主操作打开日志，次操作切换到链接工作区。
+fn render_log_welcome(
+    app: &mut ArgusApp,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    let open_sources = cx.listener(|app, _, _, cx| {
+        app.request_load_sources(cx);
+        cx.notify();
+    });
+    let open_links = cx.listener(|app, _, _, cx| {
+        app.switch_workspace(crate::app::Workspace::Connections);
+        cx.notify();
+    });
+
+    div()
+        .debug_selector(|| "log-welcome".to_string())
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .bg(rgb(theme.content))
+        .child(
+            div()
+                .w(px(560.0))
+                .max_w_full()
+                .px_6()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .text_center()
+                .child(render_icon(ArgusIcon::Logs, theme.foreground_muted, 40.0))
+                .child(
+                    div()
+                        .text_size(px(18.0))
+                        .text_color(rgb(theme.foreground))
+                        .child("开始分析日志"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.foreground_muted))
+                        .child(
+                            "打开日志文件、目录或压缩包，也可以直接把日志或压缩包拖入窗口；支持大文件按需读取与多文件分析。",
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(render_welcome_tile(
+                            "log-welcome-open-sources",
+                            ArgusIcon::FolderPlus,
+                            "打开日志",
+                            theme,
+                            open_sources,
+                        ))
+                        .child(render_welcome_tile(
+                            "log-welcome-open-links",
+                            ArgusIcon::Connection,
+                            "打开链接",
+                            theme,
+                            open_links,
+                        )),
+                )
+                .children(app.source_load_notice.clone().map(|notice| {
+                    div()
+                        .mt_1()
+                        .max_w_full()
+                        .text_size(px(11.0))
+                        .text_color(rgb(theme.warning))
+                        .child(notice)
+                })),
+        )
+        .into_any_element()
+}
+
+/// 渲染欢迎面板快捷入口：图标在上、文字在下的方形按钮。
+fn render_welcome_tile(
+    id: &'static str,
+    icon: ArgusIcon,
+    label: &'static str,
+    theme: &AppTheme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .w(px(112.0))
+        .h(px(112.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.current_line))
+        .cursor_pointer()
+        .hover(|this| this.opacity(0.82))
+        .on_click(on_click)
+        .child(render_icon(icon, theme.info, 26.0))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .text_color(rgb(theme.foreground))
+                .child(label),
+        )
 }
 
 /// 渲染当前日志 tab 对应的读取状态或真实日志文本。

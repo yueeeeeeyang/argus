@@ -1,6 +1,6 @@
 //! 文件职责：连接来源树智能分析入口、问题模态框、Agent 独立窗口和后台通用智能体任务。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-09-14
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：解析分析根范围、读取系统凭据、先创建独立窗口，再在专用 Tokio 运行时启动通用智能体循环。
 
@@ -135,7 +135,7 @@ impl ArgusApp {
         let workspace_root = self
             .source_workspace_root
             .clone()
-            .ok_or_else(|| "日志工作目录已失效，请重新加载日志来源".to_string())?;
+            .ok_or_else(|| "日志工作目录已失效，请重新加载日志".to_string())?;
         // 整体耗时从用户提交问题后正式开始准备来源时计算。
         let analysis_started_at = Instant::now();
         let preparation = prepare_agent_source_scope(
@@ -298,10 +298,10 @@ impl ArgusApp {
     /// 返回来源树是否允许启动新会话的用户可读原因，供点击入口时直接预检。
     fn ai_agent_scope_unavailable_reason(&self) -> Option<String> {
         if self.source_registry.root_ids().is_empty() {
-            return Some("尚未加载日志来源，请先添加包含日志文件的来源".to_string());
+            return Some("尚未加载日志，请先添加包含日志文件的来源".to_string());
         }
         if self.source_workspace_root.is_none() {
-            return Some("日志工作目录已失效，请重新加载日志来源".to_string());
+            return Some("日志工作目录已失效，请重新加载日志".to_string());
         }
         if self.source_registry.root_ids().len() > 1 && self.source_registry.selected_id().is_none()
         {

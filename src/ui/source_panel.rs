@@ -1,6 +1,6 @@
 //! 文件职责：渲染日志分析工作区的来源侧栏。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：展示局部工具区和来源目录树，不访问真实文件系统。
 
@@ -51,8 +51,11 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
         } else {
             dir_tree_panel::render(app, cx).into_any_element()
         })
-        .when_some(app.source_load_notice.clone(), |this, notice| {
-            this.child(render_source_load_notice(notice, &theme, cx))
+        // 欢迎态（无标签、侧栏收起）的加载提示由内容区欢迎面板展示，避免重复。
+        .when(!app.is_log_welcome(), |this| {
+            this.when_some(app.source_load_notice.clone(), |this, notice| {
+                this.child(render_source_load_notice(notice, &theme, cx))
+            })
         })
 }
 

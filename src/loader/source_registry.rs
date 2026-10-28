@@ -1,6 +1,6 @@
 //! 文件职责：管理日志来源树节点注册和可见索引。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-07-17
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：集中维护来源 ID、父子关系、选择状态、批量树构建、AI 分析根解析和虚拟列表可见节点。
 
@@ -291,6 +291,46 @@ impl SourceRegistry {
         }
         self.rebuild_visible_index();
         collapsed_count
+    }
+
+    /// 展开“单链目录”：来源树只有一个根目录时展开该根，之后每级仅有一个子目录时继续展开。
+    ///
+    /// 说明：日志目录常按日期、实例逐层嵌套且每层只有一个子目录，逐级点击才能看到日志；
+    /// 遇到多个子级或唯一子级不是目录时停止，避免过度展开干扰浏览。
+    ///
+    /// 返回值：是否有节点的展开状态发生变化。
+    pub(crate) fn expand_single_child_directory_chain(&mut self) -> bool {
+        let [root_id] = self.root_ids.as_slice() else {
+            return false;
+        };
+        let mut current_id = *root_id;
+        let mut has_changed = false;
+        while let Some(node) = self.nodes.get_mut(&current_id) {
+            if !node.kind.can_expand() {
+                break;
+            }
+            if !node.expanded {
+                node.expanded = true;
+                has_changed = true;
+            }
+            // 唯一子级必须是目录才继续下探；文件或分支节点到此为止。
+            let child_ids = self.child_ids(current_id);
+            let [only_child_id] = child_ids else {
+                break;
+            };
+            let only_child_id = *only_child_id;
+            let Some(only_child) = self.nodes.get(&only_child_id) else {
+                break;
+            };
+            if !matches!(only_child.kind, SourceKind::Directory) {
+                break;
+            }
+            current_id = only_child_id;
+        }
+        if has_changed {
+            self.rebuild_visible_index();
+        }
+        has_changed
     }
 
     /// 标记节点加载状态。
@@ -624,6 +664,183 @@ mod tests {
                 .map(|source| source.expanded)
                 .unwrap_or(false)
         );
+    }
+
+    /// 构造指定类型的来源节点，便于验证默认展开策略。
+    fn node_with_kind(
+        registry: &mut SourceRegistry,
+        parent_id: Option<crate::loader::SourceId>,
+        depth: usize,
+        label: &str,
+        kind: SourceKind,
+    ) -> crate::loader::SourceId {
+        let id = registry.allocate_id();
+        registry.insert_node(SourceTreeNode {
+            id,
+            parent_id,
+            depth,
+            label: label.to_string(),
+            kind,
+            location: SourceLocation::LocalPath(PathBuf::from(label)),
+            metadata: SourceMetadata {
+                children_loaded: true,
+                ..SourceMetadata::default()
+            },
+            selected: false,
+            expanded: false,
+        });
+        id
+    }
+
+    /// 验证单根目录、每级只有一个子目录时逐级展开到分支层。
+    #[test]
+    fn expands_single_child_directory_chain_until_branch() {
+        let mut registry = SourceRegistry::new();
+        let logs_id = node_with_kind(&mut registry, None, 0, "logs", SourceKind::Directory);
+        let month_id = node_with_kind(
+            &mut registry,
+            Some(logs_id),
+            1,
+            "2026-10",
+            SourceKind::Directory,
+        );
+        let server_id = node_with_kind(
+            &mut registry,
+            Some(month_id),
+            2,
+            "server",
+            SourceKind::Directory,
+        );
+        let app_id = node_with_kind(
+            &mut registry,
+            Some(server_id),
+            3,
+            "app.log",
+            SourceKind::LogFile,
+        );
+        let error_id = node_with_kind(
+            &mut registry,
+            Some(server_id),
+            3,
+            "error.log",
+            SourceKind::LogFile,
+        );
+        registry.rebuild_all_indices();
+
+        assert!(registry.expand_single_child_directory_chain());
+
+        for id in [logs_id, month_id, server_id] {
+            assert!(
+                registry.node(id).is_some_and(|node| node.expanded),
+                "单链目录应自动展开"
+            );
+        }
+        assert_eq!(
+            registry.visible_source_ids(),
+            &[logs_id, month_id, server_id, app_id, error_id]
+        );
+        assert!(
+            !registry.expand_single_child_directory_chain(),
+            "展开状态未变化时不应重复报告"
+        );
+    }
+
+    /// 验证顶层出现多个子级时只展开唯一的根目录，不再继续下探。
+    #[test]
+    fn expands_single_root_but_stops_at_multiple_children() {
+        let mut registry = SourceRegistry::new();
+        let logs_id = node_with_kind(&mut registry, None, 0, "logs", SourceKind::Directory);
+        let first_id = node_with_kind(
+            &mut registry,
+            Some(logs_id),
+            1,
+            "first",
+            SourceKind::Directory,
+        );
+        let second_id = node_with_kind(
+            &mut registry,
+            Some(logs_id),
+            1,
+            "second",
+            SourceKind::Directory,
+        );
+        node_with_kind(
+            &mut registry,
+            Some(first_id),
+            2,
+            "a.log",
+            SourceKind::LogFile,
+        );
+        node_with_kind(
+            &mut registry,
+            Some(second_id),
+            2,
+            "b.log",
+            SourceKind::LogFile,
+        );
+        registry.rebuild_all_indices();
+
+        assert!(registry.expand_single_child_directory_chain());
+
+        assert!(registry.node(logs_id).is_some_and(|node| node.expanded));
+        assert!(registry.node(first_id).is_some_and(|node| !node.expanded));
+        assert_eq!(
+            registry.visible_source_ids(),
+            &[logs_id, first_id, second_id]
+        );
+    }
+
+    /// 验证唯一子级是文件时只展开根目录，不把文件当作单链继续处理。
+    #[test]
+    fn expands_single_root_before_file_child() {
+        let mut registry = SourceRegistry::new();
+        let logs_id = node_with_kind(&mut registry, None, 0, "logs", SourceKind::Directory);
+        let app_id = node_with_kind(
+            &mut registry,
+            Some(logs_id),
+            1,
+            "app.log",
+            SourceKind::LogFile,
+        );
+        registry.rebuild_all_indices();
+
+        assert!(registry.expand_single_child_directory_chain());
+
+        assert!(registry.node(logs_id).is_some_and(|node| node.expanded));
+        assert_eq!(registry.visible_source_ids(), &[logs_id, app_id]);
+    }
+
+    /// 验证存在多个根目录时不做默认展开，保留用户逐层浏览的预期。
+    #[test]
+    fn keeps_multiple_roots_collapsed() {
+        let mut registry = SourceRegistry::new();
+        let first_root = node_with_kind(&mut registry, None, 0, "first", SourceKind::Directory);
+        let second_root = node_with_kind(&mut registry, None, 0, "second", SourceKind::Directory);
+        node_with_kind(
+            &mut registry,
+            Some(first_root),
+            1,
+            "a.log",
+            SourceKind::LogFile,
+        );
+        node_with_kind(
+            &mut registry,
+            Some(second_root),
+            1,
+            "b.log",
+            SourceKind::LogFile,
+        );
+        registry.rebuild_all_indices();
+
+        assert!(!registry.expand_single_child_directory_chain());
+
+        assert!(registry.node(first_root).is_some_and(|node| !node.expanded));
+        assert!(
+            registry
+                .node(second_root)
+                .is_some_and(|node| !node.expanded)
+        );
+        assert_eq!(registry.visible_source_ids(), &[first_root, second_root]);
     }
 
     /// 验证兄弟关系可用于 UI 连线裁剪，最后一个兄弟不应继续向下绘制竖线。

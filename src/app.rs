@@ -1,6 +1,6 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析、助手面板及远程连接状态。
 
@@ -572,7 +572,8 @@ impl ArgusApp {
             hovered_tab_id: None,
             active_menu: None,
             tab_menu_scroll: UniformListScrollHandle::new(),
-            is_source_panel_collapsed: false,
+            // 启动时没有任何标签，按欢迎态默认收起来源侧栏，让内容面板撑满窗口。
+            is_source_panel_collapsed: true,
             source_panel_width: SOURCE_PANEL_DEFAULT_WIDTH,
             connection_source_panel_width: SOURCE_PANEL_MIN_WIDTH,
             is_source_panel_resizing: false,
@@ -580,8 +581,9 @@ impl ArgusApp {
             source_resize_start_x: 0.0,
             source_resize_start_width: SOURCE_PANEL_DEFAULT_WIDTH,
             source_panel_animation_generation: 0,
-            source_panel_animation_from_width: SOURCE_PANEL_DEFAULT_WIDTH,
-            source_panel_animation_to_width: SOURCE_PANEL_DEFAULT_WIDTH,
+            // 启动即欢迎态：动画端点从收起宽度开始，避免首帧闪出侧栏。
+            source_panel_animation_from_width: 0.0,
+            source_panel_animation_to_width: 0.0,
             selected_theme_id,
             is_theme_dropdown_open: false,
             settings_quick_keywords_input: TextInputState::from_value(quick_keywords_input_value),
@@ -639,6 +641,7 @@ impl ArgusApp {
         if workspace == Workspace::Connections && self.is_source_panel_collapsed {
             self.toggle_source_panel();
         }
+        self.sync_source_panel_welcome_state();
         self.placeholder_notice = match workspace {
             Workspace::LogAnalysis => "已切换到日志分析占位工作区".to_string(),
             Workspace::Connections => "已切换到链接工作区".to_string(),
@@ -670,21 +673,42 @@ impl ArgusApp {
         self.open_source_picker(cx);
     }
 
-    /// 切换来源侧栏折叠状态。
-    pub(crate) fn toggle_source_panel(&mut self) {
-        let was_collapsed = self.is_source_panel_collapsed;
+    /// 是否处于“还没有打开任何日志”的欢迎状态（日志工作区且没有标签）。
+    ///
+    /// 说明：欢迎态默认收起来源侧栏，内容面板撑满窗口；用户仍可用标题栏按钮手动展开。
+    pub(crate) fn is_log_welcome(&self) -> bool {
+        self.workspace == Workspace::LogAnalysis && self.tabs.is_empty()
+    }
+
+    /// 按欢迎态默认策略收起来源侧栏。
+    ///
+    /// 只做收起、不强制展开：用户在欢迎态手动展开后保持展开；打开日志后的侧栏
+    /// 状态仍由加载策略（单文件收起、多文件展开）决定。
+    pub(crate) fn sync_source_panel_welcome_state(&mut self) {
+        if self.is_log_welcome() && !self.is_source_panel_collapsed {
+            self.set_source_panel_collapsed(true);
+        }
+    }
+
+    /// 设置来源侧栏折叠状态，并按当前宽度播放展开/收起动画。
+    fn set_source_panel_collapsed(&mut self, collapsed: bool) {
+        if self.is_source_panel_collapsed == collapsed {
+            return;
+        }
         let current_width = self.current_source_panel_width();
-        self.is_source_panel_collapsed = !self.is_source_panel_collapsed;
+        self.is_source_panel_collapsed = collapsed;
         self.is_source_panel_resizing = false;
         self.is_source_resizer_hovered = false;
         self.source_panel_animation_generation =
             self.source_panel_animation_generation.wrapping_add(1);
-        self.source_panel_animation_from_width = if was_collapsed { 0.0 } else { current_width };
-        self.source_panel_animation_to_width = if self.is_source_panel_collapsed {
-            0.0
-        } else {
-            current_width
-        };
+        self.source_panel_animation_from_width = if collapsed { current_width } else { 0.0 };
+        self.source_panel_animation_to_width = if collapsed { 0.0 } else { current_width };
+    }
+
+    /// 切换来源侧栏折叠状态。
+    pub(crate) fn toggle_source_panel(&mut self) {
+        let collapsed = !self.is_source_panel_collapsed;
+        self.set_source_panel_collapsed(collapsed);
         self.placeholder_notice = if self.is_source_panel_collapsed {
             "已折叠来源侧栏".to_string()
         } else {
@@ -1624,6 +1648,7 @@ impl ArgusApp {
             self.reset_log_text_selection();
             self.log_scrollbar_drag = None;
             self.reset_log_search_runtime_state();
+            self.sync_source_panel_welcome_state();
             self.placeholder_notice = "已关闭最后一个标签".to_string();
             return;
         }
@@ -1690,6 +1715,7 @@ impl ArgusApp {
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
         self.reset_log_search_runtime_state();
+        self.sync_source_panel_welcome_state();
         self.placeholder_notice = "已关闭全部标签".to_string();
     }
 

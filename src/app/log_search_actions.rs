@@ -1,6 +1,6 @@
 //! 文件职责：维护日志搜索对话框、后台搜索任务、来源树多选和结果跳转逻辑。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：把真实日志搜索能力接入 ArgusApp，同时保持搜索 UI 状态与日志读取状态解耦。
 
@@ -1937,7 +1937,7 @@ impl ArgusApp {
         self.log_search.directory_input.selection_drag = None;
     }
 
-    /// 清理搜索输入历史；重新加载日志来源时调用，避免旧关键字和旧目录污染新来源。
+    /// 清理搜索输入历史；重新加载日志时调用，避免旧关键字和旧目录污染新来源。
     fn clear_log_search_history_inputs(&mut self) {
         self.clear_quick_log_search_state();
         reset_log_search_input_state(&mut self.log_search.keyword_input);

@@ -1,6 +1,6 @@
 //! 文件职责：提取来源树选择、展开折叠、完整加载回填和按节点密码重试等方法到独立子模块。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：维护来源树语义状态、整树替换式加载回填、加密压缩包子树重试、单文件另存为，并通知助手真实来源内容版本变化。
 
@@ -422,6 +422,8 @@ impl ArgusApp {
 
         let added_count = registry.tree_order_source_ids().len();
         self.source_registry = registry;
+        // 加载后自动展开单链目录，用户无需逐级点开只含一个子目录的嵌套路径。
+        self.source_registry.expand_single_child_directory_chain();
         self.has_loaded_real_sources = true;
         self.source_picker.selected_paths.clear();
         self.reset_log_workspace_after_source_replace();
@@ -535,6 +537,8 @@ impl ArgusApp {
                 self.is_source_loading = false;
                 self.placeholder_notice = format!("来源加载失败：{error:#}");
                 self.source_load_notice = Some(self.placeholder_notice.clone());
+                // 加载失败会回到没有标签的欢迎态，错误在欢迎面板展示。
+                self.sync_source_panel_welcome_state();
             }
         }
     }

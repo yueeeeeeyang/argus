@@ -1,6 +1,6 @@
 //! 文件职责：维护自定义日志来源选择器的应用状态与业务动作。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：替代系统文件选择器，提供跨平台目录浏览、多选和确认加载流程。
 
@@ -243,7 +243,7 @@ impl ArgusApp {
         self.source_picker.selected_paths.clear();
         self.source_picker.path_input_selection_drag = None;
         self.source_picker.is_path_input_focused = false;
-        self.placeholder_notice = "已取消加载日志来源".to_string();
+        self.placeholder_notice = "已取消加载日志".to_string();
     }
 
     /// 后台浏览指定目录；成功后替换当前目录列表，失败时保留原目录。
@@ -551,7 +551,7 @@ impl ArgusApp {
         .detach();
     }
 
-    /// 开始加载日志来源前返回日志分析工作区，并同步对应侧栏的动画宽度。
+    /// 开始加载日志前返回日志分析工作区，并同步对应侧栏的动画宽度。
     fn activate_log_analysis_for_source_load(&mut self) {
         if self.workspace != Workspace::Connections {
             return;
@@ -969,8 +969,11 @@ mod tests {
         app.activate_log_analysis_for_source_load();
 
         assert_eq!(app.workspace, Workspace::LogAnalysis);
-        assert_eq!(app.source_panel_animation_from_width, 280.0);
-        assert_eq!(app.source_panel_animation_to_width, 280.0);
+        assert_eq!(app.source_panel_width, 280.0);
+        assert!(
+            app.is_source_panel_collapsed,
+            "加载开始时尚无标签，按欢迎态默认收起侧栏"
+        );
     }
 
     /// 验证名称排序在目录优先的前提下按名称升降序切换。

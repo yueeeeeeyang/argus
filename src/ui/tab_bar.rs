@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义标题栏中的日志标签区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：展示可切换标签、右键菜单和多标签溢出下拉入口。
 
@@ -569,6 +569,11 @@ mod tests {
             },
         }];
         app.active_tab_id = Some(1);
+        // 有标签时侧栏默认展开，边界类用例按分栏标题栏几何断言（直接落到动画终点）。
+        app.is_source_panel_collapsed = false;
+        let width = app.current_source_panel_width();
+        app.source_panel_animation_from_width = width;
+        app.source_panel_animation_to_width = width;
         app
     }
 

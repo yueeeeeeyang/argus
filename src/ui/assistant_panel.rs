@@ -1,6 +1,6 @@
 //! 文件职责：渲染并管理主窗口右侧可持续交互的 Agent 助手面板。
 //! 创建日期：2026-07-16
-//! 修改日期：2026-09-28
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：全来源扫描、多轮会话、模型切换、流式 Markdown、工具轨迹分组、Token 状态和可信日志引用跳转。
 
@@ -537,7 +537,7 @@ impl AssistantPanel {
             )
         };
         if registry.root_ids().is_empty() {
-            self.error = Some("尚未加载日志来源".to_string());
+            self.error = Some("尚未加载日志".to_string());
             return;
         }
         self.scan_generation = self.scan_generation.wrapping_add(1);

@@ -1,6 +1,6 @@
 //! 文件职责：渲染日志分析工作区的主内容区域。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：按行虚拟渲染日志正文和 Jstack 分析页，大日志只读取当前可见页，避免整份日志进入 UI 文本节点。
 
@@ -261,7 +261,7 @@ fn render_source_load_progress(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
                             theme.foreground_muted,
                             16.0,
                         ))
-                        .child("正在加载日志来源".to_string()),
+                        .child("正在加载日志".to_string()),
                 )
                 .child(
                     div()

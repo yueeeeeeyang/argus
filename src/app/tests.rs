@@ -1,6 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -3532,6 +3532,95 @@ fn source_load_result_surfaces_failure_and_warnings(cx: &mut gpui::TestAppContex
     });
 }
 
+/// 验证欢迎态（未打开任何日志）默认收起来源侧栏，内容面板撑满窗口并显示快捷入口。
+#[gpui::test]
+fn welcome_state_hides_sidebar_and_shows_quick_actions(cx: &mut gpui::TestAppContext) {
+    use crate::ui::main_window::WINDOW_CONTENT_INSET;
+
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    app.read_with(cx, |app, _| {
+        assert!(app.is_log_welcome(), "启动时没有任何标签，应处于欢迎态");
+        assert!(app.is_source_panel_collapsed, "欢迎态默认收起来源侧栏");
+    });
+    assert!(
+        cx.debug_bounds("log-welcome").is_some(),
+        "欢迎态应渲染快捷入口面板"
+    );
+    assert!(
+        cx.debug_bounds("source-resizer-hit-area").is_none(),
+        "侧栏收起时不应渲染宽度拖拽命中区"
+    );
+    let panel = cx
+        .debug_bounds("window-content-panel")
+        .expect("应渲染内容玻璃板");
+    assert_eq!(
+        f32::from(panel.left()),
+        WINDOW_CONTENT_INSET,
+        "侧栏收起后内容面板应从窗口左留白开始"
+    );
+    assert_eq!(
+        f32::from(panel.right()),
+        1401.0 - WINDOW_CONTENT_INSET,
+        "内容面板应撑满窗口右缘"
+    );
+}
+
+/// 验证关闭最后一个标签后回到欢迎态；快捷入口分别打开日志选择器与链接工作区。
+#[gpui::test]
+fn welcome_quick_actions_open_log_and_links(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    // 打开一个日志并展开侧栏，再关闭最后一个标签应回到欢迎态。
+    app.update(cx, |app, _| {
+        let app_log_id = source_id_by_label(app, "app.log");
+        app.select_source(app_log_id);
+        let tab_id = app.active_tab_id.expect("打开日志后应有激活标签");
+        app.toggle_source_panel();
+        assert!(!app.is_source_panel_collapsed, "手动展开后侧栏应可见");
+        app.close_tab(tab_id);
+        assert!(app.tabs.is_empty());
+        assert!(
+            app.is_source_panel_collapsed,
+            "关闭最后一个标签后应回到欢迎态并收起侧栏"
+        );
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    let open_sources = cx
+        .debug_bounds("log-welcome-open-sources")
+        .expect("欢迎面板应提供打开日志入口");
+    cx.simulate_click(open_sources.center(), gpui::Modifiers::default());
+    app.update(cx, |app, _| {
+        assert!(
+            app.source_picker_modal.is_some(),
+            "点击打开日志应弹出来源选择器"
+        );
+    });
+
+    // 再次渲染欢迎态并点击打开链接。
+    app.update(cx, |app, _| {
+        app.source_picker_modal = None;
+        app.source_picker.is_open = false;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1402.0), gpui::px(900.0)));
+    let open_links = cx
+        .debug_bounds("log-welcome-open-links")
+        .expect("欢迎面板应提供打开链接入口");
+    cx.simulate_click(open_links.center(), gpui::Modifiers::default());
+    app.update(cx, |app, _| {
+        assert_eq!(
+            app.workspace,
+            Workspace::Connections,
+            "打开链接应切换到链接工作区"
+        );
+        assert!(app.active_menu.is_none(), "打开链接不应再弹出新建链接菜单");
+    });
+}
+
 /// 验证最大日志大小按 2 倍档位调整，并收敛到可配置上下限。
 #[test]
 fn max_log_size_steps_between_configured_bounds() {
@@ -3563,6 +3652,11 @@ fn max_log_size_steps_between_configured_bounds() {
 fn source_load_notice_banner_is_visible_and_dismissible(cx: &mut gpui::TestAppContext) {
     let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+    // 欢迎态下提示由内容区欢迎面板展示；先打开标签，验证侧栏提示条。
+    app.update(cx, |app, _| {
+        push_test_log_tab(app, "app.log");
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(901.0)));
     assert!(
         cx.debug_bounds("source-load-notice").is_none(),
         "没有加载问题时不显示提示条"
@@ -3583,38 +3677,6 @@ fn source_load_notice_banner_is_visible_and_dismissible(cx: &mut gpui::TestAppCo
     assert!(
         cx.debug_bounds("source-load-notice").is_none(),
         "关闭提示后提示条应消失"
-    );
-}
-
-/// 验证没有打开任何标签时内容区展示空状态，关闭最后一个标签后同样回到空状态。
-#[gpui::test]
-fn no_tabs_show_content_empty_state(cx: &mut gpui::TestAppContext) {
-    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
-    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
-
-    assert!(
-        cx.debug_bounds("log-content-empty-state").is_some(),
-        "启动时没有任何标签，内容区应展示空状态"
-    );
-
-    app.update(cx, |app, _| {
-        let app_log_id = source_id_by_label(app, "app.log");
-        app.select_source(app_log_id);
-        let tab_id = app.active_tab_id.expect("打开日志后应有激活标签");
-        assert_eq!(app.tabs.len(), 1, "打开日志应创建且只创建一个标签");
-        app.close_tab(tab_id);
-        assert!(app.tabs.is_empty(), "关闭最后一个标签后不应保留占位标签");
-        assert_eq!(app.active_tab_id, None);
-    });
-    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
-
-    assert!(
-        cx.debug_bounds("log-content-empty-state").is_some(),
-        "关闭最后一个标签后内容区应回到空状态"
-    );
-    assert!(
-        cx.debug_bounds("tab-1").is_none(),
-        "关闭最后一个标签后标签栏不应再渲染页签"
     );
 }
 
@@ -4507,6 +4569,72 @@ fn floating_assistant_panel_not_rendered_inline(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// 验证加载日志后单链目录（每级只有一个子目录）默认逐级展开，遇到分支即停止。
+#[test]
+fn source_load_expands_single_child_directory_chain() {
+    let mut app = test_app();
+    let mut registry = SourceRegistry::new();
+    let push_directory =
+        |registry: &mut SourceRegistry, parent_id: Option<SourceId>, depth: usize, label: &str| {
+            let id = registry.allocate_id();
+            registry.insert_node(crate::loader::SourceTreeNode {
+                id,
+                parent_id,
+                depth,
+                label: label.to_string(),
+                kind: SourceKind::Directory,
+                location: SourceLocation::LocalPath(PathBuf::from(label)),
+                metadata: SourceMetadata {
+                    children_loaded: true,
+                    ..SourceMetadata::default()
+                },
+                selected: false,
+                expanded: false,
+            });
+            id
+        };
+    let push_log =
+        |registry: &mut SourceRegistry, parent_id: SourceId, depth: usize, label: &str| {
+            let id = registry.allocate_id();
+            registry.insert_node(crate::loader::SourceTreeNode {
+                id,
+                parent_id: Some(parent_id),
+                depth,
+                label: label.to_string(),
+                kind: SourceKind::LogFile,
+                location: SourceLocation::LocalPath(PathBuf::from(label)),
+                metadata: SourceMetadata::default(),
+                selected: false,
+                expanded: false,
+            });
+            id
+        };
+
+    let logs_id = push_directory(&mut registry, None, 0, "logs");
+    let month_id = push_directory(&mut registry, Some(logs_id), 1, "2026-10");
+    let server_id = push_directory(&mut registry, Some(month_id), 2, "server");
+    push_log(&mut registry, server_id, 3, "app.log");
+    push_log(&mut registry, server_id, 3, "error.log");
+    registry.rebuild_all_indices();
+
+    assert!(app.apply_load_report(crate::loader::SourceTreeScanResult {
+        registry,
+        warnings: Vec::new(),
+    }));
+
+    assert_eq!(
+        visible_labels(&app),
+        vec!["logs", "2026-10", "server", "app.log", "error.log"],
+        "单链目录应逐级展开到日志所在层"
+    );
+    assert!(
+        app.source_registry
+            .node(server_id)
+            .is_some_and(|node| node.expanded),
+        "含多个日志的末级目录也应展开"
+    );
+}
+
 /// 验证来源加载后的侧栏默认状态：单文件来源自动收起目录树并直接打开文件，
 /// 目录或多文件来源自动展开目录树（含上一次单文件加载收起后的重新加载）。
 #[gpui::test]
@@ -4810,6 +4938,14 @@ fn content_panel_keeps_right_inset_across_tab_kinds(cx: &mut gpui::TestAppContex
 fn source_resizer_hit_area_follows_content_panel_left_edge(cx: &mut gpui::TestAppContext) {
     let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+    // 欢迎态默认收起侧栏；本用例验证展开状态下命中区几何（直接落到动画终点）。
+    app.update(cx, |app, _| {
+        app.is_source_panel_collapsed = false;
+        let width = app.current_source_panel_width();
+        app.source_panel_animation_from_width = width;
+        app.source_panel_animation_to_width = width;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
 
     let assert_aligned = |cx: &mut gpui::VisualTestContext, scene: &str| {
         let hit_area = cx

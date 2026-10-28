@@ -1,6 +1,6 @@
 //! 文件职责：渲染自定义跨平台日志来源选择器模态框。
 //! 创建日期：2026-06-11
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：提供主窗口模态框中的目录浏览、目录/文件/压缩包多选和确认加载入口。
 
@@ -337,7 +337,7 @@ fn render_sidebar_title(theme: &AppTheme) -> impl IntoElement + use<> {
                     theme.foreground_muted,
                     SOURCE_PICKER_TITLE_ICON_SIZE,
                 ))
-                .child("加载日志来源"),
+                .child("加载日志"),
         )
 }
 
@@ -358,7 +358,7 @@ fn render_browser_title_bar(
         .child(render_icon_button(
             "source-picker-window-close",
             ArgusIcon::Close,
-            "关闭加载日志来源",
+            "关闭加载日志",
             false,
             IconButtonSize::Small,
             theme,

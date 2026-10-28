@@ -1,6 +1,6 @@
 //! 文件职责：定义 AI 会话状态、范围快照、资源预算、轨迹事件和追加消息。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-09-12
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：把来源树固化为不可变授权范围，并统一记录 Agent 日志访问、调用、Token 用量和取消边界。
 
@@ -501,13 +501,13 @@ fn resolve_scope_root_ids(
             Ok(vec![registry.root_ids()[0]])
         }
         AgentScopeSelection::SelectedRoot(None) if registry.root_ids().is_empty() => {
-            Err("请先加载日志来源".to_string())
+            Err("请先加载日志".to_string())
         }
         AgentScopeSelection::SelectedRoot(None) => {
             Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string())
         }
         AgentScopeSelection::AllLoadedRoots if registry.root_ids().is_empty() => {
-            Err("请先加载日志来源".to_string())
+            Err("请先加载日志".to_string())
         }
         AgentScopeSelection::AllLoadedRoots => Ok(registry.root_ids().to_vec()),
     }

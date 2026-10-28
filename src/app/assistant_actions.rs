@@ -1,6 +1,6 @@
 //! 文件职责：维护主窗口右侧 Agent 助手面板、尺寸和来源内容版本联动。
 //! 创建日期：2026-07-16
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：延迟创建助手实体、控制展开收起与拖动、在主窗口右侧空间充足时改用浮动窗口并跟随、原子回填扫描结果，并在根日志重新加载时重建助手会话。
 
@@ -566,6 +566,8 @@ mod tests {
         assert!(app.resize_assistant_panel(900.0, 1330.0));
         assert_eq!(app.assistant_panel_width, 450.0);
         assert_eq!(app.current_assistant_panel_width_for_window(1330.0), 450.0);
+        // 欢迎态默认收起侧栏后窄窗口也能放下 450px 面板，这里显式恢复展开以验证夹取。
+        app.is_source_panel_collapsed = false;
         assert_eq!(app.current_assistant_panel_width_for_window(820.0), 0.0);
 
         app.is_source_panel_collapsed = true;
