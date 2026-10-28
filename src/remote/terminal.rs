@@ -1,6 +1,6 @@
 //! 文件职责：封装 SSH 终端会话、主机指纹校验、终端输出解析、输入模式跟踪与查询应答。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：使用内嵌 ssh2 通道建立远程 shell，并把后台输出安全回传给 GPUI 状态。
 
@@ -24,6 +24,11 @@ use crate::remote::ssh::{authenticate_ssh_session, connect_ssh_session};
 use crate::remote::terminal_input::{
     TerminalInputMode, TerminalMouseButton, TerminalMouseEncoding, TerminalMouseMode,
 };
+
+/// 把终端行/列转换为 vt100 要求的非零尺寸；异常值按 1 兜底。
+fn terminal_grid_size(value: u16) -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(value.max(1)).unwrap_or(std::num::NonZeroU16::MIN)
+}
 
 /// 终端默认行数。
 pub(crate) const DEFAULT_TERMINAL_ROWS: u16 = 30;
@@ -87,8 +92,8 @@ impl TerminalSessionState {
             title: link.name.clone(),
             status: TerminalStatus::Connecting,
             parser: vt100::Parser::new_with_callbacks(
-                DEFAULT_TERMINAL_ROWS,
-                DEFAULT_TERMINAL_COLS,
+                terminal_grid_size(DEFAULT_TERMINAL_ROWS),
+                terminal_grid_size(DEFAULT_TERMINAL_COLS),
                 TERMINAL_SCROLLBACK_LINES,
                 TerminalCallbacks::default(),
             ),
@@ -391,7 +396,9 @@ impl TerminalSessionState {
         self.rows = rows.max(1);
         self.cols = cols.max(1);
         self.clear_selection();
-        self.parser.screen_mut().set_size(self.rows, self.cols);
+        self.parser
+            .screen_mut()
+            .set_size(terminal_grid_size(self.rows), terminal_grid_size(self.cols));
         self.refresh_max_scrollback_offset();
         if let Some(sender) = &self.command_sender {
             let _ = sender.send(TerminalCommand::Resize {
@@ -1192,8 +1199,8 @@ mod tests {
             title: "测试终端".to_string(),
             status: TerminalStatus::Connected,
             parser: vt100::Parser::new_with_callbacks(
-                rows,
-                cols,
+                terminal_grid_size(rows),
+                terminal_grid_size(cols),
                 TERMINAL_SCROLLBACK_LINES,
                 TerminalCallbacks::default(),
             ),

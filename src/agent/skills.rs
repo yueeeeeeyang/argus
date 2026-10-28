@@ -1,6 +1,6 @@
 //! 文件职责：Skill 的解析、筛选与注入。
 //! 创建日期：2026-09-14
-//! 修改日期：2026-09-14
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：导入知识解析为 AgentSkill；按用户禁用列表筛选，并渲染为进入系统提示词的
 //! <SKILLS> 区块。不提供任何内置 Skill。
@@ -295,10 +295,13 @@ fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
         if entry.is_dir() {
             continue;
         }
-        if entry.name().starts_with('/') || entry.name().contains("..") {
-            return Err(format!("ZIP 条目路径不安全：{}", entry.name()));
+        let entry_name = entry
+            .name()
+            .map_err(|error| format!("读取 ZIP 条目名失败：{error}"))?;
+        if entry_name.starts_with('/') || entry_name.contains("..") {
+            return Err(format!("ZIP 条目路径不安全：{entry_name}"));
         }
-        let relative = PathBuf::from(entry.name().replace('\\', "/"));
+        let relative = PathBuf::from(entry_name.replace('\\', "/"));
         if is_packaging_metadata(&relative) {
             continue;
         }

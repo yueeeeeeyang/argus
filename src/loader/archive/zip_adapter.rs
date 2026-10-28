@@ -1,6 +1,6 @@
 //! 文件职责：实现 ZIP 压缩包条目枚举适配器。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：打开 ZIP、枚举条目元信息，并按条目读取或流式输出日志内容。
 
@@ -374,11 +374,19 @@ where
         .map_err(|error| map_zip_error(error, source_label))
         .with_context(|| format!("无法读取 ZIP 第 {index} 个条目：{source_label}"))?;
     Ok(ZipEntryMetadata {
-        path: normalize_archive_entry_path(file.name()),
+        path: normalize_archive_entry_path(&zip_entry_display_name(&file)),
         is_dir: file.is_dir(),
         encrypted: file.encrypted(),
         unpacked_size: file.size(),
     })
+}
+
+/// 读取 ZIP 条目名；非法名称按有损解码兜底，避免整包枚举因单个条目失败。
+fn zip_entry_display_name<R: std::io::Read + ?Sized>(file: &zip::read::ZipFile<'_, R>) -> String {
+    match file.name() {
+        Ok(name) => name.into_owned(),
+        Err(_) => String::from_utf8_lossy(file.name_raw()).into_owned(),
+    }
 }
 
 /// ZIP 条目在不解密正文时即可获得的元数据。

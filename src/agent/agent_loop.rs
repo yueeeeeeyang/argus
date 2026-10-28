@@ -600,7 +600,7 @@ pub(crate) async fn send_stream_delta(
 
 /// 安全递减待消费提示数量；即使异常事件顺序也不会发生无符号下溢。
 pub(crate) fn decrement_pending_messages(counter: &AtomicUsize) {
-    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+    let _ = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
         Some(value.saturating_sub(1))
     });
 }

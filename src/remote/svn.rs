@@ -63,9 +63,11 @@ impl russh::client::Handler for SvnSshHostKeyCapture {
     /// 临时接受公钥以完成预检握手；真正信任判断紧接着在同一 worker 中完成。
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        *self.server_key.lock().expect("主机公钥捕获锁不应中毒") = Some(server_public_key.clone());
+        // 证书形式的主机密钥同样取其公钥，指纹展示与确认逻辑保持一致。
+        *self.server_key.lock().expect("主机公钥捕获锁不应中毒") =
+            Some(server_public_key.public_key());
         Ok(true)
     }
 }

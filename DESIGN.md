@@ -66,7 +66,7 @@ AI 智能体的产品边界、工具契约与安全策略另见 `docs/ai_log_age
 | **搜索匹配** | `regex`、`aho-corasick` | 正则搜索；多关键字快搜用多模式自动机一次匹配全部普通关键字 |
 | **凭据管理** | `keyring` + `secrecy` + `aes-gcm` + `hkdf` + `getrandom` + `sha2` | 优先系统凭据库；不可用时用机器绑定派生密钥加密回落，代码中不保存密钥常量 |
 | **AI 智能体** | `rig-core`（锁定 `=0.40.0`）+ `reqwest` + `futures` | Rig 负责多轮流式对话；`reqwest` 用于设置单次请求超时 |
-| **远程访问** | `ssh2`、`russh`、`smb2`、`git2`、`svn`（本地补丁）、`ureq`、`vt100` | 见 4.6 节；SSH 终端用 `ssh2`，SVN 指纹预检复用纯 Rust `russh` |
+| **远程访问** | `ssh2`、`russh`、`smb2`、`git2`、`svn`、`ureq`、`vt100` | 见 4.6 节；SSH 终端用 `ssh2`，SVN 指纹预检复用纯 Rust `russh` |
 | **序列化与配置** | `serde`、`serde_json`、`toml`、`schemars` | 设置文件、AI 工具参数结构与模型能力探测 |
 | **Markdown 渲染** | `pulldown-cmark` | 用 CommonMark/GFM 事件解析器驱动 AI 消息展示 |
 | **错误处理** | `anyhow`（业务路径）、`thiserror`（**穷尽枚举**的领域错误） | 业务错误带上下文；配置与 agent 工具用类型化错误 |
@@ -79,8 +79,8 @@ AI 智能体的产品边界、工具契约与安全策略另见 `docs/ai_log_age
 - macOS：`objc`/`objc2`/`objc2-foundation`、`block`、`raw-window-handle`（自定义标题栏与原生窗口跟随）。
 
 **本地补丁**（`[patch.crates-io]`，源码在 `third_party/`）：`gpui`（让 Windows release shader
-可在非 Windows 主机构建）、`zip`（统一到稳定版 `aes` 0.9）、`svn`
-（升级纯 Rust `russh` 传输依赖）、`block`（替换已废弃的空枚举占位类型）。
+可在非 Windows 主机构建）、`block`（替换已废弃的空枚举占位类型）。`zip` 与 `svn` 已升级到
+上游稳定版（`zip` 9.x 自带 `aes` 0.9、`svn` 0.1.16 自带 `russh` 0.63+），不再需要本地补丁。
 
 ### 2.2 GPUI 架构适配
 
@@ -674,7 +674,7 @@ NUL 判定为二进制并明确提示。
 
 | Scheme | 实现 | 说明 |
 |--------|------|------|
-| `svn://`、`svn+ssh://` | 打过本地补丁的 `svn` crate（纯 Rust ra_svn） | SSH 隧道由 `russh` 建立 |
+| `svn://`、`svn+ssh://` | `svn` crate（纯 Rust ra_svn） | SSH 隧道由 `russh` 建立 |
 | `http://`、`https://` | 内置 HTTPv2 DAV 客户端（`ureq`） | `OPTIONS`、`PROPFIND`、`GET` |
 
 - **版本选择**：`HEAD` 或非负修订号；HEAD 在建立连接时解析为具体修订；切换版本后回到仓库根；
@@ -1214,11 +1214,9 @@ argus/
 ├── assets/                                         # 内置字体与图标源文件
 │   ├── fonts/
 │   └── icons/
-├── third_party/                                    # gpui / zip / svn / block 本地补丁
+├── third_party/                                    # gpui / block 本地补丁
 │   ├── block/
-│   ├── gpui/
-│   ├── svn/
-│   └── zip/
+│   └── gpui/
 └── src/
     ├── agent/                                      # AI 智能体
     │   ├── agent_loop.rs                           # 通用单轮模型循环、工具注册、安全骨架

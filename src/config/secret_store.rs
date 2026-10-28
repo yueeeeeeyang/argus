@@ -1,6 +1,6 @@
 //! 文件职责：统一管理需要保密的连接凭据，并优先把它们保存到系统凭据库。
 //! 创建日期：2026-10-05
-//! 修改日期：2026-10-05
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：以系统凭据库为首选后端保存连接密码与私钥口令，凭据库不可用时改用机器绑定
 //! 派生密钥加密后写入设置文件；任何情况下都不再把机密明文写入 `settings.toml`。
@@ -176,7 +176,7 @@ fn encrypt_local(plaintext: &str) -> Result<String, String> {
     let key = local_encryption_key()?;
     let cipher = Aes256Gcm::new(&Array::from(key));
     let mut nonce_bytes = [0_u8; NONCE_BYTES];
-    getrandom::getrandom(&mut nonce_bytes)
+    getrandom::fill(&mut nonce_bytes)
         .map_err(|error| format!("无法生成本地加密随机数：{error}"))?;
 
     let ciphertext = cipher
@@ -259,7 +259,7 @@ fn read_or_create_salt(path: &Path) -> Result<Vec<u8>, String> {
     }
 
     let mut salt = vec![0_u8; SALT_BYTES];
-    getrandom::getrandom(&mut salt).map_err(|error| format!("无法生成本地凭据随机盐：{error}"))?;
+    getrandom::fill(&mut salt).map_err(|error| format!("无法生成本地凭据随机盐：{error}"))?;
 
     // 阶段一：尝试成为唯一创建者。
     match create_salt_file(path, &salt) {
