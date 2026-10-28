@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::remote::connection::ConnectionLinkKind;
+use crate::ui::components::icon::ArgusIcon;
 
 impl ArgusApp {
     /// 在指定窗口坐标打开标签页右键菜单。
@@ -109,9 +110,13 @@ impl ArgusApp {
 
         match active_menu.kind {
             ActiveMenuKind::TabContext { tab_id } => vec![
-                MenuEntry::new("关闭当前", MenuAction::CloseTab { tab_id }),
-                MenuEntry::new("关闭其他", MenuAction::CloseOtherTabs { tab_id }),
-                MenuEntry::new("关闭全部", MenuAction::CloseAllTabs).danger(),
+                MenuEntry::new("关闭当前", MenuAction::CloseTab { tab_id })
+                    .with_icon(ArgusIcon::Close),
+                MenuEntry::new("关闭其他", MenuAction::CloseOtherTabs { tab_id })
+                    .with_icon(ArgusIcon::CircleX),
+                MenuEntry::new("关闭全部", MenuAction::CloseAllTabs)
+                    .danger()
+                    .with_icon(ArgusIcon::Trash),
             ],
             ActiveMenuKind::TabOverflow => self
                 .tabs
@@ -132,24 +137,30 @@ impl ArgusApp {
             ],
             ActiveMenuKind::SourceTree { source_id } => {
                 let mut entries = Vec::new();
-                // 另存为对任意普通文件可用，因此排在分析类入口之前，且不依赖分析候选判定。
-                if self.source_is_exportable_file(source_id) {
-                    entries.push(MenuEntry::new(
-                        "另存为…",
-                        MenuAction::SaveSourceAs { source_id },
-                    ));
-                }
                 if self.source_supports_jstack_analysis(source_id) {
-                    entries.push(MenuEntry::new(
-                        "Jstack线程日志分析",
-                        MenuAction::OpenJstackAnalysis { source_id },
-                    ));
+                    entries.push(
+                        MenuEntry::new(
+                            "Jstack线程日志分析",
+                            MenuAction::OpenJstackAnalysis { source_id },
+                        )
+                        .with_icon(ArgusIcon::Activity),
+                    );
                 }
                 if self.source_supports_runtime_analysis(source_id) {
-                    entries.push(MenuEntry::new(
-                        "Runtime日志解析",
-                        MenuAction::OpenRuntimeAnalysis { source_id },
-                    ));
+                    entries.push(
+                        MenuEntry::new(
+                            "Runtime日志解析",
+                            MenuAction::OpenRuntimeAnalysis { source_id },
+                        )
+                        .with_icon(ArgusIcon::Timer),
+                    );
+                }
+                // 另存为放在菜单最后，避免分析类入口被文件操作打断。
+                if self.source_is_exportable_file(source_id) {
+                    entries.push(
+                        MenuEntry::new("另存为", MenuAction::SaveSourceAs { source_id })
+                            .with_icon(ArgusIcon::FileDown),
+                    );
                 }
                 entries
             }
@@ -157,13 +168,19 @@ impl ArgusApp {
                 if self.config.connections.is_directory(node_id) {
                     // 目录菜单直接提供四种协议的新建入口；父目录由右键选中的节点推导。
                     vec![
-                        MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink),
-                        MenuEntry::new("新建 SMB 链接", MenuAction::NewSmbConnectionLink),
-                        MenuEntry::new("新建 Git 链接", MenuAction::NewGitConnectionLink),
-                        MenuEntry::new("新建 SVN 链接", MenuAction::NewSvnConnectionLink),
-                        MenuEntry::new("编辑目录", MenuAction::EditConnectionNode { node_id }),
+                        MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink)
+                            .with_icon(ArgusIcon::Terminal),
+                        MenuEntry::new("新建 SMB 链接", MenuAction::NewSmbConnectionLink)
+                            .with_icon(ArgusIcon::Database),
+                        MenuEntry::new("新建 Git 链接", MenuAction::NewGitConnectionLink)
+                            .with_icon(ArgusIcon::GitBranch),
+                        MenuEntry::new("新建 SVN 链接", MenuAction::NewSvnConnectionLink)
+                            .with_icon(ArgusIcon::History),
+                        MenuEntry::new("编辑目录", MenuAction::EditConnectionNode { node_id })
+                            .with_icon(ArgusIcon::Rename),
                         MenuEntry::new("删除目录", MenuAction::DeleteConnectionNode { node_id })
-                            .danger(),
+                            .danger()
+                            .with_icon(ArgusIcon::Trash),
                     ]
                 } else {
                     // 与树渲染同一口径：无协议信息的旧配置按 SSH 处理。
@@ -172,27 +189,35 @@ impl ArgusApp {
                     });
                     let mut entries = Vec::new();
                     if is_ssh_link {
-                        entries.push(MenuEntry::new(
-                            "文件管理",
-                            MenuAction::OpenSftpFileManagerFromLink { link_id: node_id },
-                        ));
+                        entries.push(
+                            MenuEntry::new(
+                                "文件管理",
+                                MenuAction::OpenSftpFileManagerFromLink { link_id: node_id },
+                            )
+                            .with_icon(ArgusIcon::FolderOpen),
+                        );
                     }
-                    entries.push(MenuEntry::new(
-                        "编辑链接",
-                        MenuAction::EditConnectionNode { node_id },
-                    ));
+                    entries.push(
+                        MenuEntry::new("编辑链接", MenuAction::EditConnectionNode { node_id })
+                            .with_icon(ArgusIcon::Rename),
+                    );
                     entries.push(
                         MenuEntry::new("删除链接", MenuAction::DeleteConnectionNode { node_id })
-                            .danger(),
+                            .danger()
+                            .with_icon(ArgusIcon::Trash),
                     );
                     entries
                 }
             }
             ActiveMenuKind::ConnectionLinkCreate => vec![
-                MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink),
-                MenuEntry::new("新建 SMB 链接", MenuAction::NewSmbConnectionLink),
-                MenuEntry::new("新建 Git 链接", MenuAction::NewGitConnectionLink),
-                MenuEntry::new("新建 SVN 链接", MenuAction::NewSvnConnectionLink),
+                MenuEntry::new("新建 SSH 链接", MenuAction::NewSshConnectionLink)
+                    .with_icon(ArgusIcon::Terminal),
+                MenuEntry::new("新建 SMB 链接", MenuAction::NewSmbConnectionLink)
+                    .with_icon(ArgusIcon::Database),
+                MenuEntry::new("新建 Git 链接", MenuAction::NewGitConnectionLink)
+                    .with_icon(ArgusIcon::GitBranch),
+                MenuEntry::new("新建 SVN 链接", MenuAction::NewSvnConnectionLink)
+                    .with_icon(ArgusIcon::History),
             ],
             ActiveMenuKind::TerminalContext { session_id } => {
                 let mut entries = Vec::new();

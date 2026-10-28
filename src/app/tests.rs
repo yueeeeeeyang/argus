@@ -334,10 +334,10 @@ fn app_with_real_source_file(scope: &str) -> (ArgusApp, PathBuf, SourceId) {
     (app, path, file_id)
 }
 
-/// 验证单个文件的右键菜单首项是另存为。
+/// 验证单个文件的右键菜单末项是另存为，并带另存为图标。
 ///
-/// 说明：物化后的普通文件同时是 Runtime 分析候选，因此菜单会同时出现分析入口；
-/// 这里断言的是另存为排在首位且绑定到被右键的节点。
+/// 说明：物化后的普通文件同时是分析候选，分析入口排在前面；另存为放最后，
+/// 避免文件操作打断分析类入口。
 #[test]
 fn source_tree_context_menu_offers_save_as_for_single_file() {
     let (mut app, _path, file_id) = app_with_real_source_file("menu-save-as-file");
@@ -352,11 +352,21 @@ fn source_tree_context_menu_offers_save_as_for_single_file() {
         ),
         "单个文件必须能打开来源树菜单"
     );
-    assert_eq!(entries[0].label, "另存为…", "另存为应是首个菜单项");
+    let save_as = entries.last().expect("菜单不应为空");
+    assert_eq!(save_as.label, "另存为", "另存为应是最后一个菜单项");
+    assert_eq!(
+        save_as.icon,
+        Some(crate::ui::components::icon::ArgusIcon::FileDown),
+        "另存为应带文件下载图标"
+    );
     assert!(matches!(
-        entries[0].action,
+        save_as.action,
         MenuAction::SaveSourceAs { source_id } if source_id == file_id
     ));
+    assert!(
+        entries.iter().all(|entry| entry.icon.is_some()),
+        "来源树菜单每一行都应带图标"
+    );
 }
 
 /// 验证目录节点不提供另存为入口。
@@ -565,12 +575,13 @@ fn connection_link_create_menu_shows_four_protocols() {
     let mut app = test_app();
     app.open_connection_link_create_menu(gpui::point(gpui::px(1.0), gpui::px(1.0)));
 
-    let actions = app
-        .active_menu_entries()
+    let entries = app.active_menu_entries();
+    assert_eq!(entries.len(), 4);
+    assert!(entries.iter().all(|entry| entry.icon.is_some()));
+    let actions = entries
         .into_iter()
         .map(|entry| entry.action)
         .collect::<Vec<_>>();
-    assert_eq!(actions.len(), 4);
     assert!(actions.contains(&MenuAction::NewSshConnectionLink));
     assert!(actions.contains(&MenuAction::NewSmbConnectionLink));
     assert!(actions.contains(&MenuAction::NewGitConnectionLink));
@@ -595,6 +606,11 @@ fn connection_tree_directory_menu_shows_create_entries() {
         .map(|entry| entry.action)
         .collect::<Vec<_>>();
     assert_eq!(app.selected_connection_node_id, Some(directory_id));
+    assert!(
+        app.active_menu_entries()
+            .iter()
+            .all(|entry| entry.icon.is_some())
+    );
     assert!(actions.contains(&MenuAction::NewSshConnectionLink));
     assert!(actions.contains(&MenuAction::NewSmbConnectionLink));
     assert!(actions.contains(&MenuAction::NewGitConnectionLink));
@@ -3673,6 +3689,21 @@ fn tab_context_menu_records_target_tab_and_anchor() {
         ActiveMenuKind::TabContext { tab_id } if tab_id == target_tab_id
     ));
     assert_eq!(active_menu.anchor, anchor);
+
+    let entries = app.active_menu_entries();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        entries[0].icon,
+        Some(crate::ui::components::icon::ArgusIcon::Close)
+    );
+    assert_eq!(
+        entries[1].icon,
+        Some(crate::ui::components::icon::ArgusIcon::CircleX)
+    );
+    assert_eq!(
+        entries[2].icon,
+        Some(crate::ui::components::icon::ArgusIcon::Trash)
+    );
 }
 
 /// 验证关闭其他标签只保留目标标签并激活它。

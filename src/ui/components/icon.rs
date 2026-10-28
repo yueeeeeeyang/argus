@@ -26,6 +26,10 @@ pub(crate) enum ArgusIcon {
     QuickSearch,
     /// AI 智能日志分析。
     SmartAnalysis,
+    /// 线程/活动分析。
+    Activity,
+    /// 运行时耗时分析。
+    Timer,
     /// 来源树过滤。
     Filter,
     /// 连接入口。
@@ -44,6 +48,8 @@ pub(crate) enum ArgusIcon {
     Minus,
     /// 关闭标签或弹窗。
     Close,
+    /// 关闭其他项。
+    CircleX,
     /// 停止正在执行的任务。
     Stop,
     /// Windows 主窗口最大化。
@@ -74,6 +80,8 @@ pub(crate) enum ArgusIcon {
     Upload,
     /// 下载文件。
     Download,
+    /// 另存为文件。
+    FileDown,
     /// 保存设置或编辑结果。
     Save,
     /// 重命名。
@@ -132,6 +140,8 @@ impl ArgusIcon {
             Self::Search,
             Self::QuickSearch,
             Self::SmartAnalysis,
+            Self::Activity,
+            Self::Timer,
             Self::Filter,
             Self::Connection,
             Self::Link,
@@ -197,6 +207,8 @@ impl ArgusIcon {
             Self::Search => "icons/search.svg",
             Self::QuickSearch => "icons/quick-search.svg",
             Self::SmartAnalysis => "icons/smart-analysis.svg",
+            Self::Activity => "icons/activity.svg",
+            Self::Timer => "icons/timer.svg",
             Self::Filter => "icons/filter.svg",
             Self::Connection => "icons/connection.svg",
             Self::Link => "icons/link.svg",
@@ -206,6 +218,7 @@ impl ArgusIcon {
             Self::Plus => "icons/plus.svg",
             Self::Minus => "icons/minus.svg",
             Self::Close => "icons/close.svg",
+            Self::CircleX => "icons/circle-x.svg",
             Self::Stop => "icons/stop.svg",
             Self::WindowMaximize => "icons/window-maximize.svg",
             Self::WindowRestore => "icons/window-restore.svg",
@@ -221,6 +234,7 @@ impl ArgusIcon {
             Self::Refresh => "icons/refresh.svg",
             Self::Upload => "icons/upload.svg",
             Self::Download => "icons/download.svg",
+            Self::FileDown => "icons/file-down.svg",
             Self::Save => "icons/save.svg",
             Self::Rename => "icons/rename.svg",
             Self::Trash => "icons/trash.svg",
@@ -297,6 +311,8 @@ impl ArgusIcon {
             Self::Search => icondata::LuSearch,
             Self::QuickSearch => icondata::LuZap,
             Self::SmartAnalysis => icondata::LuSparkles,
+            Self::Activity => icondata::LuActivity,
+            Self::Timer => icondata::LuTimer,
             Self::Filter => icondata::LuListFilter,
             Self::Connection => icondata::LuPlug,
             Self::Link => icondata::LuLink,
@@ -306,6 +322,7 @@ impl ArgusIcon {
             Self::Plus => icondata::LuPlus,
             Self::Minus => icondata::LuMinus,
             Self::Close => icondata::LuX,
+            Self::CircleX => icondata::LuCircleX,
             Self::Stop => icondata::LuSquare,
             Self::WindowMaximize => icondata::LuSquare,
             Self::WindowRestore => icondata::LuCopy,
@@ -321,6 +338,7 @@ impl ArgusIcon {
             Self::Refresh => icondata::LuRefreshCw,
             Self::Upload => icondata::LuUpload,
             Self::Download => icondata::LuDownload,
+            Self::FileDown => icondata::LuFileDown,
             Self::Save => icondata::LuSave,
             Self::Rename => icondata::LuPencil,
             Self::Trash => icondata::LuTrash2,

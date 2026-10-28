@@ -10,7 +10,7 @@ use crate::app::ArgusApp;
 use crate::loader::SourceId;
 use crate::remote::connection::ConnectionNodeId;
 use crate::theme::AppTheme;
-use crate::ui::components::icon::ArgusIcon;
+use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use gpui::{
     Context, Corner, IntoElement, Pixels, Point, SharedString, UniformListScrollHandle, anchored,
@@ -26,9 +26,9 @@ const SEARCH_RESULTS_MENU_WIDTH: f32 = 132.0;
 /// 来源树右键菜单宽度，容纳 Jstack 和 Runtime 分析中文动作。
 const SOURCE_TREE_CONTEXT_MENU_WIDTH: f32 = 188.0;
 /// 链接树右键菜单宽度，容纳编辑和删除动作。
-const CONNECTION_TREE_CONTEXT_MENU_WIDTH: f32 = 132.0;
+const CONNECTION_TREE_CONTEXT_MENU_WIDTH: f32 = 152.0;
 /// 新增链接类型下拉菜单宽度，容纳 SSH/SMB/Git/SVN 四种连接类型。
-const CONNECTION_LINK_CREATE_MENU_WIDTH: f32 = 156.0;
+const CONNECTION_LINK_CREATE_MENU_WIDTH: f32 = 168.0;
 /// 终端右键菜单宽度，容纳文件管理动作。
 const TERMINAL_CONTEXT_MENU_WIDTH: f32 = 132.0;
 /// 远程文件行右键菜单宽度，容纳下载、重命名和删除动作。
@@ -273,6 +273,8 @@ pub(crate) struct MenuEntry {
     pub is_danger: bool,
     /// 行尾快捷操作；有值时在条目右侧渲染关闭图标按钮（标签下拉菜单用）。
     pub trailing_action: Option<MenuAction>,
+    /// 菜单项图标；`None` 时只显示文字。
+    pub icon: Option<ArgusIcon>,
 }
 
 impl MenuEntry {
@@ -284,6 +286,7 @@ impl MenuEntry {
             is_selected: false,
             is_danger: false,
             trailing_action: None,
+            icon: None,
         }
     }
 
@@ -298,6 +301,12 @@ impl MenuEntry {
     /// 标记菜单项为当前选中项。
     pub(crate) fn selected(mut self, is_selected: bool) -> Self {
         self.is_selected = is_selected;
+        self
+    }
+
+    /// 设置菜单项图标。
+    pub(crate) fn with_icon(mut self, icon: ArgusIcon) -> Self {
+        self.icon = Some(icon);
         self
     }
 
@@ -446,12 +455,29 @@ fn render_menu_entry(
         .px(px(MENU_ENTRY_HORIZONTAL_PADDING))
         .flex()
         .items_center()
+        .gap_2()
         .cursor_pointer()
         .occlude()
         .bg(rgb(background))
         .hover(move |this| this.bg(rgb(hover_background)))
         .text_size(px(12.5))
         .text_color(rgb(foreground))
+        .when_some(entry.icon, |this, icon| {
+            let icon_color = if entry.is_danger {
+                theme.error
+            } else {
+                theme.foreground_muted
+            };
+            this.child(
+                div()
+                    .w(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(render_icon(icon, icon_color, 14.0)),
+            )
+        })
         .child(div().flex_1().truncate().child(entry.label))
         .when_some(trailing_action, |this, trailing_action| {
             let trailing_entity = app_entity.clone();

@@ -70,7 +70,7 @@ AI 智能体的产品边界、工具契约与安全策略另见 `docs/ai_log_age
 | **序列化与配置** | `serde`、`serde_json`、`toml`、`schemars` | 设置文件、AI 工具参数结构与模型能力探测 |
 | **Markdown 渲染** | `pulldown-cmark` | 用 CommonMark/GFM 事件解析器驱动 AI 消息展示 |
 | **错误处理** | `anyhow`（业务路径）、`thiserror`（**穷尽枚举**的领域错误） | 业务错误带上下文；配置与 agent 工具用类型化错误 |
-| **其他** | `chrono`、`uuid`、`base64`、`hex`、`percent-encoding`、`url`、`walkdir`、`tempfile`、`roxmltree`、`icondata` | 时间、ID、编码、路径遍历、SVN DAV XML 解析、Lucide 图标 |
+| **其他** | `chrono`、`uuid`、`base64`、`hex`、`percent-encoding`、`url`、`walkdir`、`tempfile`、`roxmltree`、`icondata` | 时间、ID、编码、路径遍历、SVN DAV XML 解析、Lucide 图标；日志与链接目录树彩色图标来自 Material Icon Theme 子集（MIT，内嵌 PNG） |
 
 **平台相关依赖**（`Cargo.toml` 的 `[target.*]` 段）：
 
@@ -280,7 +280,7 @@ RAR5 的过滤器（delta / E8 / E9 / ARM）需要整块反解，`rars` 对超�
 
 #### 4.1.7 单文件导出（`src/loader/export.rs`）
 
-来源树中单个文件节点的右键菜单首项为「另存为…」，把物化后的文件复制到用户选择的目标目录。
+来源树中单个文件节点的右键菜单末项为「另存为」，把物化后的文件复制到用户选择的目标目录。
 
 | 关注点 | 实现 |
 | --- | --- |
@@ -807,7 +807,7 @@ SSH/SMB/SVN 密码、Git 访问令牌与私钥口令**不再写入 `settings.tom
 出现按钮贴边、底部大片空白或表单末行被裁切。
 | `context_menu` | 右键上下文菜单 | 分组与图标 |
 | `dropdown` | 下拉选择 | 主题、编码、排序字段等复用 |
-| `icon` / `icon_button` | 图标与图标按钮 | Lucide 图标集、悬停提示、尺寸分级 |
+| `icon` / `icon_button` | 图标与图标按钮 | 通用界面使用 Lucide 单色图标；日志来源树与链接目录树共用 Material Icon Theme 5.38.1 彩色子集（与 BaoCode Fast IDE 同版本）：按精确文件名 → 压缩包/日志特判 → 最长扩展名解析文件图标；目录统一使用第一版的棕色 `folder-base` / `folder-base-open`，链接树按协议使用 `console`（SSH）/ `database`（SMB）/ `git` / `changelog`（SVN）；16px，因 GPUI `svg()` 为单色蒙版，图标以 64×64 透明 PNG 经 `img()` 渲染，MIT 许可见 `assets/icons/material/LICENSE`，重新生成脚本为 `scripts/generate_material_icons.sh`、悬停提示与尺寸分级 |
 | `scrollbar` | 自定义滚动条 | 虚拟列表与正文区共享拖拽语义 |
 | `datetime_picker` | 日期时间选择 | Runtime 分析时间范围过滤 |
 | `bash_approval` | bash 审批卡片 | 展示完整命令与判定原因，批准/拒绝并固化结论 |
@@ -966,7 +966,7 @@ Jstack 线程详情等独立窗口复用同一套阴影函数。
 
 | 状态 | 判定 | 内容 |
 |------|------|------|
-| **欢迎态** | 日志工作区、无标签且尚未加载任何来源 | 来源侧栏默认收起、内容玻璃板撑满窗口；中央展示应用图标、“Argus”标题与“打开日志 / 打开链接”两个方形快捷入口，加载失败或跳过文件的提示也在这里展示（侧栏展开时改由侧栏底部提示条展示）；标签下拉按钮一并隐藏 |
+| **欢迎态** | 日志工作区、无标签且尚未加载任何来源 | 来源侧栏默认收起、内容玻璃板撑满窗口；中央展示应用图标核心点阵（4×4 圆角方块，无外壳底色）、“Argus”标题与“打开日志 / 打开链接”两个方形快捷入口，加载失败或跳过文件的提示也在这里展示（侧栏展开时改由侧栏底部提示条展示）；标签下拉按钮一并隐藏 |
 | **来源选择提示** | 已加载来源但无标签 | 不再展示欢迎页，内容区提示“请选择日志 / 从左侧目录树中选择日志文件，即可在此查看内容”，并自动展开来源侧栏 |
 
 欢迎态只做“默认收起”，用户仍可用标题栏按钮手动展开侧栏；打开日志后的侧栏状态继续遵循

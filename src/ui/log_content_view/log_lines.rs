@@ -48,6 +48,43 @@ pub(crate) fn render_content_body(
     }
 }
 
+/// 渲染应用图标核心点阵：4×4 圆角方块，去掉图标外壳底色后直接展示内容。
+///
+/// 说明：点阵取自应用图标本身（尺寸、间距与点亮位置保持一致），避免在欢迎页再画
+/// 一层深色圆角方块，与窗口背景叠加后显得厚重。
+fn render_app_mark() -> impl IntoElement {
+    /// 单个方块边长。
+    const DOT_SIZE: f32 = 13.0;
+    /// 方块间距。
+    const DOT_GAP: f32 = 4.0;
+    /// 方块圆角。
+    const DOT_RADIUS: f32 = 3.0;
+    /// 图标点亮色。
+    const LIT_COLOR: u32 = 0x35D07F;
+    /// 图标未点亮色。
+    const DIM_COLOR: u32 = 0x2E3136;
+
+    // 点亮模式与应用图标一致：第 2 行全亮，第 3 行第 3 个、第 4 行第 1 个点亮。
+    let is_lit = |row: usize, column: usize| matches!((row, column), (1, _) | (2, 2) | (3, 0));
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(DOT_GAP))
+        .children((0..4).map(|row| {
+            div().flex().gap(px(DOT_GAP)).children((0..4).map(|column| {
+                div()
+                    .size(px(DOT_SIZE))
+                    .rounded(px(DOT_RADIUS))
+                    .bg(rgb(if is_lit(row, column) {
+                        LIT_COLOR
+                    } else {
+                        DIM_COLOR
+                    }))
+            }))
+        }))
+}
+
 /// 渲染未打开任何日志时的欢迎面板：主操作打开日志，次操作切换到链接工作区。
 fn render_log_welcome(
     app: &mut ArgusApp,
@@ -82,11 +119,7 @@ fn render_log_welcome(
                 .items_center()
                 .gap_3()
                 .text_center()
-                .child(
-                    gpui::img(crate::assets::APP_ICON_ASSET_PATH)
-                        .size(px(64.0))
-                        .rounded(px(14.0)),
-                )
+                .child(render_app_mark())
                 .child(
                     div()
                         .text_size(px(18.0))

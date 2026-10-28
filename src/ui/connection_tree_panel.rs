@@ -1,6 +1,6 @@
 //! 文件职责：渲染链接工作区左侧远程链接目录树。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：展示目录与多协议链接、处理选择、过滤、打开会话及链接拖放移动。
 
@@ -15,13 +15,16 @@ use crate::app::ArgusApp;
 use crate::remote::connection::{ConnectionTreeRow, ConnectionTreeRowKind};
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::ui::components::material_icon::{
+    MaterialIcon, folder_icon, git_icon, render_material_icon, smb_icon, ssh_icon, svn_icon,
+};
 
 /// 链接树固定行高，保证虚拟列表滚动稳定。
 const CONNECTION_ROW_HEIGHT: f32 = 28.0;
 /// 链接树节点文字大小。
 const CONNECTION_TREE_FONT_SIZE: f32 = 12.0;
-/// 链接树节点图标大小。
-const CONNECTION_TREE_ICON_SIZE: f32 = 14.0;
+/// Material 节点图标大小；该图标集按 16px 网格设计。
+const CONNECTION_TREE_NODE_ICON_SIZE: f32 = 16.0;
 /// 链接树节点选中背景圆角。
 const CONNECTION_ROW_RADIUS: f32 = 5.0;
 /// 链接树选中块上下留白，与行高配合决定连线越界补偿量。
@@ -32,22 +35,20 @@ const CONNECTION_TREE_LINE_BASE_X: f32 = 18.0;
 const CONNECTION_TREE_LINE_INDENT_STEP: f32 = 16.0;
 /// 链接树行内容的基础左内边距；每深入一级再叠加一个缩进步长。
 const CONNECTION_ROW_CONTENT_PADDING: f32 = 10.0;
-/// 展开/收起箭头所在切换按钮的宽度；箭头图标在按钮内水平居中。
-const CONNECTION_ROW_TOGGLE_WIDTH: f32 = 18.0;
-/// 本级竖线到展开箭头按钮左沿的水平距离。
+/// 本级竖线到行内容左沿（节点图标左缘）的水平距离。
 ///
-/// 按钮左沿 = 行内容左内边距 + 本级缩进；竖线 = 连线基准线 + 上一级缩进。
-const CONNECTION_TREE_LINE_TO_TOGGLE_GAP: f32 =
+/// 行内容左沿 = 行内容左内边距 + 本级缩进；竖线 = 连线基准线 + 上一级缩进。
+const CONNECTION_TREE_LINE_TO_CONTENT_GAP: f32 =
     CONNECTION_ROW_CONTENT_PADDING + CONNECTION_TREE_LINE_INDENT_STEP - CONNECTION_TREE_LINE_BASE_X;
 /// 链接树节点横向分支线的垂直位置（相对行内容区顶部）。
 ///
-/// 行内容区上下各内缩 `CONNECTION_ROW_VERTICAL_INSET`，其垂直中心即整行中心，与展开箭头
-/// `>` 的中心重合，避免分支线偏离箭头。
+/// 行内容区上下各内缩 `CONNECTION_ROW_VERTICAL_INSET`，其垂直中心即整行中心。
 const CONNECTION_TREE_BRANCH_Y: f32 = CONNECTION_ROW_HEIGHT / 2.0 - CONNECTION_ROW_VERTICAL_INSET;
-/// 链接树节点横向分支线长度：自本级竖线起接到展开箭头按钮的水平中心，
-/// 保证连线真正接到箭头中央。
+/// 横向分支线伸入图标透明内边距的长度；图标不透明部分会覆盖在连线之上。
+const CONNECTION_TREE_BRANCH_ICON_OVERLAP: f32 = 6.0;
+/// 链接树节点横向分支线长度：接到图标左缘后伸入 6px，图形不透明部分覆盖连线，视觉上无间隙。
 const CONNECTION_TREE_BRANCH_LENGTH: f32 =
-    CONNECTION_TREE_LINE_TO_TOGGLE_GAP + CONNECTION_ROW_TOGGLE_WIDTH / 2.0;
+    CONNECTION_TREE_LINE_TO_CONTENT_GAP + CONNECTION_TREE_BRANCH_ICON_OVERLAP;
 
 /// SSH 链接悬浮提示，用于快速查看远程用户名、主机和端口。
 struct ConnectionLinkTooltip {
@@ -65,7 +66,7 @@ struct ConnectionLinkDrag {
     /// 拖动浮层展示名称。
     label: String,
     /// 拖动浮层使用的协议图标。
-    icon: ArgusIcon,
+    icon: &'static MaterialIcon,
 }
 
 /// 链接拖动时跟随指针展示的紧凑预览。
@@ -73,7 +74,7 @@ struct ConnectionLinkDragPreview {
     /// 链接名称。
     label: String,
     /// 链接协议图标。
-    icon: ArgusIcon,
+    icon: &'static MaterialIcon,
     /// 创建拖动时的主题快照。
     theme: AppTheme,
 }
@@ -96,10 +97,9 @@ impl Render for ConnectionLinkDragPreview {
             .text_size(px(CONNECTION_TREE_FONT_SIZE))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(self.theme.foreground))
-            .child(render_icon(
+            .child(render_material_icon(
                 self.icon,
-                self.theme.foreground_muted,
-                CONNECTION_TREE_ICON_SIZE,
+                CONNECTION_TREE_NODE_ICON_SIZE,
             ))
             .child(div().truncate().child(self.label.clone()))
     }
@@ -193,6 +193,17 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
         })
 }
 
+/// 根据节点类型返回 Material Icon Theme 图标。
+fn icon_for_row(kind: ConnectionTreeRowKind, expanded: bool) -> &'static MaterialIcon {
+    match kind {
+        ConnectionTreeRowKind::Directory => folder_icon(expanded),
+        ConnectionTreeRowKind::SshLink => ssh_icon(),
+        ConnectionTreeRowKind::SmbLink => smb_icon(),
+        ConnectionTreeRowKind::GitLink => git_icon(),
+        ConnectionTreeRowKind::SvnLink => svn_icon(),
+    }
+}
+
 /// 渲染单个链接树节点。
 fn render_row(
     row: ConnectionTreeRow,
@@ -200,19 +211,7 @@ fn render_row(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
     let node_id = row.id;
-    let icon = match row.kind {
-        ConnectionTreeRowKind::Directory if row.expanded => ArgusIcon::FolderOpen,
-        ConnectionTreeRowKind::Directory => ArgusIcon::Folder,
-        ConnectionTreeRowKind::SshLink => ArgusIcon::Link,
-        ConnectionTreeRowKind::SmbLink => ArgusIcon::Database,
-        ConnectionTreeRowKind::GitLink => ArgusIcon::GitBranch,
-        ConnectionTreeRowKind::SvnLink => ArgusIcon::History,
-    };
-    let expand_icon = if row.expanded {
-        ArgusIcon::Collapse
-    } else {
-        ArgusIcon::Expand
-    };
+    let icon = icon_for_row(row.kind, row.expanded);
     let meta_text = match row.kind {
         ConnectionTreeRowKind::Directory => "",
         ConnectionTreeRowKind::SshLink => "ssh",
@@ -315,37 +314,19 @@ fn render_row(
                         cx.notify();
                     }),
                 )
-                .when(row.depth > 0, |this| {
-                    this.children(tree_connection_lines(
-                        row.depth,
-                        &row.ancestor_continuation_levels,
-                        row.has_next_sibling,
-                        theme,
-                    ))
-                })
-                .child(
-                    div()
-                        .w(px(CONNECTION_ROW_TOGGLE_WIDTH))
-                        .h(px(20.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(
-                            row.kind == ConnectionTreeRowKind::Directory && row.has_children,
-                            |this| {
-                                this.child(render_icon(
-                                    expand_icon,
-                                    theme.foreground_muted,
-                                    CONNECTION_TREE_ICON_SIZE,
-                                ))
-                            },
-                        ),
+                .when(
+                    row.depth > 0 || (row.expanded && row.has_children),
+                    |this| {
+                        this.children(tree_connection_lines(
+                            row.depth,
+                            &row.ancestor_continuation_levels,
+                            row.has_next_sibling,
+                            row.expanded && row.has_children,
+                            theme,
+                        ))
+                    },
                 )
-                .child(render_icon(
-                    icon,
-                    theme.foreground_muted,
-                    CONNECTION_TREE_ICON_SIZE,
-                ))
+                .child(render_material_icon(icon, CONNECTION_TREE_NODE_ICON_SIZE))
                 .child(
                     div()
                         .id(SharedString::from(format!("connection-label-{node_id}")))
@@ -375,6 +356,7 @@ fn tree_connection_lines(
     depth: usize,
     ancestor_continuation_levels: &[usize],
     has_next_sibling: bool,
+    shows_children: bool,
     theme: &AppTheme,
 ) -> Vec<AnyElement> {
     let mut lines = Vec::new();
@@ -397,39 +379,62 @@ fn tree_connection_lines(
         );
     }
 
-    let branch_x =
-        CONNECTION_TREE_LINE_BASE_X + (depth - 1) as f32 * CONNECTION_TREE_LINE_INDENT_STEP;
-    let current_line = div()
-        .absolute()
-        .left(px(branch_x))
-        .top(px(vertical_overhang))
-        .w(px(1.0))
-        .bg(rgb(theme.border))
-        .opacity(0.55);
+    // 展开目录：从父图标底部补一段竖线到行底，接通第一个子级的子树竖线。
+    // 线段起点伸入图标底部 3px，被图标不透明部分覆盖，视觉上不留断口。
+    if shows_children {
+        let child_line_x =
+            CONNECTION_TREE_LINE_BASE_X + depth as f32 * CONNECTION_TREE_LINE_INDENT_STEP;
+        let content_height = CONNECTION_ROW_HEIGHT - 2.0 * CONNECTION_ROW_VERTICAL_INSET;
+        let segment_top = CONNECTION_TREE_BRANCH_Y + CONNECTION_TREE_NODE_ICON_SIZE / 2.0 - 3.0;
+        let segment_height = content_height + CONNECTION_ROW_VERTICAL_INSET - segment_top;
+        lines.push(
+            div()
+                .absolute()
+                .left(px(child_line_x))
+                .top(px(segment_top))
+                .w(px(1.0))
+                .h(px(segment_height))
+                .bg(rgb(theme.border))
+                .opacity(0.55)
+                .into_any_element(),
+        );
+    }
 
-    lines.push(
-        if has_next_sibling {
-            current_line.bottom(px(vertical_overhang))
-        } else {
-            // 最后一个子节点：竖线止于本级分支线下方 1px，形成 └ 形收尾。
-            current_line.h(px(CONNECTION_TREE_BRANCH_Y
-                + CONNECTION_ROW_VERTICAL_INSET
-                + 1.0))
-        }
-        .into_any_element(),
-    );
-
-    lines.push(
-        div()
+    if depth > 0 {
+        let branch_x =
+            CONNECTION_TREE_LINE_BASE_X + (depth - 1) as f32 * CONNECTION_TREE_LINE_INDENT_STEP;
+        let current_line = div()
             .absolute()
             .left(px(branch_x))
-            .top(px(CONNECTION_TREE_BRANCH_Y))
-            .w(px(CONNECTION_TREE_BRANCH_LENGTH))
-            .h(px(1.0))
+            .top(px(vertical_overhang))
+            .w(px(1.0))
             .bg(rgb(theme.border))
-            .opacity(0.55)
+            .opacity(0.55);
+
+        lines.push(
+            if has_next_sibling {
+                current_line.bottom(px(vertical_overhang))
+            } else {
+                // 最后一个子节点：竖线止于本级分支线下方 1px，形成 └ 形收尾。
+                current_line.h(px(CONNECTION_TREE_BRANCH_Y
+                    + CONNECTION_ROW_VERTICAL_INSET
+                    + 1.0))
+            }
             .into_any_element(),
-    );
+        );
+
+        lines.push(
+            div()
+                .absolute()
+                .left(px(branch_x))
+                .top(px(CONNECTION_TREE_BRANCH_Y))
+                .w(px(CONNECTION_TREE_BRANCH_LENGTH))
+                .h(px(1.0))
+                .bg(rgb(theme.border))
+                .opacity(0.55)
+                .into_any_element(),
+        );
+    }
 
     lines
 }
@@ -439,12 +444,41 @@ mod tests {
     use super::*;
     use std::hint::black_box;
 
-    /// 回归：链接树连线必须覆盖整行、垂直居中于展开箭头，并横向接到箭头按钮中心。
+    /// 验证链接树目录与四种协议使用对应的 Material 图标。
+    #[test]
+    fn connection_tree_icons_follow_protocol() {
+        assert_eq!(
+            icon_for_row(ConnectionTreeRowKind::Directory, false).id(),
+            "folder-base"
+        );
+        assert_eq!(
+            icon_for_row(ConnectionTreeRowKind::Directory, true).id(),
+            "folder-base-open"
+        );
+        assert_eq!(
+            icon_for_row(ConnectionTreeRowKind::SshLink, false).id(),
+            "console"
+        );
+        assert_eq!(
+            icon_for_row(ConnectionTreeRowKind::SmbLink, false).id(),
+            "database"
+        );
+        assert_eq!(
+            icon_for_row(ConnectionTreeRowKind::GitLink, false).id(),
+            "git"
+        );
+        assert_eq!(
+            icon_for_row(ConnectionTreeRowKind::SvnLink, false).id(),
+            "changelog"
+        );
+    }
+
+    /// 回归：链接树连线必须覆盖整行、垂直居中于节点行中心，并横向接到节点行中心。
     ///
     /// 与日志目录树同一实现口径：竖线只覆盖行内容区会让每行之间出现断缝；分支线必须
-    /// 落在箭头垂直中心并接到箭头水平中心。
+    /// 落在节点行垂直中心并接到节点行水平中心。
     #[test]
-    fn tree_connector_geometry_centers_on_expand_arrow() {
+    fn tree_connector_geometry_centers_on_row() {
         // 竖线在行内容区上下各外扩一个内缩量，总高恰好等于整行高度 → 相邻行首尾相接。
         let connector_height = (CONNECTION_ROW_HEIGHT - 2.0 * CONNECTION_ROW_VERTICAL_INSET)
             + 2.0 * CONNECTION_ROW_VERTICAL_INSET;
@@ -454,7 +488,7 @@ mod tests {
             "竖线应覆盖整行高度，行与行之间不留断缝"
         );
 
-        // 分支线落在行内容区垂直中心，即整行中心、也是展开箭头的垂直中心。
+        // 分支线落在行内容区垂直中心，即整行中心、也是节点行中心的垂直中心。
         assert_eq!(
             black_box(CONNECTION_TREE_BRANCH_Y),
             black_box(CONNECTION_ROW_HEIGHT / 2.0 - CONNECTION_ROW_VERTICAL_INSET),
@@ -466,19 +500,19 @@ mod tests {
             "分支线应落在整行 y=14 处"
         );
 
-        // 分支线从本级竖线延伸「竖线到按钮左沿 8px + 按钮半宽 9px」，正好落在箭头按钮中心。
+        // 分支线从本级竖线直接延伸到节点图标左缘，再伸入图标透明内边距 3px。
         assert_eq!(
             black_box(CONNECTION_TREE_BRANCH_LENGTH),
-            black_box(CONNECTION_TREE_LINE_TO_TOGGLE_GAP + CONNECTION_ROW_TOGGLE_WIDTH / 2.0),
-            "分支线应接到展开箭头按钮水平中心"
+            black_box(CONNECTION_TREE_LINE_TO_CONTENT_GAP + CONNECTION_TREE_BRANCH_ICON_OVERLAP),
+            "分支线应接到节点图标图形"
         );
         assert_eq!(
             black_box(CONNECTION_TREE_BRANCH_LENGTH),
-            17.0,
-            "分支线长度应为 17px（8px 间距 + 18px 按钮的一半）"
+            14.0,
+            "分支线长度应为 14px（8px 间距 + 6px 图标内缩补偿）"
         );
 
-        // 行内容左内边距与切换按钮宽度必须与连线几何使用同一组常量。
-        assert_eq!(black_box(CONNECTION_TREE_LINE_TO_TOGGLE_GAP), 8.0);
+        // 行内容左内边距必须与连线几何使用同一组常量。
+        assert_eq!(black_box(CONNECTION_TREE_LINE_TO_CONTENT_GAP), 8.0);
     }
 }
