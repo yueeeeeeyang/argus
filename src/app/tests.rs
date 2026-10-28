@@ -685,6 +685,218 @@ fn connection_tree_directory_menu_create_dialog_uses_right_clicked_parent(
     });
 }
 
+/// 验证表单弹窗的操作按钮与下边框间距等于标题到上边框的间距，避免按钮贴边或底部大片空白。
+#[gpui::test]
+fn form_dialogs_keep_symmetric_vertical_padding(cx: &mut gpui::TestAppContext) {
+    use crate::app::{ArchivePasswordPromptState, ArchivePasswordRetryAction};
+    use crate::loader::archive::ArchivePasswordError;
+    use crate::ui::components::modal_dialog::MODAL_BOTTOM_PADDING;
+
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    // 连接弹窗根节点自带 1px 边框，内容整体向内缩 1px，从外壳边界量到按钮应为 19 + 1。
+    let bordered_bottom_padding = MODAL_BOTTOM_PADDING + 1.0;
+
+    app.update(cx, |app, app_cx| {
+        app.open_new_connection_directory_dialog(app_cx);
+        assert!(
+            app.connection_directory_modal.is_some(),
+            "应创建新增目录模态框"
+        );
+        app_cx.notify();
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1402.0), gpui::px(900.0)));
+    let container = cx
+        .debug_bounds("connection-directory-modal-container-shell")
+        .expect("应渲染新增目录弹窗");
+    let submit = cx
+        .debug_bounds("connection-directory-window-submit")
+        .expect("应渲染创建目录按钮");
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        bordered_bottom_padding,
+        "新建目录按钮与下边框的间距应等于标题到上边框的间距"
+    );
+    let scroll = cx
+        .debug_bounds("connection-directory-window-scroll")
+        .expect("应渲染目录表单正文");
+    assert_eq!(
+        f32::from(scroll.size.height),
+        30.0,
+        "目录表单正文应完整容纳输入行，不应出现微小滚动"
+    );
+
+    // 空名称提交后追加错误行：外壳只增高一行，按钮仍与下边框保持同一间距。
+    let height_without_error = f32::from(container.size.height);
+    cx.simulate_click(submit.center(), gpui::Modifiers::default());
+    cx.simulate_resize(gpui::size(gpui::px(1402.0), gpui::px(900.0)));
+    let container = cx
+        .debug_bounds("connection-directory-modal-container-shell")
+        .expect("应渲染新增目录弹窗外壳");
+    let submit = cx
+        .debug_bounds("connection-directory-window-submit")
+        .expect("应渲染创建目录按钮");
+    assert_eq!(
+        f32::from(container.size.height),
+        height_without_error + 28.0,
+        "错误行应只增加一行提示的高度"
+    );
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        bordered_bottom_padding,
+        "出现错误行后按钮与下边框的间距不应变化"
+    );
+
+    app.update(cx, |app, app_cx| {
+        app.close_connection_directory_window();
+        app.open_new_ssh_link_dialog(app_cx);
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(901.0)));
+    let container = cx
+        .debug_bounds("connection-link-modal-container-shell")
+        .expect("应渲染新增 SSH 链接弹窗");
+    let submit = cx
+        .debug_bounds("connection-link-window-submit")
+        .expect("应渲染创建链接按钮");
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        bordered_bottom_padding,
+        "创建链接按钮与下边框的间距应等于标题到上边框的间距"
+    );
+    let scroll = cx
+        .debug_bounds("connection-link-window-scroll")
+        .expect("应渲染链接表单正文");
+    assert_eq!(
+        f32::from(scroll.size.height),
+        310.0,
+        "SSH 表单正文应完整容纳 7 行输入与凭据说明，不应出现滚动"
+    );
+
+    // 链接表单校验失败同样只增高一行，按钮保持固定底部间距。
+    let height_without_error = f32::from(container.size.height);
+    cx.simulate_click(submit.center(), gpui::Modifiers::default());
+    cx.simulate_resize(gpui::size(gpui::px(1402.0), gpui::px(901.0)));
+    let container = cx
+        .debug_bounds("connection-link-modal-container-shell")
+        .expect("应渲染新增 SSH 链接弹窗外壳");
+    let submit = cx
+        .debug_bounds("connection-link-window-submit")
+        .expect("应渲染创建链接按钮");
+    assert_eq!(
+        f32::from(container.size.height),
+        height_without_error + 28.0,
+        "链接表单错误行应只增加一行提示的高度"
+    );
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        bordered_bottom_padding,
+        "链接表单出现错误行后按钮与下边框的间距不应变化"
+    );
+
+    app.update(cx, |app, _| {
+        app.close_connection_link_window();
+        app.archive_password_prompt = Some(ArchivePasswordPromptState {
+            error: ArchivePasswordError::required("/tmp/secret.zip"),
+            input: TextInputState::default(),
+            retry_action: ArchivePasswordRetryAction::ReloadArchiveNode {
+                source_id: SourceId(1),
+            },
+            message: None,
+        });
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(902.0)));
+    let container = cx
+        .debug_bounds("archive-password-dialog-container-shell")
+        .expect("应渲染压缩包密码弹窗");
+    let submit = cx
+        .debug_bounds("archive-password-submit")
+        .expect("应渲染密码弹窗继续按钮");
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        MODAL_BOTTOM_PADDING,
+        "密码弹窗按钮与下边框的间距应等于标题到上边框的间距"
+    );
+
+    // 追加错误提示后弹窗同步增高，按钮仍保持同一底部间距。
+    let height_without_error = f32::from(container.size.height);
+    app.update(cx, |app, app_cx| {
+        if let Some(prompt) = app.archive_password_prompt.as_mut() {
+            prompt.message = Some("密码错误，请重试".to_string());
+        }
+        app_cx.notify();
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(903.0)));
+    let container = cx
+        .debug_bounds("archive-password-dialog-container-shell")
+        .expect("应渲染压缩包密码弹窗外壳");
+    let submit = cx
+        .debug_bounds("archive-password-submit")
+        .expect("应渲染密码弹窗继续按钮");
+    assert_eq!(
+        f32::from(container.size.height),
+        height_without_error + 28.0,
+        "密码错误提示应只增加一行提示的高度"
+    );
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        MODAL_BOTTOM_PADDING,
+        "出现密码错误提示后按钮与下边框的间距不应变化"
+    );
+
+    // 主机指纹确认与删除确认同样使用固定底栏，按钮与下边框保持统一间距。
+    app.update(cx, |app, app_cx| {
+        app.archive_password_prompt = None;
+        app.connection_dialog = Some(ConnectionDialogState::ConfirmHostKey(
+            ConnectionHostKeyPromptState {
+                session_id: 1,
+                owner: HostKeyPromptOwner::Terminal { session_id: 1 },
+                link_id: 1,
+                host: "10.0.0.1".to_string(),
+                port: 22,
+                fingerprint: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG".to_string(),
+            },
+        ));
+        app_cx.notify();
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(904.0)));
+    let container = cx
+        .debug_bounds("connection-host-key-dialog-container-shell")
+        .expect("应渲染主机指纹确认弹窗");
+    let submit = cx
+        .debug_bounds("connection-host-key-confirm")
+        .expect("应渲染信任并继续按钮");
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        MODAL_BOTTOM_PADDING,
+        "主机指纹弹窗按钮与下边框的间距应等于标题到上边框的间距"
+    );
+
+    app.update(cx, |app, app_cx| {
+        app.connection_dialog = Some(ConnectionDialogState::ConfirmDelete(
+            ConnectionDeletePromptState {
+                node_id: 1,
+                label: "app-01".to_string(),
+                is_directory: false,
+            },
+        ));
+        app_cx.notify();
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(905.0)));
+    let container = cx
+        .debug_bounds("connection-delete-dialog-container-shell")
+        .expect("应渲染删除确认弹窗");
+    let submit = cx
+        .debug_bounds("connection-delete-dialog-submit")
+        .expect("应渲染确认删除按钮");
+    assert_eq!(
+        f32::from(container.bottom() - submit.bottom()),
+        bordered_bottom_padding,
+        "删除确认弹窗按钮与下边框的间距应等于标题到上边框的间距"
+    );
+}
+
 /// 验证点击链接树空白区域会同时取消节点选中并关闭残留菜单。
 #[test]
 fn connection_tree_blank_click_clears_selection() {
@@ -3532,17 +3744,17 @@ fn source_load_result_surfaces_failure_and_warnings(cx: &mut gpui::TestAppContex
     });
 }
 
-/// 验证欢迎态（未打开任何日志）默认收起来源侧栏，内容面板撑满窗口并显示快捷入口。
+/// 验证首次启动（未加载任何来源）默认收起来源侧栏，内容面板撑满窗口并显示快捷入口。
 #[gpui::test]
 fn welcome_state_hides_sidebar_and_shows_quick_actions(cx: &mut gpui::TestAppContext) {
     use crate::ui::main_window::WINDOW_CONTENT_INSET;
 
-    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
     cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
 
     app.read_with(cx, |app, _| {
-        assert!(app.is_log_welcome(), "启动时没有任何标签，应处于欢迎态");
+        assert!(app.is_log_welcome(), "首次启动没有来源和标签，应处于欢迎态");
         assert!(app.is_source_panel_collapsed, "欢迎态默认收起来源侧栏");
     });
     assert!(
@@ -3568,27 +3780,11 @@ fn welcome_state_hides_sidebar_and_shows_quick_actions(cx: &mut gpui::TestAppCon
     );
 }
 
-/// 验证关闭最后一个标签后回到欢迎态；快捷入口分别打开日志选择器与链接工作区。
+/// 验证欢迎页快捷入口：打开日志弹出来源选择器，打开链接切换到链接工作区。
 #[gpui::test]
 fn welcome_quick_actions_open_log_and_links(cx: &mut gpui::TestAppContext) {
-    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
-
-    // 打开一个日志并展开侧栏，再关闭最后一个标签应回到欢迎态。
-    app.update(cx, |app, _| {
-        let app_log_id = source_id_by_label(app, "app.log");
-        app.select_source(app_log_id);
-        let tab_id = app.active_tab_id.expect("打开日志后应有激活标签");
-        app.toggle_source_panel();
-        assert!(!app.is_source_panel_collapsed, "手动展开后侧栏应可见");
-        app.close_tab(tab_id);
-        assert!(app.tabs.is_empty());
-        assert!(
-            app.is_source_panel_collapsed,
-            "关闭最后一个标签后应回到欢迎态并收起侧栏"
-        );
-    });
-    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
 
     let open_sources = cx
         .debug_bounds("log-welcome-open-sources")
@@ -3619,6 +3815,46 @@ fn welcome_quick_actions_open_log_and_links(cx: &mut gpui::TestAppContext) {
         );
         assert!(app.active_menu.is_none(), "打开链接不应再弹出新建链接菜单");
     });
+}
+
+/// 验证已加载来源但未打开标签时展示“请选择日志”提示，不再显示欢迎页，并展开目录树。
+#[gpui::test]
+fn loaded_sources_without_tabs_prompt_tree_selection(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    app.update(cx, |app, _| {
+        let app_log_id = source_id_by_label(app, "app.log");
+        app.select_source(app_log_id);
+        let tab_id = app.active_tab_id.expect("打开日志后应有激活标签");
+        assert!(!app.is_log_source_selection_pending());
+        // 模拟单文件加载后的侧栏收起状态：关闭最后一个标签后应按来源浏览态展开。
+        app.is_source_panel_collapsed = true;
+        app.close_tab(tab_id);
+        assert!(app.tabs.is_empty());
+        assert!(
+            app.is_log_source_selection_pending(),
+            "已加载来源但无标签时应进入选择提示态"
+        );
+        assert!(
+            !app.is_source_panel_collapsed,
+            "应展开目录树，让用户直接选择日志"
+        );
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    assert!(
+        cx.debug_bounds("log-welcome").is_none(),
+        "已加载来源后不应再展示欢迎页"
+    );
+    assert!(
+        cx.debug_bounds("log-content-empty-state").is_some(),
+        "应展示“请选择日志”提示"
+    );
+    assert!(
+        cx.debug_bounds("source-resizer-hit-area").is_some(),
+        "目录树展开后应渲染宽度拖拽命中区"
+    );
 }
 
 /// 验证最大日志大小按 2 倍档位调整，并收敛到可配置上下限。

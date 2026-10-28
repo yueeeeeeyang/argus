@@ -25,7 +25,7 @@ use crate::ui::components::input::{
     Input, InputAccessory, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
 use crate::ui::components::loading_spinner::render_loading_spinner;
-use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
+use crate::ui::components::modal_dialog::{MODAL_BOTTOM_PADDING, ModalDialog, render_modal_dialog};
 use crate::ui::input_native::app_native_input;
 use crate::ui::main_window::{
     WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS,
@@ -951,12 +951,13 @@ fn render_footer(
     let confirm_app = app_handle.clone();
 
     div()
-        .h(px(108.0))
+        .flex_none()
         .flex()
         .flex_col()
         .gap_2()
         .px_4()
-        .py_3()
+        .pt_3()
+        .pb(px(MODAL_BOTTOM_PADDING))
         .bg(rgb(theme.content))
         .child(
             div()

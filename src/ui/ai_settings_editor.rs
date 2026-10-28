@@ -1,6 +1,6 @@
 //! 文件职责：渲染智能分析的模型配置、日志类型说明与默认系统提示词子对话框。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-10-01
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、原文授权、日志类型匹配规则、分析说明和专业提示词。
 
@@ -25,7 +25,7 @@ use crate::ui::components::input::{
     TextareaAccessoryPosition, TextareaScrollState, TextareaStyle, render_input, render_textarea,
 };
 use crate::ui::components::input_behavior::{LocalInputAction, handle_local_input_key};
-use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
+use crate::ui::components::modal_dialog::{MODAL_BOTTOM_PADDING, ModalDialog, render_modal_dialog};
 use crate::ui::components::scrollbar::scrollbar_metrics;
 
 /// 模型配置对话框宽度；保持在常规表单对话框范围内，避免三项输入被无意义拉宽。
@@ -42,8 +42,6 @@ const AI_SYSTEM_PROMPT_EDITOR_WIDTH: f32 = 760.0;
 const AI_SYSTEM_PROMPT_EDITOR_HEIGHT: f32 = 620.0;
 /// 编辑器标题栏统一高度。
 const AI_EDITOR_HEADER_HEIGHT: f32 = 56.0;
-/// 编辑器底部操作区统一高度。
-const AI_EDITOR_FOOTER_HEIGHT: f32 = 60.0;
 /// 编辑器滚动条宽度。
 const AI_EDITOR_SCROLLBAR_WIDTH: f32 = 8.0;
 /// 编辑器纵向滚动条滑块宽度。
@@ -835,9 +833,10 @@ impl Render for AiSettingsEditor {
             .child(body)
             .child(
                 div()
-                    .h(px(AI_EDITOR_FOOTER_HEIGHT))
                     .flex_none()
                     .px_5()
+                    .pt_3()
+                    .pb(px(MODAL_BOTTOM_PADDING))
                     .flex()
                     .items_center()
                     .justify_between()

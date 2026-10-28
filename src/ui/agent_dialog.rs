@@ -1,6 +1,6 @@
 //! 文件职责：渲染主窗口中的 AI 日志分析问题输入模态框。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-10-16
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：展示当前来源根、原文授权提示，接收多行问题并在校验成功后创建独立 Agent 窗口。
 
@@ -21,7 +21,7 @@ use crate::ui::components::input::{
 };
 use crate::ui::components::input_behavior::{LocalInputAction, handle_local_input_key};
 use crate::ui::components::loading_spinner::render_loading_spinner;
-use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
+use crate::ui::components::modal_dialog::{MODAL_BOTTOM_PADDING, ModalDialog, render_modal_dialog};
 
 /// 启动问题模态框宽度。
 const AGENT_LAUNCH_DIALOG_WIDTH: f32 = 620.0;
@@ -506,9 +506,10 @@ impl Render for AgentLaunchDialog {
             .when(self.unavailable_reason.is_none(), |this| {
                 this.child(
                     div()
-                        .h(px(58.0))
                         .flex_none()
                         .px_5()
+                        .pt_3()
+                        .pb(px(MODAL_BOTTOM_PADDING))
                         .flex()
                         .items_center()
                         .justify_end()

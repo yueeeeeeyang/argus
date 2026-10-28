@@ -1,6 +1,6 @@
 //! 文件职责：渲染链接工作区的目录、链接和确认模态框。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-16
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：提供目录与多协议链接表单、统一删除确认样式，并展示首次连接主机指纹确认。
 
@@ -28,7 +28,10 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputPointerAction, InputPointerEvent, InputSize, NativeInput, render_input,
 };
-use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
+use crate::ui::components::modal_dialog::{
+    MODAL_ACTION_HEIGHT, MODAL_BOTTOM_PADDING, MODAL_FORM_NOTE_HEIGHT, MODAL_FORM_ROW_GAP,
+    MODAL_FORM_ROW_HEIGHT, ModalDialog, render_modal_dialog,
+};
 
 /// 新增目录窗口固定标题栏高度，和设置窗口保持一致。
 const CONNECTION_WINDOW_HEADER_HEIGHT: f32 = 56.0;
@@ -36,24 +39,37 @@ const CONNECTION_WINDOW_HEADER_HEIGHT: f32 = 56.0;
 const CONNECTION_WINDOW_TITLE_ICON_SIZE: f32 = 16.0;
 /// 目录表单模态框宽度，沿用改造前独立窗口尺寸。
 const CONNECTION_DIRECTORY_MODAL_WIDTH: f32 = 420.0;
-/// 目录表单模态框高度，沿用改造前独立窗口尺寸。
-const CONNECTION_DIRECTORY_MODAL_HEIGHT: f32 = 170.0;
 /// 链接表单模态框宽度，沿用改造前独立窗口尺寸。
 const CONNECTION_LINK_MODAL_WIDTH: f32 = 520.0;
-/// 链接表单除输入行之外的基础高度，包含标题栏、操作区、内边距和模态外壳。
-const CONNECTION_LINK_MODAL_BASE_HEIGHT: f32 = 128.0;
-/// 链接表单每个输入行占用的高度，包含 30px 输入框与 12px 行间距。
-const CONNECTION_LINK_MODAL_INPUT_STRIDE: f32 = 42.0;
-/// 链接表单警告或校验错误的预留高度，包含单行文字与上下间距。
-const CONNECTION_LINK_MODAL_MESSAGE_STRIDE: f32 = 28.0;
+/// 连接弹窗内容根节点 1px 边框在上下两侧占用的高度。
+///
+/// 边框在布局盒内，计算外壳高度时必须计入，否则正文会被压缩 2px 并出现微小滚动。
+const CONNECTION_WINDOW_BORDER_HEIGHT: f32 = 2.0;
+/// 表单内容与底部操作区之间的间距，和表单行间距之外的呼吸区保持一致。
+const CONNECTION_WINDOW_FOOTER_GAP: f32 = 20.0;
+/// 底部操作区高度：上间距 + 操作按钮。
+const CONNECTION_WINDOW_FOOTER_HEIGHT: f32 = CONNECTION_WINDOW_FOOTER_GAP + MODAL_ACTION_HEIGHT;
 /// 主机指纹确认弹窗宽度。
 const HOST_KEY_DIALOG_WIDTH: f32 = 520.0;
-/// 主机指纹确认弹窗高度。
-const HOST_KEY_DIALOG_HEIGHT: f32 = 280.0;
+/// 主机指纹确认弹窗高度：标题栏 + 说明 + 指纹框 + 底部操作区 + 底部内边距。
+const HOST_KEY_DIALOG_HEIGHT: f32 = CONNECTION_WINDOW_HEADER_HEIGHT
+    + 18.0
+    + MODAL_FORM_ROW_GAP
+    + 42.0
+    + CONNECTION_WINDOW_FOOTER_GAP
+    + 32.0
+    + MODAL_BOTTOM_PADDING;
 /// 删除确认弹窗宽度。
 const DELETE_DIALOG_WIDTH: f32 = 420.0;
-/// 删除确认弹窗高度；与新增目录弹窗保持相同的紧凑布局密度。
-const DELETE_DIALOG_HEIGHT: f32 = 190.0;
+/// 删除确认弹窗高度：标题栏 + 说明 + 提示 + 底部操作区 + 底部内边距。
+const DELETE_DIALOG_HEIGHT: f32 = CONNECTION_WINDOW_HEADER_HEIGHT
+    + 18.0
+    + MODAL_FORM_ROW_GAP
+    + 16.0
+    + CONNECTION_WINDOW_FOOTER_GAP
+    + 32.0
+    + MODAL_BOTTOM_PADDING
+    + CONNECTION_WINDOW_BORDER_HEIGHT;
 
 /// 目录窗口模式，区分新增和编辑已有目录。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -603,12 +619,16 @@ pub(crate) fn render_connection_directory_modal(
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
+    // 错误行出现或清除时高度需要同步变化；子视图会在错误状态变化时通知主应用重绘外壳。
+    let has_error = modal.read_with(cx, |window_state, _| {
+        window_state.form.error_message.is_some()
+    });
     render_modal_dialog(
         ModalDialog {
             overlay_id: "connection-directory-modal-overlay",
             container_id: "connection-directory-modal-container",
             width: CONNECTION_DIRECTORY_MODAL_WIDTH,
-            height: CONNECTION_DIRECTORY_MODAL_HEIGHT,
+            height: connection_directory_modal_height(has_error),
             content: modal.into_any_element(),
         },
         theme.clone(),
@@ -693,8 +713,13 @@ fn render_directory_window_content(
         ))
         .child(
             div()
+                .id("connection-directory-window-scroll")
+                .debug_selector(|| "connection-directory-window-scroll".to_string())
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .scrollbar_width(px(6.0))
                 .px_5()
-                .pb_5()
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -711,7 +736,17 @@ fn render_directory_window_content(
                 ))
                 .when_some(form.error_message, |this, message| {
                     this.child(error_text(message, &theme))
-                })
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_5()
+                .pt_5()
+                .pb(px(MODAL_BOTTOM_PADDING))
+                .flex()
+                .justify_end()
+                .gap_2()
                 .child(render_directory_actions(
                     &theme,
                     &app_handle,
@@ -773,6 +808,24 @@ fn connection_link_field_visibility(
     }
 }
 
+/// 计算目录表单模态框高度：标题栏 + 输入行 + 可选错误行 + 底部操作区 + 底部内边距。
+///
+/// 说明：高度贴合内容后，按钮到边框的距离恒等于 `MODAL_BOTTOM_PADDING`，
+/// 不会像固定高度那样在底部留下多余空白。
+fn connection_directory_modal_height(has_error: bool) -> f32 {
+    let error_height = if has_error {
+        MODAL_FORM_ROW_GAP + MODAL_FORM_NOTE_HEIGHT
+    } else {
+        0.0
+    };
+    CONNECTION_WINDOW_HEADER_HEIGHT
+        + MODAL_FORM_ROW_HEIGHT
+        + error_height
+        + CONNECTION_WINDOW_FOOTER_HEIGHT
+        + MODAL_BOTTOM_PADDING
+        + CONNECTION_WINDOW_BORDER_HEIGHT
+}
+
 /// 按当前可见输入行和提示行数计算链接模态框高度。
 ///
 /// 参数说明：`form` 是当前链接表单快照。
@@ -809,11 +862,19 @@ fn preferred_connection_link_modal_height_for(
         input_count += 2;
     }
 
-    let message_count =
-        usize::from(visibility.svn_transport_warning.is_some()) + usize::from(has_error);
-    CONNECTION_LINK_MODAL_BASE_HEIGHT
-        + input_count as f32 * CONNECTION_LINK_MODAL_INPUT_STRIDE
-        + message_count as f32 * CONNECTION_LINK_MODAL_MESSAGE_STRIDE
+    // 密码/令牌可见时始终展示凭据存储说明；提示行与输入行共用同一套行距。
+    let note_count = usize::from(visibility.show_secret)
+        + usize::from(visibility.svn_transport_warning.is_some())
+        + usize::from(has_error);
+    let child_count = input_count + note_count;
+    let body_height = input_count as f32 * MODAL_FORM_ROW_HEIGHT
+        + note_count as f32 * MODAL_FORM_NOTE_HEIGHT
+        + child_count.saturating_sub(1) as f32 * MODAL_FORM_ROW_GAP;
+    CONNECTION_WINDOW_HEADER_HEIGHT
+        + body_height
+        + CONNECTION_WINDOW_FOOTER_HEIGHT
+        + MODAL_BOTTOM_PADDING
+        + CONNECTION_WINDOW_BORDER_HEIGHT
 }
 
 /// 渲染 SSH/SMB 链接表单模态框内容。
@@ -909,12 +970,12 @@ fn render_link_window_content(
         .child(
             div()
                 .id("connection-link-window-scroll")
+                .debug_selector(|| "connection-link-window-scroll".to_string())
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
                 .scrollbar_width(px(6.0))
                 .px_5()
-                .pb_5()
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -997,6 +1058,7 @@ fn render_link_window_content(
                     .child(
                         div()
                             .text_size(px(11.0))
+                            .line_height(px(MODAL_FORM_NOTE_HEIGHT))
                             .text_color(rgb(theme.foreground_muted))
                             .child("密码保存在系统凭据库中，不会写入设置文件；凭据库不可用时改用本机密钥加密。"),
                     )
@@ -1064,13 +1126,24 @@ fn render_link_window_content(
                     this.child(
                         div()
                             .text_size(px(12.0))
+                            .line_height(px(MODAL_FORM_NOTE_HEIGHT))
                             .text_color(rgb(theme.warning))
                             .child(warning),
                     )
                 })
                 .when_some(form.error_message, |this, message| {
                     this.child(error_text(message, &theme))
-                })
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_5()
+                .pt_5()
+                .pb(px(MODAL_BOTTOM_PADDING))
+                .flex()
+                .justify_end()
+                .gap_2()
                 .child(render_link_actions(
                     &theme,
                     &app_handle,
@@ -1137,13 +1210,19 @@ fn render_directory_input_row(
     window_entity: &Entity<ConnectionDirectoryWindow>,
     app_handle: &Entity<ArgusApp>,
 ) -> impl IntoElement {
-    let native_input = directory_native_input(window_entity.clone(), target, focus_handle.clone());
+    let native_input = directory_native_input(
+        window_entity.clone(),
+        target,
+        focus_handle.clone(),
+        app_handle.clone(),
+    );
     let key_window = window_entity.clone();
     let click_window = window_entity.clone();
     let pointer_window = window_entity.clone();
     let submit_window = window_entity.clone();
     let submit_app = app_handle.clone();
     let close_app = app_handle.clone();
+    let layout_app = app_handle.clone();
 
     div()
         .flex()
@@ -1182,6 +1261,10 @@ fn render_directory_input_row(
                     state_cx.notify();
                     action
                 });
+                if action == ConnectionWindowInputAction::Changed {
+                    // 输入可能清除错误行，主视图需要重算模态外壳高度。
+                    notify_connection_modal_layout(&layout_app, cx);
+                }
                 handle_directory_window_action(action, &submit_app, &submit_window, window, cx);
                 if action == ConnectionWindowInputAction::Close {
                     close_directory_window(&close_app, window, cx);
@@ -1282,7 +1365,7 @@ fn render_link_input_row(
                 });
                 if action == ConnectionWindowInputAction::Changed {
                     // URL 传输方式或错误状态变化后，主视图需要重算模态外壳高度。
-                    notify_connection_link_modal_layout(&layout_app, cx);
+                    notify_connection_modal_layout(&layout_app, cx);
                 }
                 handle_link_window_action(action, &submit_app, &submit_window, window, cx);
                 if action == ConnectionWindowInputAction::Close {
@@ -1334,7 +1417,6 @@ fn render_directory_actions(
     };
 
     div()
-        .mt_2()
         .flex()
         .justify_end()
         .gap_2()
@@ -1378,7 +1460,6 @@ fn render_link_actions(
     };
 
     div()
-        .mt_2()
         .flex()
         .justify_end()
         .gap_2()
@@ -1423,6 +1504,7 @@ fn window_action_button(
     };
     div()
         .id(id)
+        .debug_selector(move || id.to_string())
         .h(px(30.0))
         .when(is_primary, |this| this.px_4())
         .when(!is_primary, |this| this.px_3())
@@ -1463,12 +1545,15 @@ fn directory_native_input(
     window_entity: Entity<ConnectionDirectoryWindow>,
     target: ConnectionFormInputTarget,
     focus_handle: FocusHandle,
+    app_handle: Entity<ArgusApp>,
 ) -> NativeInput {
     NativeInput::new(focus_handle, move |edit, _, cx| {
         window_entity.update(cx, |window_state, state_cx| {
             window_state.apply_native_edit(target, edit);
             state_cx.notify();
         });
+        // 原生编辑同样可能清除错误行，需要刷新随错误状态变化的外壳高度。
+        notify_connection_modal_layout(&app_handle, cx);
     })
 }
 
@@ -1485,7 +1570,7 @@ fn link_native_input(
             state_cx.notify();
         });
         // IME 和系统粘贴走原生编辑回调，同样要刷新随 URL 变化的外壳高度。
-        notify_connection_link_modal_layout(&app_handle, cx);
+        notify_connection_modal_layout(&app_handle, cx);
     })
 }
 
@@ -1611,10 +1696,12 @@ fn set_directory_window_error(
     cx: &mut App,
     message: String,
 ) {
+    let app_handle = window_entity.read_with(cx, |window_state, _| window_state.app.clone());
     window_entity.update(cx, |window_state, state_cx| {
         window_state.form.error_message = Some(message);
         state_cx.notify();
     });
+    notify_connection_modal_layout(&app_handle, cx);
 }
 
 /// 写入 SSH 链接窗口校验错误。
@@ -1628,15 +1715,15 @@ fn set_link_window_error(
         window_state.form.error_message = Some(message);
         state_cx.notify();
     });
-    notify_connection_link_modal_layout(&app_handle, cx);
+    notify_connection_modal_layout(&app_handle, cx);
 }
 
-/// 通知主视图重绘链接模态外壳，以应用子表单的最新自适应高度。
+/// 通知主视图重绘连接弹窗外壳，以应用子表单的最新自适应高度。
 ///
 /// 参数说明：
 /// - `app_handle`：持有模态框的主应用实体。
 /// - `cx`：当前应用上下文。
-fn notify_connection_link_modal_layout(app_handle: &Entity<ArgusApp>, cx: &mut App) {
+fn notify_connection_modal_layout(app_handle: &Entity<ArgusApp>, cx: &mut App) {
     app_handle.update(cx, |_, app_cx| app_cx.notify());
 }
 
@@ -1670,12 +1757,17 @@ fn render_host_key_prompt(
         .child(dialog_header("确认主机指纹", ArgusIcon::Key, theme, cx))
         .child(
             div()
+                .id("connection-host-key-dialog-scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .scrollbar_width(px(6.0))
                 .px_5()
-                .pb_5()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .text_size(px(13.0))
+                .line_height(px(18.0))
                 .text_color(rgb(theme.foreground))
                 .child(format!(
                     "{}:{} 首次连接，需要确认主机指纹。",
@@ -1690,28 +1782,39 @@ fn render_host_key_prompt(
                         .bg(rgb(theme.content))
                         .text_color(rgb(theme.foreground))
                         .child(prompt.fingerprint),
-                )
-                .child(
-                    div()
-                        .mt_2()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(action_button("拒绝", false, theme, cx, move |app, cx| {
-                            app.reject_connection_host_key_prompt(reject_prompt.clone());
-                            cx.notify();
-                        }))
-                        .child(action_button(
-                            "信任并继续",
-                            true,
-                            theme,
-                            cx,
-                            move |app, cx| {
-                                app.confirm_connection_host_key_prompt(confirm_prompt.clone());
-                                cx.notify();
-                            },
-                        )),
                 ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_5()
+                .pt_5()
+                .pb(px(MODAL_BOTTOM_PADDING))
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(action_button(
+                    "connection-host-key-reject",
+                    "拒绝",
+                    false,
+                    theme,
+                    cx,
+                    move |app, cx| {
+                        app.reject_connection_host_key_prompt(reject_prompt.clone());
+                        cx.notify();
+                    },
+                ))
+                .child(action_button(
+                    "connection-host-key-confirm",
+                    "信任并继续",
+                    true,
+                    theme,
+                    cx,
+                    move |app, cx| {
+                        app.confirm_connection_host_key_prompt(confirm_prompt.clone());
+                        cx.notify();
+                    },
+                )),
         )
 }
 
@@ -1754,51 +1857,60 @@ fn render_delete_prompt(
         ))
         .child(
             div()
+                .id("connection-delete-dialog-scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .scrollbar_width(px(6.0))
                 .px_5()
-                .pb_5()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .text_size(px(13.0))
+                .line_height(px(18.0))
                 .text_color(rgb(theme.foreground))
                 .child(format!("确定要删除{node_kind}「{}」吗？", prompt.label))
                 .child(
                     div()
                         .text_size(px(12.0))
+                        .line_height(px(MODAL_FORM_NOTE_HEIGHT))
                         .text_color(rgb(theme.foreground_muted))
                         .child("此操作会立即写入本地配置。"),
-                )
-                .child(
-                    div()
-                        .mt_2()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(window_action_button(
-                            "connection-delete-dialog-cancel",
-                            ArgusIcon::Close,
-                            "取消",
-                            false,
-                            theme,
-                            cx.listener(|app, _, _, cx| {
-                                cx.stop_propagation();
-                                app.close_connection_dialog();
-                                cx.notify();
-                            }),
-                        ))
-                        .child(window_action_button(
-                            "connection-delete-dialog-submit",
-                            ArgusIcon::Trash,
-                            "确认删除",
-                            true,
-                            theme,
-                            cx.listener(move |app, _, _, cx| {
-                                cx.stop_propagation();
-                                app.confirm_delete_connection_node(node_id);
-                                cx.notify();
-                            }),
-                        )),
                 ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_5()
+                .pt_5()
+                .pb(px(MODAL_BOTTOM_PADDING))
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(window_action_button(
+                    "connection-delete-dialog-cancel",
+                    ArgusIcon::Close,
+                    "取消",
+                    false,
+                    theme,
+                    cx.listener(|app, _, _, cx| {
+                        cx.stop_propagation();
+                        app.close_connection_dialog();
+                        cx.notify();
+                    }),
+                ))
+                .child(window_action_button(
+                    "connection-delete-dialog-submit",
+                    ArgusIcon::Trash,
+                    "确认删除",
+                    true,
+                    theme,
+                    cx.listener(move |app, _, _, cx| {
+                        cx.stop_propagation();
+                        app.confirm_delete_connection_node(node_id);
+                        cx.notify();
+                    }),
+                )),
         )
 }
 
@@ -1849,6 +1961,7 @@ fn dialog_header(
 
 /// 渲染主机指纹弹窗操作按钮。
 fn action_button(
+    id: &'static str,
     label: &'static str,
     is_primary: bool,
     theme: &AppTheme,
@@ -1861,6 +1974,8 @@ fn action_button(
         theme.content
     };
     div()
+        .id(id)
+        .debug_selector(move || id.to_string())
         .h(px(32.0))
         .px_3()
         .flex()
@@ -1887,6 +2002,7 @@ fn action_button(
 fn error_text(message: String, theme: &AppTheme) -> impl IntoElement {
     div()
         .text_size(px(12.0))
+        .line_height(px(MODAL_FORM_NOTE_HEIGHT))
         .text_color(rgb(theme.error))
         .child(message)
 }
@@ -2138,8 +2254,15 @@ fn clamp_range(range: Range<usize>, text_length: usize) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::preferred_connection_link_modal_height_for;
+    use super::{connection_directory_modal_height, preferred_connection_link_modal_height_for};
     use crate::remote::connection::ConnectionLinkKind;
+
+    /// 目录弹窗高度应贴合内容：错误行只增加一行高度，底部不再保留固定空白。
+    #[test]
+    fn directory_modal_height_matches_content() {
+        assert_eq!(connection_directory_modal_height(false), 157.0);
+        assert_eq!(connection_directory_modal_height(true), 185.0);
+    }
 
     /// 短的 HTTPS 仓库表单应明显低于 SSH/SMB 长表单，不再保留固定空白。
     #[test]
@@ -2150,7 +2273,7 @@ mod tests {
                 "https://host/team/repository.git",
                 false,
             ),
-            296.0
+            311.0
         );
         assert_eq!(
             preferred_connection_link_modal_height_for(
@@ -2158,7 +2281,7 @@ mod tests {
                 "git@host:team/repository.git",
                 false,
             ),
-            338.0
+            325.0
         );
     }
 
@@ -2167,11 +2290,11 @@ mod tests {
     fn server_modal_height_matches_protocol_fields() {
         assert_eq!(
             preferred_connection_link_modal_height_for(ConnectionLinkKind::Ssh, "", false),
-            422.0
+            437.0
         );
         assert_eq!(
             preferred_connection_link_modal_height_for(ConnectionLinkKind::Smb, "", false),
-            464.0
+            479.0
         );
     }
 
@@ -2184,7 +2307,7 @@ mod tests {
                 "http://host/svn/repository/",
                 false,
             ),
-            324.0
+            339.0
         );
         assert_eq!(
             preferred_connection_link_modal_height_for(
@@ -2192,7 +2315,7 @@ mod tests {
                 "http://host/svn/repository/",
                 true,
             ),
-            352.0
+            367.0
         );
     }
 }

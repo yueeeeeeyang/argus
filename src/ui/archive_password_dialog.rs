@@ -1,6 +1,6 @@
 //! 文件职责：渲染压缩包密码输入弹窗。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-10-16
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：在用户主动打开或展开加密压缩包时收集密码，并触发原操作重试。
 
@@ -12,22 +12,54 @@ use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
-use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
+use crate::ui::components::modal_dialog::{
+    MODAL_ACTION_HEIGHT, MODAL_BOTTOM_PADDING, MODAL_FORM_NOTE_HEIGHT, MODAL_FORM_ROW_GAP,
+    MODAL_FORM_ROW_HEIGHT, ModalDialog, render_modal_dialog,
+};
 use crate::ui::input_native::app_native_input;
 use gpui::{
     AnyElement, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*,
     px, rgb,
 };
 
+/// 密码弹窗标题栏高度。
+const ARCHIVE_PASSWORD_DIALOG_HEADER_HEIGHT: f32 = 58.0;
+/// 正文与底部操作区之间的间距。
+const ARCHIVE_PASSWORD_DIALOG_FOOTER_GAP: f32 = 20.0;
+/// 弹窗高度：标题栏 + 说明行 + 来源行 + 输入行 + 底部操作区 + 底部内边距。
+///
+/// 高度贴合内容，按钮到边框的距离与标题到上边框一致，不再固定 260px 留出大片空白。
+const ARCHIVE_PASSWORD_DIALOG_HEIGHT: f32 = ARCHIVE_PASSWORD_DIALOG_HEADER_HEIGHT
+    + MODAL_FORM_NOTE_HEIGHT
+    + MODAL_FORM_ROW_GAP
+    + 18.0
+    + MODAL_FORM_ROW_GAP
+    + MODAL_FORM_ROW_HEIGHT
+    + ARCHIVE_PASSWORD_DIALOG_FOOTER_GAP
+    + MODAL_ACTION_HEIGHT
+    + MODAL_BOTTOM_PADDING;
+/// 追加单行校验错误后的高度。
+const ARCHIVE_PASSWORD_DIALOG_HEIGHT_WITH_ERROR: f32 =
+    ARCHIVE_PASSWORD_DIALOG_HEIGHT + MODAL_FORM_ROW_GAP + MODAL_FORM_NOTE_HEIGHT;
+
 /// 渲染当前压缩包密码输入弹窗。
 pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
     let theme = app.theme.clone();
+    let height = if app
+        .archive_password_prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.message.is_some())
+    {
+        ARCHIVE_PASSWORD_DIALOG_HEIGHT_WITH_ERROR
+    } else {
+        ARCHIVE_PASSWORD_DIALOG_HEIGHT
+    };
     render_modal_dialog(
         ModalDialog {
             overlay_id: "archive-password-dialog-overlay",
             container_id: "archive-password-dialog-container",
             width: 460.0,
-            height: 260.0,
+            height,
             content: render_dialog_content(app, &theme, cx).into_any_element(),
         },
         theme,
@@ -73,14 +105,19 @@ fn render_dialog_content(
         .child(dialog_header(theme, cx))
         .child(
             div()
+                .id("archive-password-dialog-scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .scrollbar_width(px(6.0))
                 .px_5()
-                .pb_4()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .child(
                     div()
                         .text_size(px(12.0))
+                        .line_height(px(MODAL_FORM_NOTE_HEIGHT))
                         .text_color(rgb(theme.foreground_muted))
                         .child(description),
                 )
@@ -153,25 +190,43 @@ fn render_dialog_content(
                     this.child(
                         div()
                             .text_size(px(12.0))
+                            .line_height(px(MODAL_FORM_NOTE_HEIGHT))
                             .text_color(rgb(theme.error))
                             .child(message),
                     )
-                })
-                .child(
-                    div()
-                        .mt_1()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(text_button("取消", false, theme, cx, |app, cx| {
-                            app.cancel_archive_password_prompt();
-                            cx.notify();
-                        }))
-                        .child(text_button("继续", true, theme, cx, |app, cx| {
-                            app.submit_archive_password_prompt(cx);
-                            cx.notify();
-                        })),
-                ),
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_5()
+                .pt(px(ARCHIVE_PASSWORD_DIALOG_FOOTER_GAP))
+                .pb(px(MODAL_BOTTOM_PADDING))
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(text_button(
+                    "archive-password-cancel",
+                    "取消",
+                    false,
+                    theme,
+                    cx,
+                    |app, cx| {
+                        app.cancel_archive_password_prompt();
+                        cx.notify();
+                    },
+                ))
+                .child(text_button(
+                    "archive-password-submit",
+                    "继续",
+                    true,
+                    theme,
+                    cx,
+                    |app, cx| {
+                        app.submit_archive_password_prompt(cx);
+                        cx.notify();
+                    },
+                )),
         )
         .into_any_element()
 }
@@ -194,6 +249,7 @@ fn dialog_header(theme: &AppTheme, cx: &mut Context<ArgusApp>) -> impl IntoEleme
                 .child(
                     div()
                         .text_size(px(16.0))
+                        .line_height(px(20.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(theme.foreground))
                         .child("输入压缩包密码"),
@@ -215,6 +271,7 @@ fn dialog_header(theme: &AppTheme, cx: &mut Context<ArgusApp>) -> impl IntoEleme
 
 /// 渲染弹窗底部文字按钮。
 fn text_button(
+    id: &'static str,
     label: &'static str,
     is_primary: bool,
     theme: &AppTheme,
@@ -229,6 +286,8 @@ fn text_button(
     let hover_background = theme.current_line;
 
     div()
+        .id(id)
+        .debug_selector(move || id.to_string())
         .h(px(30.0))
         .px_4()
         .flex()

@@ -1,6 +1,6 @@
 //! 文件职责：提供窗口内通用模态遮罩与容器组件。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
 //! 主要功能：统一模态层遮罩、圆角容器、阴影和鼠标事件阻断能力。
 
@@ -48,6 +48,24 @@ pub(crate) struct ModalFrame {
 /// 标题栏、底栏必须标记 `flex_none`，可伸缩区域自己负责滚动；否则内容变长时
 /// 弹性布局会压缩标题栏，让标题贴住上边框。
 const MODAL_CONTENT_INSET: f32 = 0.0;
+
+/// 模态框内容底部内边距。
+///
+/// 取 19：56px 标题栏内 18px 标题上下各留 19px；底部沿用同一距离，
+/// 保证“标题到上边框”和“按钮到下边框”视觉一致，避免按钮贴边或底部大片空白。
+pub(crate) const MODAL_BOTTOM_PADDING: f32 = 19.0;
+
+/// 模态框底部主操作按钮高度。
+pub(crate) const MODAL_ACTION_HEIGHT: f32 = 30.0;
+
+/// 表单输入行高度（`InputSize::Regular` 输入框高度）。
+pub(crate) const MODAL_FORM_ROW_HEIGHT: f32 = 30.0;
+
+/// 表单行与行、行与提示之间的间距。
+pub(crate) const MODAL_FORM_ROW_GAP: f32 = 12.0;
+
+/// 表单单行提示（说明、警告、校验错误）的固定高度。
+pub(crate) const MODAL_FORM_NOTE_HEIGHT: f32 = 16.0;
 
 /// 渲染通用模态遮罩与容器。
 ///
@@ -105,9 +123,18 @@ where
                 .items_center()
                 .justify_center()
                 .id(SharedString::from(dialog.container_id))
+                .debug_selector({
+                    let container_id = dialog.container_id;
+                    move || container_id.to_string()
+                })
                 .occlude()
                 .child(
                     div()
+                        // 几何回归测试按“外壳”定位真实弹窗边界；容器 ID 指向全窗口居中层。
+                        .debug_selector({
+                            let shell_id = format!("{}-shell", dialog.container_id);
+                            move || shell_id.clone()
+                        })
                         .w(px(dialog.width))
                         .h(px(dialog.height))
                         .p(px(MODAL_CONTENT_INSET))

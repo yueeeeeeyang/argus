@@ -36,7 +36,14 @@ pub(crate) fn render_content_body(
                 theme,
             )
         }
-        // 没有打开任何标签时进入欢迎态：侧栏默认收起，内容面板撑满窗口并给出快捷入口。
+        // 没有任何来源时进入欢迎态：侧栏收起、内容面板撑满窗口并给出快捷入口；
+        // 已加载来源但未打开标签时只提示从目录树选择日志，不再重复展示欢迎页。
+        TabKind::Empty if app.has_loaded_log_sources() => render_empty_state(
+            "请选择日志",
+            "从左侧目录树中选择日志文件，即可在此查看内容。",
+            app,
+            theme,
+        ),
         TabKind::Empty => render_log_welcome(app, theme, cx),
     }
 }
@@ -75,20 +82,22 @@ fn render_log_welcome(
                 .items_center()
                 .gap_3()
                 .text_center()
-                .child(render_icon(ArgusIcon::Logs, theme.foreground_muted, 40.0))
+                .child(
+                    gpui::img(crate::assets::APP_ICON_ASSET_PATH)
+                        .size(px(64.0))
+                        .rounded(px(14.0)),
+                )
                 .child(
                     div()
                         .text_size(px(18.0))
                         .text_color(rgb(theme.foreground))
-                        .child("开始分析日志"),
+                        .child("Argus"),
                 )
                 .child(
                     div()
                         .text_size(px(12.0))
                         .text_color(rgb(theme.foreground_muted))
-                        .child(
-                            "打开日志文件、目录或压缩包，也可以直接把日志或压缩包拖入窗口；支持大文件按需读取与多文件分析。",
-                        ),
+                        .child("打开日志文件、目录或压缩包，也可以直接拖入窗口。"),
                 )
                 .child(
                     div()
