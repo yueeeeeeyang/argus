@@ -245,8 +245,6 @@ impl ArgusApp {
             note: AgentLoopNote::Analysis,
             question,
             history: Vec::new(),
-            history_was_trimmed: false,
-            initial_user_messages: Vec::new(),
             config,
             config_root: config_root_for_skill_loading(self),
             model,

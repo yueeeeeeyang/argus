@@ -17,13 +17,11 @@ use uuid::Uuid;
 use crate::config::{AiConfig, LogTypeProfile};
 use crate::loader::{SourceId, SourceRegistry};
 
-/// 来源快照的选择范围，避免交互助手复用单根入口时意外缩小授权范围。
+/// 来源快照的选择范围。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AgentScopeSelection {
-    /// 根据当前选中节点解析一个根；保留现有智能分析行为。
+    /// 根据当前选中节点解析一个根。
     SelectedRoot(Option<SourceId>),
-    /// 固化来源注册表中的全部已加载根。
-    AllLoadedRoots,
 }
 
 /// Agent 会话状态机中的稳定状态。
@@ -204,7 +202,7 @@ pub(crate) struct SourceScopeSnapshot {
 }
 
 impl SourceScopeSnapshot {
-    /// 按明确范围选择固化来源树；交互助手使用全部根，固定分析继续使用单根。
+    /// 按明确范围选择固化来源树；固定分析使用选中节点所属的单根。
     pub(crate) fn from_registry_selection(
         registry: &SourceRegistry,
         selection: AgentScopeSelection,
@@ -413,16 +411,7 @@ pub(crate) enum AgentEvent {
     UserMessageConsumed(String),
     /// 用户提示在最终回答或取消边界到达过晚，未进入模型上下文。
     UserMessageRejected(String, String),
-    /// 交互助手一轮回答完成，并携带实际进入模型的用户消息。
-    AssistantCompleted {
-        /// 模型最终可见正文。
-        output: String,
-        /// 初始问题和在模型边界成功消费的补充消息。
-        accepted_user_messages: Vec<String>,
-        /// 构造本轮模型历史时是否因上下文容量移除了较早轮次。
-        history_was_trimmed: bool,
-    },
-    /// 交互助手的可恢复模型故障即将重试；界面应丢弃本次尝试尚未完成的流式正文。
+    /// 可恢复模型故障即将重试；界面应丢弃本次尝试尚未完成的流式正文。
     AssistantAttemptReset,
     /// bash 工具请求用户审批一条命令；界面渲染确认卡片并回传决定。
     BashApprovalRequired {
@@ -506,10 +495,6 @@ fn resolve_scope_root_ids(
         AgentScopeSelection::SelectedRoot(None) => {
             Err("存在多个来源根，请先在来源树中选择要分析的范围".to_string())
         }
-        AgentScopeSelection::AllLoadedRoots if registry.root_ids().is_empty() => {
-            Err("请先加载日志".to_string())
-        }
-        AgentScopeSelection::AllLoadedRoots => Ok(registry.root_ids().to_vec()),
     }
 }
 

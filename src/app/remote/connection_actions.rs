@@ -123,6 +123,9 @@ impl ArgusApp {
         node_id: ConnectionNodeId,
         cx: &mut Context<Self>,
     ) {
+        if self.is_connection_tree_search_open {
+            self.close_connection_tree_search();
+        }
         self.selected_connection_node_id = Some(node_id);
         if self.config.connections.is_directory(node_id) {
             self.toggle_connection_directory(node_id);

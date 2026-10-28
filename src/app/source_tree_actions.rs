@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-08
 //! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
-//! 主要功能：维护来源树语义状态、整树替换式加载回填、加密压缩包子树重试、单文件另存为，并通知助手真实来源内容版本变化。
+//! 主要功能：维护来源树语义状态、整树替换式加载回填、加密压缩包子树重试和单文件另存为。
 
 use super::*;
 use gpui::{PathPromptOptions, SharedString};
@@ -148,6 +148,9 @@ impl ArgusApp {
 
     /// 展开或折叠目录、压缩包等来源节点；加密压缩包降级节点转为密码输入引导。
     pub(crate) fn toggle_source_expanded(&mut self, source_id: SourceId, _cx: &mut Context<Self>) {
+        if self.is_source_tree_search_open {
+            self.close_source_tree_search();
+        }
         let Some(node) = self.source_registry.node(source_id).cloned() else {
             self.placeholder_notice = "未找到可展开来源节点".to_string();
             return;
@@ -258,7 +261,7 @@ impl ArgusApp {
                 .await;
 
             view.update(cx, |app, cx| {
-                app.apply_archive_node_retry_result(source_id, result, cx);
+                app.apply_archive_node_retry_result(source_id, result);
                 cx.notify();
             })
             .ok();
@@ -271,7 +274,6 @@ impl ArgusApp {
         &mut self,
         source_id: SourceId,
         result: anyhow::Result<SourceTreeScanResult>,
-        cx: &mut Context<Self>,
     ) {
         let scan_result = match result {
             Ok(scan_result) => scan_result,
@@ -321,7 +323,6 @@ impl ArgusApp {
             return;
         }
         self.rebuild_filtered_source_ids();
-        self.mark_source_content_changed(cx);
         self.placeholder_notice = if scan_result.warnings.is_empty() {
             format!("已解锁并展开 {label}")
         } else {
@@ -527,7 +528,6 @@ impl ArgusApp {
                         self.placeholder_notice, workspace.materialized_files
                     );
                     self.source_workspace_root = Some(workspace.root);
-                    self.reset_assistant_after_log_reload(cx);
                 } else {
                     // 未加载到有效来源时新建工作目录没有消费者，后台回滚删除。
                     crate::loader::workspace::delete_workspace_best_effort(workspace.root);

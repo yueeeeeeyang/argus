@@ -121,7 +121,7 @@ Argus 围绕 GPUI 的 `Entity`、`Context`、`Render` 与事件订阅能力组�
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────┘ │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────┐ │
 │  │ 设置窗口     │  │ 分析结果视图  │  │ 远程会话视图  │  │ 独立窗口 │ │
-│  │settings_window│ │jstack/runtime│  │terminal/remote│ │5 类辅助  │ │
+│  │settings_window│ │jstack/runtime│  │terminal/remote│ │4 类辅助  │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────┘ │
 ├─────────────────────────────────────────────────────────────────────┤
 │                     UI 组件层 (src/ui/components)                    │
@@ -165,7 +165,7 @@ Argus 围绕 GPUI 的 `Entity`、`Context`、`Render` 与事件订阅能力组�
 | **语法高亮** | `src/highlight/` | 语言识别、规则匹配、高亮区间与缓存 | 只作用于可见行 |
 | **UI 层** | `src/ui/` | 窗口、面板、对话框、可复用组件 | 组件与业务解耦 |
 | **通用能力** | `src/infra/` | 性能打点、文本选择、拖拽自动滚动、输入状态 | 被日志阅读区与输入框共享 |
-| **平台适配** | `src/platform/` | 自定义标题栏、系统右键入口、浮动窗口帧、外部路径解析 | 平台差异集中封装 |
+| **平台适配** | `src/platform/` | 自定义标题栏、系统右键入口、外部路径解析 | 平台差异集中封装 |
 | **工具** | `src/utils/` | 路径、大小格式化、时间格式化 | 无状态纯函数 |
 
 ---
@@ -527,12 +527,11 @@ AI 层是**运行在物化工作目录上的通用智能体**，不包含任何�
 AI 层：src/agent/agent_loop.rs 通用单轮模型循环
   ├─ preamble = 英文安全骨架 + <CONFIGURED_SYSTEM_PROMPT> + <SKILLS>
   └─ 工具 = list_loaded_sources + read_file + bash（均限定工作目录）
-两条产品线：agent_window（智能分析独立窗口）/ assistant_panel（主窗口助手）
+产品入口：agent_window（来源树「智能分析」独立窗口）
 Skill：src/agent/skills.rs，仅用户导入
 ```
 
-两条产品线的差异仅在入口与历史管理：交互助手维护跨模型中立历史，并按上下文窗口预算裁剪
-最早的完整轮次；Skill 集由两条线共用。
+智能分析窗口直接复用通用智能体循环与 Skill 集，不再维护主窗口内的交互助手会话。
 
 #### 4.5.2 工具契约（`src/agent/tools.rs`）
 
@@ -835,8 +834,8 @@ SSH/SMB/SVN 密码、Git 访问令牌与私钥口令**不再写入 `settings.tom
 `main_window.rs`（主窗口装配）、`custom_title_bar.rs`（标题栏）、`tab_bar.rs`（标签栏）、
 `source_panel.rs` / `dir_tree_panel.rs`（来源树与侧栏）、`toolbar.rs`（侧栏上下文工具栏）、
 `source_picker.rs`（自定义来源选择器）、`settings_window.rs`（设置）、
-`ai_settings_editor.rs`（模型与提示词配置）、`agent_window.rs` / `assistant_panel.rs` /
-`assistant_float_window.rs`（AI 两条产品线）、`jstack_analysis_view.rs` /
+`ai_settings_editor.rs`（模型与提示词配置）、`agent_window.rs`（智能分析窗口）、
+`jstack_analysis_view.rs` /
 `jstack_thread_detail_window.rs`、`runtime_analysis_view/`、`log_search_dialog.rs`、
 `connection_dialog.rs` / `connection_tree_panel.rs` / `terminal_view.rs` /
 `remote_file_manager_view.rs` / `remote_file_dialog.rs`、`file_preview_window.rs`、
@@ -909,7 +908,6 @@ XML、JSON、YAML、Java、JavaScript、CSS、JSP、SQL、Shell，另有不做�
 │ │    nested.log│  ╰──────────────────────────────────────────────╯  │
 │ └              │  （内容玻璃板：8px 窗口留白 + 6px 圆角 + 阴影）    │
 ├────────────────┴────────────────────────────────────────────────────┤
-│                        （右侧可展开 Agent 助手面板）                  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -917,8 +915,7 @@ XML、JSON、YAML、Java、JavaScript、CSS、JSP、SQL、Shell，另有不做�
 间距、6 px 圆角与内部 8 px 留白。玻璃板的抬起阴影按主题模式取 opencode v2 的
 `--v2-elevation-raised`：深色主题为两层 30% 黑投影 + 0.5 px 白色外描边 + 顶部 0.5 px
 白色亮线；浅色主题为 4% / 8% 黑投影 + 0.5 px 12% 黑外描边，不绘制顶部高光，
-避免深色投影在浅色背景上形成厚重暗边。助手面板、设置、来源选择器、文件预览与
-Jstack 线程详情等独立窗口复用同一套阴影函数。
+避免深色投影在浅色背景上形成厚重暗边。设置、来源选择器、文件预览与 Jstack 线程详情等独立窗口复用同一套阴影函数。
 
 玻璃板宽度始终以窗口可用宽度为准：玻璃板与内容列等 `flex_1` 容器带 `min_w(0)`，终端
 栅格等按内容宽度布局的元素不参与固有宽度计算，因此窗口过窄时由内容自身裁剪或滚动，
@@ -981,10 +978,9 @@ Jstack 线程详情等独立窗口复用同一套阴影函数。
 | `SshTerminal` | SSH 终端 |
 | `RemoteFileManager` | 远程文件管理（SFTP / SMB / Git / SVN 共用） |
 
-**独立原生窗口**共 5 类：智能分析窗口、Jstack 线程详情、文件预览、Jstack 过滤规则编辑器、
-浮动助手窗口。其余（设置、AI 设置编辑器、来源选择器、连接对话框、日志搜索、压缩包密码
-弹窗、bash 审批卡片）都是主窗口元素树中的覆盖层。助手面板可在内嵌与浮动之间切换，
-浮动时挂为 macOS 父子窗口以获得原生跟随。
+**独立原生窗口**共 4 类：智能分析窗口、Jstack 线程详情、文件预览、Jstack 过滤规则编辑器。
+其余（设置、AI 设置编辑器、来源选择器、连接对话框、日志搜索、压缩包密码弹窗、
+bash 审批卡片）都是主窗口元素树中的覆盖层。
 
 ### 5.5 快捷键设计
 
@@ -1244,7 +1240,6 @@ argus/
 └── src/
     ├── agent/                                      # AI 智能体
     │   ├── agent_loop.rs                           # 通用单轮模型循环、工具注册、安全骨架
-    │   ├── assistant.rs                            # 交互助手装配与中立历史
     │   ├── credential.rs                           # AI API Key 的系统凭据库读写
     │   ├── mod.rs
     │   ├── model_gateway.rs                        # 模型能力探测
@@ -1265,7 +1260,6 @@ argus/
     │   │   ├── remote_file_actions.rs              # 远程文件管理动作
     │   │   └── terminal_actions.rs                 # SSH 终端动作
     │   ├── agent_actions.rs                        # 智能分析窗口编排
-    │   ├── assistant_actions.rs                    # 助手面板与浮动窗口
     │   ├── constants.rs                            # UI 时序与尺寸常量
     │   ├── jstack_actions.rs                       # Jstack 分析编排与取消
     │   ├── jstack_state.rs                         # Jstack 分析与任务状态
@@ -1351,7 +1345,6 @@ argus/
     │   ├── external_sources.rs                     # 启动参数与 open-url 路径解析
     │   ├── mod.rs
     │   ├── open_with_registration.rs               # 系统右键入口注册（Windows 注册表 / macOS LaunchServices）
-    │   └── window_follow.rs                        # 浮动窗口原生帧读写
     ├── remote/                                     # 远程访问
     │   ├── connection.rs                           # 连接配置模型、校验与机密槽位
     │   ├── git.rs                                  # Git 裸仓库缓存、fetch、版本与只读浏览
@@ -1402,8 +1395,6 @@ argus/
     │   ├── agent_window.rs                         # 智能分析独立窗口
     │   ├── ai_settings_editor.rs                   # 模型与提示词配置
     │   ├── archive_password_dialog.rs              # 压缩包密码弹窗
-    │   ├── assistant_float_window.rs               # 浮动助手窗口
-    │   ├── assistant_panel.rs                      # 助手面板
     │   ├── connection_dialog.rs                    # 链接新增/编辑
     │   ├── connection_tree_panel.rs                # 链接树
     │   ├── custom_title_bar.rs                     # 自定义标题栏

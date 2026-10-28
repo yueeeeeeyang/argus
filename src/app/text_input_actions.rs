@@ -32,9 +32,18 @@ impl ArgusApp {
     /// 说明：点击输入框以外区域时调用；只清理焦点、选区和 marked text，
     /// 不修改用户已经输入的文本内容，避免误清配置或搜索条件。
     pub(crate) fn clear_all_text_input_focus(&mut self) {
+        let source_search_was_focused = self.source_tree_search_input.is_focused;
+        let connection_search_was_focused = self.connection_tree_search_input.is_focused;
         self.source_tree_search_input.clear_focus();
 
         self.clear_connection_text_input_focuses();
+        // 过滤框失焦即收起，避免输入框与过滤结果悬空残留。
+        if source_search_was_focused && self.is_source_tree_search_open {
+            self.close_source_tree_search();
+        }
+        if connection_search_was_focused && self.is_connection_tree_search_open {
+            self.close_connection_tree_search();
+        }
         self.clear_remote_file_text_input_focuses();
 
         self.source_picker.is_path_input_focused = false;
@@ -433,6 +442,27 @@ mod tests {
         assert_eq!(
             app.config.log_display.jstack_thread_filter_rules,
             rules_before
+        );
+    }
+
+    /// 验证过滤输入框失焦后自动收起，并清空对应的过滤状态。
+    #[test]
+    fn filter_inputs_close_when_focus_is_cleared() {
+        let mut app = ArgusApp::new();
+        app.open_source_tree_search();
+        assert!(app.is_source_tree_search_open);
+        app.clear_all_text_input_focus();
+        assert!(
+            !app.is_source_tree_search_open,
+            "来源树过滤框失焦后应自动收起"
+        );
+
+        app.open_connection_tree_search();
+        assert!(app.is_connection_tree_search_open);
+        app.clear_all_text_input_focus();
+        assert!(
+            !app.is_connection_tree_search_open,
+            "链接树过滤框失焦后应自动收起"
         );
     }
 

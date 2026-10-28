@@ -48,8 +48,6 @@ pub(crate) enum ArgusIcon {
     Minus,
     /// 关闭标签或弹窗。
     Close,
-    /// 关闭其他项。
-    CircleX,
     /// 停止正在执行的任务。
     Stop,
     /// Windows 主窗口最大化。
@@ -60,10 +58,6 @@ pub(crate) enum ArgusIcon {
     PanelLeftOpen,
     /// 收起主窗口左侧来源面板。
     PanelLeftClose,
-    /// 展开主窗口右侧 Agent 助手面板。
-    PanelRightOpen,
-    /// 收起主窗口右侧 Agent 助手面板。
-    PanelRightClose,
     /// 更多操作。
     More,
     /// 后退。
@@ -156,8 +150,6 @@ impl ArgusIcon {
             Self::WindowRestore,
             Self::PanelLeftOpen,
             Self::PanelLeftClose,
-            Self::PanelRightOpen,
-            Self::PanelRightClose,
             Self::More,
             Self::ArrowLeft,
             Self::ArrowUp,
@@ -166,6 +158,7 @@ impl ArgusIcon {
             Self::Refresh,
             Self::Upload,
             Self::Download,
+            Self::FileDown,
             Self::Save,
             Self::Rename,
             Self::Trash,
@@ -218,14 +211,11 @@ impl ArgusIcon {
             Self::Plus => "icons/plus.svg",
             Self::Minus => "icons/minus.svg",
             Self::Close => "icons/close.svg",
-            Self::CircleX => "icons/circle-x.svg",
             Self::Stop => "icons/stop.svg",
             Self::WindowMaximize => "icons/window-maximize.svg",
             Self::WindowRestore => "icons/window-restore.svg",
             Self::PanelLeftOpen => "icons/panel-left-open.svg",
             Self::PanelLeftClose => "icons/panel-left-close.svg",
-            Self::PanelRightOpen => "icons/panel-right-open.svg",
-            Self::PanelRightClose => "icons/panel-right-close.svg",
             Self::More => "icons/more.svg",
             Self::ArrowLeft => "icons/arrow-left.svg",
             Self::ArrowUp => "icons/arrow-up.svg",
@@ -274,15 +264,6 @@ impl ArgusIcon {
         }
     }
 
-    /// 返回右侧 Agent 助手面板开关按钮图标：面板收起时显示展开图标，展开时显示收起图标。
-    pub(crate) fn assistant_panel_toggle(is_collapsed: bool) -> Self {
-        if is_collapsed {
-            Self::PanelRightOpen
-        } else {
-            Self::PanelRightClose
-        }
-    }
-
     /// 将 icondata 的路径片段包装为完整 SVG 文档。
     pub(crate) fn to_svg_string(self) -> String {
         let icon = self.icon_data();
@@ -322,14 +303,11 @@ impl ArgusIcon {
             Self::Plus => icondata::LuPlus,
             Self::Minus => icondata::LuMinus,
             Self::Close => icondata::LuX,
-            Self::CircleX => icondata::LuCircleX,
             Self::Stop => icondata::LuSquare,
             Self::WindowMaximize => icondata::LuSquare,
             Self::WindowRestore => icondata::LuCopy,
             Self::PanelLeftOpen => icondata::LuPanelLeftOpen,
             Self::PanelLeftClose => icondata::LuPanelLeftClose,
-            Self::PanelRightOpen => icondata::LuPanelRightOpen,
-            Self::PanelRightClose => icondata::LuPanelRightClose,
             Self::More => icondata::LuEllipsis,
             Self::ArrowLeft => icondata::LuArrowLeft,
             Self::ArrowUp => icondata::LuArrowUp,
@@ -398,6 +376,18 @@ mod tests {
         }
     }
 
+    /// 验证树右键菜单的“另存为”图标已加入资产清单，避免找不到路径导致空白。
+    #[test]
+    fn save_as_icon_is_part_of_asset_list() {
+        let icon = ArgusIcon::FileDown;
+        assert!(
+            ArgusIcon::all().contains(&icon),
+            "图标 {} 未加入 all() 资产清单",
+            icon.path()
+        );
+        assert_eq!(ArgusIcon::from_path(icon.path()), Some(icon));
+    }
+
     /// 验证左右面板开关在展开与收起状态分别使用不同图标。
     #[test]
     fn panel_toggles_use_distinct_icons_per_state() {
@@ -409,15 +399,6 @@ mod tests {
             ArgusIcon::source_panel_toggle(false),
             ArgusIcon::PanelLeftClose
         );
-        assert_eq!(
-            ArgusIcon::assistant_panel_toggle(true),
-            ArgusIcon::PanelRightOpen
-        );
-        assert_eq!(
-            ArgusIcon::assistant_panel_toggle(false),
-            ArgusIcon::PanelRightClose
-        );
         assert_ne!(ArgusIcon::PanelLeftOpen, ArgusIcon::PanelLeftClose);
-        assert_ne!(ArgusIcon::PanelRightOpen, ArgusIcon::PanelRightClose);
     }
 }

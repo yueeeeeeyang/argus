@@ -46,8 +46,6 @@ const MODEL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 pub(crate) enum AgentLoopNote {
     /// 来源树入口的智能分析独立窗口。
     Analysis,
-    /// 主窗口右侧交互助手。
-    Assistant,
 }
 
 /// 创建一次通用智能体循环所需的不可变输入和实时消息通道。
@@ -58,10 +56,6 @@ pub(crate) struct AgentLoopRequest {
     pub question: String,
     /// 预构建的 Provider 中立历史；智能分析传空。
     pub history: Vec<Message>,
-    /// 构建历史时是否因上下文容量移除了较早轮次。
-    pub history_was_trimmed: bool,
-    /// 本轮初始用户消息；交互助手在完成事件中原样回传。
-    pub initial_user_messages: Vec<String>,
     /// 已规范化且通过校验的 AI 配置快照。
     pub config: AiConfig,
     /// settings.toml 所在目录；导入 Skill 从其 ai/skills 子目录加载。
@@ -80,7 +74,7 @@ pub(crate) struct AgentLoopRequest {
     pub event_sender: async_channel::Sender<AgentEvent>,
     /// UI 与循环共享的未消费提示计数器。
     pub pending_user_messages: Arc<AtomicUsize>,
-    /// UI 发送提示与循环关闭收件箱之间的线性化门闩；交互助手不使用。
+    /// UI 发送提示与循环关闭收件箱之间的线性化门闩；可为空。
     pub user_message_gate: Option<Arc<Mutex<bool>>>,
     /// 界面 bash 审批答复接收端；发送端由界面持有。
     pub bash_decision_receiver:
@@ -93,8 +87,6 @@ pub(crate) async fn run_agent_loop(request: AgentLoopRequest) {
         note,
         question,
         history,
-        history_was_trimmed,
-        initial_user_messages,
         config,
         config_root,
         model,
@@ -248,22 +240,9 @@ pub(crate) async fn run_agent_loop(request: AgentLoopRequest) {
         )
         .await
     };
-    let Some(response_output) = response_output else {
+    let Some(_response_output) = response_output else {
         return;
     };
-    if note == AgentLoopNote::Assistant {
-        let mut accepted_user_messages = initial_user_messages;
-        if let Ok(messages) = context.accepted_user_messages.lock() {
-            accepted_user_messages.extend(messages.iter().map(|message| message.content.clone()));
-        }
-        let _ = event_sender
-            .send(AgentEvent::AssistantCompleted {
-                output: response_output,
-                accepted_user_messages,
-                history_was_trimmed,
-            })
-            .await;
-    }
     let _ = event_sender
         .send(AgentEvent::Status(AgentSessionStatus::Completed))
         .await;
@@ -607,7 +586,7 @@ pub(crate) fn decrement_pending_messages(counter: &AtomicUsize) {
 
 /// 会话退出守卫：关闭消息入口、拒绝残留提示、收敛未决审批并停止答复泵。
 struct SessionExitGuard {
-    /// UI 与循环共享的入口状态；交互助手没有门闩。
+    /// UI 与循环共享的入口状态；没有门闩时为空。
     gate: Option<Arc<Mutex<bool>>>,
     /// 用于回收并拒绝未消费提示的接收端副本。
     receiver: async_channel::Receiver<AgentUserMessage>,

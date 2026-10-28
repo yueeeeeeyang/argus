@@ -240,7 +240,7 @@ fn render_header(
                 )),
         )
         // 过滤控件固定独占一行：分析中文本变长后版式不再跳动，
-        // 助手面板展开或窗口变窄时也不会溢出面板右边缘。
+        // 窗口变窄时也不会溢出面板右边缘。
         .child(
             div()
                 .debug_selector(|| "jstack-header-filter-controls".to_string())

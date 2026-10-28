@@ -7,4 +7,3 @@
 pub(crate) mod custom_titlebar;
 pub(crate) mod external_sources;
 pub(crate) mod open_with_registration;
-pub(crate) mod window_follow;

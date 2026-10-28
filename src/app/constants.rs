@@ -13,14 +13,6 @@ pub(crate) const SOURCE_PANEL_DEFAULT_WIDTH: f32 = 350.0;
 pub(crate) const SOURCE_PANEL_MIN_WIDTH: f32 = 244.0;
 /// 来源侧栏最大宽度，避免占位界面被侧栏挤压。
 pub(crate) const SOURCE_PANEL_MAX_WIDTH: f32 = 520.0;
-/// 主窗口右侧 Agent 助手默认宽度。
-pub(crate) const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 420.0;
-/// Agent 助手允许拖动到的最小宽度。
-pub(crate) const ASSISTANT_PANEL_MIN_WIDTH: f32 = 340.0;
-/// Agent 助手绝对最大宽度；运行时还会为主内容保留至少 480 像素。
-pub(crate) const ASSISTANT_PANEL_MAX_WIDTH: f32 = 680.0;
-/// 助手面板展开时主内容区必须保留的最小宽度。
-pub(crate) const ASSISTANT_PANEL_MAIN_CONTENT_MIN_WIDTH: f32 = 480.0;
 /// 日志内容字号最小值，避免主阅读区文字过小影响可读性。
 pub(crate) const LOG_CONTENT_FONT_SIZE_MIN: f32 = 12.0;
 /// 日志内容字号最大值，避免大字号破坏当前日志行布局。

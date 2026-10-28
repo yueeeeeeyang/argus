@@ -624,7 +624,7 @@ impl AiSettingsEditor {
             .and_then(|index| self.draft.models.get(index))
             .map(|model| (model.base_url.value.clone(), model.api_key.value.clone()));
         let result = self.app.update(cx, |app, app_cx| {
-            let result = app.save_ai_settings(config, credential, app_cx);
+            let result = app.save_ai_settings(config, credential);
             app_cx.notify();
             result
         });
@@ -725,7 +725,7 @@ impl AiSettingsEditor {
         }
         let config = self.draft.to_config();
         let result = self.app.update(cx, |app, app_cx| {
-            let result = app.save_ai_settings(config, None, app_cx);
+            let result = app.save_ai_settings(config, None);
             app_cx.notify();
             result
         });

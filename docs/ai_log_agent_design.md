@@ -26,7 +26,7 @@ v3 方案的用户决策（已确认）：
 - **工作目录物化**：加载时把普通来源复制、压缩包解压进临时工作目录；左侧目录树直接
   显示工作目录真实结构；浏览器与 AI 全部只读普通文件。
 - **通用智能体**：不硬编码任何诊断逻辑；内置 bash + 文件读取工具，只允许在工作目录
-  内执行；白名单外命令弹窗确认。智能分析与 Agent 助手都是其上的薄壳，不保留旧行为。
+  内执行；白名单外命令弹窗确认。智能分析窗口是其上的薄壳，不保留旧行为。
 - **Skill 体系**：方法论以用户导入的知识文本注入，与代码解耦；不提供内置 Skill。
 
 ## 二、总体架构
@@ -45,11 +45,11 @@ v3 方案的用户决策（已确认）：
 AI 层：src/agent/agent_loop.rs 通用单轮模型循环
   ├─ preamble = 安全骨架 + <CONFIGURED_SYSTEM_PROMPT> + <SKILLS>
   └─ 工具 = list_loaded_sources + read_file + bash（均限定工作目录）
-两条薄壳：agent_window（智能分析独立窗口）/ assistant_panel（主窗口助手）
+产品入口：agent_window（智能分析独立窗口）
 Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/skills/ 落盘
 ```
 
-两条产品线的差异只剩：入口与历史（助手有跨模型中立历史）；Skill 集两条线共用。
+智能分析窗口直接复用通用智能体循环与 Skill 集。
 
 ## 三、工作目录物化
 
@@ -68,7 +68,7 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 ### 4.1 统一循环（`agent/agent_loop.rs`）
 
 `AgentLoopRequest` 携带问题、中立历史、配置快照、工作区清单、凭据与实时通道；
-`AgentLoopNote` 区分两条产品线（只影响开场状态事件与完成事件形态）。循环职责：
+`AgentLoopNote` 标识智能分析入口（影响开场状态事件）。循环职责：
 
 - reqwest/DeepSeek/OpenAI 兼容客户端构建；官方 DeepSeek 端点附加 thinking 参数；
 - 指数退避重试（1s 起步、30s 封顶）；只有 HTTP 408/429/5xx、底层连接错误和流意外结束可重试，
@@ -133,9 +133,6 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 - **智能分析独立窗口**（`ui/agent_window.rs`）：消息瀑布流（问题/轨迹/工具组/思考/
   正文/bash 审批卡片按时间交错）；顶部用量栏；底部追加提示（门闩线性化，会话结束
   拒绝残留）；发起新分析时旧窗口已终态则关闭重建，运行中拒绝并发。
-- **交互助手面板**（`ui/assistant_panel.rs`）：同一循环的薄壳；跨模型中立历史按
-  上下文窗口一半预算裁剪最早完整轮次；`@` 候选与注入元数据使用工作目录路径前缀，
-  界面不展示 Argus 生成的元数据。
 - **bash 审批卡片**（`ui/components/bash_approval.rs`，两处共用）：完整命令、白名单
   外原因提示、批准/拒绝按钮与结论固化。
 
@@ -152,7 +149,7 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
   拒绝、退出码与输出截断；
 - Skill：frontmatter 解析与拒绝条件、默认集筛选、禁用过滤、目录/ZIP 导入、同名冲突、
   注入边界与预算截断；
-- 手动冒烟：大包加载与浏览、密码包解锁、两条 AI 产品线问答与 bash 审批弹窗、Skill
+- 手动冒烟：大包加载与浏览、密码包解锁、智能分析窗口问答与 bash 审批弹窗、Skill
   全流程、Windows 删除重试。
 
 ## 八、与旧设计（v2）的差异

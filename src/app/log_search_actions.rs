@@ -957,6 +957,9 @@ impl ArgusApp {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
+        if self.is_source_tree_search_open {
+            self.close_source_tree_search();
+        }
         self.clear_log_text_focus();
 
         let Some(source) = self.source_registry.node(source_id).cloned() else {

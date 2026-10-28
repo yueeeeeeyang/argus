@@ -345,8 +345,6 @@ impl AgentWindow {
                     reason,
                 ));
             }
-            // 交互助手完成事件只由右侧面板消费；本窗口不会收到它。
-            AgentEvent::AssistantCompleted { .. } => {}
             // 统一循环重试前丢弃本次尝试尚未完成的流式正文，避免重试内容重复拼接。
             AgentEvent::AssistantAttemptReset => {
                 self.drop_incomplete_stream_text();

@@ -402,7 +402,6 @@ impl ArgusApp {
             crate::loader::workspace::delete_workspace_best_effort(old_workspace);
         }
         self.reset_log_workspace_after_source_replace();
-        self.reset_assistant_after_log_reload(cx);
         self.placeholder_notice = format!(
             "正在完整加载 {} 个{}…",
             paths.len(),

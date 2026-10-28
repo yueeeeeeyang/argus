@@ -2,9 +2,9 @@
 //! 创建日期：2026-06-09
 //! 修改日期：2026-10-16
 //! 作者：Argus 开发团队
-//! 主要功能：渲染标题栏、来源侧栏、日志内容区、右侧 Agent 助手、AI 分析弹窗和设置模态框。
+//! 主要功能：渲染标题栏、来源侧栏、日志内容区、AI 分析弹窗和设置模态框。
 
-use crate::app::{ArgusApp, AssistantPanelMode};
+use crate::app::ArgusApp;
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::theme::ThemeMode;
@@ -157,8 +157,6 @@ pub(crate) fn render(
 ) -> impl IntoElement {
     let _span = PerfSpan::new("main_window_render");
     app.sync_window_appearance_theme(window);
-    // 主窗口移动/缩放都会触发重绘，在这里同步浮动助手窗口位置以实时跟随。
-    app.sync_assistant_float_window(window, cx);
     if !app.has_registered_workspace_close_guard {
         // 主窗口关闭时删除当前物化工作目录；崩溃或强杀的场景由下次启动清扫兜底。
         let entity = cx.entity();
@@ -166,13 +164,6 @@ pub(crate) fn render(
             let app = entity.read(app_cx);
             if let Some(root) = app.source_workspace_root.clone() {
                 crate::loader::workspace::delete_workspace_best_effort(root);
-            }
-            // 主窗口关闭时一并销毁浮动助手窗口，避免残留独立窗口；
-            // 实体读取借用期间不同步调用原生窗口操作，延迟到事件循环空闲时执行。
-            if let Some(float_window) = app.assistant_float_window {
-                app_cx.defer(move |cx| {
-                    let _ = float_window.update(cx, |_, window, _| window.remove_window());
-                });
             }
             true
         });
@@ -197,7 +188,6 @@ pub(crate) fn render(
         .on_click(cx.listener(move |app, _event: &ClickEvent, window, cx| {
             root_focus_for_click.focus(window);
             app.clear_all_text_input_focus();
-            app.clear_assistant_composer_focus(cx);
             cx.notify();
         }))
         .on_mouse_down(
@@ -210,14 +200,14 @@ pub(crate) fn render(
         )
         .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _window, cx| {
             let pointer_x = event.position.x / px(1.0);
-            if app.resize_panels_from_pointer(pointer_x, _window) {
+            if app.resize_source_panel(pointer_x) {
                 cx.notify();
             }
         }))
         .on_mouse_up(
             MouseButton::Left,
             cx.listener(|app, _: &MouseUpEvent, _, cx| {
-                if app.finish_panel_resizes() {
+                if app.finish_source_panel_resize() {
                     cx.notify();
                 }
             }),
@@ -225,7 +215,7 @@ pub(crate) fn render(
         .on_mouse_up_out(
             MouseButton::Left,
             cx.listener(|app, _: &MouseUpEvent, _, cx| {
-                if app.finish_panel_resizes() {
+                if app.finish_source_panel_resize() {
                     cx.notify();
                 }
             }),
@@ -291,8 +281,7 @@ pub(crate) fn render(
                                     ))
                                 }),
                         ),
-                )
-                .child(animated_assistant_panel(app, window, cx)),
+                ),
         )
         .when(!app.is_source_panel_collapsed, |this| {
             this.child(source_resizer::render(app, "source-resizer", cx))
@@ -345,110 +334,6 @@ pub(crate) fn render(
                 modal, &theme, cx,
             ))
         })
-}
-
-/// 渲染主内容右侧可动画的 Agent 助手容器；实体在首次展开后持续保留。
-fn animated_assistant_panel(
-    app: &ArgusApp,
-    window: &Window,
-    cx: &mut Context<ArgusApp>,
-) -> AnyElement {
-    let window_width = window.viewport_size().width / px(1.0);
-    let visible_width = app.current_assistant_panel_width_for_window(window_width);
-    let dynamic_max = app.assistant_panel_max_width_for_window(window_width);
-    let from_width = app.assistant_panel_animation_from_width.min(dynamic_max);
-    let to_width = app.assistant_panel_animation_to_width.min(dynamic_max);
-    let theme = app.theme.clone();
-    let panel = div()
-        .id("animated-assistant-panel")
-        .relative()
-        .h_full()
-        .flex_none()
-        .overflow_hidden()
-        .flex()
-        // 浮动模式下面板实体只由浮动窗口渲染：若内嵌槽位（宽 0）继续渲染同一实体，
-        // 两个窗口会互相覆盖共享的列表测量态与滚动偏移，滚动条在两侧来回闪现。
-        .when_some(
-            app.assistant_panel
-                .clone()
-                .filter(|_| app.assistant_panel_mode != AssistantPanelMode::Floating),
-            |this, panel| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .h_full()
-                        // 与内容面板同构的圆角玻璃板：顶部描边余量 + 右侧/底部窗口间距，
-                        // 与内容面板之间保留 8px 缝隙，收起时由外层动画宽度整体裁掉。
-                        .pt(px(WINDOW_CONTENT_RING_ALLOWANCE))
-                        .pr(px(WINDOW_CONTENT_INSET))
-                        .pb(px(WINDOW_CONTENT_INSET))
-                        .child(
-                            div()
-                                .size_full()
-                                .p(px(WINDOW_CONTENT_PADDING))
-                                .rounded(px(WINDOW_CONTENT_RADIUS))
-                                .bg(rgb(theme.content))
-                                .shadow(window_content_shadows(theme.mode))
-                                .child(panel),
-                        ),
-                )
-            },
-        )
-        // 透明拖动层最后加入元素树，确保覆盖在面板内容之上并保持稳定命中。
-        .when(!app.is_assistant_panel_collapsed, |this| {
-            this.child(render_assistant_resizer(app, cx))
-        });
-
-    if app.is_assistant_panel_resizing {
-        return panel.w(px(visible_width.max(0.0))).into_any_element();
-    }
-    panel
-        .with_animation(
-            (
-                "assistant-panel-width",
-                app.assistant_panel_animation_generation,
-            ),
-            Animation::new(Duration::from_millis(160)).with_easing(gpui::ease_out_quint()),
-            move |this, progress| {
-                let width = from_width + (to_width - from_width) * progress;
-                this.w(px(width.max(0.0))).opacity(if to_width == 0.0 {
-                    1.0 - progress * 0.12
-                } else {
-                    0.88 + progress * 0.12
-                })
-            },
-        )
-        .into_any_element()
-}
-
-/// 渲染助手面板左侧透明拖动命中区。
-///
-/// 命中层覆盖在 Agent 色块边缘，不占用布局宽度也不绘制分割线；主内容与侧栏仅通过
-/// `content`、`side_bar` 两种背景色区分，与左侧来源树保持相同视觉逻辑。
-fn render_assistant_resizer(_app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
-    div()
-        .id("assistant-panel-resizer")
-        .absolute()
-        .top_0()
-        .left_0()
-        .w(px(6.0))
-        .h_full()
-        .cursor_col_resize()
-        .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
-            if app.is_assistant_resizer_hovered != *hovered {
-                app.is_assistant_resizer_hovered = *hovered;
-                cx.notify();
-            }
-        }))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|app, event: &MouseDownEvent, _, cx| {
-                app.begin_assistant_panel_resize(event.position.x / px(1.0));
-                cx.stop_propagation();
-                cx.notify();
-            }),
-        )
 }
 
 /// 渲染可动画宽度的来源侧栏容器；内容保持原宽度，外层负责裁剪。

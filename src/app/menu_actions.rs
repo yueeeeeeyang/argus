@@ -110,13 +110,9 @@ impl ArgusApp {
 
         match active_menu.kind {
             ActiveMenuKind::TabContext { tab_id } => vec![
-                MenuEntry::new("关闭当前", MenuAction::CloseTab { tab_id })
-                    .with_icon(ArgusIcon::Close),
-                MenuEntry::new("关闭其他", MenuAction::CloseOtherTabs { tab_id })
-                    .with_icon(ArgusIcon::CircleX),
-                MenuEntry::new("关闭全部", MenuAction::CloseAllTabs)
-                    .danger()
-                    .with_icon(ArgusIcon::Trash),
+                MenuEntry::new("关闭当前", MenuAction::CloseTab { tab_id }),
+                MenuEntry::new("关闭其他", MenuAction::CloseOtherTabs { tab_id }),
+                MenuEntry::new("关闭全部", MenuAction::CloseAllTabs).danger(),
             ],
             ActiveMenuKind::TabOverflow => self
                 .tabs

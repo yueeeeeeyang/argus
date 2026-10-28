@@ -12,7 +12,7 @@
 
 Argus（阿尔戈斯）是一款面向开发者和运维人员的高性能桌面日志工具。它把本地日志阅读、压缩包浏览、跨文件搜索、Java 线程栈分析、Runtime 请求与 SQL 分析、基于通用智能体的智能分析，以及 SSH/SMB/Git/SVN 远程操作整合到一个桌面工作台中，帮助用户缩短“获取日志—定位异常—分析根因”的完整链路。
 
-项目使用 Rust 构建核心读取与分析能力，并使用 GPUI 渲染高信息密度桌面界面。当前包版本为 `1.3.0`，产品重点不是把日志一次性加载成普通文本，而是针对大文件、压缩日志和多文件分析采用不同的读取策略。
+项目使用 Rust 构建核心读取与分析能力，并使用 GPUI 渲染高信息密度桌面界面。当前包版本为 `1.3.1`，产品重点不是把日志一次性加载成普通文本，而是针对大文件、压缩日志和多文件分析采用不同的读取策略。
 
 ## 2. 核心价值
 
@@ -173,9 +173,9 @@ Git SSH 与 SVN SSH 都先展示 SHA-256 主机指纹并复用 Argus 受信主�
 - AI 模型请求失败后按指数退避（1s 起步、30s 封顶）自动重试，次数上限由 `AiConfig.max_retry_attempts` 配置，默认 10、可填 0～20（0 表示不重试），设置页“请求重试”区可修改；达到上限会结束本轮会话并如实报错；
 - 应用不提供自动升级能力，版本更新由用户自行下载安装包完成。
 
-### 3.9 智能分析与 Agent 助手
+### 3.9 智能分析
 
-Argus 内置一条通用智能体产品线，入口有两个：来源树工具栏「智能分析」打开的独立分析窗口，以及主窗口右侧可停靠/浮动的交互助手面板。二者共用同一个智能体循环（`src/agent/agent_loop.rs`），差别只在入口与会话历史。
+Argus 内置通用智能体产品线：来源树工具栏「智能分析」打开的独立分析窗口。该窗口复用 `src/agent/agent_loop.rs` 的通用智能体循环、工具契约和 Skill 集，不再提供主窗口内的交互助手面板。
 
 智能体不硬编码任何诊断流程，而是运行在日志加载时物化出的工作目录上，只使用三个领域无关工具：
 
@@ -267,7 +267,7 @@ SSH 终端负责实时操作，SFTP/SMB 负责文件获取和管理，Git/SVN �
 | Runtime 与 SQL 分析 | `src/analysis/runtime.rs`、`src/ui/runtime_analysis_view.rs` |
 | SSH、SFTP、SMB、Git 与 SVN | `src/remote/`、`src/app/remote/` |
 | 设置、主题与持久化配置 | `src/config/`、`src/config/secret_store.rs`、`src/theme/`、`src/ui/settings_window.rs` |
-| 智能分析与 Agent 助手 | `src/agent/`、`src/ui/agent_window.rs`、`src/ui/assistant_panel.rs` |
+| 智能分析 | `src/agent/`、`src/ui/agent_window.rs` |
 | 系统打开入口 | `src/platform/external_sources.rs`、`src/platform/open_with_registration.rs` |
 
 ---

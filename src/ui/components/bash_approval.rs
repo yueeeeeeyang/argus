@@ -1,7 +1,7 @@
 //! 文件职责：bash 命令审批确认卡片组件。
 //! 创建日期：2026-09-14
 //! 作者：Argus 开发团队
-//! 主要功能：供智能分析窗口与交互助手面板共用的审批状态模型和内联确认卡片渲染。
+//! 主要功能：供智能分析窗口使用的审批状态模型和内联确认卡片渲染。
 
 use gpui::{App, ClickEvent, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
 use std::time::SystemTime;

@@ -150,6 +150,7 @@ fn source_icon_button(
                 match action_name {
                     "加载日志" => app.request_load_sources(cx),
                     "过滤" => {
+                        cx.stop_propagation();
                         app.open_source_tree_search();
                         let search_focus_handle = app
                             .ensure_input_focus_handles(cx)
@@ -197,6 +198,7 @@ fn connection_icon_button(
                 "新增链接" => app.open_connection_link_create_menu(event.position()),
                 "新增目录" => app.open_new_connection_directory_dialog(cx),
                 "过滤" => {
+                    cx.stop_propagation();
                     app.open_connection_tree_search();
                     let search_focus_handle = app
                         .ensure_input_focus_handles(cx)

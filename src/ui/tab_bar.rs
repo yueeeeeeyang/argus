@@ -39,8 +39,6 @@ const TAB_EMERGENCY_MIN_WIDTH: f32 = 48.0;
 const TAB_MAX_WIDTH: f32 = 230.0;
 /// 下拉按钮占位宽度；按钮始终展示，便于从固定入口查看全部标签。
 const TAB_OVERFLOW_BUTTON_WIDTH: f32 = 32.0;
-/// Agent 助手面板开关占位宽度；固定放在全部标签按钮右侧。
-const TAB_ASSISTANT_BUTTON_WIDTH: f32 = 32.0;
 /// 标签区与右侧下拉按钮之间的固定间距；同时也是标题栏拖拽空白的最小宽度。
 const TAB_OVERFLOW_BUTTON_GAP: f32 = 8.0;
 /// 标题栏中标签栏左侧外部留白，对应 `custom_title_bar` 中的间距（与玻璃板内边距一致）。
@@ -150,12 +148,11 @@ pub(crate) fn render(
                 ),
         )
         // 拖拽空白兼作标签区与右侧下拉按钮之间的最小间距：标签未铺满时它吸收剩余宽度，
-        // 下拉按钮与助手面板按钮因此始终固定在标题栏右侧。
+        // 下拉按钮因此始终固定在标题栏右侧。
         .child(tab_drag_area(cx))
         .when(has_tabs, |this| {
             this.child(render_overflow_button(overflow_selected, &theme, cx))
         })
-        .child(render_assistant_panel_button(app, &theme, cx))
 }
 
 /// 根据窗口宽度估算标签栏可用空间。
@@ -190,10 +187,7 @@ pub(crate) fn calculate_tab_layout(
         };
     }
 
-    let tab_area_width = (available_width
-        - TAB_OVERFLOW_BUTTON_WIDTH
-        - TAB_ASSISTANT_BUTTON_WIDTH
-        - TAB_OVERFLOW_BUTTON_GAP)
+    let tab_area_width = (available_width - TAB_OVERFLOW_BUTTON_WIDTH - TAB_OVERFLOW_BUTTON_GAP)
         .max(TAB_EMERGENCY_MIN_WIDTH);
     let ideal_widths = tabs
         .iter()
@@ -546,40 +540,6 @@ fn render_overflow_button(
         ))
 }
 
-/// 渲染固定在全部标签按钮右侧的 Agent 助手面板开关。
-fn render_assistant_panel_button(
-    app: &ArgusApp,
-    theme: &AppTheme,
-    cx: &mut Context<ArgusApp>,
-) -> impl IntoElement {
-    let is_collapsed = app.is_assistant_panel_collapsed;
-    div()
-        .w(px(TAB_ASSISTANT_BUTTON_WIDTH))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(render_icon_button(
-            "assistant-panel-toggle",
-            // 展开与收起使用成对的面板图标，与左侧来源树开关保持一致的语义区分。
-            ArgusIcon::assistant_panel_toggle(is_collapsed),
-            if is_collapsed {
-                "展开日志助手"
-            } else {
-                "收起日志助手"
-            },
-            false,
-            IconButtonSize::Small,
-            theme,
-            cx.listener(|app, _, window, cx| {
-                cx.stop_propagation();
-                app.toggle_assistant_panel(Some(window), cx);
-                cx.notify();
-            }),
-        ))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::app::{ArgusTab, TabKind};
@@ -735,11 +695,7 @@ mod tests {
             "拖拽空白应位于标签与下拉按钮之间：drag={drag_bounds:?}"
         );
         assert!(
-            (overflow_bounds.right()
-                - (window_bounds.right()
-                    - px(TAB_EXTERNAL_RIGHT_GAP)
-                    - px(TAB_ASSISTANT_BUTTON_WIDTH)))
-            .abs()
+            (overflow_bounds.right() - (window_bounds.right() - px(TAB_EXTERNAL_RIGHT_GAP))).abs()
                 <= px(0.6),
             "下拉按钮应固定在标题栏右侧：overflow={overflow_bounds:?}, window={window_bounds:?}"
         );
@@ -845,13 +801,7 @@ mod tests {
         assert!(layout.has_overflow);
         assert!(layout.visible_range.contains(&12));
         assert!(layout.visible_range.len() <= 4);
-        assert!(
-            layout.tabs_width
-                + TAB_OVERFLOW_BUTTON_GAP
-                + TAB_OVERFLOW_BUTTON_WIDTH
-                + TAB_OVERFLOW_BUTTON_GAP
-                <= 360.0
-        );
+        assert!(layout.tabs_width + TAB_OVERFLOW_BUTTON_GAP + TAB_OVERFLOW_BUTTON_WIDTH <= 360.0);
     }
 
     /// 验证激活标签靠近末尾时可见窗口不会越界。
@@ -866,13 +816,7 @@ mod tests {
 
         assert!(layout.visible_range.contains(&9));
         assert_eq!(layout.visible_range.end, 10);
-        assert!(
-            layout.tabs_width
-                + TAB_OVERFLOW_BUTTON_GAP
-                + TAB_OVERFLOW_BUTTON_WIDTH
-                + TAB_OVERFLOW_BUTTON_GAP
-                <= 320.0
-        );
+        assert!(layout.tabs_width + TAB_OVERFLOW_BUTTON_GAP + TAB_OVERFLOW_BUTTON_WIDTH <= 320.0);
     }
 
     /// 验证日志读取中的标签会被识别为加载状态，便于标题前显示旋转动画。
