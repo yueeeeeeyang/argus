@@ -1,4 +1,4 @@
-//! 文件职责：提供日志与文件预览语法高亮结果的轻量 LRU 缓存。
+//! 文件职责：提供日志与文件预览语法高亮结果的有界行缓存。
 //! 创建日期：2026-06-11
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
@@ -59,15 +59,40 @@ impl HighlightCache {
             text_hash: stable_text_hash(line),
         };
 
+        self.highlight_with_key(key, || SyntaxHighlighter::highlight(line, language))
+    }
+
+    /// 不可变文档索引拥有独立缓存，行号已唯一绑定文本及进入状态，无需每帧重新哈希整行。
+    pub(super) fn highlight_indexed_line(
+        &self,
+        line_number: usize,
+        language: HighlightLanguage,
+        compute: impl FnOnce() -> Vec<HighlightSpan>,
+    ) -> Vec<HighlightSpan> {
+        self.highlight_with_key(
+            HighlightCacheKey {
+                line_number,
+                language,
+                text_hash: 0,
+            },
+            compute,
+        )
+    }
+
+    fn highlight_with_key(
+        &self,
+        key: HighlightCacheKey,
+        compute: impl FnOnce() -> Vec<HighlightSpan>,
+    ) -> Vec<HighlightSpan> {
         let Ok(inner) = self.inner.lock() else {
-            return SyntaxHighlighter::highlight(line, language);
+            return compute();
         };
         if let Some(spans) = inner.entries.get(&key).cloned() {
             return spans;
         }
         drop(inner);
 
-        let spans = SyntaxHighlighter::highlight(line, language);
+        let spans = compute();
         if let Ok(mut inner) = self.inner.lock() {
             inner.insert(key, spans.clone());
         }
@@ -119,12 +144,12 @@ struct HighlightCacheInner {
     capacity: usize,
     /// 缓存键到高亮范围的映射。
     entries: HashMap<HighlightCacheKey, Vec<HighlightSpan>>,
-    /// 访问顺序，队尾是最新访问。
+    /// 插入顺序，队尾是最新加入的缓存项。
     order: VecDeque<HighlightCacheKey>,
 }
 
 impl HighlightCacheInner {
-    /// 插入缓存并淘汰最久未使用的行。
+    /// 插入缓存并淘汰最早加入的行。
     fn insert(&mut self, key: HighlightCacheKey, spans: Vec<HighlightSpan>) {
         if self.entries.insert(key, spans).is_none() {
             self.order.push_back(key);

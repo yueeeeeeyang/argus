@@ -3819,6 +3819,83 @@ fn jstack_matrix_hover_uses_filtered_count_and_representative(cx: &mut gpui::Tes
     });
 }
 
+/// 同名长线程在实际矩阵中保留独立 ID 空间，悬浮标签和堆栈必须对应各自原始行。
+#[gpui::test]
+fn jstack_same_name_rows_show_distinct_ids_and_hover_stacks(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    let thread_name = "background-worker-with-a-long-shared-thread-name";
+    let row_ids = app.update(cx, |app, _| {
+        app.config.log_display.jstack_thread_filter_rules.clear();
+        let source_id = source_id_by_label(app, "app.log");
+        let targets = app.jstack_targets_from_source_ids(&[source_id]);
+        let (analysis_id, generation) = app.create_jstack_analysis_tab_state(targets).unwrap();
+        assert_eq!(analysis_id, 1);
+        let snapshot = crate::analysis::jstack::parse_jstack_snapshot(
+            source_id,
+            "same-name.log",
+            "/tmp/same-name.log",
+            &format!(
+                "\"{thread_name}\" id=\"128264\"\njava.lang.Thread.State: RUNNABLE\nat app.First.run(First.java:1)\n\"{thread_name}\" id=\"128263\"\njava.lang.Thread.State: RUNNABLE\nat app.Second.run(Second.java:2)"
+            ),
+        );
+        let result = crate::analysis::jstack::build_analysis_result(vec![snapshot], Vec::new(), 1);
+        let row_ids = result.rows.iter().map(|row| row.thread_id.clone()).collect::<Vec<_>>();
+        assert_eq!(row_ids.len(), 2);
+        app.apply_jstack_analysis_result(analysis_id, generation, result);
+        row_ids
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    let selectors = [
+        (
+            "jstack-thread-name-1-0",
+            "jstack-thread-id-1-0",
+            "jstack-cell-1-0-0",
+        ),
+        (
+            "jstack-thread-name-1-1",
+            "jstack-thread-id-1-1",
+            "jstack-cell-1-1-0",
+        ),
+    ];
+    for (row_index, (thread_id, (name_selector, id_selector, cell_selector))) in
+        row_ids.iter().zip(selectors).enumerate()
+    {
+        let name = cx
+            .debug_bounds(name_selector)
+            .expect("同名线程必须有独立的名称元素");
+        let id = cx.debug_bounds(id_selector).expect("每个线程必须显示 ID");
+        let cell = cx
+            .debug_bounds(cell_selector)
+            .expect("每个线程必须有独立快照格子");
+        assert!(id.size.width > gpui::px(20.0) && id.size.width <= gpui::px(112.0));
+        assert!(
+            name.right() <= id.left() && id.right() < cell.left(),
+            "名称、ID 和快照格子不能互相覆盖"
+        );
+        assert!((id.center().y - cell.center().y).abs() <= gpui::px(1.0));
+        cx.simulate_mouse_move(cell.center(), None, gpui::Modifiers::default());
+        app.read_with(cx, |app, _| {
+            let preview = app
+                .jstack_cell_hover_preview
+                .as_ref()
+                .expect("应显示独立预览");
+            assert_eq!(preview.key, format!("1:{row_index}:0"));
+            assert_eq!(
+                preview.data.thread_label,
+                format!("{thread_name} · {thread_id}")
+            );
+            let stack = preview.data.stack_lines.as_ref().unwrap().join("\n");
+            let (expected, other) = if thread_id == "#128264" {
+                ("app.First.run", "app.Second.run")
+            } else {
+                ("app.Second.run", "app.First.run")
+            };
+            assert!(stack.contains(expected));
+            assert!(!stack.contains(other));
+        });
+    }
+}
+
 /// 验证 Shift 范围多选只纳入日志候选节点，普通压缩包节点不再打断也不进入选择集合。
 #[test]
 fn shift_range_selection_skips_non_log_candidates() {

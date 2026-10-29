@@ -80,7 +80,7 @@ impl JstackThreadState {
 pub(crate) struct JstackThreadSample {
     /// 线程名称，取自 jstack 线程头第一段双引号内容。
     pub thread_name: String,
-    /// 线程 ID 摘要，优先包含 `#id`、`tid=` 和 `nid=`，用于区分同名线程。
+    /// 规范化线程 ID：优先 Java ID（#id / id=），其次 tid、nid；无法识别时为空。
     pub thread_id: String,
     /// 解析出的线程状态。
     pub state: JstackThreadState,
@@ -99,11 +99,11 @@ pub(crate) struct JstackThreadStackOccurrence {
     pub snapshot_path: String,
     /// 线程名称。
     pub thread_name: String,
-    /// 线程 ID 摘要，和线程名共同构成线程身份。
+    /// 规范化线程 ID，和线程名共同构成线程身份；缺失时使用当前样本的唯一标识。
     pub thread_id: String,
     /// 该次出现解析出的状态。
     pub state: JstackThreadState,
-    /// 同一线程名在同一快照内的出现序号，从 1 开始。
+    /// 同一线程身份在同一快照内的出现序号，从 1 开始。
     pub occurrence_index: usize,
     /// 当前线程块完整堆栈行。
     pub stack_lines: Arc<[String]>,
@@ -116,7 +116,7 @@ pub(crate) struct JstackThreadStackOccurrence {
 pub(crate) struct JstackThreadDetail {
     /// 被查看的线程名称。
     pub thread_name: String,
-    /// 被查看线程的 ID 摘要。
+    /// 被查看线程的规范化 ID 或缺失 ID 的样本标识。
     pub thread_id: String,
     /// 该线程跨多个快照的出现记录，保持快照输入顺序。
     pub occurrences: Vec<JstackThreadStackOccurrence>,
@@ -220,7 +220,7 @@ impl JstackFrequencyCell {
 pub(crate) struct JstackFrequencyRow {
     /// 线程名称。
     pub thread_name: String,
-    /// 线程 ID 摘要，避免同名不同线程被聚合到同一行。
+    /// 规范化线程 ID 或缺失 ID 的唯一样本标识，避免同名线程被错误合并。
     pub thread_id: String,
     /// 该线程在全部快照中的总出现次数。
     pub total_count: usize,
@@ -709,8 +709,18 @@ pub(crate) fn build_analysis_result(
 
     for (snapshot_index, snapshot) in snapshots.iter().enumerate() {
         let mut threads = HashMap::<(String, String), JstackSnapshotThreadAggregate>::new();
-        for sample in &snapshot.samples {
-            let thread_identity = (sample.thread_name.clone(), sample.thread_id.clone());
+        for (sample_index, sample) in snapshot.samples.iter().enumerate() {
+            // 缺少 ID 无法证明两个同名样本是同一线程，不能跨快照或同一快照内盲目合并。
+            let thread_id = if sample.thread_id.is_empty() {
+                format!(
+                    "未知ID（快照{}，样本{}）",
+                    snapshot_index + 1,
+                    sample_index + 1
+                )
+            } else {
+                sample.thread_id.clone()
+            };
+            let thread_identity = (sample.thread_name.clone(), thread_id.clone());
             thread_identities.insert(thread_identity.clone());
             total_samples += 1;
             let aggregate = threads.entry(thread_identity).or_default();
@@ -723,7 +733,7 @@ pub(crate) fn build_analysis_result(
                     snapshot_label: snapshot.label.clone(),
                     snapshot_path: snapshot.path.clone(),
                     thread_name: sample.thread_name.clone(),
-                    thread_id: sample.thread_id.clone(),
+                    thread_id: thread_id.clone(),
                     state: sample.state,
                     occurrence_index,
                     stack_lines: sample.stack_lines.clone(),
@@ -883,7 +893,7 @@ fn flush_thread_sample(
     }
 }
 
-/// 解析 Jstack 线程头；只接受行首双引号中的线程名，并提取 `#id`、`tid=`、`nid=` 作为身份补充。
+/// 解析行首双引号中的线程名，并提取规范化线程 ID 作为稳定身份。
 fn parse_thread_header(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('"') {
@@ -897,14 +907,11 @@ fn parse_thread_header(line: &str) -> Option<(String, String)> {
         None
     } else {
         let header_tail = rest[end + 1..].trim_start();
-        Some((
-            thread_name.to_string(),
-            parse_thread_id_summary(header_tail),
-        ))
+        Some((thread_name.to_string(), parse_thread_id(header_tail)))
     }
 }
 
-/// 拼出 UI 展示用线程身份；没有可用线程 ID 时保持旧版线程名展示。
+/// 拼出 UI 展示用线程身份；只有尚未聚合的空 ID 才仅显示线程名。
 fn thread_display_label(thread_name: &str, thread_id: &str) -> String {
     if thread_id.is_empty() {
         thread_name.to_string()
@@ -913,34 +920,182 @@ fn thread_display_label(thread_name: &str, thread_id: &str) -> String {
     }
 }
 
-/// 从 jstack 线程头尾部提取线程 ID 摘要。
+/// 从线程头提取稳定 ID，不把 CPU 时间、优先级或可选辅助字段并入身份。
 ///
-/// 说明：不同 JVM 输出可能同时包含 `#id`、`tid=` 和 `nid=`，这里全部保留用于区分同名线程；
-/// 如果这些字段都缺失，则返回空串并退回到按线程名聚合。
-fn parse_thread_id_summary(header_tail: &str) -> String {
-    let mut parts = Vec::new();
-    if let Some(java_thread_id) = header_tail
-        .split_whitespace()
-        .find(|token| token.starts_with('#') && token[1..].chars().all(|ch| ch.is_ascii_digit()))
-    {
-        parts.push(java_thread_id.to_string());
+/// `#N` 与 `id=N`（包括带引号、大小写及等号两侧空白）均表示 Java 线程 ID；
+/// 缺少 Java ID 时依次使用 tid、nid。数字统一解析，避免前导零和进制差异拆分同一身份。
+fn parse_thread_id(header_tail: &str) -> String {
+    let bytes = header_tail.as_bytes();
+    let mut java_id = ThreadIdCandidate::default();
+    let mut vm_id = ThreadIdCandidate::default();
+    let mut native_id = ThreadIdCandidate::default();
+    let mut index = 0;
+    while index < bytes.len() {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| is_header_separator(*byte))
+        {
+            index += 1;
+        }
+        if index == bytes.len() {
+            break;
+        }
+        if bytes[index] == b'#' {
+            let start = index + 1;
+            index = header_token_end(bytes, start);
+            if let Some(value) = normalize_thread_id_number(&header_tail[start..index]) {
+                java_id.record(value);
+            }
+            continue;
+        }
+        let key_start = index;
+        while bytes.get(index).is_some_and(|byte| {
+            !is_header_separator(*byte) && !matches!(*byte, b'=' | b'"' | b'\'')
+        }) {
+            index += 1;
+        }
+        if index == key_start {
+            // 跳过完整未知 token（含引号内容），不能把字段值内部的 id= 当成线程属性。
+            index = read_header_value(header_tail, index).1.max(index + 1);
+            continue;
+        }
+        let key = &header_tail[key_start..index];
+        let key_end = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'=') {
+            if index == key_end {
+                index = header_token_end(bytes, index);
+            }
+            continue;
+        }
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let (value, end) = read_header_value(header_tail, index);
+        index = end;
+        let Some(value) = value.and_then(normalize_thread_id_number) else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("id") {
+            java_id.record(value);
+        } else if key.eq_ignore_ascii_case("tid") {
+            vm_id.record(value);
+        } else if key.eq_ignore_ascii_case("nid") {
+            native_id.record(value);
+        }
     }
-    if let Some(tid) = thread_header_token(header_tail, "tid=") {
-        parts.push(tid);
+    // 只判断当前权威字段的歧义；已知 Java ID 不应受可选 VM 或原生字段变化影响。
+    for (candidate, prefix) in [(java_id, "#"), (vm_id, "tid="), (native_id, "nid=")] {
+        match candidate {
+            ThreadIdCandidate::Value(value) => {
+                return if prefix == "#" {
+                    format!("#{value}")
+                } else {
+                    format!("{prefix}0x{value:x}")
+                };
+            }
+            ThreadIdCandidate::Conflicting => return String::new(),
+            ThreadIdCandidate::Missing => {}
+        }
     }
-    if let Some(nid) = thread_header_token(header_tail, "nid=") {
-        parts.push(nid);
-    }
-
-    parts.join(" · ")
+    String::new()
 }
 
-/// 提取线程头中的 `key=value` 片段，保留 key 便于用户识别 ID 来源。
-fn thread_header_token(header_tail: &str, prefix: &str) -> Option<String> {
-    header_tail
-        .split_whitespace()
-        .find(|token| token.starts_with(prefix))
-        .map(|token| token.trim_end_matches(',').to_string())
+/// 单个 ID 属性的候选值；重复但不一致的字段会保留歧义，不能悄悄覆盖。
+#[derive(Default)]
+enum ThreadIdCandidate {
+    #[default]
+    Missing,
+    Value(u128),
+    Conflicting,
+}
+
+impl ThreadIdCandidate {
+    /// 同类字段重复且不一致时保留歧义，不以最后一个值覆盖先前身份。
+    fn record(&mut self, value: u128) {
+        match self {
+            Self::Missing => *self = Self::Value(value),
+            Self::Value(previous) if *previous != value => *self = Self::Conflicting,
+            _ => {}
+        }
+    }
+}
+
+/// 只接受完整的无符号十进制或十六进制数；拒绝空值、负数、尾随文本与溢出。
+fn normalize_thread_id_number(value: &str) -> Option<u128> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        u128::from_str_radix(hex, 16).ok()
+    } else {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        value.parse().ok()
+    }
+}
+
+/// 读取带引号或普通属性值；未闭合引号和紧随引号的非法后缀不作为有效 ID。
+fn read_header_value(header: &str, start: usize) -> (Option<&str>, usize) {
+    let bytes = header.as_bytes();
+    if matches!(bytes.get(start), Some(b'"' | b'\'')) {
+        let quote = bytes[start];
+        let mut end = start + 1;
+        while end < bytes.len() && bytes[end] != quote {
+            if bytes[end] == b'\\' && end + 1 < bytes.len() {
+                end += 2;
+            } else {
+                end += 1;
+            }
+        }
+        if end == bytes.len() {
+            return (None, end);
+        }
+        if bytes
+            .get(end + 1)
+            .is_some_and(|byte| !is_header_separator(*byte))
+        {
+            return (None, header_token_end(bytes, end + 1));
+        }
+        (Some(&header[start + 1..end]), end + 1)
+    } else {
+        let end = header_token_end(bytes, start);
+        (Some(&header[start..end]), end)
+    }
+}
+
+/// 线程头属性之间允许空白、逗号和分号，其他字符仍属于值本身。
+fn is_header_separator(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b',' | b';')
+}
+
+/// 跳过完整 token，内部引号中的空白不能成为边界，避免把未知字段内容误读为新属性。
+fn header_token_end(bytes: &[u8], mut index: usize) -> usize {
+    let mut quote = None;
+    while let Some(byte) = bytes.get(index).copied() {
+        if let Some(active_quote) = quote {
+            if byte == b'\\' && index + 1 < bytes.len() {
+                index += 2;
+                continue;
+            }
+            if byte == active_quote {
+                quote = None;
+            }
+        } else if is_header_separator(byte) {
+            break;
+        } else if matches!(byte, b'"' | b'\'') {
+            quote = Some(byte);
+        }
+        index += 1;
+    }
+    index
 }
 
 /// 根据状态出现次数选择主状态，平票时使用业务优先级。
@@ -1215,12 +1370,8 @@ mod tests {
 
         assert_eq!(snapshot.samples.len(), 3);
         assert_eq!(snapshot.samples[0].thread_name, "main");
-        assert!(snapshot.samples[0].thread_id.contains("#1"));
-        assert!(
-            snapshot.samples[0]
-                .thread_id
-                .contains("tid=0x0000000149010000")
-        );
+        assert_eq!(snapshot.samples[0].thread_id, "#1");
+        assert!(snapshot.samples[0].stack_lines[0].contains("tid=0x0000000149010000"));
         assert_eq!(snapshot.samples[0].state, JstackThreadState::Runnable);
         assert!(snapshot.samples[0].stack_lines[0].contains("\"main\""));
         assert!(
@@ -1302,6 +1453,234 @@ mod tests {
             .find(|row| row.thread_name == "pool-1" && row.thread_id.contains("#2"))
             .expect("同名不同 ID 线程应拆成独立行");
         assert_eq!(pool_1_other_id.total_count, 1);
+    }
+
+    /// 兼容 HotSpot、ThreadMXBean 和带引号 id 属性，数值格式差异不能制造不同身份。
+    #[test]
+    fn parses_and_normalizes_supported_thread_id_headers() {
+        for (tail, expected) in [
+            ("#00042 prio=5 tid=0x000A nid=27", "#42"),
+            (r#"id="00042" CPU Time=12.3ms"#, "#42"),
+            ("Id = '42' RUNNABLE", "#42"),
+            ("ID=0X002A, CPU Time=1", "#42"),
+            ("#42 id=42 tid=0xA", "#42"),
+            ("#42 tid=1 tid=2 nid=3 nid=4", "#42"),
+            ("TID = \"0X000A\", nid=11", "tid=0xa"),
+            ("tid=10", "tid=0xa"),
+            ("nid='00027'", "nid=0x1b"),
+            ("NID=0X001B;", "nid=0x1b"),
+            ("id=invalid tid=0x10", "tid=0x10"),
+        ] {
+            let header = format!("\"同名线程\" {tail}");
+            assert_eq!(
+                parse_thread_header(&header),
+                Some(("同名线程".into(), expected.into())),
+                "{tail}"
+            );
+        }
+    }
+
+    /// 未知字段名可包含连字符或 Unicode，引号中的伪 ID 必须整体跳过而不影响后续真实 ID。
+    #[test]
+    fn ignores_id_text_inside_unknown_quoted_attributes() {
+        for attribute in [
+            r#"label-text="worker id=12 metadata""#,
+            r#"标签="worker id=12 metadata""#,
+            r#"标签-name = 'worker #12 tid=0x22 metadata'"#,
+            r#"label-text="escaped\" id=12 metadata""#,
+            r#"unknown"worker id=12 metadata""#,
+        ] {
+            assert_eq!(parse_thread_id(attribute), "", "{attribute}");
+            assert_eq!(
+                parse_thread_id(&format!(r#"{attribute} id="128264""#)),
+                "#128264",
+                "{attribute}"
+            );
+            assert_eq!(
+                parse_thread_id(&format!("#128264 {attribute}")),
+                "#128264",
+                "{attribute}"
+            );
+        }
+    }
+
+    /// 原始完整头保留在堆栈中，辅助字段变化不应拆分已知 Java ID。
+    #[test]
+    fn stable_java_id_survives_optional_native_metadata_changes() {
+        let result = analyze_filter_snapshots(&[
+            "\"worker\" #42 tid=0x01 nid=0x02 prio=5\njava.lang.Thread.State: RUNNABLE",
+            "\"worker\" id=\"00042\" CPU Time=8ms\njava.lang.Thread.State: WAITING",
+            "\"worker\" Id = 0x2a tid=0x99 nid=0xAA\njava.lang.Thread.State: BLOCKED",
+        ]);
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row.thread_id, "#42");
+        assert_eq!(row.total_count, 3);
+        assert_eq!(
+            row.cells.iter().map(|cell| cell.count).collect::<Vec<_>>(),
+            vec![1, 1, 1]
+        );
+        assert!(row.cells[2].stack_occurrences[0].stack_lines[0].contains("nid=0xAA"));
+    }
+
+    /// 同名不同 quoted id 在同一快照和跨快照均分开，同身份重复出现的序号仍连续。
+    #[test]
+    fn quoted_ids_split_same_name_threads_and_keep_cell_occurrence_indices() {
+        let first = r#""SJ-SyncData-1" id="128264" CPU Time=1ms
+java.lang.Thread.State: RUNNABLE
+"SJ-SyncData-1" id="128263" CPU Time=2ms
+java.lang.Thread.State: WAITING
+"SJ-SyncData-1" id="128264" CPU Time=3ms
+java.lang.Thread.State: BLOCKED"#;
+        let second = r#""SJ-SyncData-1" Id=128263
+java.lang.Thread.State: RUNNABLE
+"SJ-SyncData-1" #128265
+java.lang.Thread.State: RUNNABLE"#;
+        let result = analyze_filter_snapshots(&[first, second]);
+        assert_eq!(result.rows.len(), 3);
+        let counts = result
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.thread_id.as_str(),
+                    row.cells.iter().map(|cell| cell.count).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(counts["#128264"], vec![2, 0]);
+        assert_eq!(counts["#128263"], vec![1, 1]);
+        assert_eq!(counts["#128265"], vec![0, 1]);
+        let repeated = result
+            .rows
+            .iter()
+            .find(|row| row.thread_id == "#128264")
+            .unwrap();
+        assert_eq!(
+            repeated.cells[0]
+                .stack_occurrences
+                .iter()
+                .map(|occurrence| occurrence.occurrence_index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(
+            repeated.cells[0]
+                .stack_occurrences
+                .iter()
+                .all(|occurrence| occurrence.thread_id == repeated.thread_id)
+        );
+    }
+
+    /// 缺失、非法和矛盾 ID 都不猜测身份，不能与同名已知 ID 或其他未知样本合并。
+    #[test]
+    fn missing_or_invalid_ids_are_kept_as_separate_samples() {
+        for tail in [
+            "",
+            "#",
+            "id=\"\"",
+            "id=-1",
+            "id=12suffix",
+            "id=0x",
+            "id=\"12\"suffix",
+            "id=\"12",
+            "id=340282366920938463463374607431768211456",
+            "notid=12 worker#13",
+            "label=\"id=12\"",
+            r#"label="text\" id=12 ""#,
+            "#12 id=13",
+            "tid=1 tid=2",
+        ] {
+            assert_eq!(parse_thread_id(tail), "", "{tail}");
+        }
+        let result = analyze_filter_snapshots(&[
+            "\"same\"\njava.lang.Thread.State: RUNNABLE\n\"same\" id=\"\"\njava.lang.Thread.State: RUNNABLE\n\"same\" id=12\njava.lang.Thread.State: RUNNABLE",
+            "\"same\"\njava.lang.Thread.State: RUNNABLE\n\"same\" #12\njava.lang.Thread.State: RUNNABLE",
+        ]);
+        assert_eq!(result.rows.len(), 4);
+        let known = result
+            .rows
+            .iter()
+            .find(|row| row.thread_id == "#12")
+            .unwrap();
+        assert_eq!(known.total_count, 2);
+        let unknown = result
+            .rows
+            .iter()
+            .filter(|row| row.thread_id.starts_with("未知ID"))
+            .collect::<Vec<_>>();
+        assert_eq!(unknown.len(), 3);
+        assert_eq!(
+            unknown
+                .iter()
+                .map(|row| &row.thread_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert!(unknown.iter().all(|row| row.total_count == 1
+            && row.cells.iter().map(|cell| cell.count).sum::<usize>() == 1));
+        assert!(result.snapshots[0].samples[0].thread_id.is_empty());
+    }
+
+    /// 后备 ID 保留类型命名空间，数值相同不代表 Java ID、VM 地址和原生 ID 是同一身份。
+    #[test]
+    fn fallback_ids_normalize_values_without_crossing_id_namespaces() {
+        let result = analyze_filter_snapshots(&[
+            "\"same\" tid=0X000A\n\"same\" nid=10\n\"same\" id=10",
+            "\"same\" tid=10\n\"same\" nid=0x000a\n\"different-name\" id=10",
+        ]);
+        assert_eq!(result.rows.len(), 4);
+        for id in ["tid=0xa", "nid=0xa"] {
+            let row = result
+                .rows
+                .iter()
+                .find(|row| row.thread_name == "same" && row.thread_id == id)
+                .unwrap();
+            assert_eq!(row.total_count, 2);
+        }
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .filter(|row| row.thread_id == "#10")
+                .count(),
+            2
+        );
+    }
+
+    /// 身份规范化不改变缺席快照与按样本堆栈过滤的可见语义。
+    #[test]
+    fn normalized_identity_keeps_busy_sample_visible_with_idle_and_missing_snapshots() {
+        let filter = JstackThreadFilter::from_rules(&[stack_segment_rule("app.Idle.wait")]);
+        let result = analyze_filter_snapshots(&[
+            "\"same\" id=\"42\"\njava.lang.Thread.State: WAITING\nat app.Idle.wait(Idle.java:1)",
+            "\"other\" id=7\njava.lang.Thread.State: RUNNABLE",
+            "\"same\" #42\njava.lang.Thread.State: RUNNABLE\nat app.Business.run(Business.java:1)",
+        ]);
+        let row = result
+            .rows
+            .iter()
+            .find(|row| row.thread_id == "#42")
+            .unwrap();
+        assert!(!filter.matches_row(row));
+        let states = [JstackThreadState::Runnable, JstackThreadState::Waiting]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|cell| cell.visible_summary(&states, Some(&filter)).count)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1]
+        );
+        assert_eq!(row.cells[1].state, None);
+        assert_eq!(
+            row.cells[2]
+                .visible_summary(&states, Some(&filter))
+                .representative_occurrence_index,
+            Some(1)
+        );
     }
 
     /// 验证矩阵按快照输入顺序生成列，并按总频率排序行。

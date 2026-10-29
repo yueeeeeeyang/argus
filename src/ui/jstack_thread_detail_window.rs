@@ -507,7 +507,7 @@ impl Render for JstackThreadDetailWindow {
             }))
             .child(render_detail_title_bar(
                 &theme,
-                &self.detail.thread_name,
+                &self.detail.display_label(),
                 window,
             ))
             .child(
@@ -552,7 +552,7 @@ impl Render for JstackThreadDetailWindow {
 /// 标题栏骨架（高度、底色、拖拽与双击缩放）与主窗口自定义标题栏、文件预览窗口保持一致。
 fn render_detail_title_bar(
     theme: &AppTheme,
-    thread_name: &str,
+    thread_label: &str,
     window: &Window,
 ) -> impl IntoElement {
     let is_maximized = window.is_maximized();
@@ -568,7 +568,7 @@ fn render_detail_title_bar(
         .occlude()
         .child(platform_window_controls(is_maximized, theme))
         .child(
-            // 与标题栏按钮组保持同一节奏，避开红绿灯右缘；标题栏只保留线程名称。
+            // 与标题栏按钮组保持同一节奏，避开红绿灯右缘；名称和 ID 一起区分同名线程。
             div()
                 .pl(px(8.0))
                 .flex_1()
@@ -578,7 +578,7 @@ fn render_detail_title_bar(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(theme.foreground))
                 .truncate()
-                .child(thread_name.to_string()),
+                .child(StyledText::new(thread_label.to_string())),
         )
         .child(detail_title_drag_area())
 }

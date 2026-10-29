@@ -1,25 +1,26 @@
 //! 文件职责：渲染带语法高亮的远程文件只读预览独立窗口。
 //! 创建日期：2026-07-03
-//! 修改日期：2026-10-15
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：以项目统一编辑器样式展示远程文本、代码高亮、行号，并支持文本拖拽选中、自动滚动、复制与全选。
+//! 主要功能：展示远程文本、跨行代码高亮与行号，支持搜索、悬停滚动条、文本选择和复制。
 
 use std::borrow::Borrow;
 use std::ops::Range;
+use std::sync::Arc;
 
 #[cfg(not(target_os = "windows"))]
 use gpui::WindowControlArea;
 use gpui::{
     AnyElement, ClipboardItem, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString,
-    StyledText, Subscription, TextRun, UniformListScrollHandle, Window, canvas, div, point,
-    prelude::*, px, rgb, uniform_list,
+    ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, SharedString, StyledText, Subscription, TextRun,
+    UniformListScrollHandle, Window, canvas, div, point, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::app::{ArgusApp, log_viewer_line_number_width, observe_app_theme};
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::highlight::{
-    HighlightCache, HighlightLanguage, HighlightSpan, detect_highlight_language,
+    DocumentHighlighter, HighlightLanguage, HighlightSpan, detect_highlight_language,
 };
 use crate::infra::selection_autoscroll::{
     advance_negative_scroll, selection_autoscroll_intensity, selection_autoscroll_step_vertical_px,
@@ -30,10 +31,22 @@ use crate::infra::text_selection::{
 };
 use crate::platform::custom_titlebar;
 use crate::remote::remote_file::FilePreviewContent;
+use crate::search::preview_search::PreviewSearchMatch;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::custom_title_bar::{TITLE_BAR_HEIGHT, platform_window_controls};
-use crate::ui::log_content_view::merge_syntax_and_selection_highlights;
+use crate::ui::log_content_view::merge_log_line_highlights;
+
+mod scrollbars;
+mod search;
+use scrollbars::{PreviewScrollbarDrag, render_preview_scrollbar_sensor};
+#[cfg(test)]
+mod scrollbar_tests;
+use search::PreviewSearchState;
+#[cfg(test)]
+mod highlight_tests;
+#[cfg(test)]
+mod search_tests;
 use crate::ui::main_window::{
     WINDOW_CONTENT_INSET, WINDOW_CONTENT_PADDING, WINDOW_CONTENT_RADIUS,
     WINDOW_CONTENT_RING_ALLOWANCE, window_content_shadows,
@@ -55,7 +68,9 @@ enum FilePreviewBody {
     /// 文本内容，按行拆分；`truncated` 表示因超过读取上限被截断。
     Text {
         /// 按行拆分后的文本。
-        lines: Vec<String>,
+        lines: Arc<Vec<String>>,
+        /// 从文档开头建立的词法状态索引，虚拟列表跳行时仍能识别跨行注释与字符串。
+        highlighter: DocumentHighlighter,
         /// 是否因超过预览读取上限被截断。
         truncated: bool,
     },
@@ -120,8 +135,22 @@ pub(crate) struct FilePreviewWindow {
     body: FilePreviewBody,
     /// 正文滚动句柄。
     scroll: UniformListScrollHandle,
-    /// 可见行语法高亮缓存，避免滚动或主题刷新时反复扫描相同代码行。
-    highlight_cache: HighlightCache,
+    /// 默认测量的最长文本行，避免虚拟列表仅按第一行裁剪长行。
+    longest_line_index: usize,
+    /// 固定正文只需测量一次最长候选行，搜索输入和重绘不再反复排版该行。
+    has_measured_content_width: bool,
+    /// 命中实际字体测量得到的宽度下限，保证混合字符长行可以完整横向定位。
+    content_min_width: Pixels,
+    /// 每行第一次可见时测量实际像素宽度，避免字节长度低估中英文混合长行。
+    measured_content_lines: Vec<bool>,
+    /// 悬停状态仅属于当前预览窗口；离开正文即隐藏滑块。
+    is_body_hovered: bool,
+    /// 当前滑块拖拽状态，与正文选区和搜索状态相互独立。
+    scrollbar_drag: Option<PreviewScrollbarDrag>,
+    /// 当前窗口内查找状态，关闭时取消在途扫描。
+    search: PreviewSearchState,
+    /// 搜索输入独立焦点，防止正文全选和复制接管输入框快捷键。
+    search_focus: FocusHandle,
     /// 窗口根元素焦点句柄，用于接收键盘事件并稳定焦点归属。
     root_focus: FocusHandle,
     /// 当前正文选区；行号栏不参与选中。
@@ -152,16 +181,34 @@ impl FilePreviewWindow {
         content: FilePreviewContent,
         cx: &mut Context<Self>,
     ) -> Self {
+        let language = detect_highlight_language(&file_name, &file_name);
         let body = match content {
             FilePreviewContent::Text { content, truncated } => {
                 // 使用 `str::lines` 正确处理 `\r\n`/`\n` 换行，且不产生末尾空行。
-                let lines = content.lines().map(str::to_string).collect();
-                FilePreviewBody::Text { lines, truncated }
+                let lines = Arc::new(content.lines().map(str::to_string).collect::<Vec<_>>());
+                let highlighter = DocumentHighlighter::new(lines.clone(), language);
+                FilePreviewBody::Text {
+                    lines,
+                    highlighter,
+                    truncated,
+                }
             }
             FilePreviewContent::Binary => FilePreviewBody::Binary,
             FilePreviewContent::Error(message) => FilePreviewBody::Error(message),
         };
-        let language = detect_highlight_language(&file_name, &file_name);
+        let longest_line_index = match &body {
+            FilePreviewBody::Text { lines, .. } => lines
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, line)| line.len())
+                .map(|(index, _)| index)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        let measured_content_lines = match &body {
+            FilePreviewBody::Text { lines, .. } => vec![false; lines.len()],
+            _ => Vec::new(),
+        };
         let _app_observer = observe_app_theme(cx, &app, theme.clone(), |view, theme, _| {
             view.theme = theme.clone();
         });
@@ -172,7 +219,14 @@ impl FilePreviewWindow {
             language,
             body,
             scroll: UniformListScrollHandle::new(),
-            highlight_cache: HighlightCache::default(),
+            longest_line_index,
+            has_measured_content_width: false,
+            content_min_width: px(0.0),
+            measured_content_lines,
+            is_body_hovered: false,
+            scrollbar_drag: None,
+            search: PreviewSearchState::default(),
+            search_focus: cx.focus_handle(),
             root_focus: cx.focus_handle(),
             preview_selection: None,
             preview_selection_drag: None,
@@ -236,6 +290,7 @@ impl FilePreviewWindow {
         window: &mut Window,
     ) {
         self.root_focus.focus(window);
+        self.search.input.clear_focus();
         let position = self.preview_text_position_from_pointer(line, line_text, pointer_x, window);
         let granularity = preview_text_granularity_for_click_count(click_count);
         let anchor_range =
@@ -431,6 +486,69 @@ impl FilePreviewWindow {
         }
     }
 
+    /// 首帧只测量最长字节候选行，之后在行首次可见时补足实际像素宽度。
+    fn measure_content_width(&mut self, window: &mut Window) {
+        if self.has_measured_content_width {
+            return;
+        }
+        self.has_measured_content_width = true;
+        self.measure_content_line_width(self.longest_line_index, window);
+    }
+
+    /// 只有首次可见的行需要额外测量；宽度只增大，重绘不会再次扫描或排版全文。
+    fn measure_visible_content_width(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self.content_min_width;
+        let line_count = self.text_lines().map(<[String]>::len).unwrap_or(0);
+        for index in clamp_preview_line_range(range, line_count) {
+            self.measure_content_line_width(index, window);
+        }
+        if self.content_min_width > previous {
+            cx.notify();
+        }
+    }
+
+    /// 按与正文相同的字体测量一次，候选行和实际可见行共用同一份缓存标记。
+    fn measure_content_line_width(&mut self, index: usize, window: &mut Window) {
+        if self
+            .measured_content_lines
+            .get(index)
+            .copied()
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let Some(lines) = self.text_lines() else {
+            return;
+        };
+        let Some(line) = lines.get(index) else {
+            return;
+        };
+        let mut text_style = window.text_style();
+        text_style.font_family = ARGUS_LOG_FONT_FAMILY.into();
+        let shaped = window.text_system().shape_line(
+            SharedString::from(line.clone()),
+            px(FILE_PREVIEW_FONT_SIZE),
+            &[TextRun {
+                len: line.len(),
+                font: text_style.font(),
+                color: text_style.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+        let width = shaped.width
+            + px(log_viewer_line_number_width(lines.len()) + FILE_PREVIEW_TEXT_LEFT_PADDING * 2.0);
+        self.content_min_width = self.content_min_width.max(width);
+        self.measured_content_lines[index] = true;
+    }
+
     /// 渲染预览窗口标题栏：平台窗口控件（macOS 原生红绿灯占位）、文件图标与文件名、拖拽空白。
     ///
     /// 关闭/最小化/最大化由系统红绿灯承担，不再提供右侧自定义关闭按钮；
@@ -466,7 +584,9 @@ impl FilePreviewWindow {
     /// 渲染底部只读状态栏；作为窗口级底栏直接铺在黑色背板上，文字与玻璃面板内容左对齐。
     fn render_status_bar(&self) -> impl IntoElement {
         let content_status = match &self.body {
-            FilePreviewBody::Text { lines, truncated } => {
+            FilePreviewBody::Text {
+                lines, truncated, ..
+            } => {
                 if *truncated {
                     format!("{} 行  ·  内容已截断", lines.len())
                 } else {
@@ -511,17 +631,36 @@ impl FilePreviewWindow {
                 // 行号栏宽度随行数自适应（复用日志阅读区算法），避免固定宽度在行号过多时截断。
                 let line_number_width = log_viewer_line_number_width(line_count);
                 div()
+                    .id("file-preview-scroll-area")
+                    .debug_selector(|| "file-preview-scroll-area".to_string())
                     .size_full()
                     .relative()
                     .bg(rgb(self.theme.content))
+                    .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                        if view.is_body_hovered != *hovered {
+                            view.is_body_hovered = *hovered;
+                            cx.notify();
+                        }
+                    }))
+                    // 窗口离开事件不会清除 GPUI 的元素 hover 缓存，重新进入同一位置也需恢复。
+                    .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, _, cx| {
+                        if !view.is_body_hovered {
+                            view.is_body_hovered = true;
+                            cx.notify();
+                        }
+                    }))
                     // 行号栏与日志阅读区同一风格：内容底色、无独立色块和分隔线。
                     .child(
                         uniform_list(
                             "file-preview-lines",
                             line_count,
-                            cx.processor(move |this, range: Range<usize>, _window, cx| {
+                            cx.processor(move |this, range: Range<usize>, window, cx| {
+                                this.measure_visible_content_width(range.clone(), window, cx);
                                 // 直接通过 `this` 访问正文与主题，避免每帧深拷贝整个行向量。
-                                let FilePreviewBody::Text { lines, .. } = &this.body else {
+                                let FilePreviewBody::Text {
+                                    lines, highlighter, ..
+                                } = &this.body
+                                else {
                                     return Vec::new();
                                 };
                                 // 窗口初始化、缩放或关闭过程中，框架可能传入基于旧布局的区间。
@@ -534,22 +673,31 @@ impl FilePreviewWindow {
                                     .map(|(offset, line)| {
                                         let line_number = start + offset + 1;
                                         let line_index = line_number - 1;
-                                        let syntax_spans = this.highlight_cache.highlight_line(
-                                            line_index,
-                                            this.language,
-                                            line,
-                                        );
+                                        let syntax_spans = highlighter.highlight_line(line_index);
                                         let selection_range = preview_selection_byte_range_for_line(
                                             this.preview_selection.as_ref(),
                                             line_index,
                                             line,
                                         );
+                                        let search_matches = if this.search.is_open {
+                                            this.search.results.matches_for_line(line_index)
+                                        } else {
+                                            &[]
+                                        };
+                                        let active_search_range = this
+                                            .search
+                                            .active_match()
+                                            .filter(|hit| hit.line == line_index)
+                                            .map(|hit| hit.range.clone());
                                         render_preview_line(
                                             line_number,
                                             line,
                                             line_number_width,
                                             syntax_spans,
                                             selection_range,
+                                            search_matches,
+                                            active_search_range,
+                                            this.content_min_width,
                                             &this.theme,
                                             cx,
                                         )
@@ -559,9 +707,14 @@ impl FilePreviewWindow {
                             }),
                         )
                         .size_full()
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
                         .track_scroll(self.scroll.clone()),
                     )
                     .child(render_preview_selection_autoscroll_sensor(cx))
+                    .children(self.render_preview_scrollbars(cx))
+                    .child(render_preview_scrollbar_sensor(cx))
                     .into_any_element()
             }
             FilePreviewBody::Binary => render_preview_message(
@@ -594,7 +747,11 @@ fn clamp_preview_line_range(range: Range<usize>, line_count: usize) -> Range<usi
 impl Render for FilePreviewWindow {
     /// 渲染预览窗口主体：黑色背板 + 与主窗口一致的圆角玻璃板内容区。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let root_focus_for_click = self.root_focus.clone();
+        if window.focused(cx).is_none() {
+            self.root_focus.focus(window);
+        }
+        self.measure_content_width(window);
+        self.reveal_search_match(window);
         div()
             .id("file-preview-window-root")
             .size_full()
@@ -607,35 +764,13 @@ impl Render for FilePreviewWindow {
             .occlude()
             .focusable()
             .track_focus(&self.root_focus)
-            .on_click(move |_, window, _| {
-                root_focus_for_click.focus(window);
-            })
-            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
-                let keystroke = &event.keystroke;
-                let key = keystroke.key.to_lowercase();
-                // 预览窗口独立于主应用，快捷键经根焦点处理；macOS 用 Cmd、Windows/Linux 用 Ctrl。
-                if keystroke.modifiers.secondary() {
-                    match key.as_str() {
-                        "c" => {
-                            cx.stop_propagation();
-                            view.copy_preview_selection(cx);
-                        }
-                        "a" => {
-                            cx.stop_propagation();
-                            view.select_all_preview_text();
-                            cx.notify();
-                        }
-                        _ => {}
-                    }
-                    return;
-                }
-                if key == "escape"
-                    && (view.preview_selection.is_some() || view.preview_selection_drag.is_some())
-                {
-                    cx.stop_propagation();
-                    view.clear_preview_selection();
-                    cx.notify();
-                }
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.root_focus.focus(window);
+                view.search.input.clear_focus();
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                view.handle_preview_key(event, window, cx);
             }))
             .child(self.render_header(window))
             .child(
@@ -669,6 +804,9 @@ impl Render for FilePreviewWindow {
             )
             // 状态栏作为窗口级底栏直接显示在背板上，玻璃面板随之上移让位。
             .child(self.render_status_bar())
+            .when(self.search.is_open, |this| {
+                this.child(self.render_search_bar(cx))
+            })
     }
 }
 
@@ -699,11 +837,21 @@ fn render_preview_line(
     line_number_width: f32,
     syntax_spans: Vec<HighlightSpan>,
     selection_range: Option<Range<usize>>,
+    search_matches: &[PreviewSearchMatch],
+    active_search_range: Option<Range<usize>>,
+    content_min_width: Pixels,
     theme: &AppTheme,
     cx: &mut Context<FilePreviewWindow>,
 ) -> impl IntoElement {
     let line_index = line_number - 1;
-    let text_element = render_highlighted_preview_text(line, syntax_spans, selection_range, theme);
+    let text_element = render_highlighted_preview_text(
+        line,
+        syntax_spans,
+        selection_range,
+        search_matches,
+        active_search_range,
+        theme,
+    );
     let line_for_mouse_down = line.to_string();
     let line_for_mouse_move = line.to_string();
 
@@ -712,7 +860,7 @@ fn render_preview_line(
             "file-preview-line-{line_number}"
         )))
         .h(px(FILE_PREVIEW_ROW_HEIGHT))
-        .w_full()
+        .min_w(content_min_width)
         .flex()
         .items_center()
         .text_size(px(FILE_PREVIEW_FONT_SIZE))
@@ -735,10 +883,8 @@ fn render_preview_line(
         )
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.0))
+                .flex_none()
                 .px_3()
-                .overflow_hidden()
                 .whitespace_nowrap()
                 .text_color(rgb(theme.foreground))
                 .child(text_element),
@@ -797,10 +943,18 @@ fn render_highlighted_preview_text(
     line: &str,
     spans: Vec<HighlightSpan>,
     selection_range: Option<Range<usize>>,
+    search_matches: &[PreviewSearchMatch],
+    active_search_range: Option<Range<usize>>,
     theme: &AppTheme,
 ) -> AnyElement {
-    // 复用日志阅读区的语法/选区合并实现：选区背景优先，未选中片段保留语法色。
-    let highlights = merge_syntax_and_selection_highlights(spans, selection_range, theme);
+    // 与日志阅读区共享高亮优先级；查询结果只读取当前可见行的二分索引切片。
+    let highlights = merge_log_line_highlights(
+        spans,
+        selection_range,
+        Some(search_matches.iter().map(|hit| hit.range.clone()).collect()),
+        active_search_range,
+        theme,
+    );
     if highlights.is_empty() {
         return line.to_string().into_any_element();
     }

@@ -8,8 +8,12 @@ use std::borrow::Cow;
 
 use gpui::App;
 
-/// Argus 主界面和来源树使用的字体族名称。
-pub(crate) const ARGUS_UI_FONT_FAMILY: &str = "Microsoft YaHei Mono";
+/// Windows 与 VS Code 工作台使用相同的界面字体，中文由系统字体回退补齐。
+#[cfg(target_os = "windows")]
+pub(crate) const ARGUS_UI_FONT_FAMILY: &str = "Segoe UI";
+/// macOS 使用原生 UI 字体；其他平台使用 GPUI 的默认界面字体及其回退机制。
+#[cfg(not(target_os = "windows"))]
+pub(crate) const ARGUS_UI_FONT_FAMILY: &str = ".SystemUIFont";
 /// Argus 日志正文使用的等宽字体族名称。
 pub(crate) const ARGUS_LOG_FONT_FAMILY: &str = "JetBrains Mono";
 
@@ -25,7 +29,7 @@ const JETBRAINS_MONO_REGULAR_FONT: &[u8] =
 /// 返回值：注册成功返回 `Ok(())`；内嵌字体无法加载时返回错误。
 ///
 /// 说明：
-/// - 界面字体由操作系统提供；系统未安装 Microsoft YaHei Mono 时使用平台字体回退。
+/// - 界面字体使用平台字体源，不在程序中分发；中文等字符由平台补齐。
 /// - 日志字体直接使用编译期嵌入的字节，不依赖当前目录或安装路径。
 pub(crate) fn register_argus_fonts(cx: &mut App) -> anyhow::Result<()> {
     cx.text_system()
@@ -40,10 +44,16 @@ mod tests {
         register_argus_fonts,
     };
 
-    /// 验证 UI 字体族名称固定为设计指定值。
+    /// Windows 对齐 VS Code 的字体选择，其他平台使用 GPUI 的界面字体入口。
     #[test]
-    fn ui_font_family_is_microsoft_yahei_mono() {
-        assert_eq!(ARGUS_UI_FONT_FAMILY, "Microsoft YaHei Mono");
+    fn ui_font_family_uses_platform_ui_font() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(ARGUS_UI_FONT_FAMILY, "Segoe UI");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            ARGUS_UI_FONT_FAMILY,
+            gpui::TextStyle::default().font_family.as_ref()
+        );
     }
 
     /// 验证日志字体族名称固定为 JetBrains Mono。

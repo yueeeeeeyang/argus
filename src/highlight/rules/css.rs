@@ -2,12 +2,10 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：识别选择器、属性、at-rule、自定义变量、字符串、颜色、数字、函数和注释。
+//! 主要功能：分类选择器、属性、at-rule、自定义变量、颜色、数字和函数；字面量边界由统一词法层处理。
 
-use crate::highlight::rules::code_common::{
-    contains_word, find_block_comment_end, scan_code_number, scan_operator,
-};
-use crate::highlight::rules::common::{scan_quoted_string, skip_ascii_spaces};
+use crate::highlight::rules::code_common::{contains_word, scan_code_number, scan_operator};
+use crate::highlight::rules::common::skip_ascii_spaces;
 use crate::highlight::span::{HighlightTokenKind, SpanBuilder};
 
 /// CSS 全局值和条件关键字。
@@ -28,25 +26,14 @@ const CSS_KEYWORDS: &[&str] = &[
     "unset",
 ];
 
-/// 高亮 CSS 代码行。
+/// 分类统一词法层屏蔽注释与字符串后的 CSS 代码。
 pub(crate) fn highlight_css(line: &str, builder: &mut SpanBuilder) {
     let bytes = line.as_bytes();
     let selector_end = bytes.iter().position(|byte| *byte == b'{');
     let mut index = 0_usize;
     while index < bytes.len() {
-        if bytes.get(index..index + 2) == Some(b"/*") {
-            let end = find_block_comment_end(bytes, index + 2);
-            builder.push(index, end, HighlightTokenKind::Comment);
-            index = end;
-            continue;
-        }
-
+        // 字符串与注释由统一词法扫描器处理，代码分类不再重复判断边界。
         match bytes[index] {
-            b'"' | b'\'' => {
-                let end = scan_quoted_string(bytes, index, bytes[index]);
-                builder.push(index, end, HighlightTokenKind::String);
-                index = end;
-            }
             b'@' if bytes
                 .get(index + 1)
                 .is_some_and(|byte| is_css_name_byte(*byte)) =>

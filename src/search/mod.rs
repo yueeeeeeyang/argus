@@ -4,5 +4,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：组织搜索引擎和后台搜索任务。
 
+pub(crate) mod preview_search;
 pub(crate) mod search_engine;
 pub(crate) mod search_task;

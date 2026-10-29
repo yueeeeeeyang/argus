@@ -214,14 +214,6 @@ pub(crate) fn starts_with_at(bytes: &[u8], index: usize, prefix: &[u8]) -> bool 
         .is_some_and(|slice| slice == prefix)
 }
 
-/// 查找字节子串。
-pub(crate) fn find_bytes(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
-    bytes[start..]
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|offset| start + offset)
-}
-
 /// 扫描 ASCII 标识符。
 pub(crate) fn scan_ascii_identifier(bytes: &[u8], mut index: usize) -> usize {
     while bytes

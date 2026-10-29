@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：识别 Java 注释、字符串、关键字、类型、注解、方法、数字和运算符。
+//! 主要功能：识别 Java 关键字、类型、注解、方法、数字和运算符；字面量边界由统一词法层处理。
 
 use crate::highlight::rules::code_common::{CStyleLanguageSpec, highlight_c_style};
 use crate::highlight::span::SpanBuilder;
@@ -96,13 +96,12 @@ const JAVA_TYPES: &[&str] = &[
 /// Java 特殊字面量。
 const JAVA_LITERALS: &[&str] = &["true", "false", "null"];
 
-/// 高亮 Java 代码行。
+/// 分类统一词法层屏蔽注释与字符串后的 Java 代码。
 pub(crate) fn highlight_java(line: &str, builder: &mut SpanBuilder) {
     let spec = CStyleLanguageSpec {
         keywords: JAVA_KEYWORDS,
         types: JAVA_TYPES,
         literals: JAVA_LITERALS,
-        allow_backtick_string: false,
         allow_annotation: true,
         infer_capitalized_type: true,
     };

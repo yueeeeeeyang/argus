@@ -89,6 +89,8 @@ pub(crate) struct SpanBuilder {
     line_len: usize,
     /// 已收集的高亮范围。
     spans: Vec<HighlightSpan>,
+    /// 即使规则按优先级乱序插入，也能安全识别追加到所有已有范围之后的常见路径。
+    max_end: usize,
 }
 
 impl SpanBuilder {
@@ -102,6 +104,7 @@ impl SpanBuilder {
         Self {
             line_len,
             spans: Vec::new(),
+            max_end: 0,
         }
     }
 
@@ -115,6 +118,12 @@ impl SpanBuilder {
             return;
         }
         let range = start..end;
+        // 常规词法扫描按位置追加；跳过对全部既有 token 的重复检查，避免密集标点退化为平方复杂度。
+        if self.max_end <= start {
+            self.max_end = end;
+            self.spans.push(HighlightSpan { range, kind });
+            return;
+        }
         if self
             .spans
             .iter()
@@ -122,6 +131,7 @@ impl SpanBuilder {
         {
             return;
         }
+        self.max_end = self.max_end.max(end);
         self.spans.push(HighlightSpan { range, kind });
     }
 

@@ -2,13 +2,12 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：大小写不敏感地识别 SQL 关键字、类型、函数、参数、字符串、数字、注释和运算符。
+//! 主要功能：分类 SQL 保留字、类型、参数、数字和运算符；注释与字符串边界由统一词法层处理。
 
 use crate::highlight::rules::code_common::{
-    contains_word, find_block_comment_end, is_code_identifier_start, scan_code_identifier,
-    scan_code_number, scan_operator,
+    contains_word, is_code_identifier_start, scan_code_identifier, scan_code_number, scan_operator,
 };
-use crate::highlight::rules::common::{scan_quoted_string, skip_ascii_spaces};
+use crate::highlight::rules::common::skip_ascii_spaces;
 use crate::highlight::span::{HighlightTokenKind, SpanBuilder};
 
 /// 跨常见数据库方言的 SQL 核心关键字。
@@ -117,28 +116,13 @@ const SQL_TYPES: &[&str] = &[
 /// SQL 布尔与空值字面量。
 const SQL_LITERALS: &[&str] = &["true", "false", "null", "unknown"];
 
-/// 高亮 SQL 代码行。
+/// 分类统一词法层屏蔽注释与字符串后的 SQL 代码。
 pub(crate) fn highlight_sql(line: &str, builder: &mut SpanBuilder) {
     let bytes = line.as_bytes();
     let mut index = 0_usize;
     while index < bytes.len() {
-        if bytes.get(index..index + 2) == Some(b"--") || bytes[index] == b'#' {
-            builder.push(index, bytes.len(), HighlightTokenKind::Comment);
-            return;
-        }
-        if bytes.get(index..index + 2) == Some(b"/*") {
-            let end = find_block_comment_end(bytes, index + 2);
-            builder.push(index, end, HighlightTokenKind::Comment);
-            index = end;
-            continue;
-        }
-
+        // 字符串与注释由统一词法扫描器处理，代码分类不再重复判断边界。
         match bytes[index] {
-            b'\'' | b'"' | b'`' => {
-                let end = scan_quoted_string(bytes, index, bytes[index]);
-                builder.push(index, end, HighlightTokenKind::String);
-                index = end;
-            }
             b':' | b'@'
                 if bytes
                     .get(index + 1)

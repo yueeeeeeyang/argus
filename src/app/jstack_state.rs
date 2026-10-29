@@ -75,7 +75,7 @@ impl Drop for JstackAnalysisState {
 /// Jstack 分析矩阵左侧线程名的单行文本选区。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JstackThreadNameSelection {
-    /// 线程身份 key，包含线程名和线程 ID，用于区分同名线程。
+    /// 当前分析结果的原始行索引，不随筛选排序变化，用于区分同名线程。
     pub thread_identity: String,
     /// 当前显示的线程名文本；复制时只复制该文本的选中片段。
     pub thread_name: String,

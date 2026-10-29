@@ -373,6 +373,7 @@ pub(crate) fn merge_log_line_highlights(
     theme: &AppTheme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut highlights = Vec::new();
+    let selection_range = selection_range.filter(|range| range.start < range.end);
     let search_ranges = search_ranges.unwrap_or_default();
     let mut protected_ranges = search_ranges.clone();
     if let Some(active_range) = active_search_range.clone() {
@@ -380,6 +381,19 @@ pub(crate) fn merge_log_line_highlights(
     }
     if let Some(selection) = selection_range.clone() {
         protected_ranges.push(selection);
+    }
+    // 长行可能包含数万命中；先合并保护区间，避免每扣除一个命中都遍历此前生成的片段。
+    protected_ranges.retain(|range| range.start < range.end);
+    protected_ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged_ranges: Vec<Range<usize>> = Vec::with_capacity(protected_ranges.len());
+    for range in protected_ranges {
+        if let Some(previous) = merged_ranges.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged_ranges.push(range);
+        }
     }
 
     for span in syntax_spans {
@@ -395,7 +409,7 @@ pub(crate) fn merge_log_line_highlights(
             ..Default::default()
         };
 
-        for visible_range in subtract_ranges(span.range, &protected_ranges) {
+        for visible_range in subtract_sorted_ranges(span.range, &merged_ranges) {
             highlights.push((visible_range, syntax_style));
         }
     }
@@ -427,6 +441,11 @@ pub(crate) fn merge_log_line_highlights(
             HighlightStyle {
                 background_color: Some(rgb(theme.warning).into()),
                 color: Some(rgb(theme.background).into()),
+                underline: Some(gpui::UnderlineStyle {
+                    color: Some(rgb(theme.background).into()),
+                    thickness: px(1.0),
+                    wavy: false,
+                }),
                 ..Default::default()
             },
         );
@@ -445,18 +464,6 @@ pub(crate) fn merge_log_line_highlights(
 
     highlights.sort_by_key(|(range, _)| range.start);
     highlights
-}
-
-/// 合并语法高亮与选区高亮的二元入口，供日志单元测试和文件预览窗口共用。
-///
-/// 说明：文件预览与日志正文对所有高亮令牌使用同一套颜色映射，预览复用本函数
-/// 不会改变既有展示效果，同时保持"选区背景优先、语法色保留"的合并规则只有一份实现。
-pub(crate) fn merge_syntax_and_selection_highlights(
-    syntax_spans: Vec<HighlightSpan>,
-    selection_range: Option<Range<usize>>,
-    theme: &AppTheme,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    merge_log_line_highlights(syntax_spans, selection_range, None, None, theme)
 }
 
 /// 生成搜索跳转当前行背景色。
@@ -507,36 +514,28 @@ pub(crate) fn push_non_overlapping_highlight(
     highlights.push((range, style));
 }
 
-/// 从基础范围中扣除保护范围，返回可以继续使用语法色的非重叠片段。
-pub(crate) fn subtract_ranges(
+/// 从基础范围中扣除已排序且合并的保护区间；二分跳过无关命中后只遍历重叠部分。
+fn subtract_sorted_ranges(
     range: Range<usize>,
     protected_ranges: &[Range<usize>],
 ) -> Vec<Range<usize>> {
-    let mut pieces = vec![range];
-    for protected in protected_ranges {
-        pieces = pieces
-            .into_iter()
-            .flat_map(|piece| subtract_single_range(piece, protected))
-            .collect();
-    }
-    pieces
-}
-
-/// 从单个范围中扣除一个保护范围。
-pub(crate) fn subtract_single_range(
-    range: Range<usize>,
-    protected: &Range<usize>,
-) -> Vec<Range<usize>> {
-    if !ranges_overlap(&range, protected) {
-        return vec![range];
-    }
-
     let mut pieces = Vec::new();
-    if range.start < protected.start {
-        pieces.push(range.start..range.end.min(protected.start));
+    let first = protected_ranges.partition_point(|protected| protected.end <= range.start);
+    let mut cursor = range.start;
+    for protected in &protected_ranges[first..] {
+        if protected.start >= range.end {
+            break;
+        }
+        if cursor < protected.start {
+            pieces.push(cursor..protected.start);
+        }
+        cursor = cursor.max(protected.end);
+        if cursor >= range.end {
+            break;
+        }
     }
-    if protected.end < range.end {
-        pieces.push(range.start.max(protected.end)..range.end);
+    if cursor < range.end {
+        pieces.push(cursor..range.end);
     }
     pieces
 }

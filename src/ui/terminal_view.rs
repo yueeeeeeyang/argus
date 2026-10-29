@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use crate::app::ArgusApp;
-use crate::fonts::ARGUS_LOG_FONT_FAMILY;
+use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
 use crate::remote::terminal::{
     TerminalCellStyle, TerminalColor, TerminalGridPosition, TerminalScreenLine,
     TerminalScreenSnapshot, TerminalSessionState, TerminalStatus, TerminalTextSelection,
@@ -610,7 +610,7 @@ fn render_terminal_placeholder(text: String, theme: &AppTheme) -> impl IntoEleme
         .absolute()
         .left(px(TERMINAL_HORIZONTAL_PADDING))
         .top(px(TERMINAL_VERTICAL_PADDING))
-        .font_family(ARGUS_LOG_FONT_FAMILY)
+        .font_family(ARGUS_UI_FONT_FAMILY)
         .text_size(px(TERMINAL_FONT_SIZE))
         .line_height(px(TERMINAL_LINE_HEIGHT))
         .text_color(rgb(theme.foreground_muted))

@@ -18,3 +18,6 @@ pub(crate) mod shell;
 pub(crate) mod sql;
 pub(crate) mod xml;
 pub(crate) mod yaml;
+
+#[cfg(test)]
+mod edge_case_tests;

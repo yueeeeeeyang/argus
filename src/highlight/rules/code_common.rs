@@ -2,12 +2,12 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：扫描注释、字符串、数字、关键字、类型、函数和运算符，并安全合并子片段范围。
+//! 主要功能：分类已屏蔽注释与字符串的代码 token，并提供标识符、数字和运算符扫描工具。
 
-use crate::highlight::rules::common::{scan_quoted_string, skip_ascii_spaces};
+use crate::highlight::rules::common::skip_ascii_spaces;
 use crate::highlight::span::{HighlightTokenKind, SpanBuilder};
 
-/// C 风格语言的单行词法配置；只保存语言差异，公共边界处理集中在扫描器中。
+/// C 风格代码 token 分类配置；注释和字符串边界统一由 lexical 模块决定。
 pub(crate) struct CStyleLanguageSpec {
     /// 语言关键字。
     pub keywords: &'static [&'static str],
@@ -15,47 +15,24 @@ pub(crate) struct CStyleLanguageSpec {
     pub types: &'static [&'static str],
     /// 布尔、空值等特殊字面量。
     pub literals: &'static [&'static str],
-    /// 是否把反引号内容识别为字符串。
-    pub allow_backtick_string: bool,
     /// 是否识别 `@Name` 形式的注解。
     pub allow_annotation: bool,
     /// 是否根据大写首字母补充识别用户定义类型。
     pub infer_capitalized_type: bool,
 }
 
-/// 高亮 C 风格代码行。
+/// 分类已屏蔽注释与字符串的 C 风格代码片段。
 ///
 /// 参数说明：
-/// - `line`：不包含换行符的单行文本。
+/// - `line`：字面量范围已替换为等长空白的单行代码。
 /// - `builder`：统一范围构造器，负责去重与边界校验。
 /// - `spec`：当前语言的词法差异配置。
 pub(crate) fn highlight_c_style(line: &str, builder: &mut SpanBuilder, spec: &CStyleLanguageSpec) {
     let bytes = line.as_bytes();
     let mut index = 0_usize;
     while index < bytes.len() {
-        // 注释优先于除法运算符和字符串之外的 token，避免注释正文被重复着色。
-        if bytes.get(index..index + 2) == Some(b"//") {
-            builder.push(index, bytes.len(), HighlightTokenKind::Comment);
-            return;
-        }
-        if bytes.get(index..index + 2) == Some(b"/*") {
-            let end = find_block_comment_end(bytes, index + 2);
-            builder.push(index, end, HighlightTokenKind::Comment);
-            index = end;
-            continue;
-        }
-
+        // 字符串与注释已经由统一词法入口屏蔽，此处只分类代码 token。
         match bytes[index] {
-            b'"' | b'\'' => {
-                let end = scan_quoted_string(bytes, index, bytes[index]);
-                builder.push(index, end, HighlightTokenKind::String);
-                index = end;
-            }
-            b'`' if spec.allow_backtick_string => {
-                let end = scan_quoted_string(bytes, index, b'`');
-                builder.push(index, end, HighlightTokenKind::String);
-                index = end;
-            }
             b'@' if spec.allow_annotation
                 && bytes
                     .get(index + 1)
@@ -104,29 +81,6 @@ pub(crate) fn highlight_c_style(line: &str, builder: &mut SpanBuilder, spec: &CS
             }
             _ => index += 1,
         }
-    }
-}
-
-/// 在独立构造器中高亮子片段，再把范围平移回原始行。
-///
-/// 该方法供 JSP 等混合语言复用，避免子片段规则误把局部字节下标直接写入整行。
-pub(crate) fn highlight_segment_with_offset(
-    segment: &str,
-    offset: usize,
-    builder: &mut SpanBuilder,
-    highlighter: impl FnOnce(&str, &mut SpanBuilder),
-) {
-    if segment.is_empty() {
-        return;
-    }
-    let mut nested = SpanBuilder::new(segment.len());
-    highlighter(segment, &mut nested);
-    for span in nested.finish() {
-        builder.push(
-            offset + span.range.start,
-            offset + span.range.end,
-            span.kind,
-        );
     }
 }
 
@@ -221,15 +175,6 @@ pub(crate) fn contains_word(words: &[&str], token: &str, case_insensitive: bool)
             *word == token
         }
     })
-}
-
-/// 找到块注释当前行中的结束位置；未闭合时覆盖至行尾。
-pub(crate) fn find_block_comment_end(bytes: &[u8], start: usize) -> usize {
-    bytes[start..]
-        .windows(2)
-        .position(|window| window == b"*/")
-        .map(|offset| start + offset + 2)
-        .unwrap_or(bytes.len())
 }
 
 /// 判断代码标识符首字节。

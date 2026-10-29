@@ -38,6 +38,8 @@ use gpui::{
 const JSTACK_VIEW_PADDING: f32 = 14.0;
 /// 线程名列宽度，确保长线程名前半段稳定可读。
 const THREAD_NAME_COLUMN_WIDTH: f32 = 330.0;
+/// ID 保留独立空间，避免同名线程因长名称被裁剪而无法区分。
+const THREAD_ID_MAX_WIDTH: f32 = 112.0;
 /// 快照方块边长。
 const SNAPSHOT_CELL_SIZE: f32 = 16.0;
 /// 快照方块间距。
@@ -68,8 +70,8 @@ const HOVER_STACK_PREVIEW_LINE_LIMIT: usize = 10;
 pub(crate) struct JstackCellPreviewData {
     /// 快照文件名称。
     pub snapshot_label: String,
-    /// 线程名称。
-    pub thread_name: String,
+    /// 包含线程名称和 ID 的展示标签。
+    pub thread_label: String,
     /// 出现次数。
     pub count: usize,
     /// 状态标签。
@@ -600,7 +602,11 @@ fn render_matrix_row(
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
     let thread_name = row.thread_name.clone();
-    let thread_identity = row.display_label();
+    // 展示文本可能包含分隔符，不能充当唯一标识；原始行索引不受可见行重排影响。
+    let thread_identity = row_index.to_string();
+    let thread_label = row.display_label();
+    let tooltip_theme = theme.clone();
+    let tooltip_label = thread_label.clone();
     let cell_elements = row
         .cells
         .iter()
@@ -616,7 +622,7 @@ fn render_matrix_row(
                 row_index,
                 cell,
                 visible,
-                thread_name.clone(),
+                thread_label.clone(),
                 snapshot_label,
                 selected_cell_key,
                 row_scroll,
@@ -638,16 +644,49 @@ fn render_matrix_row(
         .child(
             div()
                 .w(px(THREAD_NAME_COLUMN_WIDTH))
+                .flex_none()
                 .pr_3()
-                .child(render_selectable_thread_name(
-                    analysis_id,
-                    thread_name,
-                    thread_identity,
-                    thread_name_selection,
-                    analysis_focus_handle,
-                    theme,
-                    cx,
-                )),
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(render_selectable_thread_name(
+                            analysis_id,
+                            thread_name,
+                            thread_identity,
+                            thread_name_selection,
+                            analysis_focus_handle,
+                            theme,
+                            cx,
+                        )),
+                )
+                .when(!row.thread_id.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "jstack-thread-id-{analysis_id}-{row_index}"
+                            )))
+                            .debug_selector(move || {
+                                format!("jstack-thread-id-{analysis_id}-{row_index}")
+                            })
+                            .flex_none()
+                            .max_w(px(THREAD_ID_MAX_WIDTH))
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.foreground_muted))
+                            .truncate()
+                            .child(StyledText::new(row.thread_id.clone()))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| ThreadNameSelectionTooltip {
+                                    label: tooltip_label.clone(),
+                                    theme: tooltip_theme.clone(),
+                                })
+                                .into()
+                            }),
+                    )
+                }),
         )
         .child(
             div()
@@ -676,6 +715,10 @@ fn render_selectable_thread_name(
         .id(SharedString::from(format!(
             "jstack-thread-name-{analysis_id}-{thread_identity}"
         )))
+        .debug_selector({
+            let thread_identity = thread_identity.clone();
+            move || format!("jstack-thread-name-{analysis_id}-{thread_identity}")
+        })
         .h(px(MATRIX_ROW_HEIGHT - 6.0))
         .w_full()
         .pl(px(THREAD_NAME_TEXT_LEFT_PADDING))
@@ -902,7 +945,7 @@ fn render_frequency_cell(
     row_index: usize,
     cell: &JstackFrequencyCell,
     visible: &JstackVisibleCell,
-    thread_name: String,
+    thread_label: String,
     snapshot_label: String,
     selected_cell_key: Option<&str>,
     row_scroll: &UniformListScrollHandle,
@@ -942,7 +985,7 @@ fn render_frequency_cell(
     let preview_key = format!("{analysis_id}:{cell_key}");
     let preview_data = JstackCellPreviewData {
         snapshot_label,
-        thread_name: thread_name.clone(),
+        thread_label,
         count: visible.count,
         state_label,
         stack_lines: tooltip_stack_lines,
@@ -1005,7 +1048,13 @@ fn render_frequency_cell(
             })
         })
         .on_hover(cx.listener(move |app, is_hovered: &bool, _, cx| {
-            if !*is_hovered {
+            // 相邻格子的进入和离开可能在同一事件中交错，旧格子不能清掉新线程的预览。
+            if !*is_hovered
+                && app
+                    .jstack_cell_hover_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.key == preview_key)
+            {
                 app.clear_jstack_cell_hover_preview();
                 cx.notify();
             }
@@ -1072,7 +1121,7 @@ fn render_cell_hover_preview(preview: JstackCellHoverPreview, theme: &AppTheme) 
             div()
                 .font_weight(FontWeight::SEMIBOLD)
                 .truncate()
-                .child(data.thread_name.clone()),
+                .child(data.thread_label.clone()),
         )
         .child(
             div()

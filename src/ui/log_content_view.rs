@@ -394,12 +394,14 @@ mod tests {
     #[test]
     fn selection_splits_overlapping_syntax_highlight() {
         let theme = AppTheme::dark();
-        let highlights = merge_syntax_and_selection_highlights(
+        let highlights = merge_log_line_highlights(
             vec![HighlightSpan {
                 range: 0..15,
                 kind: HighlightTokenKind::StackClass,
             }],
             Some(5..9),
+            None,
+            None,
             &theme,
         );
         let ranges = highlights
@@ -408,6 +410,95 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ranges, vec![0..5, 5..9, 9..15]);
+    }
+
+    /// 搜索覆盖语法色，当前命中可区分；选区仍优先于两种搜索命中。
+    #[test]
+    fn search_and_selection_highlights_keep_priority_without_overlap() {
+        let theme = AppTheme::dark();
+        let highlights = merge_log_line_highlights(
+            vec![HighlightSpan {
+                range: 0..20,
+                kind: HighlightTokenKind::StackClass,
+            }],
+            Some(7..11),
+            Some(vec![12..15, 2..4, 6..9]),
+            Some(6..9),
+            &theme,
+        );
+        let ranges = highlights
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranges,
+            vec![0..2, 2..4, 4..6, 6..7, 7..11, 11..12, 12..15, 15..20]
+        );
+        assert!(highlights[3].1.underline.is_some());
+        assert!(highlights[1].1.underline.is_none());
+        assert_eq!(
+            highlights[4].1.background_color,
+            Some(rgb(theme.selection).into())
+        );
+        assert!(highlights[0].1.background_color.is_none());
+    }
+
+    /// 大量稀疏命中切开同一语法区间时应保留完整结果，不反复遍历已生成的片段。
+    #[test]
+    fn long_syntax_span_supports_twenty_thousand_search_highlights() {
+        let match_count = crate::search::preview_search::PREVIEW_SEARCH_MATCH_LIMIT;
+        let theme = AppTheme::dark();
+        let highlights = merge_log_line_highlights(
+            vec![HighlightSpan {
+                range: 0..match_count * 2 + 1,
+                kind: HighlightTokenKind::StackClass,
+            }],
+            None,
+            Some(
+                (0..match_count)
+                    .map(|index| index * 2 + 1..index * 2 + 2)
+                    .collect(),
+            ),
+            None,
+            &theme,
+        );
+        assert_eq!(highlights.len(), match_count * 2 + 1);
+        for (index, (range, style)) in highlights.iter().enumerate() {
+            assert_eq!(*range, index..index + 1);
+            assert_eq!(style.background_color.is_some(), index % 2 == 1);
+        }
+    }
+
+    /// 无效空范围不应产生 GPUI 高亮；完全覆盖语法的选区只保留选区本身。
+    #[test]
+    fn empty_and_covering_highlight_ranges_are_handled() {
+        let theme = AppTheme::dark();
+        assert!(
+            merge_log_line_highlights(
+                Vec::new(),
+                Some(2..2),
+                Some(std::iter::once(3..3).collect()),
+                None,
+                &theme
+            )
+            .is_empty()
+        );
+        let highlights = merge_log_line_highlights(
+            vec![HighlightSpan {
+                range: 5..10,
+                kind: HighlightTokenKind::StackClass,
+            }],
+            Some(0..20),
+            Some(std::iter::once(6..8).collect()),
+            Some(6..8),
+            &theme,
+        );
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].0, 0..20);
+        assert_eq!(
+            highlights[0].1.background_color,
+            Some(rgb(theme.selection).into())
+        );
     }
 
     /// 验证横竖滚动条同时出现时，轨道末端为对向滑块预留宽度，两个滑块不在角落重叠。

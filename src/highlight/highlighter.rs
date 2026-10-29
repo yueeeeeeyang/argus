@@ -25,6 +25,14 @@ impl SyntaxHighlighter {
             return Vec::new();
         }
 
+        if super::lexical::uses_document_state(language) {
+            return super::lexical::highlight_stateful_line(
+                line,
+                language,
+                super::lexical::LineState::default(),
+            );
+        }
+
         let scan_len = capped_scan_len(line);
         let line = &line[..scan_len];
         let mut builder = SpanBuilder::new(line.len());
@@ -36,16 +44,16 @@ impl SyntaxHighlighter {
             HighlightLanguage::Properties => {
                 rules::properties::highlight_properties(line, &mut builder)
             }
-            HighlightLanguage::Xml => rules::xml::highlight_xml(line, &mut builder),
             HighlightLanguage::Json => rules::json::highlight_json(line, &mut builder),
             HighlightLanguage::Yaml => rules::yaml::highlight_yaml(line, &mut builder),
-            HighlightLanguage::Java => rules::java::highlight_java(line, &mut builder),
-            HighlightLanguage::JavaScript => {
-                rules::javascript::highlight_javascript(line, &mut builder)
+            HighlightLanguage::Xml
+            | HighlightLanguage::Java
+            | HighlightLanguage::JavaScript
+            | HighlightLanguage::Css
+            | HighlightLanguage::Jsp
+            | HighlightLanguage::Sql => {
+                unreachable!("文档语言已由统一词法入口处理")
             }
-            HighlightLanguage::Css => rules::css::highlight_css(line, &mut builder),
-            HighlightLanguage::Jsp => rules::jsp::highlight_jsp(line, &mut builder),
-            HighlightLanguage::Sql => rules::sql::highlight_sql(line, &mut builder),
             HighlightLanguage::Shell => rules::shell::highlight_shell(line, &mut builder),
             HighlightLanguage::Plain => {}
         }

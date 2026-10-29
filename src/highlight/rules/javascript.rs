@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-07-15
 //! 作者：Argus 开发团队
-//! 主要功能：识别 JavaScript 注释、字符串、模板文本、关键字、内置类型、函数和运算符。
+//! 主要功能：识别 JavaScript 关键字、内置类型、函数和运算符；模板、正则和注释边界由统一词法层处理。
 
 use crate::highlight::rules::code_common::{CStyleLanguageSpec, highlight_c_style};
 use crate::highlight::span::SpanBuilder;
@@ -58,13 +58,12 @@ const JAVASCRIPT_TYPES: &[&str] = &[
 /// JavaScript 特殊字面量。
 const JAVASCRIPT_LITERALS: &[&str] = &["true", "false", "null", "undefined", "NaN", "Infinity"];
 
-/// 高亮 JavaScript 代码行。
+/// 分类统一词法层屏蔽注释、字符串和正则后的 JavaScript 代码。
 pub(crate) fn highlight_javascript(line: &str, builder: &mut SpanBuilder) {
     let spec = CStyleLanguageSpec {
         keywords: JAVASCRIPT_KEYWORDS,
         types: JAVASCRIPT_TYPES,
         literals: JAVASCRIPT_LITERALS,
-        allow_backtick_string: true,
         allow_annotation: false,
         infer_capitalized_type: false,
     };

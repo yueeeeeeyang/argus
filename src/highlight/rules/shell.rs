@@ -22,27 +22,52 @@ const SHELL_LITERALS: &[&str] = &["true", "false"];
 pub(crate) fn highlight_shell(line: &str, builder: &mut SpanBuilder) {
     let bytes = line.as_bytes();
     let mut index = 0_usize;
+    let mut is_word_start = true;
     while index < bytes.len() {
         match bytes[index] {
-            b'#' => {
-                // Shebang 与普通注释都作为注释色展示；必须在字符串分支之后逐字扫描，避免误伤引号内 `#`。
+            b'#' if is_word_start => {
+                // 只有词起点的井号开始注释；foo#bar、引号后缀与转义空格后的井号仍属于参数。
                 builder.push(index, bytes.len(), HighlightTokenKind::Comment);
                 return;
             }
-            b'\'' | b'"' | b'`' => {
-                let end = scan_quoted_string(bytes, index, bytes[index]);
+            byte if byte.is_ascii_whitespace() => {
+                index += 1;
+                is_word_start = true;
+            }
+            b'\\' => {
+                index += 1;
+                if index < bytes.len() {
+                    index += line[index..]
+                        .chars()
+                        .next()
+                        .expect("未到行尾应有字符")
+                        .len_utf8();
+                }
+                is_word_start = false;
+            }
+            b'$' if bytes.get(index + 1) == Some(&b'\'') => {
+                let end = scan_quoted_string(bytes, index + 1, b'\'');
                 builder.push(index, end, HighlightTokenKind::String);
                 index = end;
+                is_word_start = false;
+            }
+            b'\'' | b'"' | b'`' => {
+                let end = scan_shell_quoted_string(bytes, index);
+                builder.push(index, end, HighlightTokenKind::String);
+                index = end;
+                is_word_start = false;
             }
             b'$' => {
                 let end = scan_shell_variable(bytes, index);
                 builder.push(index, end, HighlightTokenKind::Variable);
                 index = end;
+                is_word_start = false;
             }
             b'0'..=b'9' => {
                 let end = scan_code_number(bytes, index);
                 builder.push(index, end, HighlightTokenKind::Number);
                 index = end;
+                is_word_start = false;
             }
             byte if is_code_identifier_start(byte) => {
                 let end = scan_code_identifier(bytes, index);
@@ -61,19 +86,36 @@ pub(crate) fn highlight_shell(line: &str, builder: &mut SpanBuilder) {
                     builder.push(index, end, kind);
                 }
                 index = end;
+                is_word_start = false;
             }
-            b'|' | b'&' | b';' | b'<' | b'>' | b'=' | b'!' | b'+' | b'-' | b'*' | b'/' | b'%' => {
+            b'|' | b'&' | b'<' | b'>' | b'=' | b'!' | b'+' | b'-' | b'*' | b'/' | b'%' => {
                 let end = scan_operator(bytes, index);
                 builder.push(index, end, HighlightTokenKind::Operator);
+                is_word_start = matches!(bytes[end - 1], b'|' | b'&' | b'<' | b'>');
                 index = end;
             }
-            b'(' | b')' | b'{' | b'}' | b'[' | b']' => {
+            b';' | b'(' | b')' | b'{' | b'}' | b'[' | b']' => {
                 builder.push(index, index + 1, HighlightTokenKind::Punctuation);
+                is_word_start = matches!(bytes[index], b';' | b'(' | b')');
                 index += 1;
             }
-            _ => index += 1,
+            _ => {
+                index += 1;
+                is_word_start = false;
+            }
         }
     }
+}
+
+/// 普通 Shell 单引号中的反斜杠是字面量；双引号与反引号仍使用转义扫描。
+pub(crate) fn scan_shell_quoted_string(bytes: &[u8], start: usize) -> usize {
+    if bytes[start] != b'\'' {
+        return scan_quoted_string(bytes, start, bytes[start]);
+    }
+    bytes[start + 1..]
+        .iter()
+        .position(|byte| *byte == b'\'')
+        .map_or(bytes.len(), |offset| start + offset + 2)
 }
 
 /// 扫描 `$NAME`、`${NAME}`、位置参数和特殊变量。

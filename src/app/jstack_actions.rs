@@ -404,7 +404,7 @@ impl ArgusApp {
     ///
     /// 参数说明：
     /// - `analysis_id`：分析页 ID。
-    /// - `thread_identity`：内部稳定线程身份，包含线程名和线程 ID。
+    /// - `thread_identity`：当前分析结果的原始行索引，不使用可能重名的展示文本。
     /// - `thread_name`：当前行显示的线程名文本。
     /// - `character_index`：鼠标按下位置命中的字符列。
     /// - `granularity`：按点击次数决定的选择粒度。

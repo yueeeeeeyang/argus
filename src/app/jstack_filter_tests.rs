@@ -90,7 +90,7 @@ fn seed_hover(app: &mut ArgusApp) {
         position: point(px(0.0), px(0.0)),
         data: JstackCellPreviewData {
             snapshot_label: "001.log".to_string(),
-            thread_name: "worker".to_string(),
+            thread_label: "worker".to_string(),
             count: 1,
             state_label: "RUNNABLE".to_string(),
             stack_lines: Some(Arc::from(vec!["app.Idle.wait(Idle.java:1)".to_string()])),
@@ -539,4 +539,280 @@ fn state_and_rule_changes_clear_hover_and_rebuild_cache() {
     assert_eq!(app.jstack_analyses[&1].visible_cells.len(), 1);
     assert_eq!(app.jstack_analyses[&1].filtered_row_count, 0);
     assert!(app.jstack_filter_rule_hit_counts.is_empty());
+}
+
+/// 使用应用线程转储格式，覆盖同名线程、重复采样、单线程缺席和整个快照缺席。
+fn quoted_id_analysis_result() -> JstackAnalysisResult {
+    let sample = |id: usize, frame: &str| {
+        format!(
+            "\"sync-worker\" id=\"{id}\" CPU Time=12.5ms User Time=10.0ms\n   java.lang.Thread.State: RUNNABLE\n        at {frame}\n"
+        )
+    };
+    let first = format!(
+        "{}{}{}",
+        sample(128264, "app.IdentityA.first(IdentityA.java:1)"),
+        sample(128263, "app.IdentityB.first(IdentityB.java:1)"),
+        sample(128264, "app.IdentityA.second(IdentityA.java:2)"),
+    );
+    let second = sample(128263, "app.IdentityB.middle(IdentityB.java:2)");
+    let last = format!(
+        "{}{}",
+        sample(128263, "app.IdentityB.last(IdentityB.java:3)"),
+        sample(128264, "app.IdentityA.last(IdentityA.java:3)"),
+    );
+    analysis_result(&[&first, &second, "", &last])
+}
+
+/// 同名用例必须以名称和规范化 ID 一起定位，不能误取另一线程而掩盖身份合并缺陷。
+fn row_index_for_identity(state: &JstackAnalysisState, name: &str, id: &str) -> usize {
+    let JstackAnalysisTaskState::Ready(result) = &state.task_state else {
+        panic!("测试分析必须已完成");
+    };
+    result
+        .rows
+        .iter()
+        .position(|row| row.thread_name == name && row.thread_id == id)
+        .expect("应存在指定名称和 ID 的线程")
+}
+
+/// 同名不同 ID 保持独立行和独立详情，缺席快照不缩短列位置或借用另一线程样本。
+#[test]
+fn quoted_thread_ids_keep_distinct_rows_and_details_across_missing_snapshots() {
+    let mut state = analysis_state(quoted_id_analysis_result());
+    state.rebuild_visible_row_cache(&JstackThreadFilter::from_rules(&[]));
+    let first_index = row_index_for_identity(&state, "sync-worker", "#128264");
+    let second_index = row_index_for_identity(&state, "sync-worker", "#128263");
+    assert_ne!(first_index, second_index);
+    assert_eq!(state.visible_row_indices.len(), 2);
+    assert!(state.visible_row_indices.contains(&first_index));
+    assert!(state.visible_row_indices.contains(&second_index));
+    assert_eq!(state.filtered_row_count, 0);
+    let JstackAnalysisTaskState::Ready(result) = &state.task_state else {
+        panic!("测试分析必须已完成");
+    };
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.snapshots.len(), 4);
+
+    for (index, expected_counts) in [(first_index, [2, 0, 0, 1]), (second_index, [1, 1, 0, 1])] {
+        let row = &result.rows[index];
+        assert_eq!(row.total_count, 3);
+        assert_eq!(row.cells.len(), 4);
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|cell| cell.snapshot_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+        assert_eq!(
+            row.cells.iter().map(|cell| cell.count).collect::<Vec<_>>(),
+            expected_counts,
+        );
+        assert_eq!(
+            state.visible_cells[&index]
+                .iter()
+                .map(|cell| cell.count)
+                .collect::<Vec<_>>(),
+            expected_counts,
+        );
+        for (snapshot_index, count) in expected_counts.into_iter().enumerate() {
+            let cell = &row.cells[snapshot_index];
+            assert_eq!(
+                cell.stack_occurrences
+                    .iter()
+                    .map(|occurrence| occurrence.occurrence_index)
+                    .collect::<Vec<_>>(),
+                (1..=count).collect::<Vec<_>>(),
+                "每个线程身份在每个快照内独立编号",
+            );
+            if count == 0 {
+                assert_eq!(cell.state, None);
+                assert_eq!(
+                    state.visible_cells[&index][snapshot_index],
+                    JstackVisibleCell::default()
+                );
+            }
+        }
+    }
+
+    for (index, selected_snapshot, selected_occurrence, expected_positions, expected_frames) in [
+        (
+            first_index,
+            0,
+            2,
+            vec![(0, 2), (3, 1)],
+            vec![
+                "app.IdentityA.second(IdentityA.java:2)",
+                "app.IdentityA.last(IdentityA.java:3)",
+            ],
+        ),
+        (
+            second_index,
+            1,
+            1,
+            vec![(0, 1), (1, 1), (3, 1)],
+            vec![
+                "app.IdentityB.first(IdentityB.java:1)",
+                "app.IdentityB.middle(IdentityB.java:2)",
+                "app.IdentityB.last(IdentityB.java:3)",
+            ],
+        ),
+    ] {
+        let row = &result.rows[index];
+        let occurrences = jstack_detail_occurrences_for_visible_cells(
+            row,
+            &state.active_states,
+            selected_snapshot,
+            selected_occurrence,
+            None,
+        );
+        assert_eq!(
+            occurrences
+                .iter()
+                .map(|occurrence| (occurrence.snapshot_index, occurrence.occurrence_index))
+                .collect::<Vec<_>>(),
+            expected_positions,
+        );
+        assert_eq!(occurrences.len(), expected_frames.len());
+        for (occurrence, frame) in occurrences.iter().zip(expected_frames) {
+            assert_eq!(occurrence.thread_name, row.thread_name);
+            assert_eq!(occurrence.thread_id, row.thread_id);
+            assert_eq!(
+                occurrence.snapshot_label,
+                result.snapshots[occurrence.snapshot_index].label
+            );
+            assert_eq!(
+                occurrence.snapshot_path,
+                result.snapshots[occurrence.snapshot_index].path
+            );
+            assert_eq!(
+                occurrence
+                    .stack_lines
+                    .iter()
+                    .filter_map(|line| line.trim().strip_prefix("at "))
+                    .collect::<Vec<_>>(),
+                vec![frame],
+                "详情不能混入同名另一 ID 的堆栈",
+            );
+        }
+    }
+}
+
+/// 名称规则仍作用于原始名称，并同时清理两个身份的可见缓存、选区和旧悬浮。
+#[test]
+fn quoted_thread_id_name_filter_hides_both_rows_and_clears_interaction() {
+    let mut app = app_with_analysis(quoted_id_analysis_result(), Vec::new());
+    let first_index = row_index_for_identity(&app.jstack_analyses[&1], "sync-worker", "#128264");
+    let second_index = row_index_for_identity(&app.jstack_analyses[&1], "sync-worker", "#128263");
+    let visible_indices = app.jstack_analyses[&1].visible_row_indices.clone();
+    let visible_cells = app.jstack_analyses[&1].visible_cells.clone();
+    app.begin_jstack_thread_name_selection(
+        1,
+        first_index.to_string(),
+        "sync-worker".to_string(),
+        0,
+        TextSelectionGranularity::Character,
+    );
+    assert!(!app.update_jstack_thread_name_selection(1, &second_index.to_string(), 4));
+    assert!(app.update_jstack_thread_name_selection(1, &first_index.to_string(), 4));
+    app.jstack_analyses
+        .get_mut(&1)
+        .expect("应存在分析状态")
+        .selected_cell_key = Some(jstack_cell_selection_key(first_index, 0));
+    seed_hover(&mut app);
+
+    let rule = JstackThreadFilterRule {
+        enabled: true,
+        kind: JstackThreadFilterRuleKind::ThreadName,
+        pattern: "sync-worker".to_string(),
+    };
+    app.config.log_display.jstack_thread_filter_rules = vec![rule.clone()];
+    app.refresh_jstack_thread_filter();
+    assert!(app.jstack_cell_hover_preview.is_none());
+    assert_eq!(app.jstack_filter_rule_hit_counts, vec![2]);
+    let state = &app.jstack_analyses[&1];
+    assert!(state.visible_row_indices.is_empty());
+    assert!(state.visible_cells.is_empty());
+    assert_eq!(state.filtered_row_count, 2);
+    assert!(state.selected_cell_key.is_none());
+    assert!(state.thread_name_selection.is_none());
+    assert!(state.thread_name_selection_drag.is_none());
+    let JstackAnalysisTaskState::Ready(result) = &state.task_state else {
+        panic!("测试分析必须已完成");
+    };
+    let filter = JstackThreadFilter::from_rules(&[rule]);
+    for row in &result.rows {
+        assert!(
+            jstack_detail_occurrences_for_visible_cells(
+                row,
+                &state.active_states,
+                0,
+                1,
+                Some(&filter)
+            )
+            .is_empty()
+        );
+    }
+
+    app.toggle_jstack_thread_filter(1);
+    assert_eq!(app.jstack_analyses[&1].visible_row_indices, visible_indices);
+    assert_eq!(app.jstack_analyses[&1].visible_cells, visible_cells);
+    assert_eq!(app.jstack_analyses[&1].filtered_row_count, 0);
+    app.toggle_jstack_thread_filter(1);
+    assert!(app.jstack_analyses[&1].visible_row_indices.is_empty());
+
+    // ID 只用于区分身份和展示，不能偷偷扩大已有“线程名”规则的匹配范围。
+    app.config.log_display.jstack_thread_filter_rules[0].pattern = "#128264".to_string();
+    app.refresh_jstack_thread_filter();
+    assert_eq!(app.jstack_filter_rule_hit_counts, vec![0]);
+    assert_eq!(app.jstack_analyses[&1].visible_row_indices, visible_indices);
+    assert_eq!(app.jstack_analyses[&1].visible_cells, visible_cells);
+}
+
+/// 按堆栈排除一个身份时，同名另一身份的摘要与详情必须完整保留。
+#[test]
+fn quoted_thread_ids_keep_stack_filters_within_the_matching_identity() {
+    let mut state = analysis_state(quoted_id_analysis_result());
+    let first_index = row_index_for_identity(&state, "sync-worker", "#128264");
+    let second_index = row_index_for_identity(&state, "sync-worker", "#128263");
+    let filter = JstackThreadFilter::from_rules(&[stack_rule("app.IdentityA")]);
+    state.rebuild_visible_row_cache(&filter);
+    assert_eq!(state.filtered_row_count, 1);
+    assert_eq!(state.visible_row_indices, vec![second_index]);
+    assert!(!state.visible_cells.contains_key(&first_index));
+    assert_eq!(
+        state.visible_cells[&second_index]
+            .iter()
+            .map(|cell| cell.count)
+            .collect::<Vec<_>>(),
+        vec![1, 1, 0, 1]
+    );
+    let JstackAnalysisTaskState::Ready(result) = &state.task_state else {
+        panic!("测试分析必须已完成");
+    };
+    assert!(
+        jstack_detail_occurrences_for_visible_cells(
+            &result.rows[first_index],
+            &state.active_states,
+            0,
+            1,
+            Some(&filter)
+        )
+        .is_empty()
+    );
+    let details = jstack_detail_occurrences_for_visible_cells(
+        &result.rows[second_index],
+        &state.active_states,
+        0,
+        1,
+        Some(&filter),
+    );
+    assert_eq!(details.len(), 3);
+    assert!(
+        details
+            .iter()
+            .all(|occurrence| occurrence.thread_id == "#128263"
+                && occurrence.normalized_stack_text.contains("app.identityb")
+                && !occurrence.normalized_stack_text.contains("app.identitya"))
+    );
 }
