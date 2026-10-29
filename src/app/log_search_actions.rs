@@ -21,6 +21,7 @@ use gpui::{
 use super::{
     ArgusApp, LogSearchInputKind, QuickMatchKey, SEARCH_RESULT_PANEL_HEIGHT_MIN, SearchResultGroup,
     SearchResultListItem, SearchResultPanelResizeDrag, SearchRunKind, TabKind, TextInputState,
+    Workspace,
 };
 use crate::app::LOG_VIEWER_ROW_HEIGHT;
 use crate::config::SEARCH_RECENT_KEYWORDS_MAX;
@@ -304,6 +305,11 @@ impl ArgusApp {
 
         self.cancel_log_search();
         self.log_search.scope = scope;
+        self.log_search.scope_directory_source_id = directory_prepare
+            .as_ref()
+            .map(|(directory_id, _)| *directory_id);
+        self.log_search.scope_target_source_ids =
+            targets.iter().map(|target| target.source_id).collect();
         self.log_search.run_kind = run_kind;
         self.log_search.generation = self.log_search.generation.wrapping_add(1);
         self.log_search.progress = SearchProgress {
@@ -897,7 +903,49 @@ impl ArgusApp {
     }
 
     /// 返回结果面板是否需要显示。
+    ///
+    /// 结果面板只跟随搜索范围内的日志标签：当前文件/选中文件按启动搜索时记录的来源 ID
+    /// 判断，目录范围按来源树父子关系判断；链接、分析、助手等非日志标签一律隐藏。
     pub(crate) fn should_show_log_search_results(&self) -> bool {
+        if self.workspace != Workspace::LogAnalysis || !self.has_log_search_activity() {
+            return false;
+        }
+        let TabKind::LogSource { source_id, .. } = self.active_tab_kind() else {
+            return false;
+        };
+        self.log_search_scope_contains_source(source_id)
+    }
+
+    /// 判断当前搜索范围是否包含指定日志来源。
+    fn log_search_scope_contains_source(&self, source_id: SourceId) -> bool {
+        match self.log_search.scope {
+            SearchScope::Directory => match self.log_search.scope_directory_source_id {
+                Some(directory_id) => self
+                    .source_registry
+                    .is_self_or_descendant_of(source_id, directory_id),
+                None => {
+                    self.log_search.scope_target_source_ids.contains(&source_id)
+                        || self
+                            .log_search
+                            .results
+                            .iter()
+                            .any(|result| result.source_id == source_id)
+                }
+            },
+            SearchScope::CurrentFile | SearchScope::SelectedFiles => {
+                self.log_search.scope_target_source_ids.contains(&source_id)
+                    || (self.log_search.scope_target_source_ids.is_empty()
+                        && self
+                            .log_search
+                            .results
+                            .iter()
+                            .any(|result| result.source_id == source_id))
+            }
+        }
+    }
+
+    /// 返回当前是否存在需要展示的搜索结果、运行任务或提示。
+    pub(crate) fn has_log_search_activity(&self) -> bool {
         !self.log_search.results.is_empty()
             || self.log_search.task_state.is_running()
             || self.log_search.message.is_some()
@@ -921,6 +969,8 @@ impl ArgusApp {
         self.log_search.pending_activation = None;
         self.log_search.result_scrollbar_drag = None;
         self.log_search.result_panel_resize_drag = None;
+        self.log_search.scope_target_source_ids.clear();
+        self.log_search.scope_directory_source_id = None;
         self.log_search.message = None;
         self.placeholder_notice = "已关闭搜索结果面板".to_string();
     }
@@ -944,6 +994,8 @@ impl ArgusApp {
         self.log_search.result_scroll = gpui::UniformListScrollHandle::new();
         self.log_search.result_scrollbar_drag = None;
         self.log_search.result_panel_resize_drag = None;
+        self.log_search.scope_target_source_ids.clear();
+        self.log_search.scope_directory_source_id = None;
         self.log_search.message = None;
         self.clear_log_search_history_inputs();
         self.selected_search_source_ids.clear();
@@ -3156,5 +3208,66 @@ mod tests {
         assert_eq!(app.log_search.keyword_history_highlight, None);
         app.move_keyword_history_highlight(1);
         assert_eq!(app.log_search.keyword_history_highlight, None);
+    }
+    /// 搜索结果面板只跟随搜索范围内的日志标签，切换到范围外文件或链接标签时隐藏。
+    #[test]
+    fn search_results_panel_follows_scope_and_hides_on_connection_tabs() {
+        let (registry, root_id, first_id, second_id) = registry_with_directory_logs();
+        let mut app = test_app();
+        app.source_registry = registry;
+        app.select_source(first_id);
+        let first_tab = app.active_tab_id.expect("应打开第一个日志标签");
+        app.select_source(second_id);
+        let second_tab = app.active_tab_id.expect("应打开第二个日志标签");
+
+        assert!(
+            app.source_registry
+                .is_self_or_descendant_of(second_id, root_id),
+            "目录范围应包含其子日志"
+        );
+        app.log_search.scope = SearchScope::Directory;
+        app.log_search.scope_directory_source_id = Some(root_id);
+        app.log_search.message = Some("目录搜索结果仍在展示".to_string());
+        app.activate_tab(first_tab);
+        assert!(app.should_show_log_search_results());
+        app.activate_tab(second_tab);
+        assert!(app.should_show_log_search_results());
+
+        app.log_search.scope = SearchScope::CurrentFile;
+        app.log_search.scope_directory_source_id = None;
+        app.log_search.scope_target_source_ids = BTreeSet::from([first_id]);
+        app.log_search.message = Some("搜索结果仍在展示".to_string());
+
+        app.activate_tab(first_tab);
+        assert!(app.should_show_log_search_results());
+
+        app.activate_tab(second_tab);
+        assert!(
+            !app.should_show_log_search_results(),
+            "切换到搜索范围外的日志不应显示搜索结果"
+        );
+
+        app.tabs.push(ArgusTab {
+            id: 99,
+            title: "SSH".to_string(),
+            kind: TabKind::SshTerminal { session_id: 1 },
+        });
+        app.activate_tab(99);
+        assert!(
+            !app.should_show_log_search_results(),
+            "切换到链接标签不应显示搜索结果"
+        );
+
+        app.activate_tab(first_tab);
+        assert!(
+            app.should_show_log_search_results(),
+            "切回搜索范围内日志应恢复结果面板"
+        );
+
+        app.workspace = Workspace::Connections;
+        assert!(
+            !app.should_show_log_search_results(),
+            "链接工作区不应显示日志搜索结果"
+        );
     }
 }

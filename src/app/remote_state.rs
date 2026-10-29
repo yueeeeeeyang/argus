@@ -5,7 +5,7 @@
 //! 主要功能：定义连接目录表单、SSH/SMB/Git/SVN 链接表单、主机指纹确认和文件管理弹窗状态。
 
 use super::types::TextInputState;
-use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
+use crate::remote::connection::{ConnectionCredentialId, ConnectionLinkKind, ConnectionNodeId};
 use crate::remote::svn_tls::SvnCertificatePrompt;
 
 /// 链接工作区当前打开的弹窗。
@@ -56,6 +56,10 @@ pub(crate) struct ConnectionLinkFormState {
     pub port_input: TextInputState,
     /// SSH 用户名输入框。
     pub username_input: TextInputState,
+    /// 复用的共用凭据 ID；为空表示仅此连接手动输入密码。
+    pub credential_id: Option<ConnectionCredentialId>,
+    /// 手动输入密码时是否同时保存为共用凭据。
+    pub save_as_credential: bool,
     /// SSH 密码输入框。
     pub password_input: TextInputState,
     /// SMB 共享名称输入框。
@@ -70,6 +74,52 @@ pub(crate) struct ConnectionLinkFormState {
     pub private_key_passphrase_input: TextInputState,
     /// 最近一次校验错误。
     pub error_message: Option<String>,
+}
+
+/// 共用凭据管理表单状态。
+#[derive(Clone, Debug)]
+pub(crate) struct ConnectionCredentialFormState {
+    /// 当前编辑的凭据 ID；为空表示新建。
+    pub selected_id: Option<ConnectionCredentialId>,
+    /// 凭据名称输入框。
+    pub name_input: TextInputState,
+    /// 默认用户名输入框。
+    pub username_input: TextInputState,
+    /// 密码输入框；编辑已有凭据时留空表示不修改。
+    pub password_input: TextInputState,
+    /// SMB 域或工作组输入框。
+    pub domain_input: TextInputState,
+    /// 是否允许 SSH 使用。
+    pub allow_ssh: bool,
+    /// 是否允许 SMB 使用。
+    pub allow_smb: bool,
+    /// 是否允许 SVN 使用。
+    pub allow_svn: bool,
+    /// 是否作为同用户名默认凭据。
+    pub is_default: bool,
+    /// 新建凭据时优先勾选的协议，用于从具体链接表单打开管理器。
+    pub preferred_protocol: ConnectionLinkKind,
+    /// 最近一次校验错误。
+    pub error_message: Option<String>,
+}
+
+impl Default for ConnectionCredentialFormState {
+    /// 构造空凭据表单，默认允许 SSH。
+    fn default() -> Self {
+        Self {
+            selected_id: None,
+            name_input: TextInputState::default(),
+            username_input: TextInputState::default(),
+            password_input: TextInputState::default(),
+            domain_input: TextInputState::default(),
+            allow_ssh: true,
+            allow_smb: false,
+            allow_svn: false,
+            is_default: false,
+            preferred_protocol: ConnectionLinkKind::Ssh,
+            error_message: None,
+        }
+    }
 }
 
 /// SSH 主机指纹确认弹窗状态。

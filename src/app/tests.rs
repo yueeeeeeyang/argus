@@ -38,6 +38,7 @@ fn add_test_ssh_link(app: &mut ArgusApp) -> ConnectionNodeId {
                 host: "127.0.0.1".to_string(),
                 port: 22,
                 username: "tester".to_string(),
+                credential_id: None,
                 password: "secret".to_string(),
                 private_key_path: None,
                 private_key_passphrase: None,
@@ -669,6 +670,7 @@ fn connection_tree_link_menu_shows_file_manager_only_for_ssh() {
                 initial_dir: "/".to_string(),
                 domain: None,
                 username: "smbuser".to_string(),
+                credential_id: None,
                 password: "secret".to_string(),
             },
         )
@@ -811,8 +813,8 @@ fn form_dialogs_keep_symmetric_vertical_padding(cx: &mut gpui::TestAppContext) {
         .expect("应渲染链接表单正文");
     assert_eq!(
         f32::from(scroll.size.height),
-        310.0,
-        "SSH 表单正文应完整容纳 7 行输入与凭据说明，不应出现滚动"
+        352.0,
+        "SSH 表单正文应完整容纳 8 行输入与凭据说明，不应出现滚动"
     );
     let input = cx
         .debug_bounds("connection-link-private-key-passphrase-input")

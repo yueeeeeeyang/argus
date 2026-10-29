@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_log_line(
     app: &ArgusApp,
     theme: &AppTheme,
@@ -8,6 +9,7 @@ pub(crate) fn render_log_line(
     line_text: &str,
     language: HighlightLanguage,
     highlight_cache: &HighlightCache,
+    document_lines: Option<std::sync::Arc<Vec<String>>>,
     horizontal_offset: gpui::Pixels,
     line_number_offset: gpui::Pixels,
     line_number_width: f32,
@@ -24,16 +26,27 @@ pub(crate) fn render_log_line(
         .and_then(|state| state.active_search_match.as_ref())
         .filter(|active_match| active_match.line_number == line_number);
     let has_overlay_ranges = selection_range.is_some() || active_match.is_some();
-    let (visible_text, selection_range, search_ranges, active_search_range) = if has_overlay_ranges
-    {
-        let full_display_text = log_viewer_display_text(line_text).into_owned();
-        let visible_text = visible_log_text(&full_display_text, visible_char_range.as_ref());
+    // 内存日志使用文档级状态高亮，跨行注释和字符串才能连续；分页日志仍按可见切片逐行高亮。
+    let full_display_text = if document_lines.is_some() || has_overlay_ranges {
+        Some(log_viewer_display_text(line_text).into_owned())
+    } else {
+        None
+    };
+    let visible_text = if let Some(full_text) = full_display_text.as_deref() {
+        visible_log_text(full_text, visible_char_range.as_ref())
+    } else {
+        visible_log_text_from_raw(line_text, visible_char_range.as_ref())
+    };
+    let (selection_range, search_ranges, active_search_range) = if has_overlay_ranges {
+        let full_text = full_display_text
+            .as_deref()
+            .expect("有叠加范围时必须构造完整展示文本");
         let search_ranges = active_match.map(|active_match| {
-            search_ranges_for_display(line_text, &full_display_text, &active_match.match_ranges)
+            search_ranges_for_display(line_text, full_text, &active_match.match_ranges)
         });
         let active_search_range = active_match.and_then(|active_match| {
             active_match.active_range.as_ref().and_then(|range| {
-                search_ranges_for_display(line_text, &full_display_text, &active_match.match_ranges)
+                search_ranges_for_display(line_text, full_text, &active_match.match_ranges)
                     .into_iter()
                     .zip(active_match.match_ranges.iter())
                     .find_map(|(display_range, original_range)| {
@@ -45,37 +58,35 @@ pub(crate) fn render_log_line(
                     })
             })
         });
-        let selection_range = selection_range.and_then(|range| {
-            clip_display_range_to_visible(&full_display_text, &visible_text, range)
-        });
+        let selection_range = selection_range
+            .and_then(|range| clip_display_range_to_visible(full_text, &visible_text, range));
         let search_ranges = search_ranges.map(|ranges| {
             ranges
                 .into_iter()
-                .filter_map(|range| {
-                    clip_display_range_to_visible(&full_display_text, &visible_text, range)
-                })
+                .filter_map(|range| clip_display_range_to_visible(full_text, &visible_text, range))
                 .collect::<Vec<_>>()
         });
-        let active_search_range = active_search_range.and_then(|range| {
-            clip_display_range_to_visible(&full_display_text, &visible_text, range)
-        });
+        let active_search_range = active_search_range
+            .and_then(|range| clip_display_range_to_visible(full_text, &visible_text, range));
 
-        (
-            visible_text,
-            selection_range,
-            search_ranges,
-            active_search_range,
-        )
+        (selection_range, search_ranges, active_search_range)
     } else {
-        (
-            visible_log_text_from_raw(line_text, visible_char_range.as_ref()),
-            None,
-            None,
-            None,
-        )
+        (None, None, None)
     };
     let syntax_spans = if enable_syntax_highlight && allow_sync_highlight {
-        highlight_cache.highlight_line(line_number, language, &visible_text.text)
+        if let (Some(lines), Some(full_text)) = (document_lines, full_display_text.as_deref()) {
+            highlight_cache
+                .highlight_document_line(lines, language, line_number)
+                .into_iter()
+                .filter_map(|mut span| {
+                    span.range =
+                        clip_display_range_to_visible(full_text, &visible_text, span.range)?;
+                    Some(span)
+                })
+                .collect()
+        } else {
+            highlight_cache.highlight_line(line_number, language, &visible_text.text)
+        }
     } else if enable_syntax_highlight {
         highlight_cache
             .cached_highlight_line(line_number, language, &visible_text.text)

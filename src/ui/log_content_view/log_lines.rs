@@ -458,6 +458,7 @@ pub(crate) fn render_paged_log(
                         &line.text,
                         language,
                         &highlight_cache,
+                        None,
                         horizontal_offset,
                         px(0.0),
                         line_number_width,
@@ -575,6 +576,10 @@ pub(crate) fn render_log_line_range(
         return Vec::new();
     };
     let highlight_cache = state.highlight_cache.clone();
+    // 只有跨行词法语言需要完整行状态；普通日志继续使用逐行缓存，避免额外内存。
+    let document_lines = language_uses_document_state(language)
+        .then(|| handle.in_memory_lines())
+        .flatten();
     let line_number_offset = app
         .log_tab_view_state(tab_id)
         .map(|state| {
@@ -601,6 +606,7 @@ pub(crate) fn render_log_line_range(
                 &line.text,
                 language,
                 &highlight_cache,
+                document_lines.clone(),
                 px(0.0),
                 line_number_offset,
                 line_number_width,

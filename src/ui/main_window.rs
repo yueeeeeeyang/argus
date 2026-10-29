@@ -336,6 +336,11 @@ pub(crate) fn render(
                 modal, &theme, cx,
             ))
         })
+        .when_some(app.connection_credential_modal.clone(), |this, modal| {
+            this.child(connection_dialog::render_connection_credential_modal(
+                modal, &theme, cx,
+            ))
+        })
         .when(app.is_settings_modal_open, |this| {
             this.child(settings_window::render_settings_modal(
                 app,

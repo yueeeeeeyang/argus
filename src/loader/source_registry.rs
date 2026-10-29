@@ -144,6 +144,22 @@ impl SourceRegistry {
             .unwrap_or(&[])
     }
 
+    /// 判断节点是否等于指定祖先或位于其子树中。
+    pub(crate) fn is_self_or_descendant_of(
+        &self,
+        source_id: SourceId,
+        ancestor_id: SourceId,
+    ) -> bool {
+        let mut current = Some(source_id);
+        while let Some(id) = current {
+            if id == ancestor_id {
+                return true;
+            }
+            current = self.node(id).and_then(|node| node.parent_id);
+        }
+        false
+    }
+
     /// 返回指定节点后方是否还有同级节点，用于目录树连线避免绘制多余竖线。
     #[cfg(test)]
     pub(crate) fn has_next_sibling(&self, id: SourceId) -> bool {

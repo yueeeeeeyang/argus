@@ -15,6 +15,7 @@ use crate::app::{
 use crate::fonts::ARGUS_LOG_FONT_FAMILY;
 use crate::highlight::{
     HighlightCache, HighlightLanguage, HighlightSpan, detect_highlight_language,
+    language_uses_document_state,
 };
 use crate::infra::perf::PerfSpan;
 use crate::infra::text_selection::{

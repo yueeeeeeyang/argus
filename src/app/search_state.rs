@@ -164,6 +164,10 @@ pub(crate) struct LogSearchState {
     pub active_result_index: Option<usize>,
     /// 点击结果但日志尚未读取完成时的待跳转结果。
     pub pending_activation: Option<SearchResult>,
+    /// 当前搜索显式包含的来源 ID；当前文件和选中文件范围使用。
+    pub scope_target_source_ids: BTreeSet<SourceId>,
+    /// 目录搜索的根来源 ID；仅目录范围使用。
+    pub scope_directory_source_id: Option<SourceId>,
     /// 最近一次搜索错误或提示。
     pub message: Option<String>,
 }
@@ -208,6 +212,8 @@ impl Default for LogSearchState {
             result_scrollbar_drag: None,
             active_result_index: None,
             pending_activation: None,
+            scope_target_source_ids: BTreeSet::new(),
+            scope_directory_source_id: None,
             message: None,
         }
     }

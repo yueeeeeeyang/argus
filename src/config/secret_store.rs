@@ -2,8 +2,8 @@
 //! 创建日期：2026-10-05
 //! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
-//! 主要功能：以系统凭据库为首选后端保存连接密码与私钥口令，凭据库不可用时改用机器绑定
-//! 派生密钥加密后写入设置文件；任何情况下都不再把机密明文写入 `settings.toml`。
+//! 主要功能：以系统凭据库为首选后端保存连接密码、共享凭据密码与私钥口令，凭据库不可用时
+//! 改用机器绑定派生密钥加密后写入设置文件；任何情况下都不再把机密明文写入 `settings.toml`。
 
 use std::io::Write;
 use std::path::Path;
@@ -61,7 +61,17 @@ pub(crate) fn account_for_link(link_id: usize, slot: &str) -> String {
     format!("link/{link_id}/{slot}")
 }
 
-/// 连接机密集合：账户名（`link/<id>/<槽位>`）→ 机密明文。
+/// 生成一条共用凭据机密的账户名。
+///
+/// 参数说明：
+/// - `credential_id`：共用凭据稳定 ID。
+///
+/// 返回值：不含任何机密文本的账户名，用于凭据库条目与本地密文表的键。
+pub(crate) fn account_for_credential(credential_id: usize) -> String {
+    format!("credential/{credential_id}/password")
+}
+
+/// 连接机密集合：账户名（`link/<id>/<槽位>` 或 `credential/<id>/password`）→ 机密明文。
 ///
 /// 值使用 `SecretString` 包裹：集合本身会被比较与传递，Debug 输出必须是脱敏的，
 /// 否则任何一次 `{secrets:?}` 都会把全部连接密码写进日志。
@@ -538,6 +548,11 @@ mod tests {
     #[test]
     fn account_names_do_not_expose_secrets() {
         assert_eq!(account_for_link(7, "ssh_password"), "link/7/ssh_password");
+        assert_eq!(
+            account_for_credential(7),
+            "credential/7/password",
+            "共用凭据账户名只能包含凭据 ID"
+        );
     }
 
     /// 构造一份用于往返验证的连接机密集合。

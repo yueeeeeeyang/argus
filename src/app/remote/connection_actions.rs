@@ -9,23 +9,23 @@ use std::ops::Range;
 use gpui::{AppContext, Context, Keystroke};
 
 use crate::app::{
-    AppTextInputTarget, ArgusApp, ConnectionDeletePromptState, ConnectionDialogState,
-    ConnectionDirectoryFormState, ConnectionHostKeyPromptState, ConnectionLinkFormState,
-    TextInputState,
+    AppTextInputTarget, ArgusApp, ConnectionCredentialFormState, ConnectionDeletePromptState,
+    ConnectionDialogState, ConnectionDirectoryFormState, ConnectionHostKeyPromptState,
+    ConnectionLinkFormState, TextInputState,
 };
 use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, replace_character_range,
 };
 use crate::remote::connection::{
-    ConnectionConfig, ConnectionDeletedNodeKind, ConnectionLinkConfig, ConnectionLinkKind,
-    ConnectionNodeId, ConnectionTreeRow, GitLinkConfig, SmbLinkConfig, SshLinkConfig,
-    SvnLinkConfig,
+    ConnectionConfig, ConnectionCredentialId, ConnectionDeletedNodeKind, ConnectionLinkConfig,
+    ConnectionLinkKind, ConnectionNodeId, ConnectionTreeRow, GitLinkConfig, SmbLinkConfig,
+    SshLinkConfig, SvnLinkConfig,
 };
 use crate::remote::remote_file::RemoteFileBackend;
 use crate::remote::terminal::PendingHostKey;
 use crate::ui::connection_dialog::{
-    ConnectionDirectoryWindow, ConnectionDirectoryWindowMode, ConnectionLinkWindow,
-    ConnectionLinkWindowMode,
+    ConnectionCredentialWindow, ConnectionDirectoryWindow, ConnectionDirectoryWindowMode,
+    ConnectionLinkWindow, ConnectionLinkWindowMode,
 };
 
 impl ArgusApp {
@@ -206,7 +206,7 @@ impl ArgusApp {
             .config
             .connections
             .parent_for_new_link(self.selected_connection_node_id);
-        let initial_form = ConnectionLinkFormState {
+        let mut initial_form = ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Ssh,
             parent_id,
             name_input: TextInputState::default(),
@@ -214,6 +214,8 @@ impl ArgusApp {
             url_input: TextInputState::default(),
             port_input: TextInputState::from_value("22".to_string()),
             username_input: TextInputState::default(),
+            credential_id: None,
+            save_as_credential: false,
             password_input: TextInputState::default(),
             share_input: TextInputState::default(),
             initial_dir_input: TextInputState::from_value("/".to_string()),
@@ -222,6 +224,7 @@ impl ArgusApp {
             private_key_passphrase_input: TextInputState::default(),
             error_message: None,
         };
+        apply_default_credential(&mut initial_form, &self.config.connections);
 
         if let Some(modal) = self.connection_link_modal.clone() {
             modal.update(cx, |modal_state, cx| {
@@ -250,7 +253,7 @@ impl ArgusApp {
             .config
             .connections
             .parent_for_new_link(self.selected_connection_node_id);
-        let initial_form = ConnectionLinkFormState {
+        let mut initial_form = ConnectionLinkFormState {
             link_kind: ConnectionLinkKind::Smb,
             parent_id,
             name_input: TextInputState::default(),
@@ -258,6 +261,8 @@ impl ArgusApp {
             url_input: TextInputState::default(),
             port_input: TextInputState::from_value("445".to_string()),
             username_input: TextInputState::default(),
+            credential_id: None,
+            save_as_credential: false,
             password_input: TextInputState::default(),
             share_input: TextInputState::default(),
             initial_dir_input: TextInputState::from_value("/".to_string()),
@@ -266,6 +271,7 @@ impl ArgusApp {
             private_key_passphrase_input: TextInputState::default(),
             error_message: None,
         };
+        apply_default_credential(&mut initial_form, &self.config.connections);
 
         if let Some(modal) = self.connection_link_modal.clone() {
             modal.update(cx, |modal_state, cx| {
@@ -302,7 +308,7 @@ impl ArgusApp {
 
     /// 构造 Git/SVN 共用的空仓库链接表单。
     fn new_repository_link_form(&self, link_kind: ConnectionLinkKind) -> ConnectionLinkFormState {
-        ConnectionLinkFormState {
+        let mut form = ConnectionLinkFormState {
             link_kind,
             parent_id: self
                 .config
@@ -313,6 +319,8 @@ impl ArgusApp {
             url_input: TextInputState::default(),
             port_input: TextInputState::default(),
             username_input: TextInputState::default(),
+            credential_id: None,
+            save_as_credential: false,
             password_input: TextInputState::default(),
             share_input: TextInputState::default(),
             initial_dir_input: TextInputState::from_value("/".to_string()),
@@ -320,7 +328,9 @@ impl ArgusApp {
             private_key_path_input: TextInputState::default(),
             private_key_passphrase_input: TextInputState::default(),
             error_message: None,
-        }
+        };
+        apply_default_credential(&mut form, &self.config.connections);
+        form
     }
 
     /// 复用已存在的链接模态框，或为指定仓库协议创建新的新增模态框。
@@ -347,6 +357,149 @@ impl ArgusApp {
             ConnectionLinkWindowMode::Create,
             cx,
         );
+    }
+
+    /// 打开共用凭据管理模态框；优先勾选触发入口对应的协议。
+    pub(crate) fn open_connection_credential_manager(
+        &mut self,
+        preferred_protocol: ConnectionLinkKind,
+        cx: &mut Context<Self>,
+    ) {
+        let app_entity = cx.entity();
+        let initial_theme = self.theme.clone();
+        self.connection_credential_modal = Some(cx.new(|cx| {
+            ConnectionCredentialWindow::new(app_entity, initial_theme, preferred_protocol, cx)
+        }));
+        self.placeholder_notice = "请输入共用凭据信息".to_string();
+        cx.notify();
+    }
+
+    /// 关闭共用凭据管理模态框。
+    pub(crate) fn close_connection_credential_manager(&mut self) {
+        self.connection_credential_modal = None;
+    }
+
+    /// 从表单新建共用凭据并持久化。
+    pub(crate) fn create_connection_credential_from_form(
+        &mut self,
+        form: &ConnectionCredentialFormState,
+        cx: &mut Context<Self>,
+    ) -> Result<ConnectionCredentialId, String> {
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
+        let protocols = credential_form_protocols(form);
+        let result = self
+            .config
+            .connections
+            .create_credential(
+                &form.name_input.value,
+                &form.username_input.value,
+                optional_form_text(&form.domain_input.value),
+                protocols,
+                form.is_default,
+                &form.password_input.value,
+            )
+            .map_err(|error| error.to_string());
+        let credential_id = match result {
+            Ok(credential_id) => credential_id,
+            Err(message) => {
+                self.placeholder_notice = message.clone();
+                return Err(message);
+            }
+        };
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
+        self.notify_connection_link_modal(cx);
+        self.placeholder_notice = "已保存共用凭据".to_string();
+        Ok(credential_id)
+    }
+
+    /// 从表单更新共用凭据并持久化；密码留空表示不修改。
+    pub(crate) fn update_connection_credential_from_form(
+        &mut self,
+        form: &ConnectionCredentialFormState,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(credential_id) = form.selected_id else {
+            return Err("未选择要更新的共用凭据".to_string());
+        };
+        let protocols = credential_form_protocols(form);
+        if let Some(modal) = self.connection_link_modal.clone() {
+            let (selected, protocol) = modal.read_with(cx, |window_state, _| {
+                (
+                    window_state.selected_credential_id(),
+                    window_state.link_kind(),
+                )
+            });
+            if selected == Some(credential_id) && !protocols.contains(&protocol) {
+                let message = "当前连接表单正在使用该凭据，不能移除它对应的协议".to_string();
+                self.placeholder_notice = message.clone();
+                return Err(message);
+            }
+        }
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
+        let password =
+            (!form.password_input.value.is_empty()).then_some(form.password_input.value.as_str());
+        let result = self
+            .config
+            .connections
+            .update_credential(
+                credential_id,
+                &form.name_input.value,
+                &form.username_input.value,
+                optional_form_text(&form.domain_input.value),
+                protocols,
+                form.is_default,
+                password,
+            )
+            .map_err(|error| error.to_string());
+        if let Err(message) = result {
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
+        self.notify_connection_link_modal(cx);
+        self.placeholder_notice = "已更新共用凭据".to_string();
+        Ok(())
+    }
+
+    /// 删除未被任何连接引用的共用凭据并持久化。
+    pub(crate) fn delete_connection_credential(
+        &mut self,
+        credential_id: ConnectionCredentialId,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Some(modal) = self.connection_link_modal.clone()
+            && modal.read_with(cx, |window_state, _| {
+                window_state.selected_credential_id() == Some(credential_id)
+            })
+        {
+            let message = "当前连接表单正在使用该凭据，请先更换凭据或关闭表单".to_string();
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
+        let previous_connections = self.config.connections.clone();
+        let previous_selection = self.selected_connection_node_id;
+        let result = self
+            .config
+            .connections
+            .delete_credential(credential_id)
+            .map_err(|error| error.to_string());
+        if let Err(message) = result {
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
+        self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
+        self.notify_connection_link_modal(cx);
+        self.placeholder_notice = "已删除共用凭据".to_string();
+        Ok(())
+    }
+
+    /// 凭据列表变化后通知打开中的链接表单刷新下拉选项。
+    fn notify_connection_link_modal(&self, cx: &mut Context<Self>) {
+        if let Some(modal) = self.connection_link_modal.clone() {
+            modal.update(cx, |_, modal_cx| modal_cx.notify());
+        }
     }
 
     /// 清理目录表单模态框状态；关闭按钮、取消按钮和提交成功后统一调用。
@@ -439,6 +592,8 @@ impl ArgusApp {
             url_input: TextInputState::default(),
             port_input: TextInputState::from_value(ssh.port.to_string()),
             username_input: TextInputState::from_value(ssh.username),
+            credential_id: ssh.credential_id,
+            save_as_credential: false,
             password_input: TextInputState::from_value(ssh.password),
             share_input: TextInputState::default(),
             initial_dir_input: TextInputState::from_value("/".to_string()),
@@ -483,6 +638,8 @@ impl ArgusApp {
             url_input: TextInputState::default(),
             port_input: TextInputState::from_value(smb.port.to_string()),
             username_input: TextInputState::from_value(smb.username),
+            credential_id: smb.credential_id,
+            save_as_credential: false,
             password_input: TextInputState::from_value(smb.password),
             share_input: TextInputState::from_value(smb.share),
             initial_dir_input: TextInputState::from_value(smb.initial_dir),
@@ -521,6 +678,7 @@ impl ArgusApp {
             link.name,
             git.url,
             git.username,
+            None,
             git.access_token,
             git.private_key_path,
             git.private_key_passphrase,
@@ -544,6 +702,7 @@ impl ArgusApp {
             link.name,
             svn.url,
             svn.username,
+            svn.credential_id,
             svn.password,
             svn.private_key_path,
             svn.private_key_passphrase,
@@ -860,6 +1019,12 @@ impl ArgusApp {
                     return Err(message);
                 }
             };
+        if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
+            self.config.connections = previous_connections;
+            self.selected_connection_node_id = previous_selection;
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已新增 SSH 链接".to_string();
         self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
@@ -893,6 +1058,12 @@ impl ArgusApp {
                     return Err(message);
                 }
             };
+        if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
+            self.config.connections = previous_connections;
+            self.selected_connection_node_id = previous_selection;
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已新增 SMB 链接".to_string();
         self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
@@ -943,6 +1114,12 @@ impl ArgusApp {
                 self.placeholder_notice = message.clone();
                 message
             })?;
+        if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
+            self.config.connections = previous_connections;
+            self.selected_connection_node_id = previous_selection;
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已新增 SVN 链接".to_string();
         self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
@@ -1013,6 +1190,12 @@ impl ArgusApp {
             .update_ssh_link(link_id, &form.name_input.value, ssh)
         {
             Ok(()) => {
+                if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
+                    self.config.connections = previous_connections;
+                    self.selected_connection_node_id = previous_selection;
+                    self.placeholder_notice = message.clone();
+                    return Err(message);
+                }
                 self.selected_connection_node_id = Some(link_id);
                 self.placeholder_notice = "已更新 SSH 链接".to_string();
                 self.persist_connection_form_change_or_rollback(
@@ -1049,6 +1232,12 @@ impl ArgusApp {
             .update_smb_link(link_id, &form.name_input.value, smb)
         {
             Ok(()) => {
+                if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
+                    self.config.connections = previous_connections;
+                    self.selected_connection_node_id = previous_selection;
+                    self.placeholder_notice = message.clone();
+                    return Err(message);
+                }
                 self.selected_connection_node_id = Some(link_id);
                 self.placeholder_notice = "已更新 SMB 链接".to_string();
                 self.persist_connection_form_change_or_rollback(
@@ -1123,6 +1312,12 @@ impl ArgusApp {
             .connections
             .update_svn_link(link_id, &form.name_input.value, svn)
             .map_err(|error| error.to_string())?;
+        if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
+            self.config.connections = previous_connections;
+            self.selected_connection_node_id = previous_selection;
+            self.placeholder_notice = message.clone();
+            return Err(message);
+        }
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已更新 SVN 链接".to_string();
         self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
@@ -1139,6 +1334,8 @@ impl ArgusApp {
         previous_connections: ConnectionConfig,
         previous_selection: Option<ConnectionNodeId>,
     ) -> Result<(), String> {
+        // 共用凭据密码只保存在凭据记录中；保存前回填到连接内存字段，保证保存后立即可连接。
+        self.config.connections.rehydrate_credential_passwords(None);
         if let Err(error) = self.config_manager.save(&self.config) {
             self.config.connections = previous_connections;
             self.selected_connection_node_id = previous_selection;
@@ -1373,6 +1570,20 @@ impl ArgusApp {
     }
 }
 
+/// 为新建连接预选指定协议下唯一的默认凭据。
+fn apply_default_credential(form: &mut ConnectionLinkFormState, connections: &ConnectionConfig) {
+    let Some(credential) = connections.default_credential_for_new_link(form.link_kind) else {
+        return;
+    };
+    form.credential_id = Some(credential.id);
+    form.username_input = TextInputState::from_value(credential.username.clone());
+    if form.link_kind == ConnectionLinkKind::Smb {
+        form.domain_input =
+            TextInputState::from_value(credential.domain.clone().unwrap_or_default());
+    }
+    form.password_input = TextInputState::default();
+}
+
 /// 从新增 SSH 链接表单构造 SSH 配置。
 /// 构造 Git/SVN 编辑表单；两种协议共用 URL、用户名、秘密和私钥输入状态。
 fn repository_edit_form(
@@ -1381,6 +1592,7 @@ fn repository_edit_form(
     name: String,
     url: String,
     username: Option<String>,
+    credential_id: Option<ConnectionCredentialId>,
     secret: Option<String>,
     private_key_path: Option<String>,
     private_key_passphrase: Option<String>,
@@ -1393,6 +1605,8 @@ fn repository_edit_form(
         url_input: TextInputState::from_value(url),
         port_input: TextInputState::default(),
         username_input: TextInputState::from_value(username.unwrap_or_default()),
+        credential_id,
+        save_as_credential: false,
         password_input: TextInputState::from_value(secret.unwrap_or_default()),
         share_input: TextInputState::default(),
         initial_dir_input: TextInputState::from_value("/".to_string()),
@@ -1403,6 +1617,91 @@ fn repository_edit_form(
         ),
         error_message: None,
     }
+}
+
+/// 从凭据表单收集勾选的适用协议。
+fn credential_form_protocols(form: &ConnectionCredentialFormState) -> Vec<ConnectionLinkKind> {
+    let mut protocols = Vec::new();
+    if form.allow_ssh {
+        protocols.push(ConnectionLinkKind::Ssh);
+    }
+    if form.allow_smb {
+        protocols.push(ConnectionLinkKind::Smb);
+    }
+    if form.allow_svn {
+        protocols.push(ConnectionLinkKind::Svn);
+    }
+    protocols
+}
+
+/// 把表单里手动输入的密码保存为共用凭据，并把当前连接绑定到该凭据。
+fn share_link_password_as_credential(
+    app: &mut ArgusApp,
+    form: &ConnectionLinkFormState,
+    link_id: ConnectionNodeId,
+) -> Result<(), String> {
+    if !form.save_as_credential
+        || form.credential_id.is_some()
+        || form.link_kind == ConnectionLinkKind::Git
+    {
+        return Ok(());
+    }
+    let password = form.password_input.value.as_str();
+    if password.is_empty() {
+        return Err("保存为共用凭据前请先输入密码".to_string());
+    }
+    let username = form.username_input.value.trim();
+    let domain = (form.link_kind == ConnectionLinkKind::Smb)
+        .then(|| optional_form_text(&form.domain_input.value))
+        .flatten();
+    // 已存在同协议、同用户名、同域且密码相同的凭据时直接复用，避免每次保存都产生副本。
+    let existing = app
+        .config
+        .connections
+        .credentials
+        .iter()
+        .find(|credential| {
+            credential.supports_protocol(form.link_kind)
+                && credential.username.eq_ignore_ascii_case(username)
+                && credential.domain == domain
+                && credential.password == password
+        })
+        .map(|credential| credential.id);
+    let credential_id = if let Some(credential_id) = existing {
+        credential_id
+    } else {
+        let base = if username.is_empty() {
+            format!("{} 凭据", form.name_input.value.trim())
+        } else {
+            format!("{username} 凭据")
+        };
+        let name = app.config.connections.unique_credential_name(&base);
+        app.config
+            .connections
+            .create_credential(
+                &name,
+                &form.username_input.value,
+                domain,
+                vec![form.link_kind],
+                false,
+                password,
+            )
+            .map_err(|error| error.to_string())?
+    };
+    let Some(link) = app
+        .config
+        .connections
+        .links
+        .iter_mut()
+        .find(|link| link.id == link_id)
+    else {
+        return Err("新连接不存在，无法绑定共用凭据".to_string());
+    };
+    link.bind_credential(credential_id);
+    app.config
+        .connections
+        .rehydrate_credential_passwords(Some(credential_id));
+    Ok(())
 }
 
 /// 将普通表单文本转为可选值；首尾空白在此去除，空值不落盘。
@@ -1427,6 +1726,7 @@ fn ssh_config_from_form(form: &ConnectionLinkFormState) -> Result<SshLinkConfig,
         host: form.host_input.value.clone(),
         port,
         username: form.username_input.value.clone(),
+        credential_id: form.credential_id,
         password: form.password_input.value.clone(),
         private_key_path: Some(form.private_key_path_input.value.clone()),
         private_key_passphrase: Some(form.private_key_passphrase_input.value.clone()),
@@ -1461,6 +1761,7 @@ fn svn_config_from_form(form: &ConnectionLinkFormState) -> Result<SvnLinkConfig,
     SvnLinkConfig {
         url: form.url_input.value.clone(),
         username: optional_form_text(&form.username_input.value),
+        credential_id: form.credential_id,
         password: optional_form_secret(&form.password_input.value),
         private_key_path: uses_ssh_credentials
             .then(|| optional_form_text(&form.private_key_path_input.value))
@@ -1513,6 +1814,7 @@ fn smb_config_from_form(form: &ConnectionLinkFormState) -> Result<SmbLinkConfig,
         initial_dir,
         domain: Some(form.domain_input.value.clone()),
         username: form.username_input.value.clone(),
+        credential_id: form.credential_id,
         password: form.password_input.value.clone(),
     }
     .normalized_for_save()
@@ -1553,6 +1855,8 @@ mod tests {
             url_input: TextInputState::from_value(url.to_string()),
             port_input: TextInputState::default(),
             username_input: TextInputState::default(),
+            credential_id: None,
+            save_as_credential: false,
             password_input: TextInputState::default(),
             share_input: TextInputState::default(),
             initial_dir_input: TextInputState::from_value("/".to_string()),
@@ -1594,6 +1898,8 @@ mod tests {
             url_input: TextInputState::default(),
             port_input: TextInputState::from_value("70000".to_string()),
             username_input: TextInputState::from_value("deploy".to_string()),
+            credential_id: None,
+            save_as_credential: false,
             password_input: TextInputState::from_value("secret".to_string()),
             share_input: TextInputState::default(),
             initial_dir_input: TextInputState::from_value("/".to_string()),
@@ -1619,6 +1925,8 @@ mod tests {
             url_input: TextInputState::default(),
             port_input: TextInputState::from_value("445".to_string()),
             username_input: TextInputState::from_value("smbuser".to_string()),
+            credential_id: None,
+            save_as_credential: false,
             password_input: TextInputState::from_value(" secret ".to_string()),
             share_input: TextInputState::from_value("logs".to_string()),
             initial_dir_input: TextInputState::from_value("runtime".to_string()),
@@ -1757,6 +2065,7 @@ mod tests {
                     host: "10.0.0.1".to_string(),
                     port: 22,
                     username: "deploy".to_string(),
+                    credential_id: None,
                     password: "secret".to_string(),
                     private_key_path: None,
                     private_key_passphrase: None,
@@ -1776,5 +2085,249 @@ mod tests {
 
         assert!(app.config.connections.link(link_id).is_none());
         assert!(app.connection_dialog.is_none());
+    }
+    /// 手动密码勾选共用后应只创建一个凭据，并让连接引用它。
+    #[test]
+    fn save_as_shared_credential_binds_new_link() {
+        let mut app = test_app("save-as-shared-credential");
+        let form = ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Ssh,
+            parent_id: None,
+            name_input: TextInputState::from_value("app-01".to_string()),
+            host_input: TextInputState::from_value("10.0.0.1".to_string()),
+            url_input: TextInputState::default(),
+            port_input: TextInputState::from_value("22".to_string()),
+            username_input: TextInputState::from_value("deploy".to_string()),
+            credential_id: None,
+            save_as_credential: true,
+            password_input: TextInputState::from_value("shared-secret".to_string()),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::default(),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
+            error_message: None,
+        };
+        let link_id = app
+            .create_connection_link_from_form(form)
+            .expect("密码应自动保存为共用凭据");
+
+        let credential = app
+            .config
+            .connections
+            .credentials
+            .first()
+            .expect("应创建共用凭据");
+        assert_eq!(credential.username, "deploy");
+        assert_eq!(credential.password, "shared-secret");
+        let credential_id = credential.id;
+        let link = app.config.connections.link(link_id).unwrap();
+        assert_eq!(link.credential_id(), Some(credential_id));
+        assert_eq!(
+            link.ssh.as_ref().unwrap().password,
+            "shared-secret",
+            "保存后连接应立即可用，无需重启"
+        );
+
+        // 第二个连接使用相同账号密码时复用同一凭据，不再产生副本。
+        let mut second_form = ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Ssh,
+            parent_id: None,
+            name_input: TextInputState::from_value("app-02".to_string()),
+            host_input: TextInputState::from_value("10.0.0.2".to_string()),
+            url_input: TextInputState::default(),
+            port_input: TextInputState::from_value("22".to_string()),
+            username_input: TextInputState::from_value("deploy".to_string()),
+            credential_id: None,
+            save_as_credential: true,
+            password_input: TextInputState::from_value("shared-secret".to_string()),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::default(),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
+            error_message: None,
+        };
+        let second_link_id = app
+            .create_connection_link_from_form(second_form.clone())
+            .expect("相同账号密码应复用已有共用凭据");
+        assert_eq!(app.config.connections.credentials.len(), 1);
+        assert_eq!(
+            app.config
+                .connections
+                .link(second_link_id)
+                .unwrap()
+                .credential_id(),
+            Some(credential_id)
+        );
+        second_form.credential_id = Some(credential_id);
+        second_form.save_as_credential = false;
+
+        let path = app.config_manager.settings_path().to_path_buf();
+        let (reloaded, warnings) =
+            ConfigManager::load_from_path(&path).expect("共用凭据配置应可重新加载");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            reloaded.connections.link(link_id).unwrap().credential_id(),
+            Some(credential_id)
+        );
+        assert_eq!(
+            reloaded
+                .connections
+                .credential(credential_id)
+                .unwrap()
+                .password,
+            "shared-secret"
+        );
+    }
+
+    /// 凭据管理弹窗应能正常渲染保存、关闭和列表区域。
+    #[gpui::test]
+    fn credential_manager_modal_renders(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, _| test_app("credential-manager-modal"));
+        app.update(cx, |app, app_cx| {
+            app.open_connection_credential_manager(ConnectionLinkKind::Ssh, app_cx);
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+        assert!(
+            cx.debug_bounds("connection-credential-save").is_some(),
+            "应渲染保存按钮"
+        );
+        assert!(
+            cx.debug_bounds("connection-credential-cancel").is_some(),
+            "应渲染关闭按钮"
+        );
+        assert!(
+            cx.debug_bounds("connection-credential-list").is_some(),
+            "应渲染凭据列表"
+        );
+        app.update(cx, |app, _| app.close_connection_credential_manager());
+    }
+    /// 新建连接选择已有共用凭据时不再要求重复输入密码。
+    #[test]
+    fn link_form_uses_existing_shared_credential() {
+        let mut app = test_app("link-form-shared-credential");
+        let credential_id = app
+            .config
+            .connections
+            .create_credential(
+                "运维账号",
+                "deploy",
+                None,
+                vec![ConnectionLinkKind::Ssh],
+                false,
+                "shared-secret",
+            )
+            .unwrap();
+        let form = ConnectionLinkFormState {
+            link_kind: ConnectionLinkKind::Ssh,
+            parent_id: None,
+            name_input: TextInputState::from_value("app-02".to_string()),
+            host_input: TextInputState::from_value("10.0.0.2".to_string()),
+            url_input: TextInputState::default(),
+            port_input: TextInputState::from_value("22".to_string()),
+            username_input: TextInputState::from_value("deploy".to_string()),
+            credential_id: Some(credential_id),
+            save_as_credential: false,
+            password_input: TextInputState::default(),
+            share_input: TextInputState::default(),
+            initial_dir_input: TextInputState::default(),
+            domain_input: TextInputState::default(),
+            private_key_path_input: TextInputState::default(),
+            private_key_passphrase_input: TextInputState::default(),
+            error_message: None,
+        };
+        let link_id = app
+            .create_connection_link_from_form(form)
+            .expect("选择共用凭据后应允许空密码");
+
+        let link = app.config.connections.link(link_id).unwrap();
+        assert_eq!(link.credential_id(), Some(credential_id));
+        assert_eq!(link.ssh.as_ref().unwrap().password, "shared-secret");
+        assert_eq!(
+            app.config.connections.credential_usage_count(credential_id),
+            1
+        );
+    }
+    /// 链接表单可从下拉框选择共用凭据，并隐藏手动密码输入。
+    #[gpui::test]
+    fn link_form_credential_dropdown_selects_shared_credential(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, _| test_app("link-credential-dropdown"));
+        let credential_id = app.update(cx, |app, _| {
+            app.config
+                .connections
+                .create_credential(
+                    "运维账号",
+                    "deploy",
+                    None,
+                    vec![ConnectionLinkKind::Ssh],
+                    false,
+                    "shared-secret",
+                )
+                .unwrap()
+        });
+        app.update(cx, |app, app_cx| {
+            app.open_new_ssh_link_dialog(app_cx);
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+        let dropdown = cx
+            .debug_bounds("connection-link-credential-dropdown-button")
+            .expect("应渲染凭据下拉框");
+        cx.simulate_click(dropdown.center(), gpui::Modifiers::default());
+        assert_eq!(credential_id, 1);
+        let item = cx
+            .debug_bounds("connection-link-credential-menu-item-credential-1")
+            .expect("展开后应显示共用凭据选项");
+        cx.simulate_click(item.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(901.0)));
+        let selected = app.read_with(cx, |app, app_cx| {
+            app.connection_link_modal
+                .as_ref()
+                .and_then(|modal| modal.read(app_cx).credential_id_for_test())
+        });
+        assert_eq!(selected, Some(credential_id), "应记录选中的共用凭据");
+
+        assert!(
+            cx.debug_bounds("connection-link-shared-credential")
+                .is_some(),
+            "选择共用凭据后应显示凭据来源说明"
+        );
+        app.update(cx, |app, _| app.close_connection_link_window());
+    }
+    /// 新建连接应预选唯一的默认凭据，避免重复输入密码。
+    #[gpui::test]
+    fn default_shared_credential_preselects_new_link(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, _| test_app("default-credential-preselect"));
+        let credential_id = app.update(cx, |app, _| {
+            app.config
+                .connections
+                .create_credential(
+                    "运维账号",
+                    "deploy",
+                    None,
+                    vec![ConnectionLinkKind::Ssh],
+                    true,
+                    "shared-secret",
+                )
+                .unwrap()
+        });
+        app.update(cx, |app, app_cx| {
+            app.open_new_ssh_link_dialog(app_cx);
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+        let selected = app.read_with(cx, |app, app_cx| {
+            app.connection_link_modal
+                .as_ref()
+                .and_then(|modal| modal.read(app_cx).credential_id_for_test())
+        });
+        assert_eq!(selected, Some(credential_id));
+        assert!(
+            cx.debug_bounds("connection-link-shared-credential")
+                .is_some(),
+            "默认凭据应直接显示为当前凭据来源"
+        );
+        app.update(cx, |app, _| app.close_connection_link_window());
     }
 }

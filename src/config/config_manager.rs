@@ -16,8 +16,9 @@ use crate::config::paths::assert_isolated_test_path;
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::config::secret_store::{
-    ConnectionSecrets, LOCAL_SECRETS_KEY, SecretWriteOutcome, account_for_link,
-    load_connection_secrets, load_legacy_connection_secret, store_connection_secrets,
+    ConnectionSecrets, LOCAL_SECRETS_KEY, SecretWriteOutcome, account_for_credential,
+    account_for_link, load_connection_secrets, load_legacy_connection_secret,
+    store_connection_secrets,
 };
 use crate::remote::connection::ConnectionSecretSlot;
 
@@ -185,6 +186,8 @@ fn join_config_warnings(warnings: Vec<String>) -> Option<String> {
 /// 返回值：需要展示给用户的非致命说明列表。
 fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
     let mut warnings = Vec::new();
+    // 凭据密码缺失是可恢复状态，不阻止后续保存；用户可在凭据管理中补录。
+    let mut credential_warnings = Vec::new();
     config.has_loaded_connection_secrets = false;
     let mut stored = match load_connection_secrets(&config.connections.secrets) {
         Ok(secrets) => secrets,
@@ -200,6 +203,36 @@ fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
     // 只有内容确实发生变化（迁移明文、采纳旧条目，或正在使用本地密文回落）时才写回凭据库，
     // 避免每次启动都对同一份未变化的机密执行一次无谓写入。
     let mut needs_write = !config.connections.secrets.is_empty();
+
+    // 共用凭据密码独立保存；先回填元数据记录，再复制到引用它的连接内存字段。
+    for credential in &mut config.connections.credentials {
+        let account = account_for_credential(credential.id);
+        if let Some(secret) = stored.get(&account) {
+            credential.password = secret.expose_secret().to_string();
+        }
+    }
+    let credential_passwords = config
+        .connections
+        .credentials
+        .iter()
+        .map(|credential| (credential.id, credential.password.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for link in &mut config.connections.links {
+        let Some(credential_id) = link.credential_id() else {
+            continue;
+        };
+        match credential_passwords.get(&credential_id) {
+            Some(password) if !password.is_empty() => {
+                link.apply_credential_password(password);
+            }
+            _ => {
+                credential_warnings.push(format!(
+                    "连接“{}”使用的共用凭据密码未找到，请重新输入该凭据密码",
+                    link.name
+                ));
+            }
+        }
+    }
 
     for link in &mut config.connections.links {
         let link_id = link.id;
@@ -271,6 +304,7 @@ fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
     if adopted_legacy {
         warnings.push("已把旧版分散保存的连接凭据合并为单条记录，后续只需授权一次".to_string());
     }
+    warnings.append(&mut credential_warnings);
 
     warnings
 }
@@ -286,6 +320,16 @@ fn persist_connection_secrets(config: &mut AppConfig) -> Result<(), ConfigError>
         ));
     }
     let mut secrets = ConnectionSecrets::new();
+
+    for credential in &mut config.connections.credentials {
+        if !credential.password.is_empty() {
+            secrets.insert(
+                account_for_credential(credential.id),
+                SecretString::from(credential.password.clone()),
+            );
+        }
+        credential.password.clear();
+    }
 
     for link in &mut config.connections.links {
         let link_id = link.id;
@@ -629,6 +673,7 @@ password = "legacy-smb-password"
                 host: "10.0.0.1".to_string(),
                 port: 22,
                 username: "deploy".to_string(),
+                credential_id: None,
                 password: "first-secret".to_string(),
                 private_key_path: None,
                 private_key_passphrase: Some("second-secret".to_string()),
@@ -673,6 +718,134 @@ password = "legacy-smb-password"
             .expect("应保留 SSH 链接");
         assert_eq!(ssh.password, "first-secret");
         assert_eq!(ssh.private_key_passphrase.as_deref(), Some("second-secret"));
+    }
+
+    /// 验证共用凭据密码只持久化一份，并在加载时回填到所有引用连接。
+    #[test]
+    fn shared_credential_secret_is_persisted_once_and_rehydrated() {
+        use crate::remote::connection::ConnectionLinkKind;
+
+        let path = test_settings_path("shared-credential");
+        let mut config = AppConfig::default();
+        let credential_id = config
+            .connections
+            .create_credential(
+                "运维账号",
+                "deploy",
+                None,
+                vec![ConnectionLinkKind::Ssh],
+                false,
+                "shared-secret",
+            )
+            .unwrap();
+        let link_id = config
+            .connections
+            .add_ssh_link(
+                None,
+                "app-01",
+                SshLinkConfig {
+                    host: "10.0.0.1".to_string(),
+                    port: 22,
+                    username: "deploy".to_string(),
+                    credential_id: Some(credential_id),
+                    password: String::new(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .unwrap();
+        config.connections.rehydrate_credential_passwords(None);
+        assert_eq!(
+            config
+                .connections
+                .link(link_id)
+                .unwrap()
+                .ssh
+                .as_ref()
+                .unwrap()
+                .password,
+            "shared-secret"
+        );
+
+        ConfigManager::save_to_path(&path, &config).expect("应能保存共用凭据");
+        let saved = fs::read_to_string(&path).expect("应能读取设置文件");
+        assert!(
+            !saved.contains("shared-secret"),
+            "共用凭据密码不得写入设置文件：{saved}"
+        );
+
+        let (reloaded, warnings) =
+            ConfigManager::load_from_path(&path).expect("共用凭据配置应能重新加载");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let credential = reloaded
+            .connections
+            .credential(credential_id)
+            .expect("应保留凭据元数据");
+        assert_eq!(credential.name, "运维账号");
+        assert_eq!(credential.password, "shared-secret");
+        assert_eq!(
+            reloaded.connections.credential_usage_count(credential_id),
+            1
+        );
+        assert_eq!(
+            reloaded
+                .connections
+                .link(link_id)
+                .unwrap()
+                .ssh
+                .as_ref()
+                .unwrap()
+                .password,
+            "shared-secret"
+        );
+    }
+
+    /// 已有连接不会因为存在共用凭据而被自动绑定，仍保持“仅此连接”的内联密码。
+    #[test]
+    fn existing_inline_link_is_not_auto_bound_to_credentials() {
+        use crate::remote::connection::ConnectionLinkKind;
+
+        let path = test_settings_path("inline-link-not-migrated");
+        let mut config = AppConfig::default();
+        let credential_id = config
+            .connections
+            .create_credential(
+                "共用账号",
+                "ops",
+                None,
+                vec![ConnectionLinkKind::Ssh],
+                false,
+                "shared-secret",
+            )
+            .unwrap();
+        let link_id = config
+            .connections
+            .add_ssh_link(
+                None,
+                "legacy-app",
+                SshLinkConfig {
+                    host: "10.0.0.9".to_string(),
+                    port: 22,
+                    username: "legacy".to_string(),
+                    credential_id: None,
+                    password: "inline-secret".to_string(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .unwrap();
+        ConfigManager::save_to_path(&path, &config).expect("应能保存旧连接");
+
+        let (reloaded, warnings) =
+            ConfigManager::load_from_path(&path).expect("旧连接配置应能重新加载");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let link = reloaded.connections.link(link_id).unwrap();
+        assert_eq!(link.credential_id(), None);
+        assert_eq!(link.ssh.as_ref().unwrap().password, "inline-secret");
+        assert_eq!(
+            reloaded.connections.credential_usage_count(credential_id),
+            0
+        );
     }
 
     /// 验证保存后的设置文件收紧为仅所有者可读写（0600）。
@@ -874,6 +1047,8 @@ private_key_passphrase = " phrase "
             },
             connections: ConnectionConfig {
                 next_id: 4,
+                credentials: Vec::new(),
+                next_credential_id: 1,
                 directories: vec![ConnectionDirectoryConfig {
                     id: 1,
                     parent_id: None,
@@ -889,6 +1064,7 @@ private_key_passphrase = " phrase "
                             host: "10.0.0.1".to_string(),
                             port: 22,
                             username: "deploy".to_string(),
+                            credential_id: None,
                             password: "secret".to_string(),
                             private_key_path: Some("/Users/yueyang/.ssh/id_ed25519".to_string()),
                             private_key_passphrase: Some("phrase".to_string()),
@@ -909,6 +1085,7 @@ private_key_passphrase = " phrase "
                             initial_dir: "/runtime".to_string(),
                             domain: Some("WORKGROUP".to_string()),
                             username: "smbuser".to_string(),
+                            credential_id: None,
                             password: " smb-secret ".to_string(),
                         }),
                         git: None,

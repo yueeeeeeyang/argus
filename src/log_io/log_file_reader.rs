@@ -84,6 +84,14 @@ impl LogReaderHandle {
         &self.document
     }
 
+    /// 返回内存文档的完整行列表；分页文档返回 `None`。
+    pub(crate) fn in_memory_lines(&self) -> Option<Arc<Vec<String>>> {
+        match &self.document {
+            LogDocument::InMemory(document) => Some(document.lines.clone()),
+            LogDocument::Paged(_) => None,
+        }
+    }
+
     /// 返回总行数。
     pub(crate) fn line_count(&self) -> usize {
         self.document.line_count()

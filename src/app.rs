@@ -84,7 +84,9 @@ use crate::theme::{AppTheme, ThemeManager, ThemeOption};
 use crate::ui::ai_settings_editor::AiSettingsEditor;
 use crate::ui::assistant_tab::AssistantTab;
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction, MenuEntry};
-use crate::ui::connection_dialog::{ConnectionDirectoryWindow, ConnectionLinkWindow};
+use crate::ui::connection_dialog::{
+    ConnectionCredentialWindow, ConnectionDirectoryWindow, ConnectionLinkWindow,
+};
 use crate::ui::file_preview_window::FilePreviewWindow;
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
@@ -280,6 +282,8 @@ pub(crate) struct ArgusApp {
     pub connection_directory_modal: Option<Entity<ConnectionDirectoryWindow>>,
     /// 新增或编辑链接模态框子视图。
     pub connection_link_modal: Option<Entity<ConnectionLinkWindow>>,
+    /// 共用凭据管理模态框子视图。
+    pub connection_credential_modal: Option<Entity<ConnectionCredentialWindow>>,
     /// 当前进程内已输入的压缩包密码；只保存在内存，不写入配置文件。
     pub archive_passwords: ArchivePasswordStore,
     /// 压缩包密码输入弹窗状态；为空表示当前不需要用户输入密码。
@@ -478,6 +482,7 @@ impl ArgusApp {
             connection_dialog: None,
             connection_directory_modal: None,
             connection_link_modal: None,
+            connection_credential_modal: None,
             archive_passwords: ArchivePasswordStore::default(),
             archive_password_prompt: None,
             source_picker: SourcePickerState::default(),
@@ -1538,9 +1543,10 @@ impl ArgusApp {
 
     /// 进入非日志标签时关闭仍在展示的日志搜索结果面板。
     ///
-    /// 说明：结果面板由结果、运行中任务或提示消息共同决定是否可见，并没有独立的打开
-    /// 标志；这里只在面板确实可见且当前标签不是日志页时复用完整关闭流程，以同步取消
-    /// 搜索任务、清理结果和正文命中高亮，同时保留搜索对话框中的查询条件。
+    /// 说明：结果面板由搜索活动状态、当前工作区、当前标签是否为日志页以及该日志是否在
+    /// 搜索范围内共同决定是否可见，并没有独立的打开标志；这里只在仍有搜索活动且当前标签不是日志页时
+    /// 复用完整关闭流程，以同步取消搜索任务、清理结果和正文命中高亮，同时保留搜索对话框
+    /// 中的查询条件。切换到搜索范围外的日志页时只隐藏面板，切回后仍可继续查看结果。
     fn close_log_search_results_for_active_non_log_tab(&mut self) {
         let is_non_log_tab = matches!(
             self.active_tab_kind(),
@@ -1548,7 +1554,7 @@ impl ArgusApp {
                 | TabKind::RuntimeAnalysis { .. }
                 | TabKind::Assistant { .. }
         );
-        if is_non_log_tab && self.should_show_log_search_results() {
+        if is_non_log_tab && self.has_log_search_activity() {
             self.close_log_search_results_panel();
         }
     }

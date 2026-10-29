@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "argus"
-version = "1.3.12"
+version = "1.4.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",

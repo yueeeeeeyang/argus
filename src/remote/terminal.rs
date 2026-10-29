@@ -1611,6 +1611,7 @@ mod tests {
                 host: "10.0.0.1".to_string(),
                 port: 22,
                 username: "deploy".to_string(),
+                credential_id: None,
                 password: "secret".to_string(),
                 private_key_path: None,
                 private_key_passphrase: None,

@@ -999,6 +999,7 @@ mod tests {
         let config = SvnLinkConfig {
             url: "svn://read%65r@example.com/repository".to_string(),
             username: None,
+            credential_id: None,
             password: Some("password".to_string()),
             private_key_path: None,
             private_key_passphrase: None,

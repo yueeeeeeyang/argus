@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use gpui::{App, ClickEvent, IntoElement, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{
+    App, ClickEvent, IntoElement, SharedString, Window, deferred, div, prelude::*, px, rgb,
+};
 
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -83,6 +85,7 @@ pub(crate) fn render_dropdown(
         .child(
             div()
                 .id(SharedString::from(format!("{dropdown_id}-button")))
+                .debug_selector(move || format!("{dropdown_id}-button"))
                 .w_full()
                 .h(px(30.0))
                 .px_2()
@@ -120,7 +123,8 @@ pub(crate) fn render_dropdown(
                 .on_click(on_toggle),
         )
         .when(dropdown.is_open && dropdown.show_inline_menu, |this| {
-            this.child(
+            // 浮层挂在选择器内部但延迟绘制，避免被后续表单行覆盖。
+            this.child(deferred(
                 div()
                     .id(SharedString::from(format!("{dropdown_id}-menu")))
                     .absolute()
@@ -138,6 +142,7 @@ pub(crate) fn render_dropdown(
                     .children(items.into_iter().map(move |item| {
                         let is_selected = item.id == selected_id;
                         let item_id = item.id.clone();
+                        let item_debug_id = format!("{dropdown_id}-item-{}", item.id);
                         let on_select = on_select.clone();
                         let theme = menu_theme.clone();
                         let hover_background = theme.current_line;
@@ -148,6 +153,7 @@ pub(crate) fn render_dropdown(
                                 "{dropdown_id}-item-{}",
                                 item.id
                             )))
+                            .debug_selector(move || item_debug_id.clone())
                             .h(px(30.0))
                             .w_full()
                             .px_2()
@@ -167,6 +173,6 @@ pub(crate) fn render_dropdown(
                                 on_select(item_id.clone(), window, cx);
                             })
                     })),
-            )
+            ))
         })
 }

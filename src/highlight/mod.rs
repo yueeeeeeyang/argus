@@ -22,3 +22,8 @@ pub(crate) use document::DocumentHighlighter;
 pub(crate) use highlighter::SyntaxHighlighter;
 pub(crate) use language::{HighlightLanguage, detect_highlight_language};
 pub(crate) use span::{HighlightSpan, HighlightTokenKind};
+
+/// 判断语言是否需要跨行文档状态；日志阅读区据此决定是否构建文档级高亮缓存。
+pub(crate) fn language_uses_document_state(language: HighlightLanguage) -> bool {
+    lexical::uses_document_state(language)
+}

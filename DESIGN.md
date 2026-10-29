@@ -660,8 +660,8 @@ AI API Key 存入**系统凭据库**，服务名 `argus.ai`，账户名为 `SHA-
 
 #### 4.6.1 连接模型与协议
 
-`ConnectionConfig`（`src/remote/connection.rs`）由 `next_id`、`directories`、`links` 与
-`trusted_hosts` 组成。目录节点通过 `parent_id` 构成任意层级树；每个链接**只允许一种协议**，
+`ConnectionConfig`（`src/remote/connection.rs`）由 `next_id`、`directories`、`links`、
+`credentials` 与 `trusted_hosts` 组成。目录节点通过 `parent_id` 构成任意层级树；每个链接**只允许一种协议**，
 `ssh` / `smb` / `git` / `svn` 四个可选字段互斥。
 
 | 协议 | 主机与端口 | 认证方式 |
@@ -674,6 +674,12 @@ AI API Key 存入**系统凭据库**，服务名 `argus.ai`，账户名为 `SHA-
 校验规则：SSH 必须提供密码或私钥之一；Git HTTPS 要求用户名与令牌成对出现、SSH 必须有
 私钥；SVN 密码与私钥互斥；URL 内嵌密码一律拒绝。受信主机指纹随设置持久化，与用户的
 `~/.ssh/known_hosts` 相互隔离。
+
+`ConnectionConfig.credentials` 保存可跨连接复用的账号密码凭据元数据（名称、用户名、
+SMB 域、适用协议、默认标记）；SSH/SMB/SVN 连接通过协议配置中的 `credential_id` 显式引用
+凭据，密码只保存在凭据库的 `credential/<id>/password`，连接内不再复制。凭据修改会同步到
+所有引用连接；仍被连接引用的凭据禁止删除。旧连接没有 `credential_id` 时保持“仅此连接”
+的内联密码语义，不做自动迁移。
 
 #### 4.6.2 能力模型与三层强制
 
@@ -789,7 +795,7 @@ SSH/SMB/SVN 密码、Git 访问令牌与私钥口令**不再写入 `settings.tom
 
 | 优先级 | 后端 | 说明 |
 |--------|------|------|
-| 1 | 系统凭据库 | 服务名 `argus.connection`，**全部连接机密合并为单条记录**（账户名 `connection-secrets.v1`），值为账户名到机密的 JSON 映射 |
+| 1 | 系统凭据库 | 服务名 `argus.connection`，**全部连接机密合并为单条记录**（账户名 `connection-secrets.v1`），值为账户名到机密的 JSON 映射；账户名包含 `link/<id>/<slot>` 与共享凭据 `credential/<id>/password` |
 | 2 | 本地加密回落 | 凭据库不可用时（例如 Linux 缺少 Secret Service），用机器绑定派生密钥加密整份集合后以 `v1:` 前缀写入 `connections.secrets` 的保留键 `connection-secrets.v1` |
 
 **为什么是单条记录**：macOS 原生钥匙串的访问授权按**条目**授予，而应用每次更新都会改变代码

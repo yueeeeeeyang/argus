@@ -15,12 +15,15 @@ use super::svn_tls::SvnCertificateTrust;
 /// 链接目录和链接共享的节点 ID 类型，便于 UI 在同一棵树中统一选中、展开和定位。
 pub(crate) type ConnectionNodeId = usize;
 
+/// 可跨连接复用的账号密码凭据 ID。
+pub(crate) type ConnectionCredentialId = usize;
+
 /// SSH 连接默认端口；新增链接表单未填写端口时使用该值。
 pub(crate) const DEFAULT_SSH_PORT: u16 = 22;
 /// SMB 连接默认端口；新增 SMB 链接表单未填写端口时使用该值。
 pub(crate) const DEFAULT_SMB_PORT: u16 = 445;
 
-/// 链接工作区持久化配置，保存目录、远程链接和已确认的主机指纹。
+/// 链接工作区持久化配置，保存目录、远程链接、共享凭据和已确认的主机指纹。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ConnectionConfig {
     /// 下一个可分配的目录或链接 ID。
@@ -32,6 +35,15 @@ pub(crate) struct ConnectionConfig {
     /// 用户创建的远程链接；旧配置中的 SSH 链接会通过 `ssh` 字段兼容读取。
     #[serde(default)]
     pub links: Vec<ConnectionLinkConfig>,
+    /// 可跨连接复用的账号密码凭据元数据；密码本身只保存在系统凭据库。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<ConnectionCredentialConfig>,
+    /// 下一个可分配的凭据 ID。
+    #[serde(
+        default = "default_next_credential_id",
+        skip_serializing_if = "is_default_next_credential_id"
+    )]
+    pub next_credential_id: ConnectionCredentialId,
     /// 已经由用户确认可信的主机指纹。
     #[serde(default)]
     pub trusted_hosts: Vec<TrustedHostKeyConfig>,
@@ -52,6 +64,8 @@ impl Default for ConnectionConfig {
             next_id: default_next_connection_id(),
             directories: Vec::new(),
             links: Vec::new(),
+            credentials: Vec::new(),
+            next_credential_id: default_next_credential_id(),
             trusted_hosts: Vec::new(),
             trusted_svn_certificates: Vec::new(),
             secrets: BTreeMap::new(),
@@ -77,6 +91,57 @@ impl ConnectionConfig {
                 && !link.name.trim().is_empty()
                 && link.protocol().is_some()
         });
+        let mut used_credential_ids = BTreeSet::new();
+        self.credentials.retain(|credential| {
+            credential.id > 0
+                && used_credential_ids.insert(credential.id)
+                && !credential.name.trim().is_empty()
+                && !credential.username.trim().is_empty()
+                && !credential.allowed_protocols.is_empty()
+        });
+        for credential in &mut self.credentials {
+            credential.name = normalized_required_text(&credential.name);
+            credential.username = normalized_required_text(&credential.username);
+            credential.domain = normalized_optional_text(credential.domain.take());
+            credential.allowed_protocols.retain(|protocol| {
+                matches!(
+                    protocol,
+                    ConnectionLinkKind::Ssh | ConnectionLinkKind::Smb | ConnectionLinkKind::Svn
+                )
+            });
+            credential
+                .allowed_protocols
+                .sort_by_key(|protocol| match protocol {
+                    ConnectionLinkKind::Ssh => 0,
+                    ConnectionLinkKind::Smb => 1,
+                    ConnectionLinkKind::Svn => 2,
+                    ConnectionLinkKind::Git => 3,
+                });
+            credential.allowed_protocols.dedup();
+        }
+        self.credentials
+            .retain(|credential| !credential.allowed_protocols.is_empty());
+        // 同一用户名只保留一个默认凭据，避免新建连接时出现不确定的默认选择。
+        let mut default_usernames = BTreeSet::new();
+        for credential in &mut self.credentials {
+            if credential.is_default
+                && !default_usernames.insert(credential.username.to_ascii_lowercase())
+            {
+                credential.is_default = false;
+            }
+        }
+        self.next_credential_id = self
+            .next_credential_id
+            .max(
+                used_credential_ids
+                    .iter()
+                    .next_back()
+                    .copied()
+                    .unwrap_or_default()
+                    + 1,
+            )
+            .max(default_next_credential_id());
+
         let directory_ids = self
             .directories
             .iter()
@@ -138,6 +203,239 @@ impl ConnectionConfig {
         self
     }
 
+    /// 返回指定 ID 的共用凭据。
+    pub(crate) fn credential(
+        &self,
+        credential_id: ConnectionCredentialId,
+    ) -> Option<&ConnectionCredentialConfig> {
+        self.credentials
+            .iter()
+            .find(|credential| credential.id == credential_id)
+    }
+
+    /// 返回指定 ID 的共用凭据可变引用。
+    pub(crate) fn credential_mut(
+        &mut self,
+        credential_id: ConnectionCredentialId,
+    ) -> Option<&mut ConnectionCredentialConfig> {
+        self.credentials
+            .iter_mut()
+            .find(|credential| credential.id == credential_id)
+    }
+
+    /// 统计仍引用指定凭据的连接数量。
+    pub(crate) fn credential_usage_count(&self, credential_id: ConnectionCredentialId) -> usize {
+        self.links
+            .iter()
+            .filter(|link| link.credential_id() == Some(credential_id))
+            .count()
+    }
+
+    /// 返回可用于指定协议的凭据，按名称排序并保持稳定顺序。
+    pub(crate) fn credentials_for_protocol(
+        &self,
+        protocol: ConnectionLinkKind,
+    ) -> Vec<&ConnectionCredentialConfig> {
+        let mut credentials = self
+            .credentials
+            .iter()
+            .filter(|credential| credential.supports_protocol(protocol))
+            .collect::<Vec<_>>();
+        credentials.sort_by(|left, right| {
+            right
+                .is_default
+                .cmp(&left.is_default)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+        credentials
+    }
+
+    /// 返回指定协议下唯一的默认凭据，用于新建连接时预选。
+    pub(crate) fn default_credential_for_new_link(
+        &self,
+        protocol: ConnectionLinkKind,
+    ) -> Option<&ConnectionCredentialConfig> {
+        let mut matches = self
+            .credentials
+            .iter()
+            .filter(|credential| credential.is_default && credential.supports_protocol(protocol));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    /// 校验连接绑定的凭据存在且允许当前协议。
+    pub(crate) fn validate_link_credential(
+        &self,
+        credential_id: Option<ConnectionCredentialId>,
+        protocol: ConnectionLinkKind,
+    ) -> Result<(), ConnectionValidationError> {
+        let Some(credential_id) = credential_id else {
+            return Ok(());
+        };
+        let credential = self
+            .credential(credential_id)
+            .ok_or(ConnectionValidationError::CredentialNotFound)?;
+        if !credential.supports_protocol(protocol) {
+            return Err(ConnectionValidationError::CredentialProtocolMismatch);
+        }
+        Ok(())
+    }
+
+    /// 生成不冲突的凭据名称，供手动密码自动保存为共用凭据时使用。
+    pub(crate) fn unique_credential_name(&self, base: &str) -> String {
+        let base = normalized_required_text(base);
+        let base = if base.is_empty() {
+            "共用凭据".to_string()
+        } else {
+            base
+        };
+        if !self
+            .credentials
+            .iter()
+            .any(|credential| credential.name.eq_ignore_ascii_case(&base))
+        {
+            return base;
+        }
+        for suffix in 2.. {
+            let candidate = format!("{base} ({suffix})");
+            if !self
+                .credentials
+                .iter()
+                .any(|credential| credential.name.eq_ignore_ascii_case(&candidate))
+            {
+                return candidate;
+            }
+        }
+        unreachable!("凭据名称后缀必须能找到可用值")
+    }
+
+    /// 新建共用凭据并返回凭据 ID。
+    pub(crate) fn create_credential(
+        &mut self,
+        name: &str,
+        username: &str,
+        domain: Option<String>,
+        allowed_protocols: Vec<ConnectionLinkKind>,
+        is_default: bool,
+        password: &str,
+    ) -> Result<ConnectionCredentialId, ConnectionValidationError> {
+        let name = validate_required_text(name, ConnectionValidationError::MissingName)?;
+        let username =
+            validate_required_text(username, ConnectionValidationError::MissingUsername)?;
+        if password.is_empty() {
+            return Err(ConnectionValidationError::MissingCredentialPassword);
+        }
+        let allowed_protocols = normalized_credential_protocols(allowed_protocols)?;
+        if self
+            .credentials
+            .iter()
+            .any(|credential| credential.name.eq_ignore_ascii_case(&name))
+        {
+            return Err(ConnectionValidationError::DuplicateCredentialName);
+        }
+
+        let id = self.next_credential_id;
+        self.next_credential_id = self.next_credential_id.saturating_add(1);
+        if is_default {
+            self.clear_default_credential(&username, id);
+        }
+        self.credentials.push(ConnectionCredentialConfig {
+            id,
+            name,
+            username,
+            domain: normalized_optional_text(domain),
+            allowed_protocols,
+            is_default,
+            password: password.to_string(),
+        });
+        Ok(id)
+    }
+
+    /// 更新共用凭据；`password = None` 表示保留原密码。
+    pub(crate) fn update_credential(
+        &mut self,
+        credential_id: ConnectionCredentialId,
+        name: &str,
+        username: &str,
+        domain: Option<String>,
+        allowed_protocols: Vec<ConnectionLinkKind>,
+        is_default: bool,
+        password: Option<&str>,
+    ) -> Result<(), ConnectionValidationError> {
+        let name = validate_required_text(name, ConnectionValidationError::MissingName)?;
+        let username =
+            validate_required_text(username, ConnectionValidationError::MissingUsername)?;
+        if let Some(password) = password
+            && password.is_empty()
+        {
+            return Err(ConnectionValidationError::MissingCredentialPassword);
+        }
+        let allowed_protocols = normalized_credential_protocols(allowed_protocols)?;
+        if self.credentials.iter().any(|credential| {
+            credential.id != credential_id && credential.name.eq_ignore_ascii_case(&name)
+        }) {
+            return Err(ConnectionValidationError::DuplicateCredentialName);
+        }
+        // 被连接使用的协议不能被移出允许范围，否则这些连接会失去密码来源。
+        for link in &self.links {
+            if link.credential_id() == Some(credential_id)
+                && let Some(protocol) = link.protocol()
+                && !allowed_protocols.contains(&protocol)
+            {
+                return Err(ConnectionValidationError::CredentialProtocolMismatch);
+            }
+        }
+        if !self
+            .credentials
+            .iter()
+            .any(|credential| credential.id == credential_id)
+        {
+            return Err(ConnectionValidationError::CredentialNotFound);
+        }
+        if is_default {
+            self.clear_default_credential(&username, credential_id);
+        }
+        let credential = self
+            .credential_mut(credential_id)
+            .ok_or(ConnectionValidationError::CredentialNotFound)?;
+        credential.name = name;
+        credential.username = username;
+        credential.domain = normalized_optional_text(domain);
+        credential.allowed_protocols = allowed_protocols;
+        credential.is_default = is_default;
+        if let Some(password) = password {
+            credential.password = password.to_string();
+        }
+        Ok(())
+    }
+
+    /// 删除未被任何连接引用的共用凭据。
+    pub(crate) fn delete_credential(
+        &mut self,
+        credential_id: ConnectionCredentialId,
+    ) -> Result<(), ConnectionValidationError> {
+        let usage = self.credential_usage_count(credential_id);
+        if usage > 0 {
+            return Err(ConnectionValidationError::CredentialInUse(usage));
+        }
+        let previous_len = self.credentials.len();
+        self.credentials
+            .retain(|credential| credential.id != credential_id);
+        if self.credentials.len() == previous_len {
+            return Err(ConnectionValidationError::CredentialNotFound);
+        }
+        Ok(())
+    }
+
+    /// 清除同用户名其他凭据的默认标记。
+    fn clear_default_credential(&mut self, username: &str, keep_id: ConnectionCredentialId) {
+        for credential in &mut self.credentials {
+            if credential.id != keep_id && credential.username.eq_ignore_ascii_case(username) {
+                credential.is_default = false;
+            }
+        }
+    }
+
     /// 根据当前选中节点推导新增目录的父目录；仅选中目录时创建子目录。
     pub(crate) fn parent_for_new_directory(
         &self,
@@ -188,6 +486,7 @@ impl ConnectionConfig {
     ) -> Result<ConnectionNodeId, ConnectionValidationError> {
         let name = validate_node_name(name)?;
         let ssh = ssh.normalized_for_save()?;
+        self.validate_link_credential(ssh.credential_id, ConnectionLinkKind::Ssh)?;
         self.validate_parent_directory(parent_id)?;
         self.validate_sibling_name_available(parent_id, &name, None)?;
 
@@ -218,6 +517,7 @@ impl ConnectionConfig {
     ) -> Result<ConnectionNodeId, ConnectionValidationError> {
         let name = validate_node_name(name)?;
         let smb = smb.normalized_for_save()?;
+        self.validate_link_credential(smb.credential_id, ConnectionLinkKind::Smb)?;
         self.validate_parent_directory(parent_id)?;
         self.validate_sibling_name_available(parent_id, &name, None)?;
 
@@ -278,6 +578,7 @@ impl ConnectionConfig {
     ) -> Result<ConnectionNodeId, ConnectionValidationError> {
         let name = validate_node_name(name)?;
         let svn = svn.normalized_for_save()?;
+        self.validate_link_credential(svn.credential_id, ConnectionLinkKind::Svn)?;
         self.validate_parent_directory(parent_id)?;
         self.validate_sibling_name_available(parent_id, &name, None)?;
 
@@ -327,6 +628,7 @@ impl ConnectionConfig {
     ) -> Result<(), ConnectionValidationError> {
         let name = validate_node_name(name)?;
         let ssh = ssh.normalized_for_save()?;
+        self.validate_link_credential(ssh.credential_id, ConnectionLinkKind::Ssh)?;
         let parent_id = self
             .link(link_id)
             .ok_or(ConnectionValidationError::NodeNotFound)?
@@ -356,6 +658,7 @@ impl ConnectionConfig {
     ) -> Result<(), ConnectionValidationError> {
         let name = validate_node_name(name)?;
         let smb = smb.normalized_for_save()?;
+        self.validate_link_credential(smb.credential_id, ConnectionLinkKind::Smb)?;
         let parent_id = self
             .link(link_id)
             .ok_or(ConnectionValidationError::NodeNotFound)?
@@ -414,6 +717,7 @@ impl ConnectionConfig {
     ) -> Result<(), ConnectionValidationError> {
         let name = validate_node_name(name)?;
         let svn = svn.normalized_for_save()?;
+        self.validate_link_credential(svn.credential_id, ConnectionLinkKind::Svn)?;
         let parent_id = self
             .link(link_id)
             .ok_or(ConnectionValidationError::NodeNotFound)?
@@ -551,6 +855,34 @@ impl ConnectionConfig {
     /// 返回指定链接配置。
     pub(crate) fn link(&self, link_id: ConnectionNodeId) -> Option<&ConnectionLinkConfig> {
         self.links.iter().find(|link| link.id == link_id)
+    }
+
+    /// 把共用凭据密码回填到引用它的连接内存字段。
+    ///
+    /// 参数说明：
+    /// - `only_credential_id`：只回填指定凭据；`None` 表示全部共用凭据。
+    pub(crate) fn rehydrate_credential_passwords(
+        &mut self,
+        only_credential_id: Option<ConnectionCredentialId>,
+    ) {
+        let passwords = self
+            .credentials
+            .iter()
+            .filter(|credential| {
+                only_credential_id.is_none_or(|credential_id| credential.id == credential_id)
+            })
+            .map(|credential| (credential.id, credential.password.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for link in &mut self.links {
+            let Some(credential_id) = link.credential_id() else {
+                continue;
+            };
+            if let Some(password) = passwords.get(&credential_id)
+                && !password.is_empty()
+            {
+                link.apply_credential_password(password);
+            }
+        }
     }
 
     /// 返回指定目录配置。
@@ -955,6 +1287,86 @@ pub(crate) struct ConnectionLinkConfig {
     pub svn: Option<SvnLinkConfig>,
 }
 
+/// 可跨连接复用的账号密码凭据。
+///
+/// 密码只存在于系统凭据库与内存中的 `password` 字段；设置文件只保存名称、用户名、
+/// 适用协议和默认标记等元数据。
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct ConnectionCredentialConfig {
+    /// 凭据稳定 ID。
+    pub id: ConnectionCredentialId,
+    /// 面向用户展示的凭据名称。
+    pub name: String,
+    /// 凭据默认用户名；选择凭据时会填入连接表单，连接仍可单独修改用户名。
+    pub username: String,
+    /// SMB 域或工作组；其他协议忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// 允许使用该凭据的协议；至少包含一项。
+    pub allowed_protocols: Vec<ConnectionLinkKind>,
+    /// 是否作为同用户名新连接的默认凭据。
+    #[serde(default)]
+    pub is_default: bool,
+    /// 运行时密码；不序列化，只从系统凭据库回填。
+    #[serde(skip)]
+    pub password: String,
+}
+
+impl fmt::Debug for ConnectionCredentialConfig {
+    /// 输出脱敏调试信息；密码永不进入日志或断言失败文本。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionCredentialConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("username", &self.username)
+            .field("domain", &self.domain)
+            .field("allowed_protocols", &self.allowed_protocols)
+            .field("is_default", &self.is_default)
+            .field(
+                "password",
+                &(!self.password.is_empty()).then_some("<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl Default for ConnectionCredentialConfig {
+    /// 构造空凭据；ID 由 `ConnectionConfig` 分配。
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: String::new(),
+            username: String::new(),
+            domain: None,
+            allowed_protocols: Vec::new(),
+            is_default: false,
+            password: String::new(),
+        }
+    }
+}
+
+impl ConnectionCredentialConfig {
+    /// 判断凭据是否允许用于指定协议。
+    pub(crate) fn supports_protocol(&self, protocol: ConnectionLinkKind) -> bool {
+        self.allowed_protocols.contains(&protocol)
+    }
+
+    /// 返回协议的中文短标签，用于凭据列表展示。
+    pub(crate) fn protocol_labels(&self) -> String {
+        self.allowed_protocols
+            .iter()
+            .map(|protocol| match protocol {
+                ConnectionLinkKind::Ssh => "SSH",
+                ConnectionLinkKind::Smb => "SMB",
+                ConnectionLinkKind::Git => "Git",
+                ConnectionLinkKind::Svn => "SVN",
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
 /// 连接机密槽位；决定凭据库账户名与设置文件中本地密文表的键。
 ///
 /// 槽位标识是持久化契约的一部分：一旦发布就不能改名，否则已保存的凭据会失联。
@@ -992,6 +1404,50 @@ impl ConnectionSecretSlot {
 }
 
 impl ConnectionLinkConfig {
+    /// 返回当前协议绑定的共用凭据 ID。
+    pub(crate) fn credential_id(&self) -> Option<ConnectionCredentialId> {
+        self.ssh
+            .as_ref()
+            .and_then(|config| config.credential_id)
+            .or_else(|| self.smb.as_ref().and_then(|config| config.credential_id))
+            .or_else(|| self.svn.as_ref().and_then(|config| config.credential_id))
+    }
+
+    /// 把当前协议绑定到共用凭据，并清空内联密码。
+    pub(crate) fn bind_credential(&mut self, credential_id: ConnectionCredentialId) {
+        if let Some(ssh) = self.ssh.as_mut() {
+            ssh.credential_id = Some(credential_id);
+            ssh.password.clear();
+        } else if let Some(smb) = self.smb.as_mut() {
+            smb.credential_id = Some(credential_id);
+            smb.password.clear();
+        } else if let Some(svn) = self.svn.as_mut() {
+            svn.credential_id = Some(credential_id);
+            svn.password = None;
+        }
+    }
+
+    /// 把共用凭据密码写入当前协议的内存字段，供现有连接代码直接使用。
+    ///
+    /// 说明：该值不会再次序列化；保存时 `secret_slots` 会跳过共用凭据密码。
+    pub(crate) fn apply_credential_password(&mut self, password: &str) {
+        if let Some(ssh) = self.ssh.as_mut()
+            && ssh.credential_id.is_some()
+        {
+            ssh.password = password.to_string();
+        }
+        if let Some(smb) = self.smb.as_mut()
+            && smb.credential_id.is_some()
+        {
+            smb.password = password.to_string();
+        }
+        if let Some(svn) = self.svn.as_mut()
+            && svn.credential_id.is_some()
+        {
+            svn.password = Some(password.to_string());
+        }
+    }
+
     /// 返回该链接当前携带的全部机密槽位取值；未设置或协议不适用时值为 `None`。
     ///
     /// 说明：返回值是内存中的明文副本，只允许交给 `secret_store` 或远端连接代码，
@@ -999,16 +1455,21 @@ impl ConnectionLinkConfig {
     pub(crate) fn secret_slots(&self) -> Vec<(ConnectionSecretSlot, Option<String>)> {
         let mut slots = Vec::new();
         if let Some(ssh) = &self.ssh {
-            slots.push((
-                ConnectionSecretSlot::SshPassword,
-                (!ssh.password.is_empty()).then(|| ssh.password.clone()),
-            ));
+            // 共用凭据的密码由 credential/<id>/password 单独保存，连接内不再复制一份。
+            if ssh.credential_id.is_none() {
+                slots.push((
+                    ConnectionSecretSlot::SshPassword,
+                    (!ssh.password.is_empty()).then(|| ssh.password.clone()),
+                ));
+            }
             slots.push((
                 ConnectionSecretSlot::SshKeyPassphrase,
                 ssh.private_key_passphrase.clone(),
             ));
         }
-        if let Some(smb) = &self.smb {
+        if let Some(smb) = &self.smb
+            && smb.credential_id.is_none()
+        {
             slots.push((
                 ConnectionSecretSlot::SmbPassword,
                 (!smb.password.is_empty()).then(|| smb.password.clone()),
@@ -1022,7 +1483,9 @@ impl ConnectionLinkConfig {
             ));
         }
         if let Some(svn) = &self.svn {
-            slots.push((ConnectionSecretSlot::SvnPassword, svn.password.clone()));
+            if svn.credential_id.is_none() {
+                slots.push((ConnectionSecretSlot::SvnPassword, svn.password.clone()));
+            }
             slots.push((
                 ConnectionSecretSlot::SvnKeyPassphrase,
                 svn.private_key_passphrase.clone(),
@@ -1225,6 +1688,9 @@ pub(crate) struct SshLinkConfig {
     /// 之后一律不再序列化，机密落盘位置由 `secret_store` 统一决定。
     #[serde(default, skip_serializing)]
     pub password: String,
+    /// 复用的账号密码凭据；为空时使用本连接内联密码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<ConnectionCredentialId>,
     /// 私钥文件路径；为空时跳过私钥登录。
     #[serde(default)]
     pub private_key_path: Option<String>,
@@ -1261,6 +1727,7 @@ impl Default for SshLinkConfig {
             host: String::new(),
             port: DEFAULT_SSH_PORT,
             username: String::new(),
+            credential_id: None,
             password: String::new(),
             private_key_path: None,
             private_key_passphrase: None,
@@ -1280,7 +1747,10 @@ impl SshLinkConfig {
         self.private_key_path = normalized_optional_text(self.private_key_path.take());
         self.private_key_passphrase =
             normalized_optional_secret_text(self.private_key_passphrase.take());
-        if self.password.is_empty() && self.private_key_path.is_none() {
+        if self.password.is_empty()
+            && self.private_key_path.is_none()
+            && self.credential_id.is_none()
+        {
             return Err(ConnectionValidationError::MissingCredential);
         }
         Ok(self)
@@ -1308,6 +1778,9 @@ pub(crate) struct SmbLinkConfig {
     /// 密码鉴权字段；序列化语义同 SSH 的 `password`，只读旧明文、不再写回。
     #[serde(default, skip_serializing)]
     pub password: String,
+    /// 复用的账号密码凭据；为空时使用本连接内联密码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<ConnectionCredentialId>,
 }
 
 impl fmt::Debug for SmbLinkConfig {
@@ -1339,6 +1812,7 @@ impl Default for SmbLinkConfig {
             initial_dir: default_smb_initial_dir(),
             domain: None,
             username: String::new(),
+            credential_id: None,
             password: String::new(),
         }
     }
@@ -1356,7 +1830,7 @@ impl SmbLinkConfig {
         self.domain = normalized_optional_text(self.domain.take());
         self.username =
             validate_required_text(&self.username, ConnectionValidationError::MissingUsername)?;
-        if self.password.is_empty() {
+        if self.password.is_empty() && self.credential_id.is_none() {
             return Err(ConnectionValidationError::MissingPassword);
         }
         Ok(self)
@@ -1460,6 +1934,9 @@ pub(crate) struct SvnLinkConfig {
     /// HTTP(S)/`svn://` 仓库密码或 `svn+ssh://` SSH 密码；只读旧明文、不再写回设置文件。
     #[serde(default, skip_serializing)]
     pub password: Option<String>,
+    /// 复用的账号密码凭据；为空时使用本连接内联密码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<ConnectionCredentialId>,
     /// `svn+ssh://` SSH 私钥路径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
@@ -1497,10 +1974,13 @@ impl SvnLinkConfig {
 
         match svn_url_kind(&self.url)? {
             RepositoryUrlKind::Password { embedded_username } => {
-                // HTTP(S)/svn:// 允许匿名；一旦 URL 或表单提供用户名，就必须同时提供密码，反之亦然。
+                // HTTP(S)/svn:// 允许匿名；一旦 URL 或表单提供用户名，就必须同时提供密码或共用凭据。
                 let has_username = embedded_username || self.username.is_some();
-                if has_username != self.password.is_some() {
+                if has_username && self.password.is_none() && self.credential_id.is_none() {
                     return Err(ConnectionValidationError::IncompletePasswordCredential);
+                }
+                if !has_username && self.credential_id.is_some() {
+                    return Err(ConnectionValidationError::MissingUsername);
                 }
             }
             RepositoryUrlKind::Ssh {
@@ -1509,7 +1989,10 @@ impl SvnLinkConfig {
                 return Err(ConnectionValidationError::MissingUsername);
             }
             RepositoryUrlKind::Ssh { .. } => {
-                if self.password.is_none() && self.private_key_path.is_none() {
+                if self.password.is_none()
+                    && self.private_key_path.is_none()
+                    && self.credential_id.is_none()
+                {
                     return Err(ConnectionValidationError::MissingCredential);
                 }
             }
@@ -1519,7 +2002,9 @@ impl SvnLinkConfig {
         {
             return Err(ConnectionValidationError::UnexpectedSshCredential);
         }
-        if self.password.is_some() && self.private_key_path.is_some() {
+        if (self.password.is_some() || self.credential_id.is_some())
+            && self.private_key_path.is_some()
+        {
             return Err(ConnectionValidationError::ConflictingSshCredential);
         }
         Ok(self)
@@ -1686,6 +2171,24 @@ pub(crate) enum ConnectionValidationError {
     /// 同级目录或链接重名。
     #[error("同一目录下已存在同名目录或链接")]
     DuplicateName,
+    /// 连接引用的共用凭据不存在。
+    #[error("连接凭据不存在，请重新选择凭据")]
+    CredentialNotFound,
+    /// 共用凭据不允许用于当前连接协议。
+    #[error("该凭据不适用于当前连接协议")]
+    CredentialProtocolMismatch,
+    /// 凭据仍被连接引用，删除会导致这些连接失去密码。
+    #[error("该凭据仍被 {0} 个连接使用，请先更换这些连接的凭据")]
+    CredentialInUse(usize),
+    /// 凭据没有选择任何适用协议。
+    #[error("请至少选择一种适用协议")]
+    MissingCredentialProtocol,
+    /// 新建凭据时密码为空。
+    #[error("凭据密码不能为空")]
+    MissingCredentialPassword,
+    /// 凭据名称重复。
+    #[error("已存在同名凭据")]
+    DuplicateCredentialName,
 }
 
 /// 子节点引用，避免构建可见行时复制完整配置。
@@ -1709,6 +2212,16 @@ impl ConnectionChildRef {
 /// 默认下一个节点 ID，从 1 开始便于 `0` 保留给无效值。
 fn default_next_connection_id() -> ConnectionNodeId {
     1
+}
+
+/// 默认凭据 ID 从 1 开始，避免 0 被误认为未设置。
+fn default_next_credential_id() -> ConnectionCredentialId {
+    1
+}
+
+/// 凭据 ID 仍为默认值时无需写入设置文件。
+fn is_default_next_credential_id(value: &ConnectionCredentialId) -> bool {
+    *value == default_next_credential_id()
 }
 
 /// 默认目录展开状态；新建目录展开以便立即展示其子项。
@@ -1915,6 +2428,29 @@ fn normalized_optional_text(value: Option<String>) -> Option<String> {
 /// 归一化可选敏感文本字段；只把真正空字符串保存为 `None`，避免改写用户凭据。
 fn normalized_optional_secret_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| (!value.is_empty()).then_some(value))
+}
+
+/// 归一化凭据适用协议：只保留 SSH/SMB/SVN，去重排序并拒绝空集合。
+fn normalized_credential_protocols(
+    mut protocols: Vec<ConnectionLinkKind>,
+) -> Result<Vec<ConnectionLinkKind>, ConnectionValidationError> {
+    protocols.retain(|protocol| {
+        matches!(
+            protocol,
+            ConnectionLinkKind::Ssh | ConnectionLinkKind::Smb | ConnectionLinkKind::Svn
+        )
+    });
+    protocols.sort_by_key(|protocol| match protocol {
+        ConnectionLinkKind::Ssh => 0,
+        ConnectionLinkKind::Smb => 1,
+        ConnectionLinkKind::Svn => 2,
+        ConnectionLinkKind::Git => 3,
+    });
+    protocols.dedup();
+    if protocols.is_empty() {
+        return Err(ConnectionValidationError::MissingCredentialProtocol);
+    }
+    Ok(protocols)
 }
 
 #[cfg(test)]
@@ -2161,6 +2697,7 @@ mod tests {
                     host: "10.0.0.1".to_string(),
                     port: 22,
                     username: "deploy".to_string(),
+                    credential_id: None,
                     password: "secret".to_string(),
                     private_key_path: None,
                     private_key_passphrase: None,
@@ -2273,6 +2810,7 @@ mod tests {
                     host: "10.0.0.1".to_string(),
                     port: 22,
                     username: "deploy".to_string(),
+                    credential_id: None,
                     password: "secret".to_string(),
                     private_key_path: None,
                     private_key_passphrase: None,
@@ -2288,6 +2826,7 @@ mod tests {
                     host: "10.0.0.2".to_string(),
                     port: 22,
                     username: "deploy".to_string(),
+                    credential_id: None,
                     password: "secret".to_string(),
                     private_key_path: None,
                     private_key_passphrase: None,
@@ -2350,6 +2889,7 @@ mod tests {
                     host: "10.0.0.1".to_string(),
                     port: 22,
                     username: "deploy".to_string(),
+                    credential_id: None,
                     password: "secret".to_string(),
                     private_key_path: None,
                     private_key_passphrase: None,
@@ -2379,6 +2919,7 @@ mod tests {
                     host: "10.0.0.1".to_string(),
                     port: 22,
                     username: "deploy".to_string(),
+                    credential_id: None,
                     password: "secret".to_string(),
                     private_key_path: None,
                     private_key_passphrase: None,
@@ -2441,6 +2982,7 @@ mod tests {
                     host: "10.0.0.1".to_string(),
                     port: 22,
                     username: "deploy".to_string(),
+                    credential_id: None,
                     password: String::new(),
                     private_key_path: None,
                     private_key_passphrase: None,
@@ -2458,6 +3000,7 @@ mod tests {
             host: " 10.0.0.1 ".to_string(),
             port: 22,
             username: " deploy ".to_string(),
+            credential_id: None,
             password: " secret ".to_string(),
             private_key_path: Some(" ~/.ssh/id_ed25519 ".to_string()),
             private_key_passphrase: Some(" phrase ".to_string()),
@@ -2487,6 +3030,7 @@ mod tests {
                     initial_dir: "/runtime".to_string(),
                     domain: Some("WORKGROUP".to_string()),
                     username: "smbuser".to_string(),
+                    credential_id: None,
                     password: "secret".to_string(),
                 },
             )
@@ -2511,6 +3055,7 @@ mod tests {
             initial_dir: "runtime".to_string(),
             domain: None,
             username: "smbuser".to_string(),
+            credential_id: None,
             password: String::new(),
         }
         .normalized_for_save()
@@ -2524,6 +3069,7 @@ mod tests {
             initial_dir: "runtime/".to_string(),
             domain: None,
             username: "smbuser".to_string(),
+            credential_id: None,
             password: "secret".to_string(),
         }
         .normalized_for_save()
@@ -2685,6 +3231,7 @@ mod tests {
         SvnLinkConfig {
             url: "svn://example.com/repo".to_string(),
             username: Some("reader".to_string()),
+            credential_id: None,
             password: Some(" secret ".to_string()),
             ..Default::default()
         }
@@ -2892,6 +3439,172 @@ mod tests {
         assert_eq!(
             ConnectionSecretSlot::SvnKeyPassphrase.as_str(),
             "svn_key_passphrase"
+        );
+    }
+
+    /// 共用凭据应统计引用连接，且绑定连接不再保存重复密码。
+    #[test]
+    fn shared_credential_counts_usage_and_skips_inline_password_slot() {
+        let mut config = ConnectionConfig::default();
+        let credential_id = config
+            .create_credential(
+                "运维账号",
+                "deploy",
+                None,
+                vec![ConnectionLinkKind::Ssh, ConnectionLinkKind::Smb],
+                false,
+                "shared-secret",
+            )
+            .unwrap();
+        let link_id = config
+            .add_ssh_link(
+                None,
+                "app-01",
+                SshLinkConfig {
+                    host: "10.0.0.1".to_string(),
+                    port: 22,
+                    username: "deploy".to_string(),
+                    credential_id: Some(credential_id),
+                    password: String::new(),
+                    private_key_path: None,
+                    private_key_passphrase: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(config.credential_usage_count(credential_id), 1);
+        config.rehydrate_credential_passwords(None);
+        let link = config.link(link_id).unwrap();
+        assert_eq!(link.ssh.as_ref().unwrap().password, "shared-secret");
+        assert!(
+            link.secret_slots()
+                .iter()
+                .all(|(slot, _)| *slot != ConnectionSecretSlot::SshPassword),
+            "绑定共用凭据后不得再持久化连接内联密码"
+        );
+        assert!(matches!(
+            config.delete_credential(credential_id),
+            Err(ConnectionValidationError::CredentialInUse(1))
+        ));
+    }
+
+    /// 凭据不支持的协议不能绑定，更新密码后应同步到所有引用连接。
+    #[test]
+    fn shared_credential_rejects_protocol_mismatch_and_updates_bound_links() {
+        let mut config = ConnectionConfig::default();
+        let credential_id = config
+            .create_credential(
+                "SMB 账号",
+                "smbuser",
+                Some("WORKGROUP".to_string()),
+                vec![ConnectionLinkKind::Smb],
+                false,
+                "old-secret",
+            )
+            .unwrap();
+        let ssh = SshLinkConfig {
+            host: "10.0.0.1".to_string(),
+            port: 22,
+            username: "deploy".to_string(),
+            credential_id: Some(credential_id),
+            password: String::new(),
+            private_key_path: None,
+            private_key_passphrase: None,
+        };
+        assert!(matches!(
+            config.add_ssh_link(None, "app-01", ssh),
+            Err(ConnectionValidationError::CredentialProtocolMismatch)
+        ));
+
+        let link_id = config
+            .add_smb_link(
+                None,
+                "共享日志",
+                SmbLinkConfig {
+                    host: "10.0.0.2".to_string(),
+                    port: 445,
+                    share: "logs".to_string(),
+                    initial_dir: "/".to_string(),
+                    domain: Some("WORKGROUP".to_string()),
+                    username: "smbuser".to_string(),
+                    credential_id: Some(credential_id),
+                    password: String::new(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            config.update_credential(
+                credential_id,
+                "SMB 账号",
+                "smbuser",
+                Some("WORKGROUP".to_string()),
+                vec![ConnectionLinkKind::Ssh],
+                false,
+                Some("new-secret"),
+            ),
+            Err(ConnectionValidationError::CredentialProtocolMismatch)
+        ));
+        config
+            .update_credential(
+                credential_id,
+                "SMB 账号",
+                "smbuser",
+                Some("WORKGROUP".to_string()),
+                vec![ConnectionLinkKind::Smb],
+                false,
+                Some("new-secret"),
+            )
+            .unwrap();
+        config.rehydrate_credential_passwords(Some(credential_id));
+        assert_eq!(
+            config.link(link_id).unwrap().smb.as_ref().unwrap().password,
+            "new-secret"
+        );
+    }
+
+    /// 同一用户名只保留最后一个默认凭据，不同用户名互不影响。
+    #[test]
+    fn shared_credential_default_is_unique_per_username() {
+        let mut config = ConnectionConfig::default();
+        let first = config
+            .create_credential(
+                "旧默认",
+                "ops",
+                None,
+                vec![ConnectionLinkKind::Ssh],
+                true,
+                "one",
+            )
+            .unwrap();
+        let second = config
+            .create_credential(
+                "新默认",
+                "ops",
+                None,
+                vec![ConnectionLinkKind::Ssh],
+                true,
+                "two",
+            )
+            .unwrap();
+        let other_user = config
+            .create_credential(
+                "其他账号",
+                "deploy",
+                None,
+                vec![ConnectionLinkKind::Smb],
+                true,
+                "three",
+            )
+            .unwrap();
+
+        assert!(!config.credential(first).unwrap().is_default);
+        assert!(config.credential(second).unwrap().is_default);
+        assert!(config.credential(other_user).unwrap().is_default);
+        assert_eq!(
+            config
+                .default_credential_for_new_link(ConnectionLinkKind::Ssh)
+                .map(|credential| credential.id),
+            Some(second)
         );
     }
 }

@@ -1,30 +1,32 @@
 //! 文件职责：渲染链接工作区的目录、链接和确认模态框。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-28
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：提供目录与多协议链接表单、统一删除确认样式，并展示首次连接主机指纹确认。
+//! 主要功能：提供目录与多协议链接表单、共享凭据管理、统一删除确认样式，并展示首次连接主机指纹确认。
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, Subscription, Window, div,
-    prelude::*, px, rgb,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, SharedString, Subscription,
+    Window, div, prelude::*, px, rgb,
 };
 
 use crate::app::{
-    ArgusApp, ConnectionDeletePromptState, ConnectionDialogState, ConnectionDirectoryFormState,
-    ConnectionHostKeyPromptState, ConnectionLinkFormState, ConnectionSvnCertificatePromptState,
-    TextInputState,
+    ArgusApp, ConnectionCredentialFormState, ConnectionDeletePromptState, ConnectionDialogState,
+    ConnectionDirectoryFormState, ConnectionHostKeyPromptState, ConnectionLinkFormState,
+    ConnectionSvnCertificatePromptState, TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
     slice_character_range,
 };
-use crate::remote::connection::ConnectionLinkKind;
+use crate::remote::connection::{ConnectionCredentialId, ConnectionLinkKind};
 use crate::remote::svn_certificate::SvnCertificateDecision;
 use crate::theme::AppTheme;
+use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
@@ -43,6 +45,19 @@ const CONNECTION_WINDOW_TITLE_ICON_SIZE: f32 = 16.0;
 const CONNECTION_DIRECTORY_MODAL_WIDTH: f32 = 420.0;
 /// 链接表单模态框宽度，沿用改造前独立窗口尺寸。
 const CONNECTION_LINK_MODAL_WIDTH: f32 = 520.0;
+/// 共用凭据管理模态框宽度。
+const CONNECTION_CREDENTIAL_MODAL_WIDTH: f32 = 680.0;
+/// 共用凭据管理模态框高度。
+const CONNECTION_CREDENTIAL_MODAL_HEIGHT: f32 = 520.0;
+/// 链接表单凭据下拉浮层相对弹窗顶部的偏移。
+///
+/// 凭据行固定在名称行之后；浮层挂在弹窗根节点而不是滚动容器内，避免被表单
+/// 滚动区域裁切，同时保持点击命中顺序正确。
+const CONNECTION_LINK_CREDENTIAL_MENU_TOP: f32 = 132.0;
+/// 链接表单凭据下拉浮层相对弹窗左侧的偏移。
+const CONNECTION_LINK_CREDENTIAL_MENU_LEFT: f32 = 114.0;
+/// 链接表单凭据下拉浮层宽度。
+const CONNECTION_LINK_CREDENTIAL_MENU_WIDTH: f32 = 260.0;
 /// 表单滚动区滚动条宽度；滚动条槽位会占用正文可用宽度。
 const CONNECTION_FORM_SCROLLBAR_WIDTH: f32 = 6.0;
 /// 表单滚动区右侧内边距：左右 20px 视觉边距扣除滚动条槽位，保证输入框右缘与底栏按钮对齐。
@@ -298,6 +313,8 @@ pub(crate) struct ConnectionLinkWindow {
     form: ConnectionLinkFormState,
     /// 当前模态框处于新增还是编辑模式。
     mode: ConnectionLinkWindowMode,
+    /// 凭据下拉菜单是否展开。
+    credential_menu_open: bool,
     /// 模态框根区域和输入框焦点句柄。
     focus_handles: ConnectionLinkWindowFocusHandles,
     /// 主应用状态订阅，主题切换后模态框跟随刷新。
@@ -365,6 +382,7 @@ impl ConnectionLinkWindow {
             theme,
             form,
             mode,
+            credential_menu_open: false,
             focus_handles: ConnectionLinkWindowFocusHandles {
                 root: cx.focus_handle(),
                 name: cx.focus_handle(),
@@ -393,6 +411,17 @@ impl ConnectionLinkWindow {
         self.form.link_kind
     }
 
+    /// 返回当前表单选中的共用凭据，供删除保护和交互测试使用。
+    pub(crate) fn selected_credential_id(&self) -> Option<ConnectionCredentialId> {
+        self.form.credential_id
+    }
+
+    /// 返回当前表单选中的共用凭据，供交互测试断言。
+    #[cfg(test)]
+    pub(crate) fn credential_id_for_test(&self) -> Option<ConnectionCredentialId> {
+        self.form.credential_id
+    }
+
     /// 返回当前表单父目录，供菜单新建链路断言父目录推导。
     #[cfg(test)]
     pub(crate) fn form_parent_id(&self) -> Option<crate::remote::connection::ConnectionNodeId> {
@@ -416,6 +445,63 @@ impl ConnectionLinkWindow {
         focus_input_state(&mut form.name_input);
         self.form = form;
         self.mode = mode;
+    }
+
+    /// 切换凭据下拉菜单。
+    fn toggle_credential_menu(&mut self) {
+        self.credential_menu_open = !self.credential_menu_open;
+    }
+
+    /// 选择共用凭据或切回手动输入。
+    fn select_credential(
+        &mut self,
+        credential_id: Option<ConnectionCredentialId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.credential_menu_open = false;
+        self.form.credential_id = credential_id;
+        self.form.save_as_credential = false;
+        self.form.error_message = None;
+        self.form.password_input = TextInputState::default();
+        if let Some(credential_id) = credential_id
+            && let Some(credential) = self.app.read_with(cx, |app, _| {
+                app.config.connections.credential(credential_id).cloned()
+            })
+        {
+            self.form.username_input = TextInputState::from_value(credential.username);
+            if self.form.link_kind == ConnectionLinkKind::Smb {
+                self.form.domain_input =
+                    TextInputState::from_value(credential.domain.clone().unwrap_or_default());
+            }
+        }
+    }
+
+    /// 打开共用凭据管理弹窗，并优先勾选当前协议。
+    fn open_credential_manager(&mut self, cx: &mut Context<Self>) {
+        let protocol = self.form.link_kind;
+        self.credential_menu_open = false;
+        self.app.update(cx, |app, app_cx| {
+            app.open_connection_credential_manager(protocol, app_cx)
+        });
+    }
+
+    /// 切换“保存为共用凭据”选项。
+    fn toggle_save_as_credential(&mut self) {
+        self.form.save_as_credential = !self.form.save_as_credential;
+    }
+
+    /// 应用凭据下拉选项。
+    fn apply_credential_menu_selection(&mut self, item_id: &str, cx: &mut Context<Self>) {
+        if item_id == "manage" {
+            self.open_credential_manager(cx);
+        } else if item_id == "inline" {
+            self.select_credential(None, cx);
+        } else if let Some(credential_id) = item_id
+            .strip_prefix("credential-")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            self.select_credential(Some(credential_id), cx);
+        }
     }
 
     /// 聚焦链接窗口中的指定输入框。
@@ -534,12 +620,23 @@ impl ConnectionLinkWindow {
 impl Render for ConnectionLinkWindow {
     /// 渲染链接表单模态框主体。
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let link_kind = self.form.link_kind;
+        let credentials = self.app.read_with(cx, |app, _| {
+            app.config
+                .connections
+                .credentials_for_protocol(link_kind)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         render_link_window_content(
             self.app.clone(),
             cx.entity(),
             self.theme.clone(),
             self.form.clone(),
             self.mode,
+            self.credential_menu_open,
+            credentials,
             self.focus_handles.clone(),
         )
     }
@@ -756,7 +853,7 @@ fn render_directory_window_content(
                     &window_entity,
                     &app_handle,
                 ))
-                .when_some(form.error_message, |this, message| {
+                .when_some(form.error_message.clone(), |this, message| {
                     this.child(error_text(message, &theme))
                 }),
         )
@@ -857,6 +954,7 @@ fn preferred_connection_link_modal_height(form: &ConnectionLinkFormState) -> f32
         form.link_kind,
         &form.url_input.value,
         form.error_message.is_some(),
+        form.credential_id.is_some(),
     )
 }
 
@@ -872,11 +970,16 @@ fn preferred_connection_link_modal_height_for(
     link_kind: ConnectionLinkKind,
     url: &str,
     has_error: bool,
+    has_shared_credential: bool,
 ) -> f32 {
     let visibility = connection_link_field_visibility(link_kind, url);
     // 名称和用户名始终展示；非仓库链接使用主机+端口，仓库链接使用 URL。
     let mut input_count = 2 + if visibility.is_repository { 1 } else { 2 };
     input_count += usize::from(visibility.show_secret);
+    if visibility.show_secret && link_kind != ConnectionLinkKind::Git {
+        // 凭据来源选择行；Git 访问令牌不参与共用账号凭据。
+        input_count += 1;
+    }
     if link_kind == ConnectionLinkKind::Smb {
         input_count += 3;
     }
@@ -884,8 +987,8 @@ fn preferred_connection_link_modal_height_for(
         input_count += 2;
     }
 
-    // 密码/令牌可见时始终展示凭据存储说明；提示行与输入行共用同一套行距。
-    let note_count = usize::from(visibility.show_secret)
+    // 仅手动输入密码时展示凭据存储说明；提示行与输入行共用同一套行距。
+    let note_count = usize::from(visibility.show_secret && !has_shared_credential)
         + usize::from(visibility.svn_transport_warning.is_some())
         + usize::from(has_error);
     let child_count = input_count + note_count;
@@ -906,6 +1009,8 @@ fn render_link_window_content(
     theme: AppTheme,
     form: ConnectionLinkFormState,
     mode: ConnectionLinkWindowMode,
+    credential_menu_open: bool,
+    credentials: Vec<crate::remote::connection::ConnectionCredentialConfig>,
     focus_handles: ConnectionLinkWindowFocusHandles,
 ) -> impl IntoElement {
     let close_app = app_handle.clone();
@@ -953,6 +1058,15 @@ fn render_link_window_content(
     let is_repository = visibility.is_repository;
     let uses_ssh_credentials = visibility.uses_ssh_credentials;
     let show_secret = visibility.show_secret;
+    let supports_shared_credential = show_secret && form.link_kind != ConnectionLinkKind::Git;
+    let selected_credential_name = form
+        .credential_id
+        .and_then(|credential_id| {
+            credentials
+                .iter()
+                .find(|credential| credential.id == credential_id)
+        })
+        .map(|credential| credential.name.clone());
     let svn_transport_warning = visibility.svn_transport_warning;
 
     div()
@@ -975,6 +1089,7 @@ fn render_link_window_content(
             root_focus_for_click.focus(window);
             close_window_entity.update(cx, |window_state, state_cx| {
                 window_state.clear_input_focuses();
+                window_state.credential_menu_open = false;
                 state_cx.notify();
             });
         })
@@ -1013,6 +1128,16 @@ fn render_link_window_content(
                     &window_entity,
                     &app_handle,
                 ))
+                .when(supports_shared_credential, |this| {
+                    this.child(render_link_credential_selector(
+                        &form,
+                        credential_menu_open,
+                        &credentials,
+                        &theme,
+                        &window_entity,
+                        &app_handle,
+                    ))
+                })
                 .when(!is_repository, |this| {
                     this.child(render_link_input_row(
                         "主机",
@@ -1065,7 +1190,7 @@ fn render_link_window_content(
                     &window_entity,
                     &app_handle,
                 ))
-                .when(show_secret, |this| {
+                .when(show_secret && form.credential_id.is_none(), |this| {
                     this.child(render_link_input_row(
                         password_label,
                         ConnectionFormInputTarget::LinkPassword,
@@ -1080,10 +1205,50 @@ fn render_link_window_content(
                     // 凭据存储位置对用户可见：密码写入系统凭据库，不会出现在设置文件中。
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .text_size(px(11.0))
                             .line_height(px(MODAL_FORM_NOTE_HEIGHT))
                             .text_color(rgb(theme.foreground_muted))
-                            .child("密码保存在系统凭据库中，不会写入设置文件；凭据库不可用时改用本机密钥加密。"),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .child("密码保存在系统凭据库；不会写入设置文件。"),
+                            )
+                            .child(render_link_save_credential_toggle(
+                                form.save_as_credential,
+                                &theme,
+                                &window_entity,
+                            )),
+                    )
+                })
+                .when(show_secret && form.credential_id.is_some(), |this| {
+                    this.child(
+                        div()
+                            .id("connection-link-shared-credential")
+                            .debug_selector(|| "connection-link-shared-credential".to_string())
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w(px(82.0))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(theme.foreground_muted))
+                                    .child(password_label),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(theme.foreground))
+                                    .child(format!(
+                                        "由凭据「{}」提供",
+                                        selected_credential_name.as_deref().unwrap_or("已删除")
+                                    )),
+                            ),
                     )
                 })
                 .when(form.link_kind == ConnectionLinkKind::Smb, |this| {
@@ -1154,7 +1319,7 @@ fn render_link_window_content(
                             .child(warning),
                     )
                 })
-                .when_some(form.error_message, |this, message| {
+                .when_some(form.error_message.clone(), |this, message| {
                     this.child(error_text(message, &theme))
                 }),
         )
@@ -1174,6 +1339,14 @@ fn render_link_window_content(
                     mode,
                 )),
         )
+        .when(credential_menu_open, |this| {
+            this.child(render_link_credential_menu(
+                &form,
+                &credentials,
+                &theme,
+                &window_entity,
+            ))
+        })
 }
 
 /// 渲染模态框标题栏；结构和设置模态框一致，不额外绘制分割线。
@@ -1320,6 +1493,206 @@ fn render_directory_input_row(
             },
             |_, _, _| {},
         )))
+}
+
+/// 渲染链接表单凭据下拉浮层；浮层挂在弹窗根节点，避免被表单滚动区域裁切。
+fn render_link_credential_menu(
+    form: &ConnectionLinkFormState,
+    credentials: &[crate::remote::connection::ConnectionCredentialConfig],
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionLinkWindow>,
+) -> impl IntoElement {
+    let mut items = vec![DropdownItem {
+        id: "inline".to_string(),
+        label: "仅此连接（手动输入密码）".to_string(),
+    }];
+    items.extend(credentials.iter().map(|credential| DropdownItem {
+        id: format!("credential-{}", credential.id),
+        label: format!("{}（{}）", credential.name, credential.username),
+    }));
+    items.push(DropdownItem {
+        id: "manage".to_string(),
+        label: "管理凭据…".to_string(),
+    });
+    let selected_id = form
+        .credential_id
+        .map(|credential_id| format!("credential-{credential_id}"))
+        .unwrap_or_else(|| "inline".to_string());
+    let height = (items.len() as f32 * 30.0).clamp(30.0, 220.0);
+
+    div()
+        .id("connection-link-credential-menu")
+        .debug_selector(|| "connection-link-credential-menu".to_string())
+        .absolute()
+        .top(px(CONNECTION_LINK_CREDENTIAL_MENU_TOP))
+        .left(px(CONNECTION_LINK_CREDENTIAL_MENU_LEFT))
+        .w(px(CONNECTION_LINK_CREDENTIAL_MENU_WIDTH))
+        .h(px(height))
+        // 浮层挂在弹窗根节点，不继承表单字号；显式与 InputSize::Regular 的 13px 一致。
+        .text_size(px(13.0))
+        .line_height(px(18.0))
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.content))
+        .shadow_lg()
+        .overflow_y_scroll()
+        .occlude()
+        .children(items.into_iter().map(|item| {
+            let is_selected = item.id == selected_id;
+            let item_id = item.id.clone();
+            let item_debug_id = format!("connection-link-credential-menu-item-{}", item.id);
+            let entity = window_entity.clone();
+            let item_theme = theme.clone();
+            let hover_background = item_theme.current_line;
+            let foreground = item_theme.foreground;
+            div()
+                .id(SharedString::from(format!(
+                    "connection-link-credential-menu-item-{}",
+                    item.id
+                )))
+                .debug_selector(move || item_debug_id.clone())
+                .h(px(30.0))
+                .w_full()
+                .px_2()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .bg(rgb(if is_selected {
+                    item_theme.current_line
+                } else {
+                    item_theme.content
+                }))
+                .hover(move |this| this.bg(rgb(hover_background)))
+                .text_color(rgb(foreground))
+                .child(div().flex_1().truncate().child(item.label))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    entity.update(cx, |window_state, state_cx| {
+                        window_state.apply_credential_menu_selection(&item_id, state_cx);
+                        state_cx.notify();
+                    });
+                })
+        }))
+}
+
+/// 渲染链接表单中的共用凭据选择行。
+fn render_link_credential_selector(
+    form: &ConnectionLinkFormState,
+    is_open: bool,
+    credentials: &[crate::remote::connection::ConnectionCredentialConfig],
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionLinkWindow>,
+    _app_handle: &Entity<ArgusApp>,
+) -> impl IntoElement {
+    let mut items = vec![DropdownItem {
+        id: "inline".to_string(),
+        label: "仅此连接（手动输入密码）".to_string(),
+    }];
+    items.extend(credentials.iter().map(|credential| DropdownItem {
+        id: format!("credential-{}", credential.id),
+        label: format!("{}（{}）", credential.name, credential.username),
+    }));
+    items.push(DropdownItem {
+        id: "manage".to_string(),
+        label: "管理凭据…".to_string(),
+    });
+    let selected_id = form
+        .credential_id
+        .map(|credential_id| format!("credential-{credential_id}"))
+        .unwrap_or_else(|| "inline".to_string());
+    let selected_label = form
+        .credential_id
+        .and_then(|credential_id| {
+            credentials
+                .iter()
+                .find(|credential| credential.id == credential_id)
+        })
+        .map(|credential| format!("{}（{}）", credential.name, credential.username))
+        .unwrap_or_else(|| "仅此连接（手动输入密码）".to_string());
+    let toggle_window = window_entity.clone();
+    let select_window = window_entity.clone();
+
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .w(px(82.0))
+                .pt(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(theme.foreground_muted))
+                .child("凭据"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(render_dropdown(
+                    Dropdown {
+                        id: "connection-link-credential-dropdown",
+                        selected_id,
+                        selected_label,
+                        placeholder: "仅此连接",
+                        is_open,
+                        items,
+                        show_inline_menu: false,
+                    },
+                    theme,
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        toggle_window.update(cx, |window_state, state_cx| {
+                            window_state.toggle_credential_menu();
+                            state_cx.notify();
+                        });
+                    },
+                    Arc::new(move |item_id, _, cx| {
+                        select_window.update(cx, |window_state, state_cx| {
+                            window_state.apply_credential_menu_selection(&item_id, state_cx);
+                            state_cx.notify();
+                        });
+                    }),
+                )),
+        )
+}
+
+/// 渲染“保存为共用凭据”开关。
+fn render_link_save_credential_toggle(
+    is_selected: bool,
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionLinkWindow>,
+) -> impl IntoElement {
+    let entity = window_entity.clone();
+    div()
+        .id("connection-link-save-as-credential")
+        .flex()
+        .items_center()
+        .gap_1()
+        .flex_none()
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            entity.update(cx, |window_state, state_cx| {
+                window_state.toggle_save_as_credential();
+                state_cx.notify();
+            });
+        })
+        .child(
+            div()
+                .w(px(12.0))
+                .h(px(12.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(2.0))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .text_size(px(9.0))
+                .child(if is_selected { "✓" } else { "" }),
+        )
+        .child("保存为共用凭据")
 }
 
 /// 渲染 SSH 链接窗口输入行。
@@ -2370,6 +2743,909 @@ fn clamp_range(range: Range<usize>, text_length: usize) -> Range<usize> {
     start.min(end)..start.max(end)
 }
 
+/// 共用凭据管理表单的输入目标。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectionCredentialInputTarget {
+    /// 凭据名称。
+    Name,
+    /// 默认用户名。
+    Username,
+    /// 密码。
+    Password,
+    /// SMB 域或工作组。
+    Domain,
+}
+
+impl ConnectionCredentialInputTarget {
+    /// 返回稳定元素 ID。
+    fn id(self) -> &'static str {
+        match self {
+            Self::Name => "connection-credential-name-input",
+            Self::Username => "connection-credential-username-input",
+            Self::Password => "connection-credential-password-input",
+            Self::Domain => "connection-credential-domain-input",
+        }
+    }
+}
+
+/// 共用凭据管理窗口焦点句柄集合。
+#[derive(Clone)]
+struct ConnectionCredentialWindowFocusHandles {
+    /// 根区域焦点。
+    root: FocusHandle,
+    /// 凭据名称输入焦点。
+    name: FocusHandle,
+    /// 默认用户名输入焦点。
+    username: FocusHandle,
+    /// 密码输入焦点。
+    password: FocusHandle,
+    /// SMB 域输入焦点。
+    domain: FocusHandle,
+}
+
+/// 共用凭据管理模态框子视图。
+pub(crate) struct ConnectionCredentialWindow {
+    /// 主应用实体。
+    app: Entity<ArgusApp>,
+    /// 当前主题快照。
+    theme: AppTheme,
+    /// 凭据表单状态。
+    form: ConnectionCredentialFormState,
+    /// 输入框焦点句柄。
+    focus_handles: ConnectionCredentialWindowFocusHandles,
+    /// 主题观察订阅。
+    _app_observer: Subscription,
+    /// 是否已在首帧把真实键盘焦点交给名称输入框。
+    did_request_focus: bool,
+}
+
+impl ConnectionCredentialWindow {
+    /// 创建共用凭据管理模态框。
+    pub(crate) fn new(
+        app: Entity<ArgusApp>,
+        theme: AppTheme,
+        preferred_protocol: ConnectionLinkKind,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut form = ConnectionCredentialFormState {
+            preferred_protocol,
+            allow_ssh: preferred_protocol == ConnectionLinkKind::Ssh,
+            allow_smb: preferred_protocol == ConnectionLinkKind::Smb,
+            allow_svn: preferred_protocol == ConnectionLinkKind::Svn,
+            ..ConnectionCredentialFormState::default()
+        };
+        focus_input_state(&mut form.name_input);
+        let _app_observer = cx.observe(&app, |window_state, app_entity, cx| {
+            let theme = app_entity.read_with(cx, |app, _| app.theme.clone());
+            if window_state.theme == theme {
+                return;
+            }
+            window_state.theme = theme;
+            cx.notify();
+        });
+        Self {
+            app,
+            theme,
+            form,
+            focus_handles: ConnectionCredentialWindowFocusHandles {
+                root: cx.focus_handle(),
+                name: cx.focus_handle(),
+                username: cx.focus_handle(),
+                password: cx.focus_handle(),
+                domain: cx.focus_handle(),
+            },
+            _app_observer,
+            did_request_focus: false,
+        }
+    }
+
+    /// 清空表单并回到新建状态。
+    fn reset_form(&mut self) {
+        let preferred_protocol = self.form.preferred_protocol;
+        self.form = ConnectionCredentialFormState {
+            preferred_protocol,
+            allow_ssh: preferred_protocol == ConnectionLinkKind::Ssh,
+            allow_smb: preferred_protocol == ConnectionLinkKind::Smb,
+            allow_svn: preferred_protocol == ConnectionLinkKind::Svn,
+            ..ConnectionCredentialFormState::default()
+        };
+        focus_input_state(&mut self.form.name_input);
+    }
+
+    /// 选中已有凭据并填充表单；密码留空等待用户按需修改。
+    fn select_credential(&mut self, credential_id: ConnectionCredentialId, cx: &mut Context<Self>) {
+        let credential = self.app.read_with(cx, |app, _| {
+            app.config.connections.credential(credential_id).cloned()
+        });
+        let Some(credential) = credential else {
+            self.form.error_message = Some("连接凭据不存在".to_string());
+            return;
+        };
+        self.form.selected_id = Some(credential_id);
+        self.form.allow_ssh = credential.supports_protocol(ConnectionLinkKind::Ssh);
+        self.form.allow_smb = credential.supports_protocol(ConnectionLinkKind::Smb);
+        self.form.allow_svn = credential.supports_protocol(ConnectionLinkKind::Svn);
+        self.form.name_input = TextInputState::from_value(credential.name);
+        self.form.username_input = TextInputState::from_value(credential.username);
+        self.form.password_input = TextInputState::default();
+        self.form.domain_input = TextInputState::from_value(credential.domain.unwrap_or_default());
+        self.form.is_default = credential.is_default;
+        self.form.error_message = None;
+        focus_input_state(&mut self.form.name_input);
+    }
+
+    /// 聚焦指定输入框。
+    fn focus_input(&mut self, target: ConnectionCredentialInputTarget) {
+        self.clear_input_focuses();
+        if let Some(input) = self.input_mut(target) {
+            focus_input_state(input);
+        }
+    }
+
+    /// 清理全部输入焦点。
+    fn clear_input_focuses(&mut self) {
+        clear_input_focus_state(&mut self.form.name_input);
+        clear_input_focus_state(&mut self.form.username_input);
+        clear_input_focus_state(&mut self.form.password_input);
+        clear_input_focus_state(&mut self.form.domain_input);
+    }
+
+    /// 返回输入目标对应的可变输入状态。
+    fn input_mut(
+        &mut self,
+        target: ConnectionCredentialInputTarget,
+    ) -> Option<&mut TextInputState> {
+        match target {
+            ConnectionCredentialInputTarget::Name => Some(&mut self.form.name_input),
+            ConnectionCredentialInputTarget::Username => Some(&mut self.form.username_input),
+            ConnectionCredentialInputTarget::Password => Some(&mut self.form.password_input),
+            ConnectionCredentialInputTarget::Domain => Some(&mut self.form.domain_input),
+        }
+    }
+
+    /// 处理输入按键。
+    fn handle_input_key(
+        &mut self,
+        target: ConnectionCredentialInputTarget,
+        keystroke: &gpui::Keystroke,
+        cx: &mut Context<Self>,
+    ) -> ConnectionWindowInputAction {
+        let Some(input) = self.input_mut(target) else {
+            return ConnectionWindowInputAction::None;
+        };
+        if let Some(action) = handle_text_input_clipboard(input, keystroke, cx) {
+            if action == ConnectionWindowInputAction::Changed {
+                self.form.error_message = None;
+            }
+            return action;
+        }
+        let action = handle_text_input_key(input, keystroke);
+        if action == ConnectionWindowInputAction::Changed {
+            self.form.error_message = None;
+        }
+        action
+    }
+
+    /// 开始鼠标选区。
+    fn begin_pointer_selection(
+        &mut self,
+        target: ConnectionCredentialInputTarget,
+        character_index: usize,
+        granularity: TextSelectionGranularity,
+    ) {
+        self.focus_input(target);
+        let Some(input) = self.input_mut(target) else {
+            return;
+        };
+        begin_input_pointer_selection(input, character_index, granularity);
+    }
+
+    /// 更新鼠标选区。
+    fn update_pointer_selection(
+        &mut self,
+        target: ConnectionCredentialInputTarget,
+        character_index: usize,
+    ) {
+        let Some(input) = self.input_mut(target) else {
+            return;
+        };
+        update_input_pointer_selection(input, character_index);
+    }
+
+    /// 结束鼠标选区。
+    fn finish_pointer_selection(&mut self, target: ConnectionCredentialInputTarget) {
+        let Some(input) = self.input_mut(target) else {
+            return;
+        };
+        finish_input_pointer_selection(input);
+    }
+
+    /// 应用输入法提交的文本编辑。
+    fn apply_native_edit(&mut self, target: ConnectionCredentialInputTarget, edit: NativeTextEdit) {
+        self.focus_input(target);
+        let Some(input) = self.input_mut(target) else {
+            return;
+        };
+        apply_native_edit_to_input(input, &edit);
+        self.form.error_message = None;
+    }
+
+    /// 保存当前表单；失败时把错误保留在弹窗内。
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        let form = self.form.clone();
+        let result = self.app.update(cx, |app, app_cx| {
+            if form.selected_id.is_some() {
+                app.update_connection_credential_from_form(&form, app_cx)
+                    .map(|_| form.selected_id.unwrap_or_default())
+            } else {
+                app.create_connection_credential_from_form(&form, app_cx)
+            }
+        });
+        match result {
+            Ok(credential_id) => {
+                self.form.selected_id = Some(credential_id);
+                self.form.password_input = TextInputState::default();
+                self.form.error_message = None;
+            }
+            Err(message) => {
+                self.form.error_message = Some(message);
+            }
+        }
+    }
+
+    /// 删除当前选中凭据。
+    fn delete(&mut self, cx: &mut Context<Self>) {
+        let Some(credential_id) = self.form.selected_id else {
+            return;
+        };
+        let result = self.app.update(cx, |app, app_cx| {
+            app.delete_connection_credential(credential_id, app_cx)
+        });
+        match result {
+            Ok(()) => self.reset_form(),
+            Err(message) => self.form.error_message = Some(message),
+        }
+    }
+}
+
+impl Render for ConnectionCredentialWindow {
+    /// 渲染共用凭据管理模态框主体。
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.did_request_focus {
+            self.did_request_focus = true;
+            self.focus_handles.name.focus(window);
+        }
+        let entries = self.app.read_with(cx, |app, _| {
+            app.config
+                .connections
+                .credentials
+                .iter()
+                .cloned()
+                .map(|credential| {
+                    let usage = app.config.connections.credential_usage_count(credential.id);
+                    (credential, usage)
+                })
+                .collect::<Vec<_>>()
+        });
+        render_credential_window_content(
+            self.app.clone(),
+            cx.entity(),
+            self.theme.clone(),
+            self.form.clone(),
+            self.focus_handles.clone(),
+            entries,
+            cx,
+        )
+    }
+}
+
+/// 将共用凭据管理子视图包裹为主窗口模态框。
+pub(crate) fn render_connection_credential_modal(
+    modal: Entity<ConnectionCredentialWindow>,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> AnyElement {
+    render_modal_dialog(
+        ModalDialog {
+            overlay_id: "connection-credential-modal-overlay",
+            container_id: "connection-credential-modal-container",
+            width: CONNECTION_CREDENTIAL_MODAL_WIDTH,
+            height: CONNECTION_CREDENTIAL_MODAL_HEIGHT,
+            content: modal.into_any_element(),
+        },
+        theme.clone(),
+        cx,
+    )
+    .into_any_element()
+}
+
+/// 渲染共用凭据管理内容。
+fn render_credential_window_content(
+    app_handle: Entity<ArgusApp>,
+    window_entity: Entity<ConnectionCredentialWindow>,
+    theme: AppTheme,
+    form: ConnectionCredentialFormState,
+    focus_handles: ConnectionCredentialWindowFocusHandles,
+    entries: Vec<(crate::remote::connection::ConnectionCredentialConfig, usize)>,
+    cx: &mut Context<ConnectionCredentialWindow>,
+) -> impl IntoElement {
+    let close_app = app_handle.clone();
+    let root_focus_for_track = focus_handles.root.clone();
+    let root_focus_for_click = focus_handles.root.clone();
+    let close_window = window_entity.clone();
+    let has_selection = form.selected_id.is_some();
+    let password_placeholder = if has_selection {
+        "留空表示不修改"
+    } else {
+        "必填"
+    };
+
+    div()
+        .id("connection-credential-window-root")
+        .size_full()
+        .relative()
+        .flex()
+        .flex_col()
+        .rounded_lg()
+        .overflow_hidden()
+        .bg(rgb(theme.content))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .font_family(ARGUS_UI_FONT_FAMILY)
+        .text_color(rgb(theme.foreground))
+        .occlude()
+        .focusable()
+        .track_focus(&root_focus_for_track)
+        .on_click(move |_, window, cx| {
+            root_focus_for_click.focus(window);
+            close_window.update(cx, |window_state, state_cx| {
+                window_state.clear_input_focuses();
+                state_cx.notify();
+            });
+        })
+        .child(render_connection_window_header(
+            "连接凭据",
+            ArgusIcon::Key,
+            "connection-credential-close",
+            "关闭连接凭据",
+            &theme,
+            move |_, window, cx| {
+                cx.stop_propagation();
+                close_app.update(cx, |app, app_cx| {
+                    app.close_connection_credential_manager();
+                    app_cx.notify();
+                });
+                let _ = window;
+            },
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .child(
+                    div()
+                        .w(px(210.0))
+                        .flex_none()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .border_r_1()
+                        .border_color(rgb(theme.border))
+                        .child(
+                            div().p_3().child(render_credential_action_button(
+                                "connection-credential-new",
+                                "新建凭据",
+                                false,
+                                &theme,
+                                cx,
+                                move |window_state, state_cx| {
+                                    window_state.reset_form();
+                                    state_cx.notify();
+                                },
+                            )),
+                        )
+                        .child(
+                            div()
+                                .id("connection-credential-list")
+                                .debug_selector(|| "connection-credential-list".to_string())
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .overflow_y_scroll()
+                                .scrollbar_width(px(6.0))
+                                .px_2()
+                                .pb_3()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .when(entries.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .p_2()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(theme.foreground_muted))
+                                            .child("暂无凭据"),
+                                    )
+                                })
+                                .children(entries.into_iter().map(|(credential, usage)| {
+                                    let credential_id = credential.id;
+                                    let is_selected = form.selected_id == Some(credential_id);
+                                    let item_window = window_entity.clone();
+                                    let item_theme = theme.clone();
+                                    let title = credential.name.clone();
+                                    let username = credential.username.clone();
+                                    let protocols = credential.protocol_labels();
+                                    let protocol_summary = if credential.is_default {
+                                        format!("{protocols} · 默认")
+                                    } else {
+                                        protocols
+                                    };
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "connection-credential-item-{credential_id}"
+                                        )))
+                                        .p_2()
+                                        .rounded_sm()
+                                        .bg(rgb(if is_selected {
+                                            item_theme.current_line
+                                        } else {
+                                            item_theme.content
+                                        }))
+                                        .cursor_pointer()
+                                        .hover(move |this| {
+                                            this.bg(rgb(item_theme.current_line))
+                                        })
+                                        .on_click(move |_, _, app| {
+                                            app.stop_propagation();
+                                            item_window.update(app, |window_state, state_cx| {
+                                                window_state
+                                                    .select_credential(credential_id, state_cx);
+                                                state_cx.notify();
+                                            });
+                                        })
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(12.0))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(10.5))
+                                                .text_color(rgb(theme.foreground_muted))
+                                                .child(format!("{username} · {protocol_summary}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(rgb(theme.foreground_muted))
+                                                .child(format!("{usage} 个连接使用")),
+                                        )
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("connection-credential-form")
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .scrollbar_width(px(6.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(render_credential_input_row(
+                            "凭据名称",
+                            ConnectionCredentialInputTarget::Name,
+                            &form.name_input,
+                            focus_handles.name.clone(),
+                            "运维账号",
+                            false,
+                            &theme,
+                            &window_entity,
+                            &app_handle,
+                        ))
+                        .child(render_credential_input_row(
+                            "默认用户名",
+                            ConnectionCredentialInputTarget::Username,
+                            &form.username_input,
+                            focus_handles.username.clone(),
+                            "ops",
+                            false,
+                            &theme,
+                            &window_entity,
+                            &app_handle,
+                        ))
+                        .child(render_credential_input_row(
+                            "密码",
+                            ConnectionCredentialInputTarget::Password,
+                            &form.password_input,
+                            focus_handles.password.clone(),
+                            password_placeholder,
+                            true,
+                            &theme,
+                            &window_entity,
+                            &app_handle,
+                        ))
+                        .child(render_credential_input_row(
+                            "域/工作组",
+                            ConnectionCredentialInputTarget::Domain,
+                            &form.domain_input,
+                            focus_handles.domain.clone(),
+                            "可选，仅 SMB 使用",
+                            false,
+                            &theme,
+                            &window_entity,
+                            &app_handle,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .w(px(82.0))
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(theme.foreground_muted))
+                                        .child("适用协议"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(render_credential_protocol_chip(
+                                            "connection-credential-protocol-ssh",
+                                            "SSH",
+                                            form.allow_ssh,
+                                            ConnectionLinkKind::Ssh,
+                                            &theme,
+                                            &window_entity,
+                                        ))
+                                        .child(render_credential_protocol_chip(
+                                            "connection-credential-protocol-smb",
+                                            "SMB",
+                                            form.allow_smb,
+                                            ConnectionLinkKind::Smb,
+                                            &theme,
+                                            &window_entity,
+                                        ))
+                                        .child(render_credential_protocol_chip(
+                                            "connection-credential-protocol-svn",
+                                            "SVN",
+                                            form.allow_svn,
+                                            ConnectionLinkKind::Svn,
+                                            &theme,
+                                            &window_entity,
+                                        )),
+                                ),
+                        )
+                        .child(render_credential_default_toggle(
+                            form.is_default,
+                            &theme,
+                            &window_entity,
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .line_height(px(MODAL_FORM_NOTE_HEIGHT))
+                                .text_color(rgb(theme.foreground_muted))
+                                .child("密码保存在系统凭据库中，不会写入设置文件；修改后所有引用该凭据的连接下次连接生效。"),
+                        )
+                        .when_some(form.error_message.clone(), |this, message| {
+                            this.child(error_text(message, &theme))
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_5()
+                .pt_4()
+                .pb(px(MODAL_BOTTOM_PADDING))
+                .flex()
+                .justify_between()
+                .items_center()
+                .child(if has_selection {
+                    render_credential_action_button(
+                        "connection-credential-delete",
+                        "删除凭据",
+                        false,
+                        &theme,
+                        cx,
+                        move |window_state, state_cx| {
+                            window_state.delete(state_cx);
+                            state_cx.notify();
+                        },
+                    )
+                    .into_any_element()
+                } else {
+                    div().into_any_element()
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(render_credential_action_button(
+                            "connection-credential-cancel",
+                            "关闭",
+                            false,
+                            &theme,
+                            cx,
+                            {
+                                let app_handle = app_handle.clone();
+                                move |_, state_cx| {
+                                    app_handle.update(state_cx, |app, app_cx| {
+                                        app.close_connection_credential_manager();
+                                        app_cx.notify();
+                                    });
+                                }
+                            },
+                        ))
+                        .child(render_credential_action_button(
+                            "connection-credential-save",
+                            "保存",
+                            true,
+                            &theme,
+                            cx,
+                            move |window_state, state_cx| {
+                                window_state.submit(state_cx);
+                            },
+                        )),
+                ),
+        )
+}
+
+/// 渲染凭据输入行。
+fn render_credential_input_row(
+    label: &'static str,
+    target: ConnectionCredentialInputTarget,
+    input_state: &TextInputState,
+    focus_handle: FocusHandle,
+    placeholder: &'static str,
+    is_secret: bool,
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionCredentialWindow>,
+    app_handle: &Entity<ArgusApp>,
+) -> impl IntoElement {
+    let native_input = credential_native_input(window_entity.clone(), target, focus_handle.clone());
+    let key_window = window_entity.clone();
+    let click_window = window_entity.clone();
+    let pointer_window = window_entity.clone();
+    let submit_window = window_entity.clone();
+    let close_app = app_handle.clone();
+
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .w(px(82.0))
+                .text_size(px(12.0))
+                .text_color(rgb(theme.foreground_muted))
+                .child(label),
+        )
+        .child(div().flex_1().child(render_input(
+            Input {
+                id: target.id(),
+                placeholder,
+                value: input_state.value.clone(),
+                is_disabled: false,
+                is_focused: input_state.is_focused,
+                cursor_index: input_state.cursor,
+                selection_range: input_state.selection_range(),
+                marked_range: input_state.marked_range.clone(),
+                is_pointer_selecting: input_state.selection_drag.is_some(),
+                is_secret,
+                size: InputSize::Regular,
+                leading_accessory: None,
+                trailing_accessory: None,
+                native_input: Some(native_input),
+                scroll_handle: input_state.scroll_handle.clone(),
+            },
+            theme,
+            move |event: &KeyDownEvent, _, cx| {
+                cx.stop_propagation();
+                let action = key_window.update(cx, |window_state, state_cx| {
+                    let action = window_state.handle_input_key(target, &event.keystroke, state_cx);
+                    state_cx.notify();
+                    action
+                });
+                if action == ConnectionWindowInputAction::Submit {
+                    submit_window.update(cx, |window_state, state_cx| {
+                        window_state.submit(state_cx);
+                        state_cx.notify();
+                    });
+                } else if action == ConnectionWindowInputAction::Close {
+                    close_app.update(cx, |app, app_cx| {
+                        app.close_connection_credential_manager();
+                        app_cx.notify();
+                    });
+                }
+            },
+            move |_, window, cx| {
+                cx.stop_propagation();
+                focus_handle.focus(window);
+                click_window.update(cx, |window_state, state_cx| {
+                    window_state.focus_input(target);
+                    state_cx.notify();
+                });
+            },
+            move |event: &InputPointerEvent, _, cx| {
+                cx.stop_propagation();
+                pointer_window.update(cx, |window_state, state_cx| {
+                    match event.action {
+                        InputPointerAction::Begin => window_state.begin_pointer_selection(
+                            target,
+                            event.character_index,
+                            event.granularity,
+                        ),
+                        InputPointerAction::Extend => {
+                            window_state.update_pointer_selection(target, event.character_index)
+                        }
+                        InputPointerAction::Finish => window_state.finish_pointer_selection(target),
+                    }
+                    state_cx.notify();
+                });
+            },
+            |_, _, _| {},
+        )))
+}
+
+/// 构造凭据输入框的原生输入桥接。
+fn credential_native_input(
+    window_entity: Entity<ConnectionCredentialWindow>,
+    target: ConnectionCredentialInputTarget,
+    focus_handle: FocusHandle,
+) -> NativeInput {
+    NativeInput::new(focus_handle, move |edit, _, cx| {
+        window_entity.update(cx, |window_state, state_cx| {
+            window_state.apply_native_edit(target, edit);
+            state_cx.notify();
+        });
+    })
+}
+
+/// 渲染协议选择标签。
+fn render_credential_protocol_chip(
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+    protocol: ConnectionLinkKind,
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionCredentialWindow>,
+) -> impl IntoElement {
+    let entity = window_entity.clone();
+    div()
+        .id(id)
+        .px_3()
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(if selected { theme.info } else { theme.border }))
+        .bg(rgb(if selected {
+            theme.current_line
+        } else {
+            theme.content
+        }))
+        .text_size(px(12.0))
+        .text_color(rgb(if selected {
+            theme.foreground
+        } else {
+            theme.foreground_muted
+        }))
+        .cursor_pointer()
+        .hover(|this| this.opacity(0.85))
+        .child(label)
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            entity.update(cx, |window_state, state_cx| {
+                match protocol {
+                    ConnectionLinkKind::Ssh => {
+                        window_state.form.allow_ssh = !window_state.form.allow_ssh
+                    }
+                    ConnectionLinkKind::Smb => {
+                        window_state.form.allow_smb = !window_state.form.allow_smb
+                    }
+                    ConnectionLinkKind::Svn => {
+                        window_state.form.allow_svn = !window_state.form.allow_svn
+                    }
+                    ConnectionLinkKind::Git => {}
+                }
+                window_state.form.error_message = None;
+                state_cx.notify();
+            });
+        })
+}
+
+/// 渲染默认凭据开关。
+fn render_credential_default_toggle(
+    is_default: bool,
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionCredentialWindow>,
+) -> impl IntoElement {
+    let entity = window_entity.clone();
+    div()
+        .id("connection-credential-default")
+        .flex()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            entity.update(cx, |window_state, state_cx| {
+                window_state.form.is_default = !window_state.form.is_default;
+                state_cx.notify();
+            });
+        })
+        .child(
+            div()
+                .w(px(14.0))
+                .h(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .text_size(px(10.0))
+                .child(if is_default { "✓" } else { "" }),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.foreground_muted))
+                .child("设为同用户名新连接的默认凭据"),
+        )
+}
+
+/// 渲染凭据管理操作按钮。
+fn render_credential_action_button(
+    id: &'static str,
+    label: &'static str,
+    is_primary: bool,
+    theme: &AppTheme,
+    cx: &mut Context<ConnectionCredentialWindow>,
+    on_click: impl Fn(&mut ConnectionCredentialWindow, &mut Context<ConnectionCredentialWindow>)
+    + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .h(px(MODAL_ACTION_HEIGHT))
+        .px_3()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(if is_primary {
+            theme.current_line
+        } else {
+            theme.content
+        }))
+        .text_size(px(12.5))
+        .text_color(rgb(theme.foreground))
+        .cursor_pointer()
+        .hover(|this| this.opacity(0.85))
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |window_state, _: &MouseDownEvent, _, state_cx| {
+                on_click(window_state, state_cx);
+                state_cx.notify();
+            }),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{connection_directory_modal_height, preferred_connection_link_modal_height_for};
@@ -2390,6 +3666,7 @@ mod tests {
                 ConnectionLinkKind::Git,
                 "https://host/team/repository.git",
                 false,
+                false,
             ),
             311.0
         );
@@ -2397,6 +3674,7 @@ mod tests {
             preferred_connection_link_modal_height_for(
                 ConnectionLinkKind::Git,
                 "git@host:team/repository.git",
+                false,
                 false,
             ),
             325.0
@@ -2407,12 +3685,12 @@ mod tests {
     #[test]
     fn server_modal_height_matches_protocol_fields() {
         assert_eq!(
-            preferred_connection_link_modal_height_for(ConnectionLinkKind::Ssh, "", false),
-            437.0
+            preferred_connection_link_modal_height_for(ConnectionLinkKind::Ssh, "", false, false),
+            479.0
         );
         assert_eq!(
-            preferred_connection_link_modal_height_for(ConnectionLinkKind::Smb, "", false),
-            479.0
+            preferred_connection_link_modal_height_for(ConnectionLinkKind::Smb, "", false, false),
+            521.0
         );
     }
 
@@ -2424,16 +3702,18 @@ mod tests {
                 ConnectionLinkKind::Svn,
                 "http://host/svn/repository/",
                 false,
+                false,
             ),
-            339.0
+            381.0
         );
         assert_eq!(
             preferred_connection_link_modal_height_for(
                 ConnectionLinkKind::Svn,
                 "http://host/svn/repository/",
                 true,
+                false,
             ),
-            367.0
+            409.0
         );
     }
 }

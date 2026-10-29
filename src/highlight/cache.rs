@@ -8,9 +8,13 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
+use crate::highlight::document::DocumentHighlighter;
 use crate::highlight::highlighter::SyntaxHighlighter;
 use crate::highlight::language::HighlightLanguage;
 use crate::highlight::span::HighlightSpan;
+
+/// 日志阅读区制表符展开宽度；必须与 `app::constants` 中的展示宽度一致。
+const DISPLAY_TAB_SPACES: &str = "    ";
 
 /// 单个日志标签或文件预览窗口默认缓存的高亮行数。
 const DEFAULT_HIGHLIGHT_CACHE_CAPACITY: usize = 2048;
@@ -35,6 +39,7 @@ impl HighlightCache {
                 capacity: capacity.max(1),
                 entries: HashMap::new(),
                 order: VecDeque::new(),
+                document: None,
             })),
         }
     }
@@ -60,6 +65,56 @@ impl HighlightCache {
         };
 
         self.highlight_with_key(key, || SyntaxHighlighter::highlight(line, language))
+    }
+
+    /// 为内存日志按文档级词法状态生成指定行高亮。
+    ///
+    /// 参数说明：
+    /// - `lines`：内存文档的原始行列表；缓存按 `Arc` 身份复用，不重复构建状态。
+    /// - `language`：当前阅读视图的高亮语言。
+    /// - `line_number`：0 基行号。
+    ///
+    /// 返回值：基于完整展示行生成的 token；调用方按可见切片裁剪。
+    pub(crate) fn highlight_document_line(
+        &self,
+        lines: Arc<Vec<String>>,
+        language: HighlightLanguage,
+        line_number: usize,
+    ) -> Vec<HighlightSpan> {
+        let highlighter = {
+            let Ok(mut inner) = self.inner.lock() else {
+                return DocumentHighlighter::new(lines, language).highlight_line(line_number);
+            };
+            let needs_rebuild = inner.document.as_ref().is_none_or(|document| {
+                document.language != language || !Arc::ptr_eq(&document.lines, &lines)
+            });
+            if needs_rebuild {
+                let display_lines = Arc::new(
+                    lines
+                        .iter()
+                        .map(|line| {
+                            if line.contains('\t') {
+                                line.replace('\t', DISPLAY_TAB_SPACES)
+                            } else {
+                                line.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                inner.document = Some(DocumentHighlightCache {
+                    lines,
+                    language,
+                    highlighter: DocumentHighlighter::new(display_lines, language),
+                });
+            }
+            inner
+                .document
+                .as_ref()
+                .expect("文档高亮缓存刚完成初始化")
+                .highlighter
+                .clone()
+        };
+        highlighter.highlight_line(line_number)
     }
 
     /// 不可变文档索引拥有独立缓存，行号已唯一绑定文本及进入状态，无需每帧重新哈希整行。
@@ -146,6 +201,19 @@ struct HighlightCacheInner {
     entries: HashMap<HighlightCacheKey, Vec<HighlightSpan>>,
     /// 插入顺序，队尾是最新加入的缓存项。
     order: VecDeque<HighlightCacheKey>,
+    /// 内存日志的文档级词法高亮器；分页日志不进入该路径。
+    document: Option<DocumentHighlightCache>,
+}
+
+/// 内存日志文档高亮缓存。
+#[derive(Debug)]
+struct DocumentHighlightCache {
+    /// 原始行列表，用于识别文档是否发生变化。
+    lines: Arc<Vec<String>>,
+    /// 当前高亮语言。
+    language: HighlightLanguage,
+    /// 已建立全文进入状态的高亮器。
+    highlighter: DocumentHighlighter,
 }
 
 impl HighlightCacheInner {
@@ -168,4 +236,51 @@ fn stable_text_hash(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::highlight::span::HighlightTokenKind;
+
+    /// 内存日志使用文档级缓存后，XML 多行注释必须跨行连续高亮。
+    #[test]
+    fn document_cache_preserves_xml_block_comment_state() {
+        assert_eq!(
+            DISPLAY_TAB_SPACES,
+            crate::app::LOG_VIEWER_TAB_DISPLAY_SPACES,
+            "高亮缓存与日志展示必须使用相同制表符宽度"
+        );
+        let lines = Arc::new(
+            vec!["<root>", "<!--", "  multi-line comment", "-->", "<node/>"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        );
+        let cache = HighlightCache::default();
+
+        let comment = cache.highlight_document_line(lines.clone(), HighlightLanguage::Xml, 2);
+        assert!(
+            comment
+                .iter()
+                .any(|span| span.kind == HighlightTokenKind::Comment
+                    && span.range == (0..lines[2].len())),
+            "注释中间行应整体标记为注释：{comment:?}"
+        );
+
+        let closing = cache.highlight_document_line(lines.clone(), HighlightLanguage::Xml, 3);
+        assert!(
+            closing
+                .iter()
+                .any(|span| span.kind == HighlightTokenKind::Comment),
+            "注释闭合行应继续识别为注释：{closing:?}"
+        );
+
+        let next = cache.highlight_document_line(lines, HighlightLanguage::Xml, 4);
+        assert!(
+            next.iter()
+                .all(|span| span.kind != HighlightTokenKind::Comment),
+            "注释闭合后代码不应继续标记为注释：{next:?}"
+        );
+    }
 }
