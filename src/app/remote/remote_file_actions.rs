@@ -10,9 +10,10 @@ use std::path::PathBuf;
 use gpui::{Context, Keystroke, PathPromptOptions, Pixels, Point, SharedString};
 
 use crate::app::{
-    AppTextInputTarget, ArgusApp, ArgusTab, ConnectionHostKeyPromptState, HostKeyPromptOwner,
-    InputTextSelectionDrag, RemoteFileDeletePromptState, RemoteFileDialogState,
-    RemoteFileRenameDialogState, TabKind, TextInputState, Workspace,
+    AppTextInputTarget, ArgusApp, ArgusTab, ConnectionDialogState, ConnectionHostKeyPromptState,
+    ConnectionSvnCertificatePromptState, HostKeyPromptOwner, InputTextSelectionDrag,
+    RemoteFileDeletePromptState, RemoteFileDialogState, RemoteFileRenameDialogState, TabKind,
+    TextInputState, Workspace,
 };
 use crate::infra::text_selection::{
     NativeTextEdit, TextSelectionGranularity, character_count, replace_character_range,
@@ -25,8 +26,14 @@ use crate::remote::remote_file::{
     is_remote_file_entry_previewable, remote_parent_dir, spawn_remote_file_worker,
     validate_remote_file_rename_name,
 };
+use crate::remote::svn_certificate::{SvnCertificateApproval, SvnCertificateDecision};
+use crate::remote::svn_tls::SvnCertificateTrust;
 use crate::remote::terminal::PendingHostKey;
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind};
+
+#[cfg(test)]
+#[path = "svn_certificate_tests.rs"]
+mod svn_certificate_tests;
 
 /// 远程文件管理输入框的可变部件引用。
 struct RemoteFileInputParts<'a> {
@@ -189,6 +196,7 @@ impl ArgusApp {
 
     /// 断开并移除指定远程文件管理会话。
     pub(crate) fn disconnect_remote_file_session(&mut self, session_id: usize) {
+        self.clear_remote_svn_certificate_request(session_id);
         if let Some(session) = self.remote_file_sessions.remove(&session_id)
             && let Some(sender) = session.command_sender
         {
@@ -199,6 +207,7 @@ impl ArgusApp {
         {
             self.remote_file_dialog = None;
         }
+        self.open_next_svn_certificate_prompt();
     }
 
     /// 断开所有远程文件管理会话。
@@ -276,6 +285,7 @@ impl ArgusApp {
                 self.confirm_remote_file_host_key(session_id)
             }
         }
+        self.open_next_svn_certificate_prompt();
     }
 
     /// 通过主机指纹弹窗 owner 分发拒绝动作。
@@ -291,6 +301,7 @@ impl ArgusApp {
                 self.reject_remote_file_host_key(session_id)
             }
         }
+        self.open_next_svn_certificate_prompt();
     }
 
     /// 加载远程文件管理地址栏中的目录。
@@ -1065,6 +1076,7 @@ impl ArgusApp {
         let Some(worker_backend) = self.remote_file_worker_backend(link, backend) else {
             return false;
         };
+        self.clear_remote_svn_certificate_request(session_id);
         let request = RemoteFileWorkerRequest {
             session_id,
             backend: worker_backend,
@@ -1073,8 +1085,10 @@ impl ArgusApp {
         let mut session =
             RemoteFileSessionState::connecting(session_id, link, backend, command_sender);
         session.worker_guard = Some(worker_guard);
+        let worker_generation = session.worker_generation;
         self.remote_file_sessions.insert(session_id, session);
-        Self::spawn_remote_file_event_pump(cx, event_receiver);
+        self.open_next_svn_certificate_prompt();
+        Self::spawn_remote_file_event_pump(cx, session_id, worker_generation, event_receiver);
         true
     }
 
@@ -1136,9 +1150,15 @@ impl ArgusApp {
                         .trusted_fingerprint(&host, port)
                         .map(ToString::to_string)
                 });
+                let trusted_certificate = self
+                    .config
+                    .connections
+                    .trusted_svn_certificate(link_id, &svn.url)
+                    .cloned();
                 Some(RemoteFileWorkerBackend::Svn {
                     svn,
                     trusted_fingerprint,
+                    trusted_certificate,
                 })
             }
         }
@@ -1147,17 +1167,46 @@ impl ArgusApp {
     /// 消费远程文件 worker 事件并回写应用状态，直到事件通道关闭。
     fn spawn_remote_file_event_pump(
         cx: &mut Context<Self>,
+        session_id: usize,
+        worker_generation: uuid::Uuid,
         event_receiver: async_channel::Receiver<RemoteFileEvent>,
     ) {
         cx.spawn(async move |view, cx| {
             while let Ok(event) = event_receiver.recv().await {
-                let _ = view.update(cx, |app, cx| {
-                    app.apply_remote_file_event(event, cx);
-                    cx.notify();
+                let applied = view.update(cx, |app, cx| {
+                    app.apply_remote_file_event_for_generation(
+                        session_id,
+                        worker_generation,
+                        event,
+                        cx,
+                    )
                 });
+                if !matches!(applied, Ok(true)) {
+                    break;
+                }
             }
         })
         .detach();
+    }
+
+    /// 重连复用会话 ID，但旧 worker 的迟到事件不能关闭或批准新一轮连接。
+    fn apply_remote_file_event_for_generation(
+        &mut self,
+        session_id: usize,
+        worker_generation: uuid::Uuid,
+        event: RemoteFileEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self
+            .remote_file_sessions
+            .get(&session_id)
+            .is_some_and(|session| session.worker_generation == worker_generation)
+        {
+            return false;
+        }
+        self.apply_remote_file_event(event, cx);
+        cx.notify();
+        true
     }
 
     /// 为已有远程文件会话创建标签。
@@ -1179,6 +1228,12 @@ impl ArgusApp {
     /// 应用通用远程文件 worker 回传事件。
     fn apply_remote_file_event(&mut self, event: RemoteFileEvent, cx: &mut Context<Self>) {
         match event {
+            RemoteFileEvent::SvnCertificateVerification {
+                session_id,
+                request,
+            } => {
+                self.apply_remote_svn_certificate_event(session_id, request);
+            }
             RemoteFileEvent::HostKeyVerification {
                 session_id,
                 host,
@@ -1255,16 +1310,19 @@ impl ArgusApp {
                 session_id,
                 message,
             } => {
+                self.clear_remote_svn_certificate_request(session_id);
                 if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
                     session.status = RemoteFileStatus::Connected;
                     session.message = Some(message.clone());
                 }
                 self.placeholder_notice = message;
+                self.open_next_svn_certificate_prompt();
             }
             RemoteFileEvent::Disconnected {
                 session_id,
                 message,
             } => {
+                self.clear_remote_svn_certificate_request(session_id);
                 if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
                     session.status = RemoteFileStatus::Disconnected;
                     session.command_sender = None;
@@ -1272,11 +1330,13 @@ impl ArgusApp {
                     session.message = Some(message.clone());
                 }
                 self.placeholder_notice = message;
+                self.open_next_svn_certificate_prompt();
             }
             RemoteFileEvent::Failed {
                 session_id,
                 message,
             } => {
+                self.clear_remote_svn_certificate_request(session_id);
                 if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
                     session.status = RemoteFileStatus::Failed;
                     session.command_sender = None;
@@ -1284,7 +1344,244 @@ impl ArgusApp {
                     session.message = Some(message.clone());
                 }
                 self.placeholder_notice = message;
+                self.open_next_svn_certificate_prompt();
             }
+        }
+    }
+
+    /// 保存证书挑战到所属会话；其他弹窗仍可继续操作，证书请求保留在等待队列中。
+    fn apply_remote_svn_certificate_event(
+        &mut self,
+        session_id: usize,
+        request: SvnCertificateApproval,
+    ) {
+        if !request.is_pending() {
+            return;
+        }
+        if !self
+            .remote_file_sessions
+            .get(&session_id)
+            .is_some_and(|session| {
+                session.backend == RemoteFileBackend::Svn
+                    && !matches!(
+                        session.status,
+                        RemoteFileStatus::Disconnected | RemoteFileStatus::Failed
+                    )
+            })
+        {
+            if let Err(error) = request.respond(SvnCertificateDecision::Reject) {
+                self.placeholder_notice =
+                    format!("会话 {session_id} 的失效证书请求无法拒绝：{error}");
+            }
+            return;
+        }
+        if self
+            .remote_file_sessions
+            .get(&session_id)
+            .is_some_and(|session| {
+                session
+                    .pending_svn_certificate
+                    .as_ref()
+                    .is_some_and(|pending| pending.request_id == request.request_id)
+            })
+        {
+            return;
+        }
+        self.clear_remote_svn_certificate_request(session_id);
+        if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+            session.status = RemoteFileStatus::AwaitingCertificate;
+            session.pending_svn_certificate = Some(request);
+            session.message = Some("请确认 SVN HTTPS 服务器证书".to_string());
+        }
+        self.open_next_svn_certificate_prompt();
+        self.placeholder_notice = "请确认 SVN HTTPS 服务器证书".to_string();
+    }
+
+    /// 从等待页面重新打开本会话证书；不得覆盖另一个尚未处理的弹窗。
+    pub(crate) fn open_svn_certificate_prompt(&mut self, session_id: usize) {
+        if self.connection_dialog.is_some() {
+            self.placeholder_notice = "请先处理当前弹窗，再查看 SVN 证书".to_string();
+            return;
+        }
+        let Some(request) = self
+            .remote_file_sessions
+            .get(&session_id)
+            .and_then(|session| session.pending_svn_certificate.as_ref())
+            .filter(|request| request.is_pending())
+        else {
+            self.placeholder_notice = "证书确认请求已失效，请重新连接".to_string();
+            return;
+        };
+        self.connection_dialog = Some(ConnectionDialogState::SvnCertificate(
+            ConnectionSvnCertificatePromptState {
+                session_id,
+                request_id: request.request_id.clone(),
+                prompt: request.prompt.clone(),
+                error_message: None,
+            },
+        ));
+    }
+
+    /// 每个会话保留自己的待确认请求，依会话顺序逐一展示，避免并发连接覆盖证书信息。
+    pub(crate) fn open_next_svn_certificate_prompt(&mut self) {
+        if self.connection_dialog.is_some() {
+            return;
+        }
+        let next_session = self
+            .remote_file_sessions
+            .values()
+            .filter(|session| {
+                session
+                    .pending_svn_certificate
+                    .as_ref()
+                    .is_some_and(|request| request.is_pending())
+            })
+            .map(|session| session.id)
+            .min();
+        if let Some(session_id) = next_session {
+            self.open_svn_certificate_prompt(session_id);
+        }
+    }
+
+    /// 处理用户明确点击的证书决定；保存失败保留请求，旧请求不能授权新连接。
+    pub(crate) fn respond_svn_certificate_prompt(
+        &mut self,
+        displayed: ConnectionSvnCertificatePromptState,
+        decision: SvnCertificateDecision,
+    ) {
+        let current = self
+            .remote_file_sessions
+            .get(&displayed.session_id)
+            .filter(|session| session.status == RemoteFileStatus::AwaitingCertificate)
+            .and_then(|session| {
+                session
+                    .pending_svn_certificate
+                    .as_ref()
+                    .map(|request| (session.link_id, request.clone()))
+            })
+            .filter(|(_, request)| {
+                request.request_id == displayed.request_id
+                    && request.prompt == displayed.prompt
+                    && request.is_pending()
+            });
+        let Some((link_id, request)) = current else {
+            self.close_svn_certificate_prompt_if_matches(
+                displayed.session_id,
+                &displayed.request_id,
+            );
+            self.placeholder_notice = "证书确认请求已失效，请查看当前请求或重新连接".to_string();
+            self.open_next_svn_certificate_prompt();
+            return;
+        };
+        let trust = SvnCertificateTrust {
+            host: request.prompt.host.clone(),
+            port: request.prompt.port,
+            fingerprint: request.prompt.fingerprint.clone(),
+            allowed_failures: request.prompt.failures.clone(),
+        };
+        let mut persisted_config = None;
+        if decision != SvnCertificateDecision::Reject {
+            // 临时信任同样检查连接端点；编辑链接后，旧证书不能批准新地址。
+            let mut candidate = self.config.clone();
+            if let Err(error) = candidate.connections.trust_svn_certificate(link_id, trust) {
+                self.report_svn_certificate_prompt_error(
+                    &displayed,
+                    format!("证书确认失败：{error}"),
+                );
+                return;
+            }
+            if decision == SvnCertificateDecision::TrustPermanently {
+                if let Err(error) = self.config_manager.save(&candidate) {
+                    self.report_svn_certificate_prompt_error(
+                        &displayed,
+                        format!("证书信任记录保存失败，尚未继续连接：{error}"),
+                    );
+                    return;
+                }
+                persisted_config = Some(candidate);
+            }
+        }
+        if let Err(error) = request.respond(decision) {
+            let mut message = format!("证书确认未生效：{error}");
+            if persisted_config.is_some()
+                && let Err(rollback_error) = self.config_manager.save(&self.config)
+            {
+                message.push_str(&format!(
+                    "；信任记录回滚保存失败，磁盘可能保留该记录：{rollback_error}"
+                ));
+            }
+            self.report_svn_certificate_prompt_error(&displayed, message);
+            return;
+        }
+        if let Some(config) = persisted_config {
+            self.config = config;
+        }
+        let message = match decision {
+            SvnCertificateDecision::Reject => "已拒绝 SVN HTTPS 服务器证书",
+            SvnCertificateDecision::TrustOnce => "已仅为本次连接信任 SVN 证书，继续连接...",
+            SvnCertificateDecision::TrustPermanently => "已保存 SVN 证书信任记录，继续连接...",
+        }
+        .to_string();
+        if let Some(session) = self.remote_file_sessions.get_mut(&displayed.session_id) {
+            session.pending_svn_certificate = None;
+            session.status = if decision == SvnCertificateDecision::Reject {
+                RemoteFileStatus::Failed
+            } else {
+                RemoteFileStatus::Connecting
+            };
+            session.message = Some(message.clone());
+        }
+        self.close_svn_certificate_prompt_if_matches(displayed.session_id, &displayed.request_id);
+        self.placeholder_notice = message;
+        self.open_next_svn_certificate_prompt();
+    }
+
+    /// 同时在当前弹窗和会话中保留失败原因，不把配置保存失败伪装成已信任。
+    fn report_svn_certificate_prompt_error(
+        &mut self,
+        displayed: &ConnectionSvnCertificatePromptState,
+        message: String,
+    ) {
+        if let Some(ConnectionDialogState::SvnCertificate(current)) =
+            self.connection_dialog.as_mut()
+            && current.session_id == displayed.session_id
+            && current.request_id == displayed.request_id
+        {
+            current.error_message = Some(message.clone());
+        }
+        if let Some(session) = self.remote_file_sessions.get_mut(&displayed.session_id)
+            && session
+                .pending_svn_certificate
+                .as_ref()
+                .is_some_and(|request| request.request_id == displayed.request_id)
+        {
+            session.message = Some(message.clone());
+        }
+        self.placeholder_notice = message;
+    }
+
+    /// 仅关闭仍绑定同一挑战的弹窗，不影响后来出现的另一张证书。
+    fn close_svn_certificate_prompt_if_matches(&mut self, session_id: usize, request_id: &str) {
+        if matches!(&self.connection_dialog, Some(ConnectionDialogState::SvnCertificate(displayed))
+            if displayed.session_id == session_id && displayed.request_id == request_id)
+        {
+            self.connection_dialog = None;
+        }
+    }
+
+    /// 会话关闭、失败或重连时拒绝残留挑战，防止后台继续等待已经不存在的弹窗。
+    fn clear_remote_svn_certificate_request(&mut self, session_id: usize) {
+        let request = self
+            .remote_file_sessions
+            .get_mut(&session_id)
+            .and_then(|session| session.pending_svn_certificate.take());
+        if let Some(request) = request {
+            if request.is_pending()
+                && let Err(error) = request.respond(SvnCertificateDecision::Reject)
+            {
+                self.placeholder_notice = format!("会话 {session_id} 的证书请求关闭失败：{error}");
+            }
+            self.close_svn_certificate_prompt_if_matches(session_id, &request.request_id);
         }
     }
 

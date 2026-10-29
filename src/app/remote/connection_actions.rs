@@ -616,6 +616,14 @@ impl ArgusApp {
 
     /// 关闭当前链接工作区弹窗。
     pub(crate) fn close_connection_dialog(&mut self) {
+        if let Some(ConnectionDialogState::SvnCertificate(prompt)) = self.connection_dialog.clone()
+        {
+            self.respond_svn_certificate_prompt(
+                prompt,
+                crate::remote::svn_certificate::SvnCertificateDecision::Reject,
+            );
+            return;
+        }
         if let Some(ConnectionDialogState::ConfirmHostKey(prompt)) = self.connection_dialog.clone()
         {
             self.reject_connection_host_key_prompt(prompt);
@@ -623,11 +631,14 @@ impl ArgusApp {
         }
         self.connection_dialog = None;
         self.placeholder_notice = "已关闭链接弹窗".to_string();
+        self.open_next_svn_certificate_prompt();
     }
 
     /// 提交当前链接工作区弹窗。
     pub(crate) fn submit_connection_dialog(&mut self) {
         match self.connection_dialog.clone() {
+            // 证书信任必须明确点击相应按钮，避免 Enter 在意外弹出的确认框中授权。
+            Some(ConnectionDialogState::SvnCertificate(_)) => {}
             Some(ConnectionDialogState::ConfirmHostKey(prompt)) => {
                 self.confirm_connection_host_key_prompt(prompt)
             }
@@ -1186,6 +1197,7 @@ impl ArgusApp {
     pub(crate) fn confirm_delete_connection_node(&mut self, node_id: ConnectionNodeId) {
         self.delete_connection_node(node_id);
         self.connection_dialog = None;
+        self.open_next_svn_certificate_prompt();
     }
 
     /// 执行链接目录或 SSH 链接删除，调用方需先完成二次确认。

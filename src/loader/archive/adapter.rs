@@ -116,10 +116,18 @@ pub(crate) trait ArchiveAdapter: Sync {
     }
 
     /// 提取一批已校验条目；不支持该能力的适配器必须明确报错。
+    ///
+    /// 参数说明：
+    /// - `path`：本地压缩包路径。
+    /// - `targets`：需要提取的条目及目标路径。
+    /// - `password`：解密密码；无加密时为 `None`。
+    /// - `max_log_bytes`：单个条目解压后的最大字节数。
+    /// - `cancellation`：取消令牌。
     fn extract_entries_to_paths(
         &self,
         _path: &Path,
         _targets: &[ArchiveEntryTarget],
+        _password: Option<&str>,
         _max_log_bytes: u64,
         _cancellation: &CancellationToken,
     ) -> Result<()> {

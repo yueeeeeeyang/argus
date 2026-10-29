@@ -110,8 +110,17 @@ impl ConfigManager {
         let mut config = toml::from_str::<AppConfig>(&text)?;
         // 必须先回填机密再规范化：设置文件里已经不含密码，若先规范化，校验会判定
         // “SMB 链接缺少密码”并丢弃用户链接。
-        let warnings = hydrate_connection_secrets(&mut config);
-        Ok((config.normalized(), warnings))
+        let mut warnings = hydrate_connection_secrets(&mut config);
+        let previous_certificate_count = config.connections.trusted_svn_certificates.len();
+        let config = config.normalized();
+        let removed_certificate_count =
+            previous_certificate_count - config.connections.trusted_svn_certificates.len();
+        if removed_certificate_count > 0 {
+            warnings.push(format!(
+                "已清除 {removed_certificate_count} 条无效、重复或端点已变更的 SVN 证书信任记录；再次连接时需要重新确认"
+            ));
+        }
+        Ok((config, warnings))
     }
 
     /// 将配置写入指定路径，先写临时文件再 rename，降低异常退出造成半文件的概率。
@@ -347,12 +356,115 @@ mod tests {
     use crate::config::paths::{argus_config_dir_from_home, isolated_test_dir, user_home_dir};
     use crate::remote::connection::{
         ConnectionConfig, ConnectionDirectoryConfig, ConnectionLinkConfig, SmbLinkConfig,
-        SshLinkConfig, TrustedHostKeyConfig,
+        SshLinkConfig, SvnLinkConfig, TrustedHostKeyConfig, TrustedSvnCertificateConfig,
     };
+    use crate::remote::svn_tls::{SvnCertificateFailure, SvnCertificateTrust};
 
     /// 构造唯一测试配置路径，避免并发测试之间互相覆盖。
     fn test_settings_path(name: &str) -> PathBuf {
         isolated_test_dir(&format!("config-manager-{name}")).join("settings.toml")
+    }
+
+    /// 证书例外写盘后可恢复，落盘内容仅包含端点、指纹及确认范围。
+    #[test]
+    fn svn_certificate_trust_round_trips_without_certificate_or_secret_material() {
+        let path = test_settings_path("svn-certificate-trust");
+        let mut config = AppConfig::default();
+        let link_id = config
+            .connections
+            .add_svn_link(
+                None,
+                "测试仓库",
+                SvnLinkConfig {
+                    url: "https://example.com/svn".to_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let certificate = SvnCertificateTrust {
+            host: "example.com".to_owned(),
+            port: 443,
+            fingerprint: format!("SHA256:{}", "a".repeat(64)),
+            allowed_failures: vec![SvnCertificateFailure::UnknownIssuer],
+        };
+        config
+            .connections
+            .trust_svn_certificate(link_id, certificate.clone())
+            .unwrap();
+
+        ConfigManager::save_to_path(&path, &config).unwrap();
+        let serialized = fs::read_to_string(&path).unwrap();
+        let saved = toml::from_str::<toml::Value>(&serialized).unwrap();
+        let trust_record = &saved["connections"]["trusted_svn_certificates"][0];
+        let certificate_keys = trust_record["certificate"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            certificate_keys,
+            std::collections::BTreeSet::from(["host", "port", "fingerprint", "allowed_failures",])
+        );
+        for absent_field in ["password", "private_key", "passphrase", "BEGIN CERTIFICATE"] {
+            assert!(!serialized.contains(absent_field));
+        }
+        let (loaded, warnings) = ConfigManager::load_from_path(&path).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            loaded
+                .connections
+                .trusted_svn_certificate(link_id, "https://example.com/svn"),
+            Some(&certificate)
+        );
+    }
+
+    /// 损坏的永久信任记录应清除并明确提醒，不能悄悄沿用或使其获得更宽的权限。
+    #[test]
+    fn loading_invalid_svn_certificate_trust_reports_warning() {
+        let path = test_settings_path("invalid-svn-certificate-trust");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut config = AppConfig::default();
+        let link_id = config
+            .connections
+            .add_svn_link(
+                None,
+                "测试仓库",
+                SvnLinkConfig {
+                    url: "https://example.com/svn".to_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        config
+            .connections
+            .trusted_svn_certificates
+            .push(TrustedSvnCertificateConfig {
+                link_id,
+                certificate: SvnCertificateTrust {
+                    host: "example.com".to_owned(),
+                    port: 443,
+                    fingerprint: "SHA256:invalid".to_owned(),
+                    allowed_failures: vec![SvnCertificateFailure::UnknownIssuer],
+                },
+            });
+        fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+
+        let (loaded, warnings) = ConfigManager::load_from_path(&path).unwrap();
+        assert_eq!(loaded.connections.links.len(), 1);
+        assert!(loaded.connections.trusted_svn_certificates.is_empty());
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("已清除 1 条") && warning.contains("SVN 证书信任记录")
+        }));
+    }
+
+    /// 未确认任何证书时不新增落盘字段，也不影响已有配置读取。
+    #[test]
+    fn empty_svn_certificate_trust_is_omitted_and_defaults_to_empty() {
+        let serialized = toml::to_string(&AppConfig::default()).unwrap();
+        assert!(!serialized.contains("trusted_svn_certificates"));
+        let loaded = toml::from_str::<AppConfig>(&serialized).unwrap();
+        assert!(loaded.connections.trusted_svn_certificates.is_empty());
     }
 
     /// 验证无法恢复密码的连接不会被静默丢弃。
@@ -808,6 +920,7 @@ private_key_passphrase = " phrase "
                     port: 22,
                     fingerprint: "SHA256:test".to_string(),
                 }],
+                trusted_svn_certificates: Vec::new(),
                 secrets: std::collections::BTreeMap::new(),
             },
             encoding: EncodingConfig {

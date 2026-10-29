@@ -24,7 +24,9 @@ use crate::remote::remote_file::{
     remote_file_name, resolve_remote_path, send_event_blocking, send_file_preview_loaded,
     send_operation_failed,
 };
+use crate::remote::svn_certificate::SvnCertificateContext;
 use crate::remote::svn_http::{HttpSvnNodeStat, HttpSvnSession};
+use crate::remote::svn_tls::SvnCertificateTrust;
 use tokio::io::AsyncWriteExt as _;
 
 /// 当前 SVN 会话的版本选择；HEAD 在每次刷新时重新解析，固定修订保持不变。
@@ -102,9 +104,15 @@ impl SvnRevisionSelection {
 
 impl SvnReadSession {
     /// 按 URL 协议创建内置 SVN 读取会话。
-    async fn open(config: &SvnLinkConfig) -> Result<Self> {
+    async fn open(
+        config: &SvnLinkConfig,
+        trusted_certificate: Option<SvnCertificateTrust>,
+        certificate_context: SvnCertificateContext,
+    ) -> Result<Self> {
         if matches!(repository_url_scheme(&config.url), Some("http" | "https")) {
-            return HttpSvnSession::open(config).map(Box::new).map(Self::Http);
+            return HttpSvnSession::open(config, trusted_certificate, Some(certificate_context))
+                .map(Box::new)
+                .map(Self::Http);
         }
         let client = create_svn_client(config)?;
         client
@@ -235,6 +243,7 @@ pub(super) fn run_svn_worker(
     session_id: usize,
     svn: SvnLinkConfig,
     trusted_fingerprint: Option<String>,
+    trusted_certificate: Option<SvnCertificateTrust>,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
     cancellation: WorkerCancellation,
@@ -247,6 +256,7 @@ pub(super) fn run_svn_worker(
         session_id,
         svn,
         trusted_fingerprint,
+        trusted_certificate,
         command_receiver,
         event_sender,
         cancellation,
@@ -258,6 +268,7 @@ async fn run_svn_worker_async(
     session_id: usize,
     config: SvnLinkConfig,
     trusted_fingerprint: Option<String>,
+    trusted_certificate: Option<SvnCertificateTrust>,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
     cancellation: WorkerCancellation,
@@ -275,7 +286,13 @@ async fn run_svn_worker_async(
             &event_sender,
         )?;
     }
-    let mut session = SvnReadSession::open(&config).await?;
+    let certificate_context = SvnCertificateContext {
+        session_id,
+        event_sender: event_sender.clone(),
+        cancellation: cancellation.clone(),
+    };
+    let mut session =
+        SvnReadSession::open(&config, trusted_certificate, certificate_context).await?;
     let latest_revision = session.latest_revision().await?;
     let mut selection = SvnRevisionSelection::Head(latest_revision);
     let mut current_dir = "/".to_string();

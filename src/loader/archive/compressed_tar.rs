@@ -47,6 +47,7 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
         &self,
         path: &Path,
         targets: &[ArchiveEntryTarget],
+        _password: Option<&str>,
         max_log_bytes: u64,
         cancellation: &CancellationToken,
     ) -> Result<()> {

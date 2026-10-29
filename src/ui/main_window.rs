@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：渲染标题栏、来源侧栏、日志内容区、AI 分析弹窗和设置模态框。
 
-use crate::app::ArgusApp;
+use crate::app::{ArgusApp, ConnectionDialogState};
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::perf::PerfSpan;
 use crate::theme::ThemeMode;
@@ -15,8 +15,8 @@ use crate::ui::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, Context, ExternalPaths,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window, div, hsla,
-    point, prelude::*, px, rgb,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window,
+    div, hsla, point, prelude::*, px, rgb,
 };
 use std::time::Duration;
 
@@ -169,6 +169,13 @@ pub(crate) fn render(
     let input_focus_handles = app.ensure_input_focus_handles(cx);
     let root_focus_for_track = input_focus_handles.root.clone();
     let root_focus_for_click = input_focus_handles.root.clone();
+    if matches!(
+        app.connection_dialog,
+        Some(ConnectionDialogState::SvnCertificate(_))
+    ) {
+        // 弹窗可能在没有键盘焦点时异步出现，主动接管焦点使 Escape 始终能拒绝。
+        root_focus_for_track.focus(window);
+    }
     let theme = app.theme.clone();
 
     div()
@@ -182,6 +189,19 @@ pub(crate) fn render(
         .text_color(rgb(theme.foreground))
         .focusable()
         .track_focus(&root_focus_for_track)
+        .capture_key_down(cx.listener(|app, event: &KeyDownEvent, _, cx| {
+            if matches!(
+                app.connection_dialog,
+                Some(ConnectionDialogState::SvnCertificate(_))
+            ) {
+                // 证书弹出时输入焦点可能仍在后方页面；先拦截，避免 Enter 或后台输入触发授权。
+                cx.stop_propagation();
+                if event.keystroke.key == "escape" {
+                    app.close_connection_dialog();
+                    cx.notify();
+                }
+            }
+        }))
         .on_click(cx.listener(move |app, _event: &ClickEvent, window, cx| {
             root_focus_for_click.focus(window);
             app.clear_all_text_input_focus();

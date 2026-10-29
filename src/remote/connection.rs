@@ -10,6 +10,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::svn_tls::SvnCertificateTrust;
+
 /// 链接目录和链接共享的节点 ID 类型，便于 UI 在同一棵树中统一选中、展开和定位。
 pub(crate) type ConnectionNodeId = usize;
 
@@ -33,6 +35,9 @@ pub(crate) struct ConnectionConfig {
     /// 已经由用户确认可信的主机指纹。
     #[serde(default)]
     pub trusted_hosts: Vec<TrustedHostKeyConfig>,
+    /// 用户确认的 SVN HTTPS 证书例外，仅作用于指定链接和服务端点。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_svn_certificates: Vec<TrustedSvnCertificateConfig>,
     /// 系统凭据库不可用时保存的连接机密密文；键为凭据账户名，值为本地密文。
     ///
     /// 凭据库可用时该表始终为空——设置文件中不会出现任何机密，无论明文还是密文。
@@ -48,6 +53,7 @@ impl Default for ConnectionConfig {
             directories: Vec::new(),
             links: Vec::new(),
             trusted_hosts: Vec::new(),
+            trusted_svn_certificates: Vec::new(),
             secrets: BTreeMap::new(),
         }
     }
@@ -124,6 +130,7 @@ impl ConnectionConfig {
             host.host = normalized_required_text(&host.host);
             host.fingerprint = normalized_required_text(&host.fingerprint);
         }
+        self.retain_valid_svn_certificates();
         self.next_id = self
             .next_id
             .max(used_ids.iter().next_back().copied().unwrap_or_default() + 1)
@@ -335,6 +342,8 @@ impl ConnectionConfig {
         link.smb = None;
         link.git = None;
         link.svn = None;
+        self.trusted_svn_certificates
+            .retain(|trusted| trusted.link_id != link_id);
         Ok(())
     }
 
@@ -362,6 +371,8 @@ impl ConnectionConfig {
         link.smb = Some(smb);
         link.git = None;
         link.svn = None;
+        self.trusted_svn_certificates
+            .retain(|trusted| trusted.link_id != link_id);
         Ok(())
     }
 
@@ -389,6 +400,8 @@ impl ConnectionConfig {
         link.smb = None;
         link.git = Some(git);
         link.svn = None;
+        self.trusted_svn_certificates
+            .retain(|trusted| trusted.link_id != link_id);
         Ok(())
     }
 
@@ -416,6 +429,7 @@ impl ConnectionConfig {
         link.smb = None;
         link.git = None;
         link.svn = Some(svn);
+        self.retain_valid_svn_certificates();
         Ok(())
     }
 
@@ -477,6 +491,8 @@ impl ConnectionConfig {
                 .map(ConnectionDeletedNodeKind::from)
                 .unwrap_or(ConnectionDeletedNodeKind::UnknownLink);
             self.links.retain(|link| link.id != node_id);
+            self.trusted_svn_certificates
+                .retain(|trusted| trusted.link_id != node_id);
             return Ok(deleted_kind);
         }
 
@@ -601,6 +617,88 @@ impl ConnectionConfig {
             .iter()
             .find(|trusted| trusted.host == normalized_host && trusted.port == port)
             .map(|trusted| trusted.fingerprint.as_str())
+    }
+
+    /// 查询指定链接和 HTTPS 地址已确认的证书；链接、主机、端口任一不匹配均返回空。
+    pub(crate) fn trusted_svn_certificate(
+        &self,
+        link_id: ConnectionNodeId,
+        url: &str,
+    ) -> Option<&SvnCertificateTrust> {
+        let link_url = self.svn_certificate_url(link_id)?;
+        let requested_url = url::Url::parse(url).ok()?;
+        let mut records = self
+            .trusted_svn_certificates
+            .iter()
+            .filter(|trusted| trusted.link_id == link_id);
+        let certificate = &records.next()?.certificate;
+        // 重复记录无法证明哪条来自最近一次确认，必须重新由用户确认。
+        if records.next().is_some()
+            || !certificate.is_valid()
+            || !certificate.matches_url(&link_url)
+            || !certificate.matches_url(&requested_url)
+        {
+            return None;
+        }
+        Some(certificate)
+    }
+
+    /// 保存用户明确确认的证书，替换该链接已有记录；证书或链接端点无效时返回错误且不修改配置。
+    pub(crate) fn trust_svn_certificate(
+        &mut self,
+        link_id: ConnectionNodeId,
+        mut certificate: SvnCertificateTrust,
+    ) -> Result<(), ConnectionValidationError> {
+        if self.link(link_id).is_none() {
+            return Err(ConnectionValidationError::NodeNotFound);
+        }
+        if !certificate.is_valid() {
+            return Err(ConnectionValidationError::InvalidSvnCertificateTrust);
+        }
+        let link_url = self
+            .svn_certificate_url(link_id)
+            .ok_or(ConnectionValidationError::SvnCertificateEndpointMismatch)?;
+        if !certificate.matches_url(&link_url) {
+            return Err(ConnectionValidationError::SvnCertificateEndpointMismatch);
+        }
+        certificate.allowed_failures.sort_unstable();
+        certificate.allowed_failures.dedup();
+        self.trusted_svn_certificates
+            .retain(|trusted| trusted.link_id != link_id);
+        self.trusted_svn_certificates
+            .push(TrustedSvnCertificateConfig {
+                link_id,
+                certificate,
+            });
+        Ok(())
+    }
+
+    /// 返回唯一 SVN 协议链接的仓库地址，拒绝混合协议的损坏配置。
+    fn svn_certificate_url(&self, link_id: ConnectionNodeId) -> Option<url::Url> {
+        let link = self.link(link_id)?;
+        if link.protocol() != Some(ConnectionLinkKind::Svn) {
+            return None;
+        }
+        url::Url::parse(&link.svn.as_ref()?.url).ok()
+    }
+
+    /// 清除失去归属、端点变更、无效或重复的信任记录，避免旧确认被应用到新链接。
+    fn retain_valid_svn_certificates(&mut self) {
+        let mut record_counts = BTreeMap::new();
+        for trusted in &self.trusted_svn_certificates {
+            *record_counts.entry(trusted.link_id).or_insert(0_usize) += 1;
+        }
+        let link_urls = record_counts
+            .keys()
+            .filter_map(|&link_id| self.svn_certificate_url(link_id).map(|url| (link_id, url)))
+            .collect::<BTreeMap<_, _>>();
+        self.trusted_svn_certificates.retain(|trusted| {
+            record_counts.get(&trusted.link_id) == Some(&1)
+                && trusted.certificate.is_valid()
+                && link_urls
+                    .get(&trusted.link_id)
+                    .is_some_and(|url| trusted.certificate.matches_url(url))
+        });
     }
 
     /// 根据选中节点推导新节点父目录的内部实现。
@@ -1439,6 +1537,15 @@ pub(crate) struct TrustedHostKeyConfig {
     pub fingerprint: String,
 }
 
+/// 用户针对某个 SVN 链接确认的证书例外；仅保存指纹和可接受的校验错误，不保存证书原文。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct TrustedSvnCertificateConfig {
+    /// 作出信任确认时所属的链接 ID，不能在其他链接复用。
+    pub link_id: ConnectionNodeId,
+    /// HTTPS 服务端点、证书指纹和已明确确认的校验错误。
+    pub certificate: SvnCertificateTrust,
+}
+
 /// 链接目录树的一行可见节点。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConnectionTreeRow {
@@ -1543,6 +1650,12 @@ pub(crate) enum ConnectionValidationError {
     /// URL 在 authority 中携带密码，可能被日志或提示意外暴露。
     #[error("仓库 URL 不能内嵌密码，请使用独立凭据字段")]
     EmbeddedUrlPassword,
+    /// SVN 证书指纹、主机或端口无效。
+    #[error("SVN 证书信任记录无效，请重新确认服务端证书")]
+    InvalidSvnCertificateTrust,
+    /// 证书确认不能用于其他链接类型或不同 HTTPS 服务端点。
+    #[error("SVN 证书与当前链接的 HTTPS 主机或端口不匹配，请重新连接并确认")]
+    SvnCertificateEndpointMismatch,
     /// HTTPS 用户名与令牌未成对填写。
     #[error("HTTPS 用户名与访问令牌必须同时填写或同时留空")]
     IncompleteHttpCredential,
@@ -1807,6 +1920,233 @@ fn normalized_optional_secret_text(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::svn_tls::SvnCertificateFailure;
+
+    /// 构造不含机密、仅用于证书信任范围测试的 SVN 链接。
+    fn add_certificate_test_link(config: &mut ConnectionConfig, name: &str, url: &str) -> usize {
+        config
+            .add_svn_link(
+                None,
+                name,
+                SvnLinkConfig {
+                    url: url.to_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    /// 指纹仅用于配置格式校验，无需保存真实证书或测试私钥。
+    fn certificate_test_trust() -> SvnCertificateTrust {
+        SvnCertificateTrust {
+            host: "example.com".to_owned(),
+            port: 443,
+            fingerprint: format!("SHA256:{}", "a".repeat(64)),
+            allowed_failures: vec![
+                SvnCertificateFailure::UnknownIssuer,
+                SvnCertificateFailure::NameMismatch,
+            ],
+        }
+    }
+
+    /// 同一端点的其他链接、不同端口和 HTTP 地址都不能复用信任确认。
+    #[test]
+    fn svn_certificate_trust_is_scoped_to_link_and_https_origin() {
+        let mut config = ConnectionConfig::default();
+        let link_id = add_certificate_test_link(&mut config, "仓库", "https://example.com/svn");
+        let other_id =
+            add_certificate_test_link(&mut config, "其他仓库", "https://example.com/other");
+        let certificate = certificate_test_trust();
+        config
+            .trust_svn_certificate(link_id, certificate.clone())
+            .unwrap();
+
+        assert_eq!(
+            config.trusted_svn_certificate(link_id, "https://EXAMPLE.com:443/another/path"),
+            Some(&certificate)
+        );
+        assert!(
+            config
+                .trusted_svn_certificate(other_id, "https://example.com/other")
+                .is_none()
+        );
+        for url in [
+            "https://other.example.com/svn",
+            "https://example.com:8443/svn",
+            "http://example.com/svn",
+            "svn://example.com/svn",
+            "invalid",
+        ] {
+            assert!(config.trusted_svn_certificate(link_id, url).is_none());
+        }
+    }
+
+    /// 无效记录必须显式拒绝；拒绝后仍保留之前确认的证书。
+    #[test]
+    fn invalid_svn_certificate_trust_does_not_replace_existing_record() {
+        let mut config = ConnectionConfig::default();
+        let link_id = add_certificate_test_link(&mut config, "仓库", "https://example.com/svn");
+        let certificate = certificate_test_trust();
+        config
+            .trust_svn_certificate(link_id, certificate.clone())
+            .unwrap();
+        let mut invalid = certificate.clone();
+        invalid.fingerprint = "SHA256:invalid".to_owned();
+        assert_eq!(
+            config.trust_svn_certificate(link_id, invalid),
+            Err(ConnectionValidationError::InvalidSvnCertificateTrust)
+        );
+        let mut invalid = certificate.clone();
+        invalid.port = 0;
+        assert_eq!(
+            config.trust_svn_certificate(link_id, invalid),
+            Err(ConnectionValidationError::InvalidSvnCertificateTrust)
+        );
+        let mut different = certificate.clone();
+        different.host = "other.example.com".to_owned();
+        assert_eq!(
+            config.trust_svn_certificate(link_id, different),
+            Err(ConnectionValidationError::SvnCertificateEndpointMismatch)
+        );
+        assert_eq!(
+            config.trust_svn_certificate(usize::MAX, certificate.clone()),
+            Err(ConnectionValidationError::NodeNotFound)
+        );
+        assert_eq!(
+            config.trusted_svn_certificate(link_id, "https://example.com/svn"),
+            Some(&certificate)
+        );
+    }
+
+    /// 用户重新确认新证书后，同一链接只保留一条新记录。
+    #[test]
+    fn confirmed_svn_certificate_replaces_previous_record() {
+        let mut config = ConnectionConfig::default();
+        let link_id = add_certificate_test_link(&mut config, "仓库", "https://example.com/svn");
+        config
+            .trust_svn_certificate(link_id, certificate_test_trust())
+            .unwrap();
+        let mut replacement = certificate_test_trust();
+        replacement.fingerprint = format!("SHA256:{}", "b".repeat(64));
+        replacement.allowed_failures.clear();
+        config
+            .trust_svn_certificate(link_id, replacement.clone())
+            .unwrap();
+        assert_eq!(config.trusted_svn_certificates.len(), 1);
+        assert_eq!(
+            config.trusted_svn_certificate(link_id, "https://example.com/svn"),
+            Some(&replacement)
+        );
+    }
+
+    /// 同端点修改路径保留确认，修改主机、端口或协议后清除确认。
+    #[test]
+    fn svn_certificate_trust_tracks_endpoint_changes() {
+        for changed_url in [
+            "https://other.example.com/svn",
+            "https://example.com:8443/svn",
+            "http://example.com/svn",
+            "svn://example.com/svn",
+        ] {
+            let mut config = ConnectionConfig::default();
+            let link_id = add_certificate_test_link(&mut config, "仓库", "https://example.com/svn");
+            config
+                .trust_svn_certificate(link_id, certificate_test_trust())
+                .unwrap();
+            config
+                .update_svn_link(
+                    link_id,
+                    "仓库",
+                    SvnLinkConfig {
+                        url: "https://EXAMPLE.com:443/other".to_owned(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(config.trusted_svn_certificates.len(), 1);
+            config
+                .update_svn_link(
+                    link_id,
+                    "仓库",
+                    SvnLinkConfig {
+                        url: changed_url.to_owned(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(config.trusted_svn_certificates.is_empty());
+            assert_eq!(
+                config.trust_svn_certificate(link_id, certificate_test_trust()),
+                Err(ConnectionValidationError::SvnCertificateEndpointMismatch)
+            );
+        }
+    }
+
+    /// 删除链接或切换到 Git 协议后，不允许遗留 SVN 证书确认。
+    #[test]
+    fn removing_svn_link_or_changing_protocol_clears_certificate_trust() {
+        let mut config = ConnectionConfig::default();
+        let link_id = add_certificate_test_link(&mut config, "仓库", "https://example.com/svn");
+        config
+            .trust_svn_certificate(link_id, certificate_test_trust())
+            .unwrap();
+        let mut removed = config.clone();
+        removed.delete_node(link_id).unwrap();
+        assert!(removed.trusted_svn_certificates.is_empty());
+        config
+            .update_git_link(
+                link_id,
+                "仓库",
+                GitLinkConfig {
+                    url: "https://example.com/repo.git".to_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(config.trusted_svn_certificates.is_empty());
+        assert_eq!(
+            config.trust_svn_certificate(link_id, certificate_test_trust()),
+            Err(ConnectionValidationError::SvnCertificateEndpointMismatch)
+        );
+    }
+
+    /// 外部编辑设置造成的孤立、重复、错端点、坏格式记录均不能参与证书校验。
+    #[test]
+    fn normalized_removes_ambiguous_or_invalid_svn_certificate_records() {
+        let mut config = ConnectionConfig::default();
+        let valid_id = add_certificate_test_link(&mut config, "有效", "https://example.com/svn");
+        let duplicate_id =
+            add_certificate_test_link(&mut config, "重复", "https://example.com/svn");
+        let invalid_id = add_certificate_test_link(&mut config, "无效", "https://example.com/svn");
+        let changed_id = add_certificate_test_link(&mut config, "已变更", "http://example.com/svn");
+        for link_id in [
+            valid_id,
+            duplicate_id,
+            duplicate_id,
+            invalid_id,
+            changed_id,
+            usize::MAX,
+        ] {
+            let mut certificate = certificate_test_trust();
+            if link_id == invalid_id {
+                certificate.fingerprint.clear();
+            }
+            config
+                .trusted_svn_certificates
+                .push(TrustedSvnCertificateConfig {
+                    link_id,
+                    certificate,
+                });
+        }
+        assert!(
+            config
+                .trusted_svn_certificate(duplicate_id, "https://example.com/svn")
+                .is_none()
+        );
+        let normalized = config.normalized();
+        assert_eq!(normalized.trusted_svn_certificates.len(), 1);
+        assert_eq!(normalized.trusted_svn_certificates[0].link_id, valid_id);
+    }
 
     /// 构造含有两层目录和一个 SSH 链接的测试配置。
     fn sample_config() -> ConnectionConfig {

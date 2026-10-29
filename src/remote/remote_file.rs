@@ -30,6 +30,8 @@ use crate::remote::connection::{
 use crate::remote::git::run_git_worker;
 use crate::remote::ssh::{authenticate_ssh_session, connect_ssh_session};
 use crate::remote::svn::run_svn_worker;
+use crate::remote::svn_certificate::SvnCertificateApproval;
+use crate::remote::svn_tls::SvnCertificateTrust;
 use crate::remote::terminal::PendingHostKey;
 
 /// 远程 Unix 文件类型掩码。
@@ -78,8 +80,12 @@ pub(crate) struct RemoteFileSessionState {
     pub command_sender: Option<mpsc::Sender<RemoteFileCommand>>,
     /// 随会话释放的取消守卫，可中断正在执行的 SSH I/O。
     pub worker_guard: Option<WorkerGuard>,
+    /// 每次重连都会更新，用于拒绝旧 worker 延迟到达的事件。
+    pub worker_generation: uuid::Uuid,
     /// 等待用户确认的主机指纹；没有待确认时为空。
     pub pending_host_key: Option<PendingHostKey>,
+    /// 当前 SVN HTTPS 握手等待的证书确认，与普通命令队列独立。
+    pub pending_svn_certificate: Option<SvnCertificateApproval>,
     /// 当前远程目录。
     pub current_dir: String,
     /// 地址栏输入框状态。
@@ -121,7 +127,9 @@ impl RemoteFileSessionState {
             status: RemoteFileStatus::Connecting,
             command_sender: Some(command_sender),
             worker_guard: None,
+            worker_generation: uuid::Uuid::new_v4(),
             pending_host_key: None,
+            pending_svn_certificate: None,
             current_dir: String::new(),
             address_input: TextInputState::default(),
             entries: Vec::new(),
@@ -280,6 +288,8 @@ pub(crate) enum RemoteFileStatus {
     Connecting,
     /// 已拿到未知主机指纹，等待用户确认。
     AwaitingHostKey,
+    /// HTTPS 证书需要用户显式确认，尚未发送认证信息。
+    AwaitingCertificate,
     /// 正在读取目录。
     Loading,
     /// 文件管理通道可用。
@@ -402,6 +412,8 @@ pub(crate) enum RemoteFileWorkerBackend {
         svn: SvnLinkConfig,
         /// 已确认可信的 SSH 主机指纹；`svn://` 时为空。
         trusted_fingerprint: Option<String>,
+        /// 此链接、HTTPS 地址和证书专属的用户确认记录。
+        trusted_certificate: Option<SvnCertificateTrust>,
     },
 }
 
@@ -480,6 +492,11 @@ pub(crate) enum FilePreviewContent {
 /// 远程文件 worker 回传给 UI 的事件。
 #[derive(Clone, Debug)]
 pub(crate) enum RemoteFileEvent {
+    /// TLS 握手失败后申请证书确认，响应由请求的专属通道返回。
+    SvnCertificateVerification {
+        session_id: usize,
+        request: SvnCertificateApproval,
+    },
     /// 发现未知主机指纹，需要 UI 弹窗确认。
     HostKeyVerification {
         /// 会话 ID。
@@ -728,10 +745,12 @@ fn run_remote_file_worker(
         RemoteFileWorkerBackend::Svn {
             svn,
             trusted_fingerprint,
+            trusted_certificate,
         } => run_svn_worker(
             request.session_id,
             svn,
             trusted_fingerprint,
+            trusted_certificate,
             command_receiver,
             event_sender,
             cancellation,

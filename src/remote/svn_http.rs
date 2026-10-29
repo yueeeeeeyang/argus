@@ -5,6 +5,8 @@
 //! 主要功能：发现 SVN HTTPv2 修订资源、枚举目录、读取文件，并安全处理认证与重定向。
 
 use super::download::DownloadFile;
+use super::svn_certificate::SvnCertificateContext;
+use super::svn_tls::{SvnCertificateTrust, SvnTlsSession};
 use super::worker::WorkerCancellation;
 
 use std::io::Read;
@@ -22,6 +24,10 @@ use url::Url;
 use crate::remote::connection::SvnLinkConfig;
 use crate::remote::remote_file::{RemoteFileEntry, RemoteFileEntryKind, remote_child_path};
 
+#[cfg(test)]
+#[path = "svn_http_certificate_tests.rs"]
+mod certificate_tests;
+
 /// HTTP 连接超时，避免不可达内网地址长期占用单个仓库 worker。
 const SVN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 单次 DAV 请求读写超时；大文件下载按持续有数据到达计算，不限制总耗时。
@@ -30,6 +36,8 @@ const SVN_HTTP_IO_TIMEOUT: Duration = Duration::from_secs(60);
 const SVN_HTTP_MAX_XML_BYTES: u64 = 16 * 1024 * 1024;
 /// 同源重定向最大次数，兼容仓库根目录补斜杠等常见服务器配置。
 const SVN_HTTP_MAX_REDIRECTS: usize = 5;
+/// 同一请求的换证确认有上限，避免异常服务不断换证形成无限重试。
+const SVN_HTTP_MAX_CERTIFICATE_RETRIES: usize = 3;
 /// SVN HTTPv2 能力发现请求体；服务端据此返回最新修订号和修订资源根等专用响应头。
 const SVN_DAV_OPTIONS_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:options xmlns:D="DAV:">
@@ -98,6 +106,10 @@ pub(super) struct HttpSvnSession {
     browse_root_segments: Vec<String>,
     /// 首次 OPTIONS 已取得但尚未被上层消费的最新修订号。
     initial_youngest_revision: Option<u64>,
+    /// HTTPS 会话独立的验证器及显式信任，不沿用 ureq 的进程级根证书缓存。
+    tls: Option<SvnTlsSession>,
+    /// 通知 UI 并等待用户确认；没有交互上下文时严格拒绝未知证书。
+    certificate_context: Option<SvnCertificateContext>,
 }
 
 impl HttpSvnSession {
@@ -105,22 +117,32 @@ impl HttpSvnSession {
     ///
     /// 参数：`config` 提供仓库 URL 和可选用户名/密码；密码不会写入 URL 或错误文本。
     /// 返回值：服务端提供 HTTPv2 修订根信息时返回可用会话，否则返回明确的不兼容错误。
-    pub(super) fn open(config: &SvnLinkConfig) -> Result<Self> {
+    pub(super) fn open(
+        config: &SvnLinkConfig,
+        trusted_certificate: Option<SvnCertificateTrust>,
+        certificate_context: Option<SvnCertificateContext>,
+    ) -> Result<Self> {
         let (base_url, authorization) = sanitized_url_and_authorization(config)?;
-
-        let agent = ureq::AgentBuilder::new()
+        let tls = (base_url.scheme() == "https")
+            .then(|| SvnTlsSession::new(&base_url, trusted_certificate))
+            .transpose()?;
+        let mut agent = ureq::AgentBuilder::new()
             .timeout_connect(SVN_HTTP_CONNECT_TIMEOUT)
             .timeout_read(SVN_HTTP_IO_TIMEOUT)
             .timeout_write(SVN_HTTP_IO_TIMEOUT)
-            .redirects(0)
-            .build();
+            .redirects(0);
+        if let Some(tls) = &tls {
+            agent = agent.tls_config(tls.client_config());
+        }
         let mut session = Self {
-            agent,
+            agent: agent.build(),
             base_url: base_url.clone(),
             authorization,
             revision_root_stub: base_url,
             browse_root_segments: Vec::new(),
             initial_youngest_revision: None,
+            tls,
+            certificate_context,
         };
         let discovery = session.discover()?;
         session.apply_discovery(discovery)?;
@@ -326,7 +348,12 @@ impl HttpSvnSession {
         allow_not_found: bool,
     ) -> Result<Option<(ureq::Response, Url)>> {
         let mut request_url = initial_url.clone();
-        for redirect_count in 0..=SVN_HTTP_MAX_REDIRECTS {
+        let mut redirect_count = 0;
+        let mut certificate_retries = 0;
+        loop {
+            if let Some(context) = &self.certificate_context {
+                context.cancellation.ensure_active()?;
+            }
             let mut request = self
                 .agent
                 .request(method, request_url.as_str())
@@ -358,6 +385,22 @@ impl HttpSvnSession {
                     ));
                 }
                 Err(ureq::Error::Transport(error)) => {
+                    if let Some(tls) = &self.tls
+                        && let Some(prompt) = tls.take_pending()?
+                    {
+                        if certificate_retries == SVN_HTTP_MAX_CERTIFICATE_RETRIES {
+                            bail!("SVN 服务器证书连续变化，已停止重试，请检查服务器配置");
+                        }
+                        let context = self.certificate_context.as_ref().ok_or_else(|| {
+                            anyhow!("SVN HTTPS 证书校验失败，需要在连接页面确认服务器证书")
+                        })?;
+                        // 已失败的握手不会发送 HTTP 认证信息；在握手之外等待用户，
+                        // 确认后仅重试本次只读请求，后续握手仍校验当前证书与批准指纹。
+                        context.confirm(prompt.clone())?;
+                        tls.trust(&prompt)?;
+                        certificate_retries += 1;
+                        continue;
+                    }
                     return Err(anyhow!("SVN HTTP 网络请求失败：{error}"));
                 }
             };
@@ -382,8 +425,8 @@ impl HttpSvnSession {
                 bail!("已阻止携带 URL 凭据的 SVN HTTP 重定向");
             }
             request_url = next_url;
+            redirect_count += 1;
         }
-        unreachable!("重定向循环总会返回响应或错误")
     }
 }
 
@@ -813,7 +856,8 @@ mod tests {
             url: format!("{base}/repo"),
             ..SvnLinkConfig::default()
         };
-        let mut session = HttpSvnSession::open(&config).expect("应完成 HTTPv2 能力发现");
+        let mut session =
+            HttpSvnSession::open(&config, None, None).expect("应完成 HTTPv2 能力发现");
         assert_eq!(session.latest_revision().expect("应返回缓存的最新修订"), 42);
 
         let entries = session.list_directory("", 42).expect("应列出目录");
@@ -880,6 +924,8 @@ mod tests {
             revision_root_stub: url,
             browse_root_segments: Vec::new(),
             initial_youngest_revision: None,
+            tls: None,
+            certificate_context: None,
         };
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("report.log");
@@ -941,6 +987,8 @@ mod tests {
             revision_root_stub: Url::parse("http://example.com/svn/repo/!svn/rvr").unwrap(),
             browse_root_segments: vec!["trunk".to_string()],
             initial_youngest_revision: None,
+            tls: None,
+            certificate_context: None,
         };
         assert_eq!(
             session.revision_url("/目录/文件.txt", 7).unwrap().as_str(),

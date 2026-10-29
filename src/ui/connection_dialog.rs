@@ -14,7 +14,8 @@ use gpui::{
 
 use crate::app::{
     ArgusApp, ConnectionDeletePromptState, ConnectionDialogState, ConnectionDirectoryFormState,
-    ConnectionHostKeyPromptState, ConnectionLinkFormState, TextInputState,
+    ConnectionHostKeyPromptState, ConnectionLinkFormState, ConnectionSvnCertificatePromptState,
+    TextInputState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::infra::text_selection::{
@@ -22,6 +23,7 @@ use crate::infra::text_selection::{
     slice_character_range,
 };
 use crate::remote::connection::ConnectionLinkKind;
+use crate::remote::svn_certificate::SvnCertificateDecision;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
@@ -55,6 +57,9 @@ const CONNECTION_WINDOW_FOOTER_GAP: f32 = 20.0;
 const CONNECTION_WINDOW_FOOTER_HEIGHT: f32 = CONNECTION_WINDOW_FOOTER_GAP + MODAL_ACTION_HEIGHT;
 /// 主机指纹确认弹窗宽度。
 const HOST_KEY_DIALOG_WIDTH: f32 = 520.0;
+/// 证书元信息较长，正文允许滚动而标题和三个明确操作保持固定。
+const SVN_CERTIFICATE_DIALOG_WIDTH: f32 = 680.0;
+const SVN_CERTIFICATE_DIALOG_HEIGHT: f32 = 580.0;
 /// 主机指纹确认弹窗高度：标题栏 + 说明 + 指纹框 + 底部操作区 + 底部内边距。
 const HOST_KEY_DIALOG_HEIGHT: f32 = CONNECTION_WINDOW_HEADER_HEIGHT
     + 18.0
@@ -590,6 +595,18 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
     };
 
     match dialog {
+        ConnectionDialogState::SvnCertificate(prompt) => render_modal_dialog(
+            ModalDialog {
+                overlay_id: "connection-svn-certificate-dialog-overlay",
+                container_id: "connection-svn-certificate-dialog-container",
+                width: SVN_CERTIFICATE_DIALOG_WIDTH,
+                height: SVN_CERTIFICATE_DIALOG_HEIGHT,
+                content: render_svn_certificate_prompt(prompt, &theme, cx).into_any_element(),
+            },
+            theme,
+            cx,
+        )
+        .into_any_element(),
         ConnectionDialogState::ConfirmHostKey(prompt) => render_modal_dialog(
             ModalDialog {
                 overlay_id: "connection-host-key-dialog-overlay",
@@ -1823,6 +1840,91 @@ fn render_host_key_prompt(
                     },
                 )),
         )
+}
+
+/// 展示本次握手的证书信息及精确授权范围，不为 Enter 设置默认信任动作。
+fn render_svn_certificate_prompt(
+    displayed: ConnectionSvnCertificatePromptState,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let prompt = &displayed.prompt;
+    let mut fields = vec![
+        ("目标地址", format!("{}:{}", prompt.host, prompt.port)),
+        ("证书主体", prompt.subject.clone()),
+        ("签发机构", prompt.issuer.clone()),
+        (
+            "允许的域名 / IP（SAN）",
+            if prompt.subject_alt_names.is_empty() {
+                "未提供".to_string()
+            } else {
+                prompt.subject_alt_names.join("\n")
+            },
+        ),
+        (
+            "有效期",
+            format!("{} ～ {}", prompt.not_before, prompt.not_after),
+        ),
+        ("SHA-256 指纹", prompt.fingerprint.clone()),
+    ];
+    if let Some(previous) = &prompt.previous_fingerprint {
+        fields.push(("此前信任的指纹", previous.clone()));
+    }
+    let reasons = prompt
+        .failures
+        .iter()
+        .map(|failure| failure.label())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let has_changed = prompt
+        .previous_fingerprint
+        .as_ref()
+        .is_some_and(|previous| previous != &prompt.fingerprint);
+    let reject = displayed.clone();
+    let once = displayed.clone();
+    let permanent = displayed.clone();
+    div().size_full().flex().flex_col().rounded_lg().bg(rgb(theme.content))
+        .child(dialog_header("确认 SVN 服务器证书", ArgusIcon::Key, theme, cx))
+        .child(div().id("connection-svn-certificate-dialog-scroll")
+            .debug_selector(|| "connection-svn-certificate-dialog-scroll".to_string())
+            .flex_1().min_h(px(0.0)).w_full().overflow_y_scroll()
+            .scrollbar_width(px(CONNECTION_FORM_SCROLLBAR_WIDTH))
+            .px_5().pr(px(CONNECTION_FORM_SCROLL_RIGHT_PADDING))
+            .flex().flex_col().gap_3().text_size(px(13.0)).line_height(px(19.0))
+            .text_color(rgb(theme.foreground))
+            .when(has_changed, |this| this.child(div().flex_none().w_full().text_color(rgb(theme.warning))
+                .child("服务器证书与此前信任的指纹不同，请重新核对。")))
+            .child(div().flex_none().w_full().text_color(rgb(theme.warning)).child(
+                if reasons.is_empty() { "请确认以下服务器证书。".to_string() }
+                else { format!("证书校验未通过：\n{reasons}") }))
+            .children(fields.into_iter().map(|(label, value)| {
+                div().flex_none().w_full().flex().flex_col().gap_1()
+                    .child(div().w_full().text_color(rgb(theme.foreground_muted)).child(label))
+                    .child(div().w_full().child(value))
+            }))
+            .child(div().flex_none().w_full().text_color(rgb(theme.foreground_muted))
+                .child("请核对证书信息后选择是否信任。信任仅适用于当前链接、主机端口及这张证书；证书变化时将重新询问。")))
+        .child(div().flex_none().px_5().pt_5().pb(px(MODAL_BOTTOM_PADDING))
+            .flex().flex_col().gap_2()
+            .when_some(displayed.error_message, |this, error| {
+                this.child(div().id("connection-svn-certificate-error").flex_none().w_full()
+                    .debug_selector(|| "connection-svn-certificate-error".to_string())
+                    .text_size(px(12.0)).line_height(px(18.0))
+                    .text_color(rgb(theme.error)).child(error))
+            })
+            .child(div().flex().justify_end().gap_2()
+            .child(action_button("connection-svn-certificate-reject", "拒绝", false, theme, cx, move |app,cx| {
+                app.respond_svn_certificate_prompt(reject.clone(), SvnCertificateDecision::Reject);
+                cx.notify();
+            }))
+            .child(action_button("connection-svn-certificate-trust-once", "仅本次信任", false, theme, cx, move |app,cx| {
+                app.respond_svn_certificate_prompt(once.clone(), SvnCertificateDecision::TrustOnce);
+                cx.notify();
+            }))
+            .child(action_button("connection-svn-certificate-trust-permanently", "永久信任", true, theme, cx, move |app,cx| {
+                app.respond_svn_certificate_prompt(permanent.clone(), SvnCertificateDecision::TrustPermanently);
+                cx.notify();
+            }))))
 }
 
 /// 渲染删除连接节点的二次确认弹窗。

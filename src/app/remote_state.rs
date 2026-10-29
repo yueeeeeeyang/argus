@@ -6,14 +6,26 @@
 
 use super::types::TextInputState;
 use crate::remote::connection::{ConnectionLinkKind, ConnectionNodeId};
+use crate::remote::svn_tls::SvnCertificatePrompt;
 
 /// 链接工作区当前打开的弹窗。
 #[derive(Clone, Debug)]
 pub(crate) enum ConnectionDialogState {
     /// SSH 首次连接未知主机时的指纹确认弹窗。
     ConfirmHostKey(ConnectionHostKeyPromptState),
+    /// SVN HTTPS 证书异常或已信任证书变化时的确认弹窗。
+    SvnCertificate(ConnectionSvnCertificatePromptState),
     /// 删除链接目录或任一协议链接前的二次确认弹窗。
     ConfirmDelete(ConnectionDeletePromptState),
+}
+
+/// SVN 证书弹窗绑定单次请求，避免旧按钮批准重连后出现的新证书。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConnectionSvnCertificatePromptState {
+    pub session_id: usize,
+    pub request_id: String,
+    pub prompt: SvnCertificatePrompt,
+    pub error_message: Option<String>,
 }
 
 /// 新增目录表单状态。

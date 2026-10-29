@@ -1024,7 +1024,11 @@ impl WorkspaceMaterializer<'_> {
 
         // 普通文件先落盘，嵌套包随后解压并在提升单文件时按序号消歧；
         // 这样同名条目不会互相覆盖，也保持与串行时代"普通文件在前"一致的结果。
-        if let EntrySource::Adapter { adapter, path, .. } = &source
+        if let EntrySource::Adapter {
+            adapter,
+            path,
+            password,
+        } = &source
             && adapter.supports_batch_extraction()
         {
             let mut targets = plain_jobs
@@ -1047,9 +1051,13 @@ impl WorkspaceMaterializer<'_> {
                     target,
                 });
             }
-            if let Err(error) =
-                adapter.extract_entries_to_paths(path, &targets, max_log_bytes, self.cancellation)
-            {
+            if let Err(error) = adapter.extract_entries_to_paths(
+                path,
+                &targets,
+                *password,
+                max_log_bytes,
+                self.cancellation,
+            ) {
                 self.ensure_not_cancelled()?;
                 return Err(MaterializeRootError::Fatal(error));
             }
@@ -1918,6 +1926,7 @@ mod tests {
     use crate::config::paths::isolated_test_dir;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use sevenz_rust::{SeqReader, SevenZArchiveEntry, SevenZWriter, SourceReader};
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
@@ -1930,6 +1939,33 @@ mod tests {
                 encoder.finish().unwrap()
             })
             .collect()
+    }
+
+    /// 写入一个把全部条目放在同一固实块的 7Z，验证工作区批量提取路径。
+    fn write_solid_test_sevenz(path: &Path, entries: &[(&str, &[u8])]) -> PathBuf {
+        let mut writer =
+            SevenZWriter::new(std::io::Cursor::new(Vec::new())).expect("创建 7Z 写入器");
+        let archive_entries = entries
+            .iter()
+            .map(|(name, _)| {
+                let mut entry = SevenZArchiveEntry::new();
+                entry.name = (*name).to_string();
+                entry.has_stream = true;
+                entry
+            })
+            .collect::<Vec<_>>();
+        let readers = SeqReader::new(
+            entries
+                .iter()
+                .map(|(_, data)| SourceReader::new(std::io::Cursor::new(data.to_vec())))
+                .collect::<Vec<_>>(),
+        );
+        writer
+            .push_archive_entries(archive_entries, readers)
+            .expect("写入固实 7Z 条目");
+        let bytes = writer.finish().expect("完成 7Z 写入").into_inner();
+        fs::write(path, bytes).expect("写入 7Z 文件");
+        path.to_path_buf()
     }
 
     fn materialize_test_path(path: &Path) -> MaterializedWorkspace {
@@ -2833,6 +2869,32 @@ mod tests {
             fs::read(workspace.root.join("app (2).log")).expect("应读取去重后的第二个文件"),
             b"two"
         );
+    }
+
+    /// 固实 7Z 必须通过批量路径一次提取多个条目，并继续展开嵌套压缩包。
+    #[test]
+    fn solid_sevenz_materializes_plain_and_nested_entries() {
+        let directory = tempfile::tempdir().expect("创建测试目录");
+        let nested = nested_zip_bytes("inner.log", "nested");
+        let gzip = gzip_members(&[b"gzip content"]);
+        let archive = write_solid_test_sevenz(
+            &directory.path().join("bundle.7z"),
+            &[
+                ("plain.log", b"plain"),
+                ("inner.zip", &nested),
+                ("app.log.gz", &gzip),
+            ],
+        );
+
+        let workspace = materialize_test_path(&archive);
+        let root = &workspace.roots[0].path;
+
+        assert_eq!(fs::read(root.join("plain.log")).unwrap(), b"plain");
+        assert_eq!(fs::read(root.join("inner.log")).unwrap(), b"nested");
+        assert_eq!(fs::read(root.join("app.log")).unwrap(), b"gzip content");
+        assert_eq!(workspace.materialized_files, 3);
+        assert!(workspace.warnings.is_empty());
+        fs::remove_dir_all(workspace.root).unwrap();
     }
 
     /// 验证压缩包内含目录或多个文件时保持标签目录布局。

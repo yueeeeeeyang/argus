@@ -61,6 +61,37 @@ pub(crate) fn render(
             .child("文件管理会话不存在")
             .into_any_element();
     };
+    if session.status == RemoteFileStatus::AwaitingCertificate {
+        return div()
+            .id("remote-file-certificate-pending")
+            .debug_selector(|| "remote-file-certificate-pending".to_string())
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .text_color(rgb(theme.foreground))
+            .child("等待确认 SVN HTTPS 服务器证书")
+            .child(
+                div()
+                    .id("remote-file-show-certificate")
+                    .debug_selector(|| "remote-file-show-certificate".to_string())
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme.selection)))
+                    .child("查看证书")
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.open_svn_certificate_prompt(session_id);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element();
+    }
     // 连接断开/失败后整窗展示状态面板：保留旧目录列表会让用户无法判断是卡顿还是断开。
     if matches!(
         session.status,
@@ -784,6 +815,7 @@ fn status_label(status: &RemoteFileStatus) -> &'static str {
     match status {
         RemoteFileStatus::Connecting => "连接中",
         RemoteFileStatus::AwaitingHostKey => "等待确认指纹",
+        RemoteFileStatus::AwaitingCertificate => "等待确认证书",
         RemoteFileStatus::Loading => "加载中",
         RemoteFileStatus::Connected => "已连接",
         RemoteFileStatus::Transferring => "传输中",
