@@ -20,6 +20,7 @@ use crate::config::{
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::platform::open_with_registration::RegistrationStatus;
+use crate::remote::connection::ConnectionLinkKind;
 use crate::theme::{AppTheme, ThemeOption};
 use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
@@ -142,6 +143,8 @@ struct SettingsModalSnapshot {
     skill_management_message: Option<crate::app::SkillManagementMessage>,
     /// 终端设置：Option 键是否作为 Meta（发送 ESC 前缀）。
     terminal_option_as_meta: bool,
+    /// 已保存的连接共享凭据数量。
+    connection_credential_count: usize,
 }
 
 /// Skill 管理分区的单行展示状态。
@@ -185,6 +188,7 @@ impl SettingsModalSnapshot {
             skill_entries: build_skill_entries(app),
             skill_management_message: app.skill_management_message.clone(),
             terminal_option_as_meta: app.config.terminal.option_as_meta,
+            connection_credential_count: app.config.connections.credentials.len(),
         }
     }
 }
@@ -580,8 +584,15 @@ fn render_settings_sidebar(
                 .child(
                     div()
                         .mt_3()
-                        .child(settings_navigation_group_label("链接", theme)),
+                        .child(settings_navigation_group_label("连接", theme)),
                 )
+                .child(settings_navigation_item(
+                    SettingsSection::Connections,
+                    ArgusIcon::Key,
+                    snapshot.selected_section,
+                    app_handle,
+                    theme,
+                ))
                 .child(settings_navigation_item(
                     SettingsSection::Terminal,
                     ArgusIcon::Terminal,
@@ -667,6 +678,7 @@ fn settings_navigation_item(
             "settings-navigation-{}",
             settings_section_id(section)
         )))
+        .debug_selector(move || format!("settings-navigation-{}", settings_section_id(section)))
         .h(px(34.0))
         .px_2()
         .flex()
@@ -712,6 +724,7 @@ fn settings_section_id(section: SettingsSection) -> &'static str {
         SettingsSection::LogDisplay => "log-display",
         SettingsSection::LogSearch => "log-search",
         SettingsSection::LogLoading => "log-loading",
+        SettingsSection::Connections => "connections",
         SettingsSection::Terminal => "terminal",
     }
 }
@@ -755,6 +768,9 @@ fn render_selected_settings_section(
         }
         SettingsSection::LogLoading => {
             render_log_loading_section(snapshot, app_handle, theme).into_any_element()
+        }
+        SettingsSection::Connections => {
+            render_connections_section(snapshot, app_handle, theme).into_any_element()
         }
         SettingsSection::Terminal => {
             render_terminal_section(snapshot, app_handle, theme).into_any_element()
@@ -1133,6 +1149,51 @@ fn render_terminal_section(
     .into_any_element()
 }
 
+/// 渲染连接凭据设置页；具体凭据列表在独立管理弹窗中维护。
+fn render_connections_section(
+    snapshot: &SettingsModalSnapshot,
+    app_handle: &Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> AnyElement {
+    let manage_app = app_handle.clone();
+    settings_section(
+        "连接凭据",
+        ArgusIcon::Key,
+        setting_group(theme)
+            .child(setting_row(
+                "共享账号密码",
+                ai_settings_entry_control(
+                    format!("{} 个凭据", snapshot.connection_credential_count),
+                    "管理连接凭据",
+                    "settings-connection-credentials",
+                    ArgusIcon::Key,
+                    theme,
+                    move |cx| {
+                        update_settings_app(&manage_app, cx, |app, app_cx| {
+                            app.open_connection_credential_manager(
+                                ConnectionLinkKind::Ssh,
+                                app_cx,
+                            );
+                        });
+                    },
+                ),
+                theme,
+            ))
+            .child(
+                div()
+                    .px_3()
+                    .text_size(px(11.0))
+                    .line_height(px(17.0))
+                    .text_color(rgb(theme.foreground_muted))
+                    .child(
+                        "SSH、SMB 和 SVN 连接可复用同一份账号密码；凭据只保存在系统凭据库，修改一次后所有引用它的连接下次连接生效。",
+                    ),
+            ),
+        theme,
+    )
+    .into_any_element()
+}
+
 /// 渲染单条 Skill 管理行：名称、说明、启用开关和删除。
 fn render_skill_entry_row(
     index: usize,
@@ -1261,6 +1322,7 @@ fn ai_settings_entry_control(
         .child(
             div()
                 .id(button_id)
+                .debug_selector(move || button_id.to_string())
                 .h(px(30.0))
                 .px_3()
                 .flex()

@@ -5,7 +5,6 @@
 //! 主要功能：提供加载日志、过滤、目录树折叠、智能助手、导航和更多上下文操作。
 
 use crate::app::{AppTextInputTarget, ArgusApp};
-use crate::remote::connection::ConnectionLinkKind;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::ArgusIcon;
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
@@ -107,13 +106,6 @@ pub(crate) fn render_connection_toolbar(app: &ArgusApp, cx: &mut Context<ArgusAp
             cx,
         ))
         .child(connection_icon_button(
-            "connection-credentials",
-            ArgusIcon::Key,
-            "连接凭据",
-            &theme,
-            cx,
-        ))
-        .child(connection_icon_button(
             "connection-filter",
             ArgusIcon::Filter,
             "过滤",
@@ -206,9 +198,6 @@ fn connection_icon_button(
             match action_name {
                 "新增链接" => app.open_connection_link_create_menu(event.position()),
                 "新增目录" => app.open_new_connection_directory_dialog(cx),
-                "连接凭据" => {
-                    app.open_connection_credential_manager(ConnectionLinkKind::Ssh, cx);
-                }
                 "过滤" => {
                     cx.stop_propagation();
                     app.open_connection_tree_search();

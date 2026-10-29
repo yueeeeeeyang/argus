@@ -1190,6 +1190,12 @@ impl ArgusApp {
             .update_ssh_link(link_id, &form.name_input.value, ssh)
         {
             Ok(()) => {
+                self.move_link_to_form_parent_or_rollback(
+                    link_id,
+                    form.parent_id,
+                    previous_connections.clone(),
+                    previous_selection,
+                )?;
                 if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
                     self.config.connections = previous_connections;
                     self.selected_connection_node_id = previous_selection;
@@ -1232,6 +1238,12 @@ impl ArgusApp {
             .update_smb_link(link_id, &form.name_input.value, smb)
         {
             Ok(()) => {
+                self.move_link_to_form_parent_or_rollback(
+                    link_id,
+                    form.parent_id,
+                    previous_connections.clone(),
+                    previous_selection,
+                )?;
                 if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
                     self.config.connections = previous_connections;
                     self.selected_connection_node_id = previous_selection;
@@ -1277,6 +1289,12 @@ impl ArgusApp {
             .connections
             .update_git_link(link_id, &form.name_input.value, git)
             .map_err(|error| error.to_string())?;
+        self.move_link_to_form_parent_or_rollback(
+            link_id,
+            form.parent_id,
+            previous_connections.clone(),
+            previous_selection,
+        )?;
         self.selected_connection_node_id = Some(link_id);
         self.placeholder_notice = "已更新 Git 链接".to_string();
         self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
@@ -1312,6 +1330,12 @@ impl ArgusApp {
             .connections
             .update_svn_link(link_id, &form.name_input.value, svn)
             .map_err(|error| error.to_string())?;
+        self.move_link_to_form_parent_or_rollback(
+            link_id,
+            form.parent_id,
+            previous_connections.clone(),
+            previous_selection,
+        )?;
         if let Err(message) = share_link_password_as_credential(self, &form, link_id) {
             self.config.connections = previous_connections;
             self.selected_connection_node_id = previous_selection;
@@ -1323,6 +1347,26 @@ impl ArgusApp {
         self.persist_connection_form_change_or_rollback(previous_connections, previous_selection)?;
         self.disconnect_remote_file_sessions_for_link(link_id);
         Ok(())
+    }
+
+    /// 把编辑中的链接移动到表单所选目录；失败时回滚整次提交。
+    fn move_link_to_form_parent_or_rollback(
+        &mut self,
+        link_id: ConnectionNodeId,
+        parent_id: Option<ConnectionNodeId>,
+        previous_connections: ConnectionConfig,
+        previous_selection: Option<ConnectionNodeId>,
+    ) -> Result<(), String> {
+        match self.config.connections.move_link(link_id, parent_id) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.config.connections = previous_connections;
+                self.selected_connection_node_id = previous_selection;
+                let message = format!("无法移动到所选目录：{error}");
+                self.placeholder_notice = message.clone();
+                Err(message)
+            }
+        }
     }
 
     /// 持久化由模态表单触发的连接配置变更；失败时恢复提交前状态并让对话框继续显示错误。
@@ -2328,6 +2372,42 @@ mod tests {
                 .is_some(),
             "默认凭据应直接显示为当前凭据来源"
         );
+        app.update(cx, |app, _| app.close_connection_link_window());
+    }
+    /// 链接表单应能通过目录下拉框修改新建链接的所属目录。
+    #[gpui::test]
+    fn link_form_directory_dropdown_updates_parent(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, _| test_app("link-directory-dropdown"));
+        let directory_id = app.update(cx, |app, _| {
+            app.config
+                .connections
+                .add_directory(None, "生产环境")
+                .unwrap()
+        });
+        app.update(cx, |app, app_cx| {
+            app.open_new_ssh_link_dialog(app_cx);
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+        let dropdown = cx
+            .debug_bounds("connection-link-directory-dropdown-button")
+            .expect("应渲染所属目录下拉框");
+        cx.simulate_click(dropdown.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+        assert_eq!(directory_id, 1);
+        let item = cx
+            .debug_bounds("connection-link-directory-menu-item-directory-1")
+            .expect("目录下拉框应展示已建目录");
+        cx.simulate_click(item.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        let parent = app.read_with(cx, |app, app_cx| {
+            app.connection_link_modal
+                .as_ref()
+                .and_then(|modal| modal.read(app_cx).form_parent_id())
+        });
+        assert_eq!(parent, Some(directory_id));
         app.update(cx, |app, _| app.close_connection_link_window());
     }
 }

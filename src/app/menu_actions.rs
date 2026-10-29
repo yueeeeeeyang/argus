@@ -88,6 +88,12 @@ impl ArgusApp {
         });
     }
 
+    /// 在链接树空白处打开新建链接菜单；新建链接固定归属根目录。
+    pub(crate) fn open_connection_blank_context_menu(&mut self, anchor: Point<Pixels>) {
+        self.selected_connection_node_id = None;
+        self.open_connection_link_create_menu(anchor);
+    }
+
     /// 在指定窗口坐标打开新增链接类型下拉菜单。
     pub(crate) fn open_connection_link_create_menu(&mut self, anchor: Point<Pixels>) {
         self.tab_menu_scroll = UniformListScrollHandle::new();

@@ -58,6 +58,10 @@ const CONNECTION_LINK_CREDENTIAL_MENU_TOP: f32 = 132.0;
 const CONNECTION_LINK_CREDENTIAL_MENU_LEFT: f32 = 114.0;
 /// 链接表单凭据下拉浮层宽度。
 const CONNECTION_LINK_CREDENTIAL_MENU_WIDTH: f32 = 260.0;
+/// 带凭据选择行时，目录下拉浮层相对弹窗顶部的偏移。
+const CONNECTION_LINK_DIRECTORY_MENU_TOP_WITH_CREDENTIAL: f32 = 174.0;
+/// Git 表单没有凭据行时，目录下拉浮层相对弹窗顶部的偏移。
+const CONNECTION_LINK_DIRECTORY_MENU_TOP_REPOSITORY: f32 = 132.0;
 /// 表单滚动区滚动条宽度；滚动条槽位会占用正文可用宽度。
 const CONNECTION_FORM_SCROLLBAR_WIDTH: f32 = 6.0;
 /// 表单滚动区右侧内边距：左右 20px 视觉边距扣除滚动条槽位，保证输入框右缘与底栏按钮对齐。
@@ -315,6 +319,8 @@ pub(crate) struct ConnectionLinkWindow {
     mode: ConnectionLinkWindowMode,
     /// 凭据下拉菜单是否展开。
     credential_menu_open: bool,
+    /// 目录下拉菜单是否展开。
+    directory_menu_open: bool,
     /// 模态框根区域和输入框焦点句柄。
     focus_handles: ConnectionLinkWindowFocusHandles,
     /// 主应用状态订阅，主题切换后模态框跟随刷新。
@@ -383,6 +389,7 @@ impl ConnectionLinkWindow {
             form,
             mode,
             credential_menu_open: false,
+            directory_menu_open: false,
             focus_handles: ConnectionLinkWindowFocusHandles {
                 root: cx.focus_handle(),
                 name: cx.focus_handle(),
@@ -445,11 +452,31 @@ impl ConnectionLinkWindow {
         focus_input_state(&mut form.name_input);
         self.form = form;
         self.mode = mode;
+        self.credential_menu_open = false;
+        self.directory_menu_open = false;
     }
 
     /// 切换凭据下拉菜单。
     fn toggle_credential_menu(&mut self) {
         self.credential_menu_open = !self.credential_menu_open;
+        self.directory_menu_open = false;
+    }
+
+    /// 切换所属目录下拉菜单。
+    fn toggle_directory_menu(&mut self) {
+        self.directory_menu_open = !self.directory_menu_open;
+        self.credential_menu_open = false;
+    }
+
+    /// 选择新增或编辑链接所属的目录。
+    fn select_directory(
+        &mut self,
+        directory_id: Option<crate::remote::connection::ConnectionNodeId>,
+    ) {
+        self.form.parent_id = directory_id;
+        self.directory_menu_open = false;
+        self.credential_menu_open = false;
+        self.form.error_message = None;
     }
 
     /// 选择共用凭据或切回手动输入。
@@ -459,6 +486,7 @@ impl ConnectionLinkWindow {
         cx: &mut Context<Self>,
     ) {
         self.credential_menu_open = false;
+        self.directory_menu_open = false;
         self.form.credential_id = credential_id;
         self.form.save_as_credential = false;
         self.form.error_message = None;
@@ -480,6 +508,7 @@ impl ConnectionLinkWindow {
     fn open_credential_manager(&mut self, cx: &mut Context<Self>) {
         let protocol = self.form.link_kind;
         self.credential_menu_open = false;
+        self.directory_menu_open = false;
         self.app.update(cx, |app, app_cx| {
             app.open_connection_credential_manager(protocol, app_cx)
         });
@@ -629,6 +658,14 @@ impl Render for ConnectionLinkWindow {
                 .cloned()
                 .collect::<Vec<_>>()
         });
+        let (directory_choices, directory_label) = self.app.read_with(cx, |app, _| {
+            (
+                app.config.connections.directory_choices(),
+                app.config
+                    .connections
+                    .directory_display_path(self.form.parent_id),
+            )
+        });
         render_link_window_content(
             self.app.clone(),
             cx.entity(),
@@ -636,7 +673,10 @@ impl Render for ConnectionLinkWindow {
             self.form.clone(),
             self.mode,
             self.credential_menu_open,
+            self.directory_menu_open,
             credentials,
+            directory_choices,
+            directory_label,
             self.focus_handles.clone(),
         )
     }
@@ -975,6 +1015,8 @@ fn preferred_connection_link_modal_height_for(
     let visibility = connection_link_field_visibility(link_kind, url);
     // 名称和用户名始终展示；非仓库链接使用主机+端口，仓库链接使用 URL。
     let mut input_count = 2 + if visibility.is_repository { 1 } else { 2 };
+    // 所属目录始终展示。
+    input_count += 1;
     input_count += usize::from(visibility.show_secret);
     if visibility.show_secret && link_kind != ConnectionLinkKind::Git {
         // 凭据来源选择行；Git 访问令牌不参与共用账号凭据。
@@ -1010,7 +1052,10 @@ fn render_link_window_content(
     form: ConnectionLinkFormState,
     mode: ConnectionLinkWindowMode,
     credential_menu_open: bool,
+    directory_menu_open: bool,
     credentials: Vec<crate::remote::connection::ConnectionCredentialConfig>,
+    directory_choices: Vec<(Option<crate::remote::connection::ConnectionNodeId>, String)>,
+    directory_label: String,
     focus_handles: ConnectionLinkWindowFocusHandles,
 ) -> impl IntoElement {
     let close_app = app_handle.clone();
@@ -1090,6 +1135,7 @@ fn render_link_window_content(
             close_window_entity.update(cx, |window_state, state_cx| {
                 window_state.clear_input_focuses();
                 window_state.credential_menu_open = false;
+                window_state.directory_menu_open = false;
                 state_cx.notify();
             });
         })
@@ -1138,6 +1184,14 @@ fn render_link_window_content(
                         &app_handle,
                     ))
                 })
+                .child(render_link_directory_selector(
+                    &form,
+                    directory_menu_open,
+                    &directory_choices,
+                    directory_label,
+                    &theme,
+                    &window_entity,
+                ))
                 .when(!is_repository, |this| {
                     this.child(render_link_input_row(
                         "主机",
@@ -1343,6 +1397,15 @@ fn render_link_window_content(
             this.child(render_link_credential_menu(
                 &form,
                 &credentials,
+                &theme,
+                &window_entity,
+            ))
+        })
+        .when(directory_menu_open, |this| {
+            this.child(render_link_directory_menu(
+                &form,
+                &directory_choices,
+                supports_shared_credential,
                 &theme,
                 &window_entity,
             ))
@@ -1570,6 +1633,159 @@ fn render_link_credential_menu(
                     cx.stop_propagation();
                     entity.update(cx, |window_state, state_cx| {
                         window_state.apply_credential_menu_selection(&item_id, state_cx);
+                        state_cx.notify();
+                    });
+                })
+        }))
+}
+
+/// 渲染链接表单所属目录选择行。
+fn render_link_directory_selector(
+    form: &ConnectionLinkFormState,
+    is_open: bool,
+    choices: &[(Option<crate::remote::connection::ConnectionNodeId>, String)],
+    selected_label: String,
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionLinkWindow>,
+) -> impl IntoElement {
+    let mut items = Vec::with_capacity(choices.len());
+    for (directory_id, label) in choices {
+        items.push(DropdownItem {
+            id: directory_id
+                .map(|directory_id| format!("directory-{directory_id}"))
+                .unwrap_or_else(|| "root".to_string()),
+            label: label.clone(),
+        });
+    }
+    let selected_id = form
+        .parent_id
+        .map(|directory_id| format!("directory-{directory_id}"))
+        .unwrap_or_else(|| "root".to_string());
+    let toggle_window = window_entity.clone();
+    let select_window = window_entity.clone();
+
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .w(px(82.0))
+                .pt(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(theme.foreground_muted))
+                .child("所属目录"),
+        )
+        .child(div().flex_1().child(render_dropdown(
+            Dropdown {
+                id: "connection-link-directory-dropdown",
+                selected_id,
+                selected_label,
+                placeholder: "根目录",
+                is_open,
+                items,
+                show_inline_menu: false,
+            },
+            theme,
+            move |_, _, cx| {
+                cx.stop_propagation();
+                toggle_window.update(cx, |window_state, state_cx| {
+                    window_state.toggle_directory_menu();
+                    state_cx.notify();
+                });
+            },
+            Arc::new(move |item_id, _, cx| {
+                select_window.update(cx, |window_state, state_cx| {
+                    let directory_id = item_id
+                        .strip_prefix("directory-")
+                        .and_then(|value| value.parse::<usize>().ok());
+                    window_state.select_directory(directory_id);
+                    state_cx.notify();
+                });
+            }),
+        )))
+}
+
+/// 渲染所属目录下拉浮层，与凭据浮层一样挂在弹窗根节点避免裁切。
+fn render_link_directory_menu(
+    form: &ConnectionLinkFormState,
+    choices: &[(Option<crate::remote::connection::ConnectionNodeId>, String)],
+    has_credential_row: bool,
+    theme: &AppTheme,
+    window_entity: &Entity<ConnectionLinkWindow>,
+) -> impl IntoElement {
+    let mut items = Vec::with_capacity(choices.len());
+    for (directory_id, label) in choices {
+        items.push(DropdownItem {
+            id: directory_id
+                .map(|directory_id| format!("directory-{directory_id}"))
+                .unwrap_or_else(|| "root".to_string()),
+            label: label.clone(),
+        });
+    }
+    let selected_id = form
+        .parent_id
+        .map(|directory_id| format!("directory-{directory_id}"))
+        .unwrap_or_else(|| "root".to_string());
+    let height = (items.len() as f32 * 30.0).clamp(30.0, 220.0);
+    let top = if has_credential_row {
+        CONNECTION_LINK_DIRECTORY_MENU_TOP_WITH_CREDENTIAL
+    } else {
+        CONNECTION_LINK_DIRECTORY_MENU_TOP_REPOSITORY
+    };
+
+    div()
+        .id("connection-link-directory-menu")
+        .debug_selector(|| "connection-link-directory-menu".to_string())
+        .absolute()
+        .top(px(top))
+        .left(px(CONNECTION_LINK_CREDENTIAL_MENU_LEFT))
+        .w(px(CONNECTION_LINK_CREDENTIAL_MENU_WIDTH))
+        .h(px(height))
+        .text_size(px(13.0))
+        .line_height(px(18.0))
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.content))
+        .shadow_lg()
+        .overflow_y_scroll()
+        .occlude()
+        .children(items.into_iter().map(|item| {
+            let is_selected = item.id == selected_id;
+            let item_id = item.id.clone();
+            let item_debug_id = format!("connection-link-directory-menu-item-{}", item.id);
+            let entity = window_entity.clone();
+            let item_theme = theme.clone();
+            let hover_background = item_theme.current_line;
+            let foreground = item_theme.foreground;
+            div()
+                .id(SharedString::from(format!(
+                    "connection-link-directory-menu-item-{}",
+                    item.id
+                )))
+                .debug_selector(move || item_debug_id.clone())
+                .h(px(30.0))
+                .w_full()
+                .px_2()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .bg(rgb(if is_selected {
+                    item_theme.current_line
+                } else {
+                    item_theme.content
+                }))
+                .hover(move |this| this.bg(rgb(hover_background)))
+                .text_color(rgb(foreground))
+                .child(div().flex_1().truncate().child(item.label))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    entity.update(cx, |window_state, state_cx| {
+                        let directory_id = item_id
+                            .strip_prefix("directory-")
+                            .and_then(|value| value.parse::<usize>().ok());
+                        window_state.select_directory(directory_id);
                         state_cx.notify();
                     });
                 })
@@ -3668,7 +3884,7 @@ mod tests {
                 false,
                 false,
             ),
-            311.0
+            353.0
         );
         assert_eq!(
             preferred_connection_link_modal_height_for(
@@ -3677,7 +3893,7 @@ mod tests {
                 false,
                 false,
             ),
-            325.0
+            367.0
         );
     }
 
@@ -3686,11 +3902,11 @@ mod tests {
     fn server_modal_height_matches_protocol_fields() {
         assert_eq!(
             preferred_connection_link_modal_height_for(ConnectionLinkKind::Ssh, "", false, false),
-            479.0
+            521.0
         );
         assert_eq!(
             preferred_connection_link_modal_height_for(ConnectionLinkKind::Smb, "", false, false),
-            521.0
+            563.0
         );
     }
 
@@ -3704,7 +3920,7 @@ mod tests {
                 false,
                 false,
             ),
-            381.0
+            423.0
         );
         assert_eq!(
             preferred_connection_link_modal_height_for(
@@ -3713,7 +3929,7 @@ mod tests {
                 true,
                 false,
             ),
-            409.0
+            451.0
         );
     }
 }

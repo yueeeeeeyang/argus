@@ -15,6 +15,7 @@ use crate::analysis::runtime::{
 use crate::config::JstackThreadFilterRuleKind;
 use crate::config::paths::{isolated_test_dir, temporary_test_dir};
 use crate::remote::connection::ConnectionLinkKind;
+use gpui::MouseButton;
 
 /// 构造隔离真实用户目录的配置管理器。
 fn isolated_config_manager() -> ConfigManager {
@@ -689,7 +690,83 @@ fn connection_tree_link_menu_shows_file_manager_only_for_ssh() {
     );
 }
 
-/// 验证目录右键新建链接会以右键选中的目录作为父目录打开新增对话框。
+/// 验证链接树空白处真实右键会打开根级新建菜单，行右键仍保留节点菜单。
+#[gpui::test]
+fn connection_tree_blank_right_click_opens_root_create_menu(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    app.update(cx, |app, _| {
+        app.switch_workspace(Workspace::Connections);
+        // 跳过侧栏展开动画，直接以最终宽度参与命中测试。
+        app.is_source_panel_collapsed = false;
+        let width = app.current_source_panel_width();
+        app.source_panel_animation_from_width = width;
+        app.source_panel_animation_to_width = width;
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    let panel = cx
+        .debug_bounds("connection-tree-panel")
+        .expect("应渲染链接树面板");
+    let blank = panel.center();
+    cx.simulate_mouse_move(blank, None, gpui::Modifiers::default());
+    cx.simulate_mouse_down(blank, MouseButton::Right, gpui::Modifiers::default());
+    cx.simulate_mouse_up(blank, MouseButton::Right, gpui::Modifiers::default());
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_connection_node_id),
+        None
+    );
+    assert!(matches!(
+        app.read_with(cx, |app, _| {
+            app.active_menu.as_ref().map(|menu| menu.kind.clone())
+        }),
+        Some(ActiveMenuKind::ConnectionLinkCreate)
+    ));
+
+    app.update(cx, |app, _| app.close_active_menu());
+    let directory_id = app.update(cx, |app, _| {
+        app.config
+            .connections
+            .add_directory(None, "生产环境")
+            .unwrap()
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+    assert_eq!(directory_id, 1);
+    let row = cx.debug_bounds("connection-node-1").expect("应渲染目录行");
+    cx.simulate_mouse_down(row.center(), MouseButton::Right, gpui::Modifiers::default());
+    cx.simulate_mouse_up(row.center(), MouseButton::Right, gpui::Modifiers::default());
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_connection_node_id),
+        Some(directory_id)
+    );
+    assert!(matches!(
+        app.read_with(cx, |app, _| {
+            app.active_menu.as_ref().map(|menu| menu.kind.clone())
+        }),
+        Some(ActiveMenuKind::ConnectionTree { node_id }) if node_id == directory_id
+    ));
+
+    app.update(cx, |app, _| app.close_active_menu());
+    cx.run_until_parked();
+    cx.simulate_resize(gpui::size(gpui::px(1402.0), gpui::px(900.0)));
+    let panel = cx
+        .debug_bounds("connection-tree-panel")
+        .expect("应仍渲染链接树面板");
+    let blank = gpui::point(panel.center().x, panel.top() + gpui::px(120.0));
+    cx.simulate_mouse_down(blank, MouseButton::Right, gpui::Modifiers::default());
+    cx.simulate_mouse_up(blank, MouseButton::Right, gpui::Modifiers::default());
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_connection_node_id),
+        None
+    );
+    assert!(matches!(
+        app.read_with(cx, |app, _| {
+            app.active_menu.as_ref().map(|menu| menu.kind.clone())
+        }),
+        Some(ActiveMenuKind::ConnectionLinkCreate)
+    ));
+}
+
+/// 验证目录右键新建链接会以右键选中的目录作为父目录打开新增对话框。/// 验证目录右键新建链接会以右键选中的目录作为父目录打开新增对话框。
 #[gpui::test]
 fn connection_tree_directory_menu_create_dialog_uses_right_clicked_parent(
     cx: &mut gpui::TestAppContext,
@@ -718,6 +795,79 @@ fn connection_tree_directory_menu_create_dialog_uses_right_clicked_parent(
             assert_eq!(modal_state.form_parent_id(), Some(directory_id));
         });
     });
+}
+
+/// 验证链接树空白处右键新建链接固定归属根目录。
+#[gpui::test]
+fn connection_tree_blank_context_menu_creates_link_at_root(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    app.update(cx, |app, app_cx| {
+        let directory_id = app
+            .config
+            .connections
+            .add_directory(None, "生产环境")
+            .unwrap();
+        app.selected_connection_node_id = Some(directory_id);
+
+        app.open_connection_blank_context_menu(gpui::point(gpui::px(1.0), gpui::px(1.0)));
+        assert_eq!(app.selected_connection_node_id, None);
+        assert_eq!(app.active_menu_entries().len(), 4);
+
+        app.handle_menu_action_with_context(MenuAction::NewSshConnectionLink, None, app_cx);
+        let modal = app
+            .connection_link_modal
+            .as_ref()
+            .expect("空白右键菜单应打开新增链接表单");
+        modal.read_with(app_cx, |modal_state, _| {
+            assert_eq!(
+                modal_state.form_parent_id(),
+                None,
+                "空白位置右键新建的链接应保存到根目录"
+            );
+        });
+    });
+}
+
+/// 验证编辑链接时表单可以修改所属目录。
+#[test]
+fn editing_link_form_moves_link_to_selected_directory() {
+    let mut app = test_app();
+    let directory_id = app
+        .config
+        .connections
+        .add_directory(None, "生产环境")
+        .unwrap();
+    let link_id = add_test_ssh_link(&mut app);
+    assert_eq!(
+        app.config.connections.link(link_id).unwrap().parent_id,
+        None
+    );
+
+    let form = ConnectionLinkFormState {
+        link_kind: ConnectionLinkKind::Ssh,
+        parent_id: Some(directory_id),
+        name_input: TextInputState::from_value("测试服务器".to_string()),
+        host_input: TextInputState::from_value("127.0.0.1".to_string()),
+        url_input: TextInputState::default(),
+        port_input: TextInputState::from_value("22".to_string()),
+        username_input: TextInputState::from_value("tester".to_string()),
+        credential_id: None,
+        save_as_credential: false,
+        password_input: TextInputState::from_value("secret".to_string()),
+        share_input: TextInputState::default(),
+        initial_dir_input: TextInputState::default(),
+        domain_input: TextInputState::default(),
+        private_key_path_input: TextInputState::default(),
+        private_key_passphrase_input: TextInputState::default(),
+        error_message: None,
+    };
+    app.update_connection_link_from_form(link_id, form)
+        .expect("编辑链接应能移动到所选目录");
+
+    assert_eq!(
+        app.config.connections.link(link_id).unwrap().parent_id,
+        Some(directory_id)
+    );
 }
 
 /// 验证表单弹窗的操作按钮与下边框间距等于标题到上边框的间距，避免按钮贴边或底部大片空白。
@@ -813,8 +963,8 @@ fn form_dialogs_keep_symmetric_vertical_padding(cx: &mut gpui::TestAppContext) {
         .expect("应渲染链接表单正文");
     assert_eq!(
         f32::from(scroll.size.height),
-        352.0,
-        "SSH 表单正文应完整容纳 8 行输入与凭据说明，不应出现滚动"
+        394.0,
+        "SSH 表单正文应完整容纳目录、凭据与连接输入，不应出现滚动"
     );
     let input = cx
         .debug_bounds("connection-link-private-key-passphrase-input")
@@ -6265,6 +6415,37 @@ fn settings_modal_titles_share_top_spacing(cx: &mut gpui::TestAppContext) {
         f32::from(sidebar_title.top()) - f32::from(sidebar.top()) >= 32.0,
         "侧栏标题上方应保留至少 32px 顶部留白，实际 {:.1}px",
         f32::from(sidebar_title.top()) - f32::from(sidebar.top())
+    );
+}
+
+/// 连接凭据入口位于设置页，点击后应在设置模态框之上打开凭据管理弹窗。
+#[gpui::test]
+fn settings_connections_entry_opens_credential_manager(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| test_app());
+    app.update(cx, |app, app_cx| app.open_settings_modal(app_cx));
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+
+    let nav = cx
+        .debug_bounds("settings-navigation-connections")
+        .expect("设置侧栏应包含连接凭据分类");
+    cx.simulate_click(nav.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_resize(gpui::size(gpui::px(1401.0), gpui::px(900.0)));
+
+    let entry = cx
+        .debug_bounds("settings-connection-credentials")
+        .expect("连接凭据页应包含管理入口");
+    cx.simulate_click(entry.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_resize(gpui::size(gpui::px(1402.0), gpui::px(900.0)));
+
+    assert!(
+        app.read_with(cx, |app, _| app.connection_credential_modal.is_some()),
+        "点击管理入口应创建凭据管理弹窗"
+    );
+    assert!(
+        cx.debug_bounds("connection-credential-save").is_some(),
+        "凭据管理弹窗应渲染在设置模态框之上"
     );
 }
 

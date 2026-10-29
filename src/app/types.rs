@@ -43,6 +43,8 @@ pub(crate) enum SettingsSection {
     LogSearch,
     /// 日志加载设置，包含压缩包和符号链接策略。
     LogLoading,
+    /// 连接凭据设置，管理可跨连接复用的账号密码。
+    Connections,
     /// 终端设置，包含 Option 键等本地按键语义。
     Terminal,
 }
@@ -60,6 +62,7 @@ impl SettingsSection {
             Self::LogDisplay => "日志显示",
             Self::LogSearch => "日志搜索",
             Self::LogLoading => "日志加载",
+            Self::Connections => "连接凭据",
             Self::Terminal => "终端",
         }
     }

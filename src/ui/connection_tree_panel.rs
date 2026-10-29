@@ -141,16 +141,30 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
 
     div()
         .id("connection-tree-panel")
+        .debug_selector(|| "connection-tree-panel".to_string())
         .relative()
         .flex_1()
         .overflow_hidden()
         .pt(px(1.0))
         .pb_2()
-        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-            if app.clear_connection_tree_selection() {
+        .on_click(cx.listener(|app, event: &ClickEvent, _, cx| {
+            // 右键用于打开上下文菜单；只有主键点击才清空树选择。
+            let is_primary_click = match event {
+                ClickEvent::Mouse(click) => click.down.button == MouseButton::Left,
+                ClickEvent::Keyboard(_) => true,
+            };
+            if is_primary_click && app.clear_connection_tree_selection() {
                 cx.notify();
             }
         }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|app, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                app.open_connection_blank_context_menu(event.position);
+                cx.notify();
+            }),
+        )
         .on_drop(cx.listener(|app, drag: &ConnectionLinkDrag, _, cx| {
             // 目录行会在更内层处理并阻止冒泡；落在列表空白处则移动到根层级。
             cx.stop_propagation();
@@ -168,6 +182,14 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
                     .gap_2()
                     .text_xs()
                     .text_color(rgb(theme.foreground_muted))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|app, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            app.open_connection_blank_context_menu(event.position);
+                            cx.notify();
+                        }),
+                    )
                     .child(render_icon(empty_icon, theme.foreground_muted, 28.0))
                     .child(empty_message),
             )
@@ -189,7 +211,15 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
                     }),
                 )
                 .size_full()
-                .track_scroll(app.connection_tree_scroll.clone()),
+                .track_scroll(app.connection_tree_scroll.clone())
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|app, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        app.open_connection_blank_context_menu(event.position);
+                        cx.notify();
+                    }),
+                ),
             )
         })
 }
@@ -229,6 +259,7 @@ fn render_row(
 
     div()
         .id(SharedString::from(format!("connection-node-{node_id}")))
+        .debug_selector(move || format!("connection-node-{node_id}"))
         .h(px(CONNECTION_ROW_HEIGHT))
         .w_full()
         .px_2()

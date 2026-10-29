@@ -895,6 +895,66 @@ impl ConnectionConfig {
             .find(|directory| directory.id == directory_id)
     }
 
+    /// 返回新增/编辑链接时可选的目录列表，第一项为根目录。
+    ///
+    /// 名称按树层级缩进，便于同名目录区分；目录 ID 顺序与来源树一致。
+    pub(crate) fn directory_choices(&self) -> Vec<(Option<ConnectionNodeId>, String)> {
+        let mut choices = vec![(None, "根目录".to_string())];
+        let mut visited = BTreeSet::new();
+        self.collect_directory_choices(None, 0, &mut visited, &mut choices);
+        choices
+    }
+
+    /// 递归收集目录选项，避免损坏配置中的父指针形成死循环。
+    fn collect_directory_choices(
+        &self,
+        parent_id: Option<ConnectionNodeId>,
+        depth: usize,
+        visited: &mut BTreeSet<ConnectionNodeId>,
+        choices: &mut Vec<(Option<ConnectionNodeId>, String)>,
+    ) {
+        for directory in self
+            .directories
+            .iter()
+            .filter(|directory| directory.parent_id == parent_id)
+        {
+            if !visited.insert(directory.id) {
+                continue;
+            }
+            choices.push((
+                Some(directory.id),
+                format!("{}{}", "  ".repeat(depth), directory.name),
+            ));
+            self.collect_directory_choices(Some(directory.id), depth + 1, visited, choices);
+        }
+    }
+
+    /// 返回目录的完整展示路径；根目录返回固定文案。
+    pub(crate) fn directory_display_path(&self, directory_id: Option<ConnectionNodeId>) -> String {
+        let Some(directory_id) = directory_id else {
+            return "根目录".to_string();
+        };
+        let mut names = Vec::new();
+        let mut current = Some(directory_id);
+        let mut visited = BTreeSet::new();
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                break;
+            }
+            let Some(directory) = self.directory(id) else {
+                break;
+            };
+            names.push(directory.name.clone());
+            current = directory.parent_id;
+        }
+        if names.is_empty() {
+            "根目录".to_string()
+        } else {
+            names.reverse();
+            names.join(" / ")
+        }
+    }
+
     /// 判断节点是否为目录。
     pub(crate) fn is_directory(&self, node_id: ConnectionNodeId) -> bool {
         self.directory(node_id).is_some()
