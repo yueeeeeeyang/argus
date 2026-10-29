@@ -131,17 +131,18 @@ impl FileDiffWindow {
         app: Entity<ArgusApp>,
         theme: AppTheme,
         file_name: String,
-        current_version: String,
-        target_version: String,
-        current_content: FilePreviewContent,
-        target_content: FilePreviewContent,
+        left_version: String,
+        right_version: String,
+        left_content: FilePreviewContent,
+        right_content: FilePreviewContent,
         cx: &mut Context<Self>,
     ) -> Self {
-        let content = build_diff_content(file_name.as_str(), current_content, target_content);
+        let content = build_diff_content(file_name.as_str(), left_content, right_content);
         let line_number_width =
             diff_line_number_width(content.left_line_count.max(content.right_line_count));
-        let left_label = diff_column_label("当前版本", &current_version, content.left_line_count);
-        let right_label = diff_column_label("对比版本", &target_version, content.right_line_count);
+        // 左侧固定为所选历史版本，右侧为当前版本；这样删除在左、新增在右，方向和配色一致。
+        let left_label = diff_column_label("对比版本", &left_version, content.left_line_count);
+        let right_label = diff_column_label("当前版本", &right_version, content.right_line_count);
         let row_count = content.rows.len();
         let _app_observer = cx.observe(&app, |view, app, cx| {
             let theme = app.read_with(cx, |app, _| app.theme.clone());
@@ -806,25 +807,29 @@ mod render_tests {
             ))
         });
         let theme = cx.read(|cx| app.read(cx).theme.clone());
-        let (_window, cx) = cx.add_window_view(move |_, cx| {
+        let (view, cx) = cx.add_window_view(move |_, cx| {
             FileDiffWindow::new(
                 app,
                 theme,
                 "app.rs".to_string(),
-                "HEAD (r42)".to_string(),
                 "r7".to_string(),
+                "HEAD (r42)".to_string(),
                 FilePreviewContent::Text {
-                    content: "alpha\nbeta\n".to_string(),
+                    content: "alpha\ngamma\n".to_string(),
                     truncated: false,
                 },
                 FilePreviewContent::Text {
-                    content: "alpha\ngamma\n".to_string(),
+                    content: "alpha\nbeta\n".to_string(),
                     truncated: false,
                 },
                 cx,
             )
         });
         cx.simulate_resize(size(px(1280.0), px(760.0)));
+        view.read_with(cx, |view, _| {
+            assert!(view.left_label.starts_with("对比版本 · r7"));
+            assert!(view.right_label.starts_with("当前版本 · HEAD (r42)"));
+        });
 
         let bounds = cx
             .debug_bounds("file-diff-scroll")
@@ -852,14 +857,14 @@ mod render_tests {
                 app,
                 theme,
                 "app.rs".to_string(),
-                "HEAD".to_string(),
                 "r7".to_string(),
+                "HEAD".to_string(),
                 FilePreviewContent::Text {
-                    content,
+                    content: changed,
                     truncated: false,
                 },
                 FilePreviewContent::Text {
-                    content: changed,
+                    content,
                     truncated: false,
                 },
                 cx,

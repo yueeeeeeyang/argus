@@ -413,10 +413,10 @@ impl ArgusApp {
     pub(crate) fn open_file_diff_window(
         &mut self,
         file_name: String,
-        current_version: String,
-        target_version: String,
-        current_content: FilePreviewContent,
-        target_content: FilePreviewContent,
+        left_version: String,
+        right_version: String,
+        left_content: FilePreviewContent,
+        right_content: FilePreviewContent,
         cx: &mut Context<Self>,
     ) {
         let initial_theme = self.theme.clone();
@@ -445,10 +445,10 @@ impl ArgusApp {
                     app_entity,
                     initial_theme,
                     file_name,
-                    current_version,
-                    target_version,
-                    current_content,
-                    target_content,
+                    left_version,
+                    right_version,
+                    left_content,
+                    right_content,
                     cx,
                 )
             })
@@ -1969,12 +1969,13 @@ impl ArgusApp {
                     session.status = RemoteFileStatus::Connected;
                     session.message = Some(format!("已加载版本对比：{file_name}"));
                 }
+                // 历史版本放左侧作为基准，当前版本放右侧；这样红绿增删方向和常规 diff 一致。
                 self.open_file_diff_window(
                     file_name,
-                    current_version,
                     target_version,
-                    current_content,
+                    current_version,
                     target_content,
+                    current_content,
                     cx,
                 );
             }
