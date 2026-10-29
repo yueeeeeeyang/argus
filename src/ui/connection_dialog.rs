@@ -1883,7 +1883,15 @@ fn render_svn_certificate_prompt(
     let reject = displayed.clone();
     let once = displayed.clone();
     let permanent = displayed.clone();
-    div().size_full().flex().flex_col().rounded_lg().bg(rgb(theme.content))
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .rounded_lg()
+        .overflow_hidden()
+        .bg(rgb(theme.content))
+        .border_1()
+        .border_color(rgb(theme.border))
         .child(dialog_header("确认 SVN 服务器证书", ArgusIcon::Key, theme, cx))
         .child(div().id("connection-svn-certificate-dialog-scroll")
             .debug_selector(|| "connection-svn-certificate-dialog-scroll".to_string())

@@ -348,6 +348,8 @@ fn certificate_modal_keeps_all_decisions_visible_and_waiting_page_can_reopen(
     let container = cx
         .debug_bounds("connection-svn-certificate-dialog-container-shell")
         .unwrap();
+    // 弹窗根节点自带 1px 边框，内容整体向内缩 1px，从外壳边界量到按钮应为 19 + 1。
+    let bordered_bottom_padding = crate::ui::components::modal_dialog::MODAL_BOTTOM_PADDING + 1.0;
     for id in [
         "connection-svn-certificate-reject",
         "connection-svn-certificate-trust-once",
@@ -357,7 +359,7 @@ fn certificate_modal_keeps_all_decisions_visible_and_waiting_page_can_reopen(
         assert!(button.top() >= container.top());
         assert_eq!(
             f32::from(container.bottom() - button.bottom()),
-            crate::ui::components::modal_dialog::MODAL_BOTTOM_PADDING
+            bordered_bottom_padding
         );
     }
     let blocked_directory = temporary_test_dir("svn-certificate-modal-save-failure");
@@ -386,7 +388,7 @@ fn certificate_modal_keeps_all_decisions_visible_and_waiting_page_can_reopen(
     assert!(error.bottom() <= permanent_button.top());
     assert_eq!(
         f32::from(container.bottom() - permanent_button.bottom()),
-        crate::ui::components::modal_dialog::MODAL_BOTTOM_PADDING
+        bordered_bottom_padding
     );
     assert!(receiver.try_recv().is_err(), "保存失败不得发送证书批准");
     app.update(cx, |app, cx| {
