@@ -19,8 +19,8 @@ use crate::ui::components::material_icon::{
     MaterialIcon, folder_icon, git_icon, render_material_icon, smb_icon, ssh_icon, svn_icon,
 };
 
-/// 链接树固定行高，保证虚拟列表滚动稳定。
-const CONNECTION_ROW_HEIGHT: f32 = 28.0;
+/// 16px 图标之间保留 8px 纵向留白，与来源树保持一致并保证虚拟列表滚动稳定。
+const CONNECTION_ROW_HEIGHT: f32 = 24.0;
 /// 链接树节点文字大小。
 const CONNECTION_TREE_FONT_SIZE: f32 = 12.0;
 /// Material 节点图标大小；该图标集按 16px 网格设计。
@@ -28,7 +28,7 @@ const CONNECTION_TREE_NODE_ICON_SIZE: f32 = 16.0;
 /// 链接树节点选中背景圆角。
 const CONNECTION_ROW_RADIUS: f32 = 5.0;
 /// 链接树选中块上下留白，与行高配合决定连线越界补偿量。
-const CONNECTION_ROW_VERTICAL_INSET: f32 = 2.0;
+const CONNECTION_ROW_VERTICAL_INSET: f32 = 1.0;
 /// 链接树连线的首层横坐标，和日志目录树保持一致。
 const CONNECTION_TREE_LINE_BASE_X: f32 = 18.0;
 /// 链接树每一级缩进对应的连线横向步长。
@@ -95,6 +95,7 @@ impl Render for ConnectionLinkDragPreview {
             .bg(rgb(self.theme.current_line))
             .shadow_md()
             .text_size(px(CONNECTION_TREE_FONT_SIZE))
+            .line_height(px(CONNECTION_TREE_NODE_ICON_SIZE))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(self.theme.foreground))
             .child(render_material_icon(
@@ -266,6 +267,7 @@ fn render_row(
                     })
                 })
                 .text_size(px(CONNECTION_TREE_FONT_SIZE))
+                .line_height(px(CONNECTION_TREE_NODE_ICON_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme.foreground))
                 .when(row.is_selected, |this| this.bg(rgb(theme.current_line)))
@@ -496,8 +498,8 @@ mod tests {
         );
         assert_eq!(
             black_box(CONNECTION_TREE_BRANCH_Y),
-            12.0,
-            "分支线应落在整行 y=14 处"
+            11.0,
+            "分支线应落在整行 y=12 处"
         );
 
         // 分支线从本级竖线直接延伸到节点图标左缘，再伸入图标透明内边距 3px。

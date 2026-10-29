@@ -148,8 +148,6 @@ pub(crate) struct SourceScopeSnapshot {
     pub sources: Arc<Vec<SnapshotSource>>,
     /// 按 ID 索引的日志说明快照。
     pub profiles: Arc<HashMap<String, LogProfileSnapshot>>,
-    /// 是否允许把工具返回的必要日志原文发送给模型。
-    pub allow_raw_log_content: bool,
 }
 
 impl SourceScopeSnapshot {
@@ -219,7 +217,6 @@ impl SourceScopeSnapshot {
             preferred_encoding: preferred_encoding.to_string(),
             sources: Arc::new(sources),
             profiles: Arc::new(profile_snapshots),
-            allow_raw_log_content: config.allow_raw_log_content,
         })
     }
 }

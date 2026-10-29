@@ -5,22 +5,22 @@
 //! 主要功能：加载日志时将普通文件/目录复制、压缩包（含嵌套）解压到 `cache/workdirs/<id>/`，
 //! 统一浏览器与 AI 的读取模型为普通文件；提供条目路径清洗和残留工作目录清扫。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::LoaderConfig;
 use crate::config::paths::argus_config_dir;
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveEntrySession, is_skippable_entry_error,
+    ArchiveAdapter, ArchiveEntrySession, ArchiveEntryTarget, is_skippable_entry_error,
 };
 use crate::loader::archive::detector::{
     ArchiveFormat, detect_archive_format, detect_archive_format_by_name,
@@ -30,6 +30,9 @@ use crate::loader::archive::password::{
 };
 use crate::loader::archive::registry::archive_registry;
 use crate::loader::source_scanner::{SourceLoadPhase, SourceTreeScanProgress};
+pub(crate) use crate::loader::workspace_lease::WorkspaceLease;
+pub(crate) use crate::loader::workspace_lease::create_leased_workspace;
+use crate::loader::workspace_lease::sweep_workspaces;
 use crate::utils::size_format::format_bytes;
 
 /// Argus 缓存目录名。
@@ -54,6 +57,8 @@ const DELETE_RETRY_INTERVAL_MS: u64 = 500;
 /// 一次完整物化的产物；随来源替换而失效。
 #[derive(Debug)]
 pub(crate) struct MaterializedWorkspace {
+    /// 活跃会话租约；应用保存该句柄直到工作区被替换或关闭。
+    pub lease: Arc<WorkspaceLease>,
     /// 工作目录根路径。
     pub root: PathBuf,
     /// 物化成功的顶层根（用于来源树扫描）。
@@ -205,6 +210,8 @@ impl SessionFactory<'_> {
 /// 会话优先：一次打开压缩包复用已解析的中央目录，条目数量大的包不再逐条目
 /// 重新打开；不支持会话的格式回退适配器逐条目路径，语义完全一致。
 enum EntrySource<'a> {
+    /// 顺序格式一次扫描后暂存的嵌套容器；后续递归仅移动这些自有文件。
+    Staged(HashMap<String, PathBuf>),
     /// 一次打开的会话句柄。
     Session(Box<dyn ArchiveEntrySession>),
     /// 逐条目打开的适配器路径。
@@ -224,6 +231,7 @@ impl EntrySource<'_> {
         &mut self,
     ) -> anyhow::Result<Vec<crate::loader::archive::adapter::ArchiveEntryInfo>> {
         match self {
+            Self::Staged(_) => bail!("已暂存的嵌套条目不支持重新枚举"),
             Self::Session(session) => session.list_entries(),
             Self::Adapter {
                 adapter,
@@ -242,13 +250,27 @@ impl EntrySource<'_> {
         entry_path: &str,
         target: &Path,
         max_log_bytes: u64,
+        cancellation: &CancellationToken,
     ) -> anyhow::Result<()> {
+        if cancellation.is_cancelled() {
+            bail!("已取消归档提取");
+        }
         match self {
+            Self::Staged(paths) => {
+                let source = paths.remove(entry_path).context("未找到已暂存的归档条目")?;
+                if target.exists() {
+                    bail!("归档暂存目标已存在：{}", target.display());
+                }
+                fs::rename(&source, target).context("无法移动已暂存的嵌套归档")
+            }
             Self::Session(session) => {
                 let mut file = File::create(target)
                     .with_context(|| format!("无法创建物化文件：{}", target.display()))?;
                 let mut written = 0_u64;
                 session.stream_entry(entry_path, &mut |chunk| {
+                    if cancellation.is_cancelled() {
+                        bail!("已取消归档提取");
+                    }
                     written = written.saturating_add(chunk.len() as u64);
                     if written > max_log_bytes {
                         anyhow::bail!("解压后超过最大日志大小 {max_log_bytes} 字节");
@@ -308,8 +330,7 @@ pub(crate) fn materialize_sources(
     progress: MaterializeProgress<'_>,
 ) -> Result<MaterializedWorkspace> {
     let root = unique_workspace_root();
-    fs::create_dir_all(&root)
-        .with_context(|| format!("无法创建日志工作目录：{}", root.display()))?;
+    let lease = create_leased_workspace(&root)?;
 
     let mut materializer = WorkspaceMaterializer {
         config,
@@ -317,7 +338,7 @@ pub(crate) fn materialize_sources(
         cancellation,
         progress,
         root: root.clone(),
-        used_labels: HashSet::new(),
+        used_labels: HashSet::from([".argus-scratch".to_string()]),
         files_written: 0,
         roots: Vec::new(),
         password_pending: Vec::new(),
@@ -333,6 +354,7 @@ pub(crate) fn materialize_sources(
     let _ = fs::remove_dir_all(root.join(".argus-scratch"));
 
     Ok(MaterializedWorkspace {
+        lease,
         root,
         roots: materializer.roots,
         password_pending: materializer.password_pending,
@@ -412,6 +434,7 @@ pub(crate) fn append_materialize_archive(
         .with_context(|| format!("无法识别压缩包格式：{}", archive_path.display()))?;
     let label = unique_label_in_dir(workspace_root, preferred_label);
     let label_dir = workspace_root.join(&label);
+    fs::create_dir(&label_dir).context("无法创建追加归档目录")?;
 
     let mut materializer = WorkspaceMaterializer {
         config,
@@ -419,7 +442,7 @@ pub(crate) fn append_materialize_archive(
         cancellation,
         progress: None,
         root: workspace_root.to_path_buf(),
-        used_labels: HashSet::new(),
+        used_labels: HashSet::from([".argus-scratch".to_string()]),
         files_written: 0,
         roots: Vec::new(),
         password_pending: Vec::new(),
@@ -435,7 +458,7 @@ pub(crate) fn append_materialize_archive(
     let _ = fs::remove_dir_all(workspace_root.join(".argus-scratch"));
     match result {
         Ok(()) => {
-            let root_path = materializer.promote_single_file_root(&label, &label_dir);
+            let root_path = materializer.promote_single_file_root(&label, &label_dir)?;
             Ok(MaterializedRootInfo { path: root_path })
         }
         Err(MaterializeRootError::PasswordPending) => {
@@ -452,7 +475,7 @@ pub(crate) fn append_materialize_archive(
         }
         Err(MaterializeRootError::EntrySkipped(error)) => {
             materializer.warnings.push(format!("{error}，已跳过"));
-            let root_path = materializer.promote_single_file_root(&label, &label_dir);
+            let root_path = materializer.promote_single_file_root(&label, &label_dir)?;
             Ok(MaterializedRootInfo { path: root_path })
         }
         Err(MaterializeRootError::Cancelled) => {
@@ -471,11 +494,54 @@ fn unique_label_in_dir(workspace_root: &Path, preferred: &str) -> String {
     let sanitized = sanitize_label(preferred);
     let mut candidate = sanitized.clone();
     let mut suffix = 1_usize;
-    while workspace_root.join(&candidate).exists() {
+    while candidate.eq_ignore_ascii_case(".argus-scratch")
+        || workspace_root.join(&candidate).exists()
+    {
         suffix += 1;
         candidate = format!("{sanitized} ({suffix})");
     }
     candidate
+}
+
+/// 为名称转换后的文件或目录分配位置；统一考虑原始路径、已有产物和大小写冲突。
+fn reserve_output_path(preferred: &Path, reserved: &mut HashSet<String>) -> PathBuf {
+    let name = preferred.file_name().unwrap_or_default().to_string_lossy();
+    let (stem, extension) = WorkspaceMaterializer::split_file_name_extension(&name);
+    let mut candidate = preferred.to_path_buf();
+    let mut suffix = 1_usize;
+    while candidate.exists() || !reserved.insert(candidate.to_string_lossy().to_lowercase()) {
+        suffix += 1;
+        candidate = preferred.with_file_name(format!("{stem} ({suffix}){extension}"));
+    }
+    candidate
+}
+
+/// 单文件提升只适用于确实只有一个普通文件的目录，枚举失败不能视作空目录。
+fn single_file_in_directory(directory: &Path) -> Result<Option<PathBuf>> {
+    let mut entries = fs::read_dir(directory)
+        .with_context(|| format!("无法检查归档产物：{}", directory.display()))?;
+    let Some(entry) = entries.next().transpose()? else {
+        return Ok(None);
+    };
+    if entries.next().transpose()?.is_some() || !entry.file_type()?.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(entry.path()))
+}
+
+/// 使用独占临时目录中转同名包装目录，避免固定暂存名覆盖用户原有文件。
+fn move_promoted_file(file: &Path, wrapper: &Path, target: &Path) -> Result<()> {
+    if target == wrapper {
+        let staging = tempfile::tempdir_in(wrapper.parent().context("归档目录缺少父目录")?)?;
+        let staging_file = staging.path().join("content");
+        fs::rename(file, &staging_file).context("无法暂存归档提升文件")?;
+        fs::remove_dir(wrapper).context("无法移除归档包装目录")?;
+        fs::rename(&staging_file, target).context("无法完成归档文件提升")?;
+    } else {
+        fs::rename(file, target).context("无法提升归档文件")?;
+        fs::remove_dir(wrapper).context("无法移除归档包装目录")?;
+    }
+    Ok(())
 }
 
 /// 判断错误是否为可重试的压缩包密码错误（缺少密码或密码错误）；
@@ -503,7 +569,11 @@ fn decompress_gzip_to_path(
     target: &Path,
     max_log_bytes: u64,
     display_entry: &str,
+    cancellation: &CancellationToken,
 ) -> Result<(), MaterializeRootError> {
+    if cancellation.is_cancelled() {
+        return Err(MaterializeRootError::Cancelled);
+    }
     let context = format!("解压条目失败：{display_entry}");
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -519,7 +589,7 @@ fn decompress_gzip_to_path(
                 .context(format!("无法读取 gzip 暂存文件：{}", source.display())),
         )
     })?;
-    let mut decoder = GzDecoder::new(input);
+    let mut decoder = MultiGzDecoder::new(input);
     let mut output = File::create(target).map_err(|error| {
         MaterializeRootError::Fatal(
             anyhow::Error::new(error).context(format!("无法创建物化文件：{}", target.display())),
@@ -528,6 +598,9 @@ fn decompress_gzip_to_path(
     let mut written = 0_u64;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     loop {
+        if cancellation.is_cancelled() {
+            return Err(MaterializeRootError::Cancelled);
+        }
         let read = decoder.read(&mut buffer).map_err(|error| {
             MaterializeRootError::EntrySkipped(anyhow::Error::new(error).context(context.clone()))
         })?;
@@ -565,7 +638,11 @@ fn stream_entry_to_path(
     target: &Path,
     display_entry: &str,
     max_log_bytes: u64,
+    cancellation: &CancellationToken,
 ) -> Result<(), MaterializeRootError> {
+    if cancellation.is_cancelled() {
+        return Err(MaterializeRootError::Cancelled);
+    }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             MaterializeRootError::Fatal(
@@ -575,7 +652,7 @@ fn stream_entry_to_path(
         })?;
     }
 
-    match source.extract_entry_to_path(entry_path, target, max_log_bytes) {
+    match source.extract_entry_to_path(entry_path, target, max_log_bytes, cancellation) {
         Ok(()) => {
             // 兜底校验：适配器无法在包头给出大小时（如 GZIP），按落盘结果判断。
             let produced = fs::metadata(target)
@@ -593,6 +670,9 @@ fn stream_entry_to_path(
         }
         Err(error) => {
             let _ = fs::remove_file(target);
+            if cancellation.is_cancelled() {
+                return Err(MaterializeRootError::Cancelled);
+            }
             if is_retryable_password_error(&error) {
                 return Err(MaterializeRootError::PasswordPending);
             }
@@ -628,9 +708,7 @@ fn store_parallel_failure(slot: &Mutex<Option<MaterializeRootError>>, error: Mat
 /// 启动时清扫全部残留工作目录和历史压缩分页缓存（崩溃或强杀后的兜底清理）。
 pub(crate) fn sweep_stale_workspaces() {
     let workspaces = workspaces_dir();
-    if workspaces.exists()
-        && let Err(error) = fs::remove_dir_all(&workspaces)
-    {
+    if let Err(error) = sweep_workspaces(&workspaces) {
         eprintln!(
             "启动清扫残留日志工作目录失败：{}：{error}",
             workspaces.display()
@@ -688,6 +766,7 @@ impl WorkspaceMaterializer<'_> {
         let base_label = display_label_for_path(path);
         let label = self.unique_top_label(&base_label);
         let label_dir = self.root.join(&label);
+        fs::create_dir(&label_dir).map_err(|error| MaterializeRootError::Fatal(error.into()))?;
         let archive = detect_archive_format(path);
         let is_extractable_archive = archive.is_some_and(|format| format.is_supported());
         // 目录来源即使只含一个文件也保留目录层级；单文件与单文件压缩包做顶层提升。
@@ -696,6 +775,7 @@ impl WorkspaceMaterializer<'_> {
             Ok(()) => {
                 let root_path = if promotes_single_file {
                     self.promote_single_file_root(&label, &label_dir)
+                        .map_err(MaterializeRootError::Fatal)?
                 } else {
                     label_dir
                 };
@@ -850,6 +930,16 @@ impl WorkspaceMaterializer<'_> {
         };
 
         let mut written_paths = HashSet::new();
+        // 先保留所有原始路径及其祖先，转换后的归档名称不能抢占尚未写入的普通条目。
+        let mut output_paths = HashSet::new();
+        for entry in &entries {
+            if let Some(relative) = sanitize_entry_path(&entry.path) {
+                let target = dest_dir.join(relative);
+                for path in target.ancestors().take_while(|path| *path != dest_dir) {
+                    output_paths.insert(path.to_string_lossy().to_lowercase());
+                }
+            }
+        }
         let mut nested_jobs = Vec::new();
         let mut plain_jobs = Vec::new();
         let max_log_bytes = self.config.max_log_size_bytes();
@@ -895,6 +985,15 @@ impl WorkspaceMaterializer<'_> {
                 .filter(|format| depth < self.config.max_archive_depth && format.is_supported());
             match nested_format {
                 Some(ArchiveFormat::Gzip) => {
+                    let preferred = target.with_file_name(target.file_stem().unwrap_or_default());
+                    let target = reserve_output_path(&preferred, &mut output_paths);
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|error| MaterializeRootError::Fatal(error.into()))?;
+                    }
+                    // 占位文件让随后并行执行的单文件提升也能观察到此名称已被预留。
+                    File::create_new(&target)
+                        .map_err(|error| MaterializeRootError::Fatal(error.into()))?;
                     nested_jobs.push(NestedEntryJob::Gzip {
                         entry_path: entry.path,
                         target,
@@ -902,6 +1001,10 @@ impl WorkspaceMaterializer<'_> {
                     });
                 }
                 Some(nested) => {
+                    let preferred = target.with_file_name(nested_dir_name_for(&entry.path));
+                    let target = reserve_output_path(&preferred, &mut output_paths);
+                    fs::create_dir_all(&target)
+                        .map_err(|error| MaterializeRootError::Fatal(error.into()))?;
                     nested_jobs.push(NestedEntryJob::Container {
                         entry_path: entry.path,
                         format: nested,
@@ -921,6 +1024,46 @@ impl WorkspaceMaterializer<'_> {
 
         // 普通文件先落盘，嵌套包随后解压并在提升单文件时按序号消歧；
         // 这样同名条目不会互相覆盖，也保持与串行时代"普通文件在前"一致的结果。
+        if let EntrySource::Adapter { adapter, path, .. } = &source
+            && adapter.supports_batch_extraction()
+        {
+            let mut targets = plain_jobs
+                .iter()
+                .map(|job| ArchiveEntryTarget {
+                    entry_path: job.entry_path.clone(),
+                    target: job.target.clone(),
+                })
+                .collect::<Vec<_>>();
+            let mut staged = HashMap::new();
+            for job in &nested_jobs {
+                let entry_path = match job {
+                    NestedEntryJob::Gzip { entry_path, .. }
+                    | NestedEntryJob::Container { entry_path, .. } => entry_path,
+                };
+                let target = next_scratch_file(&self.root, depth);
+                staged.insert(entry_path.clone(), target.clone());
+                targets.push(ArchiveEntryTarget {
+                    entry_path: entry_path.clone(),
+                    target,
+                });
+            }
+            if let Err(error) =
+                adapter.extract_entries_to_paths(path, &targets, max_log_bytes, self.cancellation)
+            {
+                self.ensure_not_cancelled()?;
+                return Err(MaterializeRootError::Fatal(error));
+            }
+            self.files_written += plain_jobs.len();
+            self.report_progress(&container.display);
+            return self.extract_nested_entries(
+                nested_jobs,
+                &mut EntrySource::Staged(staged),
+                None,
+                container,
+                &chain,
+                depth,
+            );
+        }
         self.extract_plain_entries(plain_jobs, &mut source, session_factory, depth)?;
         self.extract_nested_entries(
             nested_jobs,
@@ -956,6 +1099,7 @@ impl WorkspaceMaterializer<'_> {
         }
 
         for job in jobs {
+            self.ensure_not_cancelled()?;
             self.run_nested_entry_job(job, source, container, chain, depth)?;
         }
         Ok(())
@@ -1040,7 +1184,7 @@ impl WorkspaceMaterializer<'_> {
                         cancellation: &cancellation,
                         progress: None,
                         root,
-                        used_labels: HashSet::new(),
+                        used_labels: HashSet::from([".argus-scratch".to_string()]),
                         files_written: 0,
                         roots: Vec::new(),
                         password_pending: Vec::new(),
@@ -1177,6 +1321,7 @@ impl WorkspaceMaterializer<'_> {
                             &job.target,
                             &job.display_entry,
                             max_log_bytes,
+                            &cancellation,
                         ) {
                             Ok(()) => {}
                             Err(MaterializeRootError::EntrySkipped(error)) => {
@@ -1229,20 +1374,6 @@ impl WorkspaceMaterializer<'_> {
         display_entry: &str,
         depth: usize,
     ) -> Result<(), MaterializeRootError> {
-        let file_stem = target
-            .file_name()
-            .and_then(|name| Path::new(name).file_stem().map(|stem| stem.to_os_string()));
-        let Some(file_stem) = file_stem else {
-            self.warnings.push(format!(
-                "嵌套 gzip 条目名无法推导落盘名，已跳过：{display_entry}"
-            ));
-            return Ok(());
-        };
-        let target = target
-            .parent()
-            .map(|parent| parent.join(&file_stem))
-            .unwrap_or_else(|| PathBuf::from(&file_stem));
-
         let scratch_dir = self.root.join(".argus-scratch");
         fs::create_dir_all(&scratch_dir).map_err(|error| {
             MaterializeRootError::Fatal(
@@ -1261,15 +1392,17 @@ impl WorkspaceMaterializer<'_> {
             }
         };
         if !streamed {
+            fs::remove_file(target).map_err(|error| MaterializeRootError::Fatal(error.into()))?;
             let _ = fs::remove_file(&scratch_file);
             return Ok(());
         }
 
         let result = decompress_gzip_to_path(
             &scratch_file,
-            &target,
+            target,
             self.config.max_log_size_bytes(),
             display_entry,
+            self.cancellation,
         );
         let _ = fs::remove_file(&scratch_file);
         match result {
@@ -1281,12 +1414,12 @@ impl WorkspaceMaterializer<'_> {
                 Ok(())
             }
             Err(MaterializeRootError::EntrySkipped(error)) => {
-                let _ = fs::remove_file(&target);
+                let _ = fs::remove_file(target);
                 self.warnings.push(format!("{error}，已跳过"));
                 Ok(())
             }
             Err(error) => {
-                let _ = fs::remove_file(&target);
+                let _ = fs::remove_file(target);
                 Err(error)
             }
         }
@@ -1308,6 +1441,7 @@ impl WorkspaceMaterializer<'_> {
             target,
             display_entry,
             self.config.max_log_size_bytes(),
+            self.cancellation,
         ) {
             Ok(()) => Ok(true),
             Err(MaterializeRootError::EntrySkipped(error)) => {
@@ -1332,16 +1466,7 @@ impl WorkspaceMaterializer<'_> {
         depth: usize,
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
-        let nested_dir = target
-            .parent()
-            .map(|parent| parent.join(nested_dir_name_for(entry_path)))
-            .unwrap_or_else(|| PathBuf::from(nested_dir_name_for(entry_path)));
-        fs::create_dir_all(&nested_dir).map_err(|error| {
-            MaterializeRootError::Fatal(
-                anyhow::Error::new(error)
-                    .context(format!("无法创建嵌套物化目录：{}", nested_dir.display())),
-            )
-        })?;
+        let nested_dir = target;
 
         let scratch_dir = self.root.join(".argus-scratch");
         fs::create_dir_all(&scratch_dir).map_err(|error| {
@@ -1358,11 +1483,12 @@ impl WorkspaceMaterializer<'_> {
             &scratch_file,
             display_entry,
             max_log_bytes,
+            self.cancellation,
         ) {
             Ok(()) => {}
             Err(MaterializeRootError::EntrySkipped(error)) => {
                 let _ = fs::remove_file(&scratch_file);
-                let _ = fs::remove_dir_all(&nested_dir);
+                let _ = fs::remove_dir_all(nested_dir);
                 self.warnings.push(format!("{error}，已跳过"));
                 return Ok(());
             }
@@ -1380,72 +1506,38 @@ impl WorkspaceMaterializer<'_> {
             format: nested_format,
             root_archive: container.root_archive.clone(),
         };
-        let result = self.extract_archive(&nested_container, &nested_dir, nested_chain, depth + 1);
+        let result = self.extract_archive(&nested_container, nested_dir, nested_chain, depth + 1);
         let _ = fs::remove_file(&scratch_file);
         // 嵌套包只解出一个普通文件时提升到父级，去掉以压缩包名命名的包装目录。
         if result.is_ok() {
-            Self::promote_single_file_out_of_dir(&nested_dir);
+            Self::promote_single_file_out_of_dir(nested_dir)
+                .map_err(MaterializeRootError::Fatal)?;
         }
         result
     }
 
     /// 把包装目录中唯一的一个普通文件提升到父级；目标名与包装目录同名时经暂存名中转，
-    /// 重名按扩展名前序号消歧。任何失败都保持原布局，不阻断加载。
-    fn promote_single_file_out_of_dir(wrapper_dir: &Path) {
-        let Ok(entries) = fs::read_dir(wrapper_dir) else {
-            return;
+    /// 重名按扩展名前序号消歧；失败上报并由调用方回滚本次物化。
+    fn promote_single_file_out_of_dir(wrapper_dir: &Path) -> Result<()> {
+        let Some(file_path) = single_file_in_directory(wrapper_dir)? else {
+            return Ok(());
         };
-        let mut single_file: Option<PathBuf> = None;
-        let mut entry_count = 0_usize;
-        for entry in entries.flatten() {
-            entry_count += 1;
-            if entry_count > 1 {
-                break;
-            }
-            let path = entry.path();
-            single_file = path.is_file().then_some(path);
-        }
-        if entry_count != 1 {
-            return;
-        }
-        let Some(file_path) = single_file else {
-            return;
-        };
-        let Some(parent) = wrapper_dir.parent() else {
-            return;
-        };
-        let Some(file_name) = file_path
+        let parent = wrapper_dir.parent().context("归档目录缺少父目录")?;
+        let file_name = file_path
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            return;
-        };
+            .context("归档文件缺少名称")?
+            .to_string_lossy();
         let (stem, extension) = Self::split_file_name_extension(&file_name);
-        let mut candidate = file_name.clone();
+        let mut candidate = file_name.to_string();
         let mut suffix = 1_usize;
-        // 并行解压时多个嵌套包会同时向同一父目录提升文件；加锁保证重名消歧与落位
-        // 不互相竞争，避免 rename 覆盖同名文件。
         let _promote_guard = NESTED_PROMOTE_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // 包装目录自身占用的名称即将释放，视为可用。
+            .map_err(|_| anyhow::anyhow!("归档文件提升锁已损坏"))?;
         while parent.join(&candidate).exists() && parent.join(&candidate) != wrapper_dir {
             suffix += 1;
             candidate = format!("{stem} ({suffix}){extension}");
         }
-        let target = parent.join(&candidate);
-        if target == wrapper_dir {
-            // 目标名正被包装目录占用：先经暂存名移出，删除目录后落位。
-            let staging = parent.join(format!(".argus-promote-{file_name}"));
-            if fs::rename(&file_path, &staging).is_err()
-                || fs::remove_dir(wrapper_dir).is_err()
-                || fs::rename(&staging, &target).is_err()
-            {
-                let _ = fs::rename(&staging, &file_path);
-            }
-        } else if fs::rename(&file_path, &target).is_ok() {
-            let _ = fs::remove_dir(wrapper_dir);
-        }
+        move_promoted_file(&file_path, wrapper_dir, &parent.join(candidate))
     }
 
     /// 把文件名拆为词干与含点的扩展名；无扩展名时扩展名为空。
@@ -1465,7 +1557,14 @@ impl WorkspaceMaterializer<'_> {
         display_entry: &str,
     ) -> Result<(), MaterializeRootError> {
         let max_log_bytes = self.config.max_log_size_bytes();
-        match stream_entry_to_path(source, entry_path, target, display_entry, max_log_bytes) {
+        match stream_entry_to_path(
+            source,
+            entry_path,
+            target,
+            display_entry,
+            max_log_bytes,
+            self.cancellation,
+        ) {
             Ok(()) => {
                 self.files_written += 1;
                 if self.files_written.is_multiple_of(PROGRESS_REPORT_INTERVAL) {
@@ -1529,11 +1628,20 @@ impl WorkspaceMaterializer<'_> {
         fs::create_dir_all(target)
             .with_context(|| format!("无法创建工作目录：{}", target.display()))?;
 
-        let entries =
-            fs::read_dir(source).with_context(|| format!("无法读取目录：{}", source.display()))?;
+        let entries = fs::read_dir(source)
+            .with_context(|| format!("无法读取目录：{}", source.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut output_paths = entries
+            .iter()
+            .map(|entry| {
+                target
+                    .join(entry.file_name())
+                    .to_string_lossy()
+                    .to_lowercase()
+            })
+            .collect::<HashSet<_>>();
         for entry in entries {
             self.ensure_not_cancelled()?;
-            let entry = entry?;
             let entry_path = entry.path();
             let entry_target = target.join(entry.file_name());
             let metadata = fs::symlink_metadata(&entry_path)?;
@@ -1550,7 +1658,7 @@ impl WorkspaceMaterializer<'_> {
             if followed.is_dir() {
                 self.copy_directory_into(&entry_path, &entry_target, visited)?;
             } else if followed.is_file() {
-                self.materialize_directory_file(&entry_path, &entry_target)?;
+                self.materialize_directory_file(&entry_path, &entry_target, &mut output_paths)?;
             }
         }
         Ok(())
@@ -1559,13 +1667,21 @@ impl WorkspaceMaterializer<'_> {
     /// 物化目录中的单个文件：压缩包同步展开为去扩展名的同名目录，其余按原文件复制。
     ///
     /// 说明：目录内加密压缩包不提供占位流程，未展开的包按原文件保留（来源树标记未展开）。
-    fn materialize_directory_file(&mut self, source: &Path, target: &Path) -> Result<()> {
+    fn materialize_directory_file(
+        &mut self,
+        source: &Path,
+        target: &Path,
+        output_paths: &mut HashSet<String>,
+    ) -> Result<()> {
         let Some(format) = detect_archive_format(source).filter(|format| format.is_supported())
         else {
             return self.copy_file_into(source, target);
         };
 
-        let stem_dir = target.with_file_name(nested_dir_name_for(&file_name_for(source)));
+        let preferred = target.with_file_name(nested_dir_name_for(&file_name_for(source)));
+        let stem_dir = reserve_output_path(&preferred, output_paths);
+        fs::create_dir(&stem_dir)
+            .with_context(|| format!("无法创建独立归档目录：{}", stem_dir.display()))?;
         let container = ArchiveContainerContext {
             path: source.to_path_buf(),
             display: source.display().to_string(),
@@ -1595,59 +1711,20 @@ impl WorkspaceMaterializer<'_> {
     /// 解压产物若恰好只有一个普通文件，把它提升为工作目录顶层的文件根。
     ///
     /// 提升后标签目录删除、标签名从占用集合释放；重名时在扩展名前追加序号。
-    /// 任何异常都退回原标签目录布局，不阻断加载。
-    fn promote_single_file_root(&mut self, label: &str, label_dir: &Path) -> PathBuf {
-        let fallback = |materializer: &mut Self| {
-            materializer.used_labels.insert(label.to_lowercase());
-            label_dir.to_path_buf()
+    /// 文件移动失败必须上报，避免成功状态中遗漏日志。
+    fn promote_single_file_root(&mut self, label: &str, label_dir: &Path) -> Result<PathBuf> {
+        let Some(file_path) = single_file_in_directory(label_dir)? else {
+            return Ok(label_dir.to_path_buf());
         };
-        let entries = match fs::read_dir(label_dir) {
-            Ok(entries) => entries,
-            Err(_) => return fallback(self),
-        };
-        let mut single_file: Option<PathBuf> = None;
-        let mut entry_count = 0_usize;
-        for entry in entries.flatten() {
-            entry_count += 1;
-            if entry_count > 1 {
-                break;
-            }
-            let path = entry.path();
-            single_file = path.is_file().then_some(path);
-        }
-        if entry_count != 1 {
-            return fallback(self);
-        }
-        let Some(file_path) = single_file else {
-            return fallback(self);
-        };
-        let Some(file_name) = file_path
+        let file_name = file_path
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            return fallback(self);
-        };
-        // 先释放标签占用：目标文件名与标签同名时（如 gzip 派生的 access.log）才会被放行。
-        let label_key = label.to_lowercase();
-        self.used_labels.remove(&label_key);
+            .context("归档文件缺少名称")?
+            .to_string_lossy();
+        self.used_labels.remove(&label.to_lowercase());
         let unique_name = self.unique_top_file_name(&file_name, label_dir);
-        let target = self.root.join(&unique_name);
-        if target == label_dir {
-            // 目标名正被标签目录占用：先经临时名移出文件，删除目录后落位。
-            let staging = self.root.join(format!(".argus-promote-{file_name}"));
-            if fs::rename(&file_path, &staging).is_err()
-                || fs::remove_dir(label_dir).is_err()
-                || fs::rename(&staging, &target).is_err()
-            {
-                let _ = fs::rename(&staging, &file_path);
-                return fallback(self);
-            }
-        } else if fs::rename(&file_path, &target).is_err() {
-            return fallback(self);
-        } else {
-            let _ = fs::remove_dir(label_dir);
-        }
-        target
+        let target = self.root.join(unique_name);
+        move_promoted_file(&file_path, label_dir, &target)?;
+        Ok(target)
     }
 
     /// 生成工作目录顶层不冲突的文件名；序号插在扩展名之前（`app.log` → `app (2).log`）。
@@ -1843,6 +1920,213 @@ mod tests {
     use flate2::write::GzEncoder;
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
+
+    fn gzip_members(contents: &[&[u8]]) -> Vec<u8> {
+        contents
+            .iter()
+            .flat_map(|content| {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+                encoder.write_all(content).unwrap();
+                encoder.finish().unwrap()
+            })
+            .collect()
+    }
+
+    fn materialize_test_path(path: &Path) -> MaterializedWorkspace {
+        materialize_sources(
+            &[path.to_path_buf()],
+            &LoaderConfig::default(),
+            &ArchivePasswordStore::default(),
+            &CancellationToken::new(),
+            None,
+        )
+        .unwrap()
+    }
+
+    /// 同名正文、gzip 和内嵌单文件归档必须保留三份证据，包括并行提升时预留的名称。
+    #[test]
+    fn materialization_preserves_plain_gzip_and_nested_archive_name_collisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let gzip = gzip_members(&[b"gzip first", b" gzip second"]);
+        let nested = nested_zip_bytes("app.log", "nested");
+        let archive = write_test_zip(
+            &directory.path().join("logs.zip"),
+            &[
+                ("app.log", b"plain"),
+                ("app.log.gz", &gzip),
+                ("inner.zip", &nested),
+            ],
+        );
+        let workspace = materialize_test_path(&archive);
+        let mut contents = walkdir_files(&workspace.root)
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        contents.sort();
+        let mut expected = vec![
+            b"plain".to_vec(),
+            b"gzip first gzip second".to_vec(),
+            b"nested".to_vec(),
+        ];
+        expected.sort();
+        assert_eq!(contents, expected);
+        assert_eq!(workspace.materialized_files, 3);
+        assert!(workspace.warnings.is_empty());
+        fs::remove_dir_all(workspace.root).unwrap();
+    }
+
+    /// 目录与同名归档应保留各自的子树，文件系统枚举顺序不能改变取证内容。
+    #[test]
+    fn materialization_keeps_directory_and_same_stem_archive_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("service")).unwrap();
+        fs::write(
+            directory.path().join("service/app.log"),
+            b"original directory",
+        )
+        .unwrap();
+        write_test_zip(
+            &directory.path().join("service.zip"),
+            &[("app.log", b"archive")],
+        );
+        let workspace = materialize_test_path(directory.path());
+        let root = &workspace.roots[0].path;
+        assert_eq!(
+            fs::read(root.join("service/app.log")).unwrap(),
+            b"original directory"
+        );
+        assert_eq!(
+            fs::read(root.join("service (2)/app.log")).unwrap(),
+            b"archive"
+        );
+        fs::remove_dir_all(workspace.root).unwrap();
+    }
+
+    /// 旧实现的固定提升暂存名与内部 scratch 名都不能覆盖或清理用户来源。
+    #[test]
+    fn materialization_reserves_internal_names_and_uses_private_promotion_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = nested_zip_bytes("app.log", "nested");
+        let archive = write_test_zip(
+            &directory.path().join("logs.zip"),
+            &[
+                (".argus-promote-app.log", b"sentinel"),
+                ("app.log.zip", &nested),
+            ],
+        );
+        let workspace = materialize_test_path(&archive);
+        assert_eq!(
+            fs::read(workspace.roots[0].path.join(".argus-promote-app.log")).unwrap(),
+            b"sentinel"
+        );
+        assert_eq!(
+            fs::read(workspace.roots[0].path.join("app.log")).unwrap(),
+            b"nested"
+        );
+        fs::remove_dir_all(workspace.root).unwrap();
+        let source = directory.path().join(".argus-scratch");
+        fs::write(&source, b"ordinary log").unwrap();
+        let workspace = materialize_test_path(&source);
+        assert_eq!(fs::read(&workspace.roots[0].path).unwrap(), b"ordinary log");
+        fs::remove_dir_all(workspace.root).unwrap();
+    }
+
+    /// 多 member 的总量共同受大小限制，后段损坏不能保留已被报告成功的部分日志。
+    #[test]
+    fn nested_gzip_checks_all_members_and_combined_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("app.log.gz");
+        let target = directory.path().join("app.log");
+        fs::write(&source, gzip_members(&[b"first", b"second"])).unwrap();
+        decompress_gzip_to_path(
+            &source,
+            &target,
+            11,
+            "app.log.gz",
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"firstsecond");
+        assert!(matches!(
+            decompress_gzip_to_path(
+                &source,
+                &target,
+                10,
+                "app.log.gz",
+                &CancellationToken::new()
+            ),
+            Err(MaterializeRootError::EntrySkipped(_))
+        ));
+        let mut broken = gzip_members(&[b"first", b"second"]);
+        let crc = broken.len() - 8;
+        broken[crc] ^= 1;
+        fs::write(&source, &broken).unwrap();
+        assert!(
+            decompress_gzip_to_path(
+                &source,
+                &target,
+                100,
+                "app.log.gz",
+                &CancellationToken::new()
+            )
+            .is_err()
+        );
+        let archive = write_test_zip(
+            &directory.path().join("logs.zip"),
+            &[("app.log", b"keep"), ("app.log.gz", &broken)],
+        );
+        let workspace = materialize_test_path(&archive);
+        assert_eq!(walkdir_files(&workspace.root).len(), 1);
+        assert_eq!(fs::read(&workspace.roots[0].path).unwrap(), b"keep");
+        assert_eq!(workspace.warnings.len(), 1);
+        fs::remove_dir_all(workspace.root).unwrap();
+    }
+
+    /// 顺序格式在一次批量提取中同时准备普通文件与嵌套容器，压缩编码不改变产物。
+    #[test]
+    fn materializes_tar_family_with_nested_archives_and_multiple_gzip_members() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = nested_zip_bytes("nested.log", "nested");
+        let nested_gzip = gzip_members(&[b"first", b" second"]);
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, content) in [
+            ("plain.log", b"plain".as_slice()),
+            ("nested.zip", nested.as_slice()),
+            ("combined.log.gz", nested_gzip.as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, content).unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let gzip = gzip_members(&[&tar[..700], &tar[700..]]);
+        let mut bzip = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bzip.write_all(&tar).unwrap();
+        let mut xz = xz2::write::XzEncoder::new(Vec::new(), 1);
+        xz.write_all(&tar).unwrap();
+        for (name, content) in [
+            ("logs.tar", tar),
+            ("logs.tar.gz", gzip),
+            ("logs.tar.bz2", bzip.finish().unwrap()),
+            ("logs.tar.xz", xz.finish().unwrap()),
+        ] {
+            let source = directory.path().join(name);
+            fs::write(&source, content).unwrap();
+            let workspace = materialize_test_path(&source);
+            let root = &workspace.roots[0].path;
+            assert_eq!(fs::read(root.join("plain.log")).unwrap(), b"plain");
+            assert_eq!(fs::read(root.join("nested.log")).unwrap(), b"nested");
+            assert_eq!(
+                fs::read(root.join("combined.log")).unwrap(),
+                b"first second"
+            );
+            assert_eq!(workspace.materialized_files, 3);
+            assert!(workspace.warnings.is_empty());
+            fs::remove_dir_all(workspace.root).unwrap();
+        }
+    }
 
     /// 手动验收：对指定 RAR 走完整物化流程，验证大过滤器成员经磁盘 scratch 解码。
     ///

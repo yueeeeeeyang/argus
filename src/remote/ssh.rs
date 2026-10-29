@@ -6,25 +6,70 @@
 
 use std::net::TcpStream;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use ssh2::{HashType, Session};
 
+use super::worker::WorkerCancellation;
 use crate::remote::connection::SshLinkConfig;
+
+/// DNS/TCP 建连的总期限，以及每次阻塞 SSH/SFTP 操作的最大等待时间。
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SSH_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 建立阻塞 SSH 会话并返回统一格式的 SHA256 主机指纹。
 ///
 /// 主机信任仍由终端和 SFTP 各自的事件协议确认；此函数只负责在鉴权前完成网络握手。
-pub(super) fn connect_ssh_session(ssh: &SshLinkConfig) -> Result<(Session, String)> {
-    let tcp = TcpStream::connect((ssh.host.as_str(), ssh.port))
-        .with_context(|| format!("无法连接到 {}:{}", ssh.host, ssh.port))?;
-    // 禁用 Nagle 可降低交互式终端输入延迟；失败不影响连接正确性，因此保持非阻塞告警语义。
-    tcp.set_nodelay(true).ok();
+pub(super) fn connect_ssh_session(
+    ssh: &SshLinkConfig,
+    cancellation: &WorkerCancellation,
+) -> Result<(Session, String)> {
+    connect_ssh_endpoint(
+        &ssh.host,
+        ssh.port,
+        cancellation,
+        SSH_CONNECT_TIMEOUT,
+        SSH_IO_TIMEOUT,
+    )
+}
+
+/// 在有界连接阶段处理取消，随后为 libssh2 提供阻塞 socket 和操作超时。
+fn connect_ssh_endpoint(
+    host: &str,
+    port: u16,
+    cancellation: &WorkerCancellation,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+) -> Result<(Session, String)> {
+    cancellation.ensure_active()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("无法创建 SSH 连接运行时")?;
+    let connection = runtime.block_on(async {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => bail!("SSH 连接已取消"),
+            result = tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect((host, port))) => {
+                result.context("SSH 连接超时")?.context("SSH TCP 连接失败")?.into_std().context("无法转换 SSH socket")
+            }
+        }
+    });
+    // 操作系统 DNS 解析不可强制终止；超时后不让运行时析构等待其完成。
+    runtime.shutdown_background();
+    let tcp: TcpStream = connection.with_context(|| format!("无法连接到 {host}:{port}"))?;
+    tcp.set_nonblocking(false)
+        .context("无法配置 SSH 阻塞 socket")?;
+    tcp.set_nodelay(true).context("无法配置 SSH 低延迟传输")?;
+    cancellation.attach_socket(&tcp)?;
 
     let mut session = Session::new().context("无法创建 SSH 会话")?;
+    session.set_timeout(u32::try_from(io_timeout.as_millis()).context("SSH 操作超时超出支持范围")?);
     session.set_tcp_stream(tcp);
     session.handshake().context("SSH 握手失败")?;
+    cancellation.ensure_active()?;
     let fingerprint = sha256_fingerprint(&session).context("无法获取 SSH 主机指纹")?;
     Ok((session, fingerprint))
 }
@@ -67,4 +112,61 @@ fn sha256_fingerprint(session: &Session) -> Result<String> {
         .host_key_hash(HashType::Sha256)
         .ok_or_else(|| anyhow!("服务器未返回 SHA256 主机指纹"))?;
     Ok(format!("SHA256:{}", STANDARD_NO_PAD.encode(hash)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::worker::WorkerGuard;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    #[test]
+    fn silent_ssh_handshake_times_out_and_can_be_cancelled() {
+        for should_cancel in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (guard, cancellation) = WorkerGuard::new(1);
+            let (done_sender, done_receiver) = mpsc::channel();
+            let started = Instant::now();
+            let worker = std::thread::spawn(move || {
+                let result = connect_ssh_endpoint(
+                    "127.0.0.1",
+                    address.port(),
+                    &cancellation,
+                    Duration::from_secs(2),
+                    if should_cancel {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_millis(150)
+                    },
+                );
+                done_sender.send(result.is_err()).unwrap();
+            });
+            let (_server, _) = listener.accept().unwrap();
+            if should_cancel {
+                drop(guard);
+            }
+            assert!(done_receiver.recv_timeout(Duration::from_secs(2)).unwrap());
+            assert!(started.elapsed() < Duration::from_secs(2));
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn cancelled_ssh_connection_does_not_start_network_work() {
+        let (guard, cancellation) = WorkerGuard::new(1);
+        drop(guard);
+        assert!(
+            connect_ssh_endpoint(
+                "invalid.example",
+                22,
+                &cancellation,
+                Duration::from_secs(1),
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+    }
 }

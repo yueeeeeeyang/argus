@@ -27,8 +27,6 @@ pub(crate) const DEFAULT_AI_MAX_RETRY_ATTEMPTS: u32 = 10;
 pub(crate) const MIN_AI_MAX_RETRY_ATTEMPTS: u32 = 0;
 /// 允许配置的最大重试次数；配合 30 秒退避上限，避免故障服务长时间占用会话与额度。
 pub(crate) const MAX_AI_MAX_RETRY_ATTEMPTS: u32 = 20;
-/// 当前原文授权说明版本；版本变化后用户需要重新确认。
-pub(crate) const AI_RAW_LOG_CONSENT_VERSION: &str = "2026-07-15";
 /// 用户可编辑系统提示词的最大 UTF-8 字节数，避免设置文件和每轮模型上下文异常膨胀。
 pub(crate) const MAX_AI_SYSTEM_PROMPT_BYTES: usize = 32 * 1024;
 /// 新安装和旧配置迁移时使用的通用助手提示词。
@@ -82,12 +80,6 @@ pub(crate) struct AiConfig {
     /// 可供每次智能助手会话选择的模型配置。
     #[serde(default)]
     pub model_profiles: Vec<AiModelProfile>,
-    /// 是否允许把经工具裁剪的必要日志原文发送给模型。
-    #[serde(default)]
-    pub allow_raw_log_content: bool,
-    /// 用户确认过的原文授权说明版本。
-    #[serde(default)]
-    pub consent_version: String,
     /// 单次模型请求超时秒数。
     #[serde(default = "default_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
@@ -165,13 +157,10 @@ impl AiConfig {
         }
     }
 
-    /// 校验模型端点、授权和全部日志类型配置。
+    /// 校验模型端点和全部日志类型配置。
     ///
     /// 返回值：配置可用于新会话时返回 `Ok`；否则返回第一条用户可读错误。
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.allow_raw_log_content && self.consent_version != AI_RAW_LOG_CONSENT_VERSION {
-            return Err("日志原文授权说明已更新，请在设置中重新确认".to_string());
-        }
         self.validate_model_profiles()?;
         if !self.model_profiles.iter().any(|profile| profile.enabled) {
             return Err("请至少启用一个可用于智能助手的模型".to_string());
@@ -251,8 +240,6 @@ impl Default for AiConfig {
             base_url: String::new(),
             model: String::new(),
             model_profiles: Vec::new(),
-            allow_raw_log_content: false,
-            consent_version: String::new(),
             request_timeout_seconds: default_request_timeout_seconds(),
             max_retry_attempts: default_max_retry_attempts(),
             system_prompt: default_ai_system_prompt(),

@@ -399,6 +399,7 @@ impl ArgusApp {
         self.has_loaded_real_sources = false;
         // 先清理依赖旧工作目录的页签和会话，取消可能仍在读取的智能助手任务，再删除物化目录。
         self.reset_log_workspace_after_source_replace();
+        self.source_workspace_lease = None;
         // 旧物化工作目录随来源替换立即失效，后台尽力删除；句柄占用导致的失败由启动清扫兜底。
         if let Some(old_workspace) = self.source_workspace_root.take() {
             crate::loader::workspace::delete_workspace_best_effort(old_workspace);

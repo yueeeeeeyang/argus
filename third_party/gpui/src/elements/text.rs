@@ -8,6 +8,7 @@ use crate::{
 use anyhow::Context as _;
 use smallvec::SmallVec;
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     mem,
     ops::Range,
@@ -316,6 +317,7 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
 }
@@ -334,7 +336,7 @@ impl TextLayout {
             .line_height
             .to_pixels(font_size.into(), window.rem_size());
 
-        let mut runs = if let Some(runs) = runs {
+        let runs = if let Some(runs) = runs {
             runs
         } else {
             vec![text_style.to_run(text.len())]
@@ -372,18 +374,22 @@ impl TextLayout {
 
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && text_layout.size.is_some()
-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+                    && wrap_width == text_layout.wrap_width
+                    && truncate_width == text_layout.truncate_width
                 {
                     return text_layout.size.unwrap();
                 }
 
+                // 同一帧可能先按固有尺寸再按可用宽度测量；截断会裁短样式段，
+                // 每次重排必须从原始样式恢复，避免宽度增大后丢失后半段字形和样式。
+                let mut measured_runs = Cow::Borrowed(runs.as_slice());
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
                 let text = if let Some(truncate_width) = truncate_width {
                     line_wrapper.truncate_line(
                         text.clone(),
                         truncate_width,
                         &truncation_suffix,
-                        &mut runs,
+                        measured_runs.to_mut(),
                     )
                 } else {
                     text.clone()
@@ -395,7 +401,7 @@ impl TextLayout {
                     .shape_text(
                         text,
                         font_size,
-                        &runs,
+                        &measured_runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
                     )
@@ -406,6 +412,7 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
                     });
@@ -424,6 +431,7 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    truncate_width,
                     size: Some(size),
                     bounds: None,
                 });
@@ -910,5 +918,138 @@ impl IntoElement for InteractiveText {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AvailableSpace, TestAppContext, TextStyleRefinement, div, px, rgb, size};
+
+    /// 同一帧的窄测量会裁短样式段，后续宽测量必须恢复全部 UTF-8 字节和后半段颜色。
+    #[gpui::test]
+    fn text_layout_restores_styled_runs_after_alternating_widths(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.draw(
+            Point::default(),
+            size(px(1500.0), px(200.0)),
+            |window, cx| {
+                window.with_text_style(
+                    Some(TextStyleRefinement {
+                        white_space: Some(WhiteSpace::Nowrap),
+                        text_overflow: Some(TextOverflow::Truncate("…".into())),
+                        ..Default::default()
+                    }),
+                    |window| {
+                        // 首字符为 ASCII，随后为中文；复用被裁成 3 字节的样式会切入中文字节内部。
+                        let first = "a中文范围";
+                        let second = " second half must retain its complete text and color";
+                        let content = format!("{first}{second}");
+                        let mut first_run = window.text_style().to_run(first.len());
+                        first_run.color = rgb(0xcc1122).into();
+                        let mut second_run = window.text_style().to_run(second.len());
+                        second_run.color = rgb(0x1144cc).into();
+                        let expected_runs = [first_run.clone(), second_run.clone()];
+                        let mut text =
+                            StyledText::new(content.clone()).with_runs(vec![first_run, second_run]);
+                        let (layout_id, _) = text.request_layout(None, None, window, cx);
+
+                        for width in [0.0, 900.0, 40.0, 1400.0] {
+                            window.compute_layout(
+                                layout_id,
+                                size(
+                                    AvailableSpace::Definite(px(width)),
+                                    AvailableSpace::MaxContent,
+                                ),
+                                cx,
+                            );
+                            let rendered = text.layout().text();
+                            let measured = text.layout().0.borrow();
+                            let measured = measured.as_ref().expect("文字应完成测量");
+                            assert_eq!(measured.truncate_width, Some(px(width)));
+                            assert_eq!(measured.lines.len(), 1);
+                            let decorations = &measured.lines[0].decoration_runs;
+                            assert_eq!(
+                                decorations
+                                    .iter()
+                                    .map(|run| run.len as usize)
+                                    .sum::<usize>(),
+                                rendered.len(),
+                                "样式必须覆盖本次实际显示的全部字节"
+                            );
+
+                            if width >= 900.0 {
+                                assert_eq!(rendered, content);
+                                assert_eq!(measured.len, content.len());
+                                assert_eq!(decorations.len(), expected_runs.len());
+                                for (actual, expected) in decorations.iter().zip(&expected_runs) {
+                                    assert_eq!(actual.len as usize, expected.len);
+                                    assert_eq!(actual.color, expected.color);
+                                }
+                            } else {
+                                assert_ne!(rendered, content);
+                                assert!(rendered.ends_with('…'));
+                            }
+                        }
+                    },
+                );
+                div()
+            },
+        );
+    }
+
+    /// 换行宽度从有限变为无约束时必须重新排版，不能沿用旧的软换行和多行高度。
+    #[gpui::test]
+    fn text_layout_remeasures_when_wrap_width_becomes_unconstrained(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.draw(
+            Point::default(),
+            size(px(1500.0), px(300.0)),
+            |window, cx| {
+                window.with_text_style(
+                    Some(TextStyleRefinement {
+                        white_space: Some(WhiteSpace::Normal),
+                        ..Default::default()
+                    }),
+                    |window| {
+                        let content = "first group second group third group fourth group";
+                        let mut text = StyledText::new(content);
+                        let (layout_id, _) = text.request_layout(None, None, window, cx);
+
+                        window.compute_layout(
+                            layout_id,
+                            size(
+                                AvailableSpace::Definite(px(48.0)),
+                                AvailableSpace::MaxContent,
+                            ),
+                            cx,
+                        );
+                        {
+                            let measured = text.layout().0.borrow();
+                            let measured = measured.as_ref().expect("文字应完成窄宽度测量");
+                            assert_eq!(measured.wrap_width, Some(px(48.0)));
+                            assert!(!measured.lines[0].layout.wrap_boundaries.is_empty());
+                            assert!(measured.size.unwrap().height > measured.line_height);
+                        }
+
+                        window.compute_layout(
+                            layout_id,
+                            size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+                            cx,
+                        );
+                        assert_eq!(text.layout().text(), content);
+                        let measured = text.layout().0.borrow();
+                        let measured = measured.as_ref().expect("文字应完成无约束测量");
+                        assert_eq!(measured.wrap_width, None);
+                        assert_eq!(measured.truncate_width, None);
+                        assert_eq!(measured.len, content.len());
+                        assert!(measured.lines[0].layout.wrap_boundaries.is_empty());
+                        assert_eq!(measured.size.unwrap().height, measured.line_height);
+                        assert!(measured.size.unwrap().width > px(48.0));
+                    },
+                );
+                div()
+            },
+        );
     }
 }

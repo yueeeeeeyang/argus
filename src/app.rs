@@ -16,6 +16,8 @@ mod text_input_actions;
 
 mod constants;
 mod jstack_actions;
+#[cfg(test)]
+mod jstack_filter_tests;
 mod jstack_state;
 mod log_state;
 mod menu_actions;
@@ -250,6 +252,8 @@ pub(crate) struct ArgusApp {
     pub source_load_cancellation: Option<tokio_util::sync::CancellationToken>,
     /// 来源完整加载 generation，用于丢弃被取消任务的过期结果和进度。
     pub source_load_generation: usize,
+    /// 密码重试独立于完整加载；来源替换时统一取消，阻止旧子树回填。
+    pub archive_retry_cancellations: HashMap<SourceId, tokio_util::sync::CancellationToken>,
     /// 来源树虚拟列表滚动句柄。
     pub source_tree_scroll: UniformListScrollHandle,
     /// 来源树自定义滚动条拖拽时鼠标在 thumb 内的相对位置。
@@ -292,10 +296,14 @@ pub(crate) struct ArgusApp {
     pub log_read_states: HashMap<SourceId, LogOpenState>,
     /// 当前已物化的日志工作目录根；随来源替换而失效，由加载流程负责删除。
     pub source_workspace_root: Option<std::path::PathBuf>,
+    /// 持有当前工作目录的存活租约，防止其他实例的启动清扫删除活跃来源。
+    pub source_workspace_lease: Option<Arc<crate::loader::workspace::WorkspaceLease>>,
     /// 主窗口关闭时删除工作目录的钩子是否已注册，避免每帧重复注册。
     pub has_registered_workspace_close_guard: bool,
     /// 日志读取 generation，用于丢弃后台任务返回的过期结果。
     pub log_reader_generations: HashMap<SourceId, usize>,
+    /// 全局读取序号不随标签或来源清理重置，避免旧任务命中新任务的 generation。
+    pub log_reader_generation_counter: usize,
     /// 每个日志 tab 的滚动、选区和焦点状态。
     pub log_tab_view_states: HashMap<usize, LogTabViewState>,
     /// 日志正文滚动条拖拽状态。
@@ -456,6 +464,7 @@ impl ArgusApp {
             source_load_progress: None,
             source_load_cancellation: None,
             source_load_generation: 0,
+            archive_retry_cancellations: HashMap::new(),
             source_tree_scroll: UniformListScrollHandle::new(),
             source_scrollbar_drag_position: None,
             is_source_tree_search_open: false,
@@ -477,8 +486,10 @@ impl ArgusApp {
             assistant_tabs: HashMap::new(),
             log_read_states: HashMap::new(),
             source_workspace_root: None,
+            source_workspace_lease: None,
             has_registered_workspace_close_guard: false,
             log_reader_generations: HashMap::new(),
+            log_reader_generation_counter: 0,
             log_tab_view_states: HashMap::new(),
             log_scrollbar_drag: None,
             log_selection_autoscroll: None,
@@ -1158,9 +1169,13 @@ impl ArgusApp {
 
     /// 为指定日志来源生成下一次读取 generation。
     fn next_log_reader_generation(&mut self, source_id: SourceId) -> usize {
-        let generation = self.log_reader_generations.entry(source_id).or_insert(0);
-        *generation = generation.wrapping_add(1);
-        *generation
+        self.log_reader_generation_counter = self
+            .log_reader_generation_counter
+            .checked_add(1)
+            .expect("日志读取任务序号已耗尽");
+        self.log_reader_generations
+            .insert(source_id, self.log_reader_generation_counter);
+        self.log_reader_generation_counter
     }
 
     /// 释放某个标签页对应的运行期资源，避免关闭 tab 后继续占用内存。
@@ -1686,9 +1701,7 @@ impl ArgusApp {
         self.log_reader_generations.clear();
         self.log_tab_view_states.clear();
         self.jstack_analyses.clear();
-        self.next_jstack_analysis_id = 1;
         self.runtime_analyses.clear();
-        self.next_runtime_analysis_id = 1;
         self.disconnect_all_terminal_sessions();
         self.disconnect_all_remote_file_sessions();
         self.assistant_tabs.clear();
@@ -1705,6 +1718,25 @@ impl ArgusApp {
     pub(crate) fn close_all_tabs_with_context(&mut self, _cx: &mut Context<Self>) {
         self.clear_jstack_cell_hover_preview();
         self.close_all_tabs();
+    }
+
+    /// 主窗口关闭前取消所有后台工作并释放目录租约；旧加载结果不得重建已关闭的工作区。
+    pub(crate) fn prepare_to_close(&mut self) {
+        if let Some(cancellation) = self.source_load_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.source_load_generation = self
+            .source_load_generation
+            .checked_add(1)
+            .expect("来源加载任务序号已耗尽");
+        for (_, cancellation) in self.archive_retry_cancellations.drain() {
+            cancellation.cancel();
+        }
+        self.close_all_tabs();
+        self.source_workspace_lease = None;
+        if let Some(root) = self.source_workspace_root.take() {
+            crate::loader::workspace::delete_workspace_best_effort(root);
+        }
     }
 
     pub(crate) fn active_tab(&self) -> Option<&ArgusTab> {

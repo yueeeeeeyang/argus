@@ -1441,8 +1441,69 @@ fn creating_jstack_analysis_tab_reuses_empty_tab() {
         state.task_state,
         JstackAnalysisTaskState::Loading { .. }
     ));
-    assert_eq!(app.active_tab_title(), "Jstack分析(2)");
+    assert_eq!(app.active_tab_title(), "app.log ～ error.log");
+    assert_eq!(
+        app.jstack_analysis_title(analysis_id),
+        Some("app.log ～ error.log")
+    );
     assert!(!app.should_show_log_search_results());
+}
+
+/// 单文件的首尾名称相同；空输入不创建页签，没有有效快照时仍保留输入范围。
+#[test]
+fn jstack_title_preserves_single_file_range_without_snapshots() {
+    let mut app = app_with_placeholder_sources();
+    assert!(app.create_jstack_analysis_tab_state(Vec::new()).is_none());
+    assert!(app.tabs.is_empty());
+    let source_id = source_id_by_label(&app, "app.log");
+    let targets = app.jstack_targets_from_source_ids(&[source_id]);
+    let (analysis_id, generation) = app.create_jstack_analysis_tab_state(targets).unwrap();
+    assert_eq!(app.active_tab_title(), "app.log ～ app.log");
+
+    let result = crate::analysis::jstack::build_analysis_result(Vec::new(), Vec::new(), 0);
+    app.apply_jstack_analysis_result(analysis_id, generation, result);
+
+    assert_eq!(
+        app.jstack_analysis_title(analysis_id),
+        Some("app.log ～ app.log")
+    );
+}
+
+/// 后台结果只更新对应页签的范围，过期和取消结果不能覆盖标题。
+#[test]
+fn jstack_result_title_updates_matching_tab_and_ignores_stale_results() {
+    let mut app = app_with_placeholder_sources();
+    let source_id = source_id_by_label(&app, "app.log");
+    let targets = app.jstack_targets_from_source_ids(&[source_id]);
+    let (analysis_id, generation) = app
+        .create_jstack_analysis_tab_state(targets.clone())
+        .unwrap();
+    let (other_id, _) = app.create_jstack_analysis_tab_state(targets).unwrap();
+    let mut result = crate::analysis::jstack::build_analysis_result(Vec::new(), Vec::new(), 2);
+    result.log_range =
+        crate::analysis::jstack::JstackLogRange::from_labels(["开始.log", "结束.log"]);
+
+    app.apply_jstack_analysis_result(analysis_id, generation + 1, result.clone());
+    assert_eq!(
+        app.jstack_analysis_title(analysis_id),
+        Some("app.log ～ app.log")
+    );
+
+    let mut cancelled = result.clone();
+    cancelled.was_cancelled = true;
+    app.apply_jstack_analysis_result(other_id, generation, cancelled);
+    app.apply_jstack_analysis_result(other_id, generation, result.clone());
+    assert_eq!(
+        app.jstack_analysis_title(other_id),
+        Some("app.log ～ app.log")
+    );
+
+    app.apply_jstack_analysis_result(analysis_id, generation, result);
+    assert_eq!(
+        app.jstack_analysis_title(analysis_id),
+        Some("开始.log ～ 结束.log")
+    );
+    assert_eq!(app.active_tab_title(), "app.log ～ app.log");
 }
 
 /// 验证 Jstack 配置过滤开关默认开启，并可在分析页内临时关闭。
@@ -1818,7 +1879,7 @@ fn activating_existing_analysis_tab_closes_search_results_panel() {
     assert_eq!(app.active_tab_id, Some(analysis_tab_id));
     assert!(!app.should_show_log_search_results());
     assert!(app.log_search.message.is_none());
-    assert_eq!(app.placeholder_notice, "已切换到 Jstack分析");
+    assert_eq!(app.placeholder_notice, "已切换到 app.log ～ app.log");
 }
 
 /// 验证关闭当前日志标签并自动落到分析标签时也会关闭日志搜索结果面板。
@@ -3123,6 +3184,7 @@ fn jstack_filtered_row_count_survives_empty_active_states() {
         thread_name_selection_drag: None,
         selected_cell_key: None,
         visible_row_indices: Vec::new(),
+        visible_cells: HashMap::new(),
         filtered_row_count: 0,
         row_scroll: UniformListScrollHandle::new(),
         task_state: JstackAnalysisTaskState::Ready(result),
@@ -3135,15 +3197,33 @@ fn jstack_filtered_row_count_survives_empty_active_states() {
     assert!(state.visible_row_indices.is_empty());
 }
 
-/// 验证 Jstack 头部过滤控件固定独占一行，窗口变窄时版式稳定且不溢出内容玻璃板右边缘。
+/// 验证标题和统计获得完整可用宽度，过滤控件在窗口变窄时仍固定独占一行。
 #[gpui::test]
 fn jstack_header_controls_wrap_within_content_panel(cx: &mut gpui::TestAppContext) {
     let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
     app.update(cx, |app, _| {
         let app_log_id = source_id_by_label(app, "app.log");
         let targets = app.jstack_targets_from_source_ids(&[app_log_id]);
-        app.create_jstack_analysis_tab_state(targets)
+        let (analysis_id, generation) = app
+            .create_jstack_analysis_tab_state(targets)
             .expect("应能创建 Jstack 分析 tab");
+        let snapshots = ["thread_000236.log", "thread_000436.log"]
+            .into_iter()
+            .map(|label| {
+                crate::analysis::jstack::parse_jstack_snapshot(
+                    app_log_id,
+                    label,
+                    label,
+                    "\"worker\" #7 tid=0x7\n   java.lang.Thread.State: RUNNABLE\n",
+                )
+            })
+            .collect();
+        let result = crate::analysis::jstack::build_analysis_result(snapshots, Vec::new(), 2);
+        app.apply_jstack_analysis_result(analysis_id, generation, result);
+        assert_eq!(
+            app.jstack_analysis_title(analysis_id),
+            Some("thread_000236.log ～ thread_000436.log")
+        );
     });
 
     cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
@@ -3173,6 +3253,26 @@ fn jstack_header_controls_wrap_within_content_panel(cx: &mut gpui::TestAppContex
         narrow_controls.right() <= narrow_panel.right() + gpui::px(0.5),
         "窄窗口下过滤控件不应溢出玻璃板右边缘：controls={narrow_controls:?}, panel={narrow_panel:?}"
     );
+
+    for width in [760.0, 1600.0] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(900.0)));
+        let panel = cx.debug_bounds("window-content-panel").unwrap();
+        let header = cx.debug_bounds("jstack-header").unwrap();
+        for selector in ["jstack-header-title", "jstack-header-summary"] {
+            let text = cx.debug_bounds(selector).expect("应渲染标题和统计");
+            let left_inset = text.left() - header.left();
+            let right_inset = header.right() - text.right();
+            assert!(
+                (left_inset - gpui::px(14.0)).abs() <= gpui::px(0.5)
+                    && (right_inset - gpui::px(14.0)).abs() <= gpui::px(0.5),
+                "标题和统计应占满头部内边距之间的宽度：text={text:?}, header={header:?}"
+            );
+            assert!(
+                text.left() >= panel.left() && text.right() <= panel.right(),
+                "标题和统计应位于内容面板内"
+            );
+        }
+    }
 }
 
 /// 验证线程详情按可见快照收集代表堆栈，不把同一文件内重复出现展开成多条同源记录。
@@ -3207,13 +3307,74 @@ fn jstack_detail_occurrences_keep_one_stack_per_visible_snapshot() {
         .expect("应存在同一线程行");
     let active_states = BTreeSet::from([JstackThreadState::Runnable]);
 
-    let occurrences = jstack_detail_occurrences_for_visible_cells(row, &active_states, 0, 2);
+    let occurrences = jstack_detail_occurrences_for_visible_cells(row, &active_states, 0, 2, None);
 
     assert_eq!(occurrences.len(), 2);
     assert_eq!(occurrences[0].snapshot_label, "001.log");
     assert_eq!(occurrences[0].occurrence_index, 2);
     assert_eq!(occurrences[1].snapshot_label, "002.log");
     assert_eq!(occurrences[1].occurrence_index, 1);
+}
+
+/// 同一快照首条为空闲样本时，实际矩阵悬浮必须展示剩余业务样本，并随过滤开关恢复。
+#[gpui::test]
+fn jstack_matrix_hover_uses_filtered_count_and_representative(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, _| app_with_placeholder_sources());
+    let analysis_id = app.update(cx, |app, _| {
+        app.config.log_display.jstack_thread_filter_rules = vec![JstackThreadFilterRule {
+            enabled: true,
+            kind: JstackThreadFilterRuleKind::StackSegment,
+            pattern: "app.Idle.wait".to_string(),
+        }];
+        let source_id = source_id_by_label(app, "app.log");
+        let targets = app.jstack_targets_from_source_ids(&[source_id]);
+        let (analysis_id, generation) = app.create_jstack_analysis_tab_state(targets).unwrap();
+        let snapshot = crate::analysis::jstack::parse_jstack_snapshot(
+            source_id,
+            "mixed.log",
+            "/tmp/mixed.log",
+            r#""worker" #7 tid=0x7
+   java.lang.Thread.State: RUNNABLE
+        at app.Idle.wait(Idle.java:1)
+"worker" #7 tid=0x7
+   java.lang.Thread.State: RUNNABLE
+        at app.Business.execute(Business.java:2)
+"#,
+        );
+        let result = crate::analysis::jstack::build_analysis_result(vec![snapshot], Vec::new(), 1);
+        app.apply_jstack_analysis_result(analysis_id, generation, result);
+        analysis_id
+    });
+    assert_eq!(analysis_id, 1, "隔离应用中的首个分析应使用固定测试选择器");
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    let cell = cx
+        .debug_bounds("jstack-cell-1-0-0")
+        .expect("包含执行样本的格子必须显示");
+    cx.simulate_mouse_move(cell.center(), None, gpui::Modifiers::default());
+    app.update(cx, |app, cx| {
+        let preview = &app.jstack_cell_hover_preview.as_ref().unwrap().data;
+        assert_eq!(preview.count, 1);
+        assert_eq!(preview.state_label, "RUNNABLE");
+        let stack = preview.stack_lines.as_ref().unwrap().join("\n");
+        assert!(stack.contains("app.Business.execute"));
+        assert!(!stack.contains("app.Idle.wait"));
+        app.toggle_jstack_thread_filter(analysis_id);
+        assert!(app.jstack_cell_hover_preview.is_none());
+        cx.notify();
+    });
+    cx.simulate_mouse_move(cell.center(), None, gpui::Modifiers::default());
+    app.update(cx, |app, _| {
+        let preview = &app.jstack_cell_hover_preview.as_ref().unwrap().data;
+        assert_eq!(preview.count, 2);
+        assert!(
+            preview
+                .stack_lines
+                .as_ref()
+                .unwrap()
+                .join("\n")
+                .contains("app.Idle.wait")
+        );
+    });
 }
 
 /// 验证 Shift 范围多选只纳入日志候选节点，普通压缩包节点不再打断也不进入选择集合。
@@ -4895,6 +5056,7 @@ fn load_encrypted_archive_node(app: &mut ArgusApp, archive_path: &Path) -> Sourc
     registry.rebuild_all_indices();
     app.source_registry = registry;
     app.source_workspace_root = Some(workspace.root);
+    app.source_workspace_lease = Some(workspace.lease);
     let archive_id = app
         .source_registry
         .tree_order_source_ids()
@@ -5043,11 +5205,16 @@ fn applying_source_load_result_clears_progress(cx: &mut gpui::TestAppContext) {
             scanned: 5,
             current: "logs/app.log".to_string(),
         });
+        let review_workspace_root = isolated_test_dir("workspace-lease").join("workspace");
+        let review_workspace_lease =
+            crate::loader::workspace::create_leased_workspace(&review_workspace_root)
+                .expect("应创建带租约的测试工作目录");
         app.apply_source_load_result(
             2,
             Ok((
                 crate::loader::MaterializedWorkspace {
-                    root: std::path::PathBuf::from("/tmp/argus-test-workspace"),
+                    root: review_workspace_root.clone(),
+                    lease: review_workspace_lease,
                     roots: Vec::new(),
                     password_pending: Vec::new(),
                     warnings: Vec::new(),
@@ -5154,11 +5321,16 @@ fn source_load_panel_defaults_follow_source_shape(cx: &mut gpui::TestAppContext)
         single_file_registry.rebuild_all_indices();
 
         app.source_load_generation = 1;
+        let review_workspace_root = isolated_test_dir("workspace-lease").join("workspace");
+        let review_workspace_lease =
+            crate::loader::workspace::create_leased_workspace(&review_workspace_root)
+                .expect("应创建带租约的测试工作目录");
         app.apply_source_load_result(
             1,
             Ok((
                 crate::loader::MaterializedWorkspace {
-                    root: PathBuf::from("/tmp/argus-test-single-file"),
+                    root: review_workspace_root.clone(),
+                    lease: review_workspace_lease,
                     roots: Vec::new(),
                     password_pending: Vec::new(),
                     warnings: Vec::new(),
@@ -5190,11 +5362,16 @@ fn source_load_panel_defaults_follow_source_shape(cx: &mut gpui::TestAppContext)
         // 目录或多文件来源：不重置折叠状态，验证在“单文件已收起”的现状上重新加载会
         // 自动展开目录树。
         app.source_load_generation = 2;
+        let review_workspace_root = isolated_test_dir("workspace-lease").join("workspace");
+        let review_workspace_lease =
+            crate::loader::workspace::create_leased_workspace(&review_workspace_root)
+                .expect("应创建带租约的测试工作目录");
         app.apply_source_load_result(
             2,
             Ok((
                 crate::loader::MaterializedWorkspace {
-                    root: PathBuf::from("/tmp/argus-test-dir-source"),
+                    root: review_workspace_root.clone(),
+                    lease: review_workspace_lease,
                     roots: Vec::new(),
                     password_pending: Vec::new(),
                     warnings: Vec::new(),
@@ -5707,4 +5884,175 @@ fn assert_details_layout_is_usable(
             f32::from(info.size.width)
         );
     }
+}
+
+/// 验证来源替换和关闭全部标签都会取消分析，且旧结果无法命中新任务。
+#[test]
+fn analysis_tasks_are_cancelled_and_ids_are_not_reused() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for reset in [
+        ArgusApp::close_all_tabs,
+        ArgusApp::reset_log_workspace_after_source_replace,
+    ] {
+        let mut app = app_with_placeholder_sources();
+        let source_id = source_id_by_label(&app, "app.log");
+        let jstack_targets = app.jstack_targets_from_source_ids(&[source_id]);
+        let runtime_targets = app.runtime_targets_from_source_ids(&[source_id]);
+        let old_jstack = app
+            .create_jstack_analysis_tab_state(jstack_targets.clone())
+            .unwrap();
+        let old_runtime = app
+            .create_runtime_analysis_tab_state(runtime_targets.clone())
+            .unwrap();
+        let jstack_cancel = Arc::new(AtomicBool::new(false));
+        let runtime_cancel = Arc::new(AtomicBool::new(false));
+        app.jstack_analyses
+            .get_mut(&old_jstack.0)
+            .unwrap()
+            .cancel_token = Some(jstack_cancel.clone());
+        app.runtime_analyses
+            .get_mut(&old_runtime.0)
+            .unwrap()
+            .cancel_token = Some(runtime_cancel.clone());
+        reset(&mut app);
+        assert!(jstack_cancel.load(Ordering::Relaxed));
+        assert!(runtime_cancel.load(Ordering::Relaxed));
+        let new_jstack = app
+            .create_jstack_analysis_tab_state(jstack_targets)
+            .unwrap();
+        let new_runtime = app
+            .create_runtime_analysis_tab_state(runtime_targets)
+            .unwrap();
+        assert_ne!(old_jstack.0, new_jstack.0);
+        assert_ne!(old_runtime.0, new_runtime.0);
+        app.apply_jstack_analysis_result(
+            old_jstack.0,
+            old_jstack.1,
+            crate::analysis::jstack::build_analysis_result(Vec::new(), Vec::new(), 7),
+        );
+        assert!(matches!(
+            app.jstack_analyses[&new_jstack.0].task_state,
+            JstackAnalysisTaskState::Loading { .. }
+        ));
+        app.apply_jstack_analysis_result(
+            new_jstack.0,
+            new_jstack.1,
+            crate::analysis::jstack::build_analysis_result(Vec::new(), Vec::new(), 3),
+        );
+        let JstackAnalysisTaskState::Ready(result) = &app.jstack_analyses[&new_jstack.0].task_state
+        else {
+            panic!("新任务应正常完成");
+        };
+        assert_eq!(result.total_files, 3);
+    }
+}
+
+/// 验证关闭其他标签和单个标签都触发状态所有者的取消逻辑。
+#[test]
+fn closing_analysis_tabs_cancels_only_removed_tasks() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut app = app_with_placeholder_sources();
+    let source_id = source_id_by_label(&app, "app.log");
+    let targets = app.jstack_targets_from_source_ids(&[source_id]);
+    let first = app
+        .create_jstack_analysis_tab_state(targets.clone())
+        .unwrap();
+    let kept_tab_id = app.active_tab_id.unwrap();
+    let second = app.create_jstack_analysis_tab_state(targets).unwrap();
+    let first_cancel = Arc::new(AtomicBool::new(false));
+    let second_cancel = Arc::new(AtomicBool::new(false));
+    app.jstack_analyses.get_mut(&first.0).unwrap().cancel_token = Some(first_cancel.clone());
+    app.jstack_analyses.get_mut(&second.0).unwrap().cancel_token = Some(second_cancel.clone());
+    app.close_other_tabs(kept_tab_id);
+    assert!(!first_cancel.load(Ordering::Relaxed));
+    assert!(second_cancel.load(Ordering::Relaxed));
+    app.close_tab(kept_tab_id);
+    assert!(first_cancel.load(Ordering::Relaxed));
+}
+
+/// 验证旧读取错误不会覆盖重新打开文件后的任务，当前任务的错误仍如实显示。
+#[test]
+fn reopened_log_rejects_old_reader_result() {
+    for reset in [
+        ArgusApp::close_all_tabs,
+        ArgusApp::reset_log_workspace_after_source_replace,
+    ] {
+        let mut app = app_with_placeholder_sources();
+        let source_id = source_id_by_label(&app, "app.log");
+        let old_generation = app.next_log_reader_generation(source_id);
+        reset(&mut app);
+        let new_generation = app.next_log_reader_generation(source_id);
+        assert_ne!(old_generation, new_generation);
+        app.log_read_states.insert(
+            source_id,
+            LogOpenState::Loading {
+                message: "新读取".into(),
+            },
+        );
+        app.apply_log_open_result(
+            source_id,
+            old_generation,
+            Err(anyhow::anyhow!("旧读取失败")),
+        );
+        assert!(matches!(
+            app.log_read_states[&source_id],
+            LogOpenState::Loading { .. }
+        ));
+        app.apply_log_open_result(
+            source_id,
+            new_generation,
+            Err(anyhow::anyhow!("当前读取失败")),
+        );
+        assert!(
+            matches!(&app.log_read_states[&source_id], LogOpenState::Failed { message } if message == "当前读取失败")
+        );
+    }
+}
+
+/// 验证用户主动取消后，即使后台已经计算成功，延迟回填也不能恢复结果页。
+#[gpui::test]
+fn cancelled_analysis_rejects_already_completed_result(cx: &mut gpui::TestAppContext) {
+    let entity = cx.new(|_| app_with_placeholder_sources());
+    entity.update(cx, |app, cx| {
+        let source_id = source_id_by_label(app, "app.log");
+        let targets = app.runtime_targets_from_source_ids(&[source_id]);
+        let (analysis_id, generation) = app.create_runtime_analysis_tab_state(targets).unwrap();
+        app.runtime_analyses
+            .get_mut(&analysis_id)
+            .unwrap()
+            .cancel_token = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        app.cancel_runtime_analysis(analysis_id);
+        app.apply_runtime_analysis_result(
+            analysis_id,
+            generation,
+            build_runtime_analysis_result(Vec::new(), Vec::new(), 1, false),
+            cx,
+        );
+        assert!(matches!(
+            app.runtime_analyses[&analysis_id].task_state,
+            RuntimeAnalysisTaskState::Cancelled { .. }
+        ));
+    });
+}
+
+/// 验证窗口关闭取消完整加载与密码重试，来源替换也取消旧子树任务。
+#[test]
+fn workspace_shutdown_cancels_source_tasks() {
+    let mut app = test_app();
+    let retry = tokio_util::sync::CancellationToken::new();
+    app.archive_retry_cancellations
+        .insert(SourceId(1), retry.clone());
+    app.reset_log_workspace_after_source_replace();
+    assert!(retry.is_cancelled());
+    let load = tokio_util::sync::CancellationToken::new();
+    let retry = tokio_util::sync::CancellationToken::new();
+    app.source_load_cancellation = Some(load.clone());
+    app.archive_retry_cancellations
+        .insert(SourceId(1), retry.clone());
+    let generation = app.source_load_generation;
+    app.prepare_to_close();
+    assert!(load.is_cancelled());
+    assert!(retry.is_cancelled());
+    assert_ne!(generation, app.source_load_generation);
+    assert!(app.source_workspace_lease.is_none());
 }

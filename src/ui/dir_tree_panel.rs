@@ -41,10 +41,10 @@ const TREE_BRANCH_Y: f32 = SOURCE_ROW_HEIGHT / 2.0 - SOURCE_ROW_VERTICAL_INSET;
 const TREE_BRANCH_ICON_OVERLAP: f32 = 6.0;
 /// 节点横向分支线长度：接到图标左缘后再伸入 6px，图形不透明部分覆盖连线，视觉上无间隙。
 const TREE_BRANCH_LENGTH: f32 = TREE_LINE_TO_CONTENT_GAP + TREE_BRANCH_ICON_OVERLAP;
-/// 来源树固定行高；uniform_list 依赖所有行保持一致高度。
-const SOURCE_ROW_HEIGHT: f32 = 28.0;
+/// 16px 图标之间保留 8px 纵向留白；uniform_list 依赖所有行保持一致高度。
+const SOURCE_ROW_HEIGHT: f32 = 24.0;
 /// 来源树选中块上下留白，避免连续多选行视觉上粘成整片。
-const SOURCE_ROW_VERTICAL_INSET: f32 = 2.0;
+const SOURCE_ROW_VERTICAL_INSET: f32 = 1.0;
 /// 来源树选中块圆角半径。
 const SOURCE_ROW_RADIUS: f32 = 5.0;
 /// 来源树节点文字大小，保持高密度目录树的可扫描性。
@@ -238,6 +238,7 @@ fn render_node(
                     this.hover(|this| this.bg(rgb(theme.current_line)))
                 })
                 .text_size(px(SOURCE_TREE_FONT_SIZE))
+                .line_height(px(SOURCE_TREE_NODE_ICON_SIZE))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme.foreground))
                 .cursor_pointer()
@@ -640,7 +641,7 @@ mod tests {
             black_box(SOURCE_ROW_HEIGHT / 2.0 - SOURCE_ROW_VERTICAL_INSET),
             "分支线应位于行内容区垂直中心"
         );
-        assert_eq!(black_box(TREE_BRANCH_Y), 12.0, "分支线应落在整行 y=14 处");
+        assert_eq!(black_box(TREE_BRANCH_Y), 11.0, "分支线应落在整行 y=12 处");
 
         // 分支线从本级竖线直接延伸到节点图标左缘，再伸入图标透明内边距 3px。
         assert_eq!(

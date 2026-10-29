@@ -670,11 +670,10 @@ impl ArgusApp {
             rows: DEFAULT_TERMINAL_ROWS,
             cols: DEFAULT_TERMINAL_COLS,
         };
-        let (command_sender, event_receiver) = spawn_ssh_worker(request);
-        self.terminal_sessions.insert(
-            session_id,
-            TerminalSessionState::connecting(session_id, link, command_sender),
-        );
+        let (command_sender, event_receiver, worker_guard) = spawn_ssh_worker(request);
+        let mut session = TerminalSessionState::connecting(session_id, link, command_sender);
+        session.worker_guard = Some(worker_guard);
+        self.terminal_sessions.insert(session_id, session);
         Self::spawn_terminal_event_pump(cx, event_receiver);
         true
     }
@@ -739,6 +738,7 @@ impl ArgusApp {
                 if let Some(session) = self.terminal_sessions.get_mut(&session_id) {
                     session.status = TerminalStatus::Disconnected;
                     session.command_sender = None;
+                    session.worker_guard = None;
                     session.message = Some(message.clone());
                 }
                 self.placeholder_notice = message;
@@ -750,6 +750,7 @@ impl ArgusApp {
                 if let Some(session) = self.terminal_sessions.get_mut(&session_id) {
                     session.status = TerminalStatus::Failed;
                     session.command_sender = None;
+                    session.worker_guard = None;
                     session.message = Some(message.clone());
                 }
                 self.placeholder_notice = message;

@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 
 use crate::loader::archive::adapter::{
     ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo,
@@ -115,7 +115,7 @@ where
         bail!("GZIP 只有一个虚拟条目：{expected_entry_path}，无法读取 {normalized_entry_path}");
     }
 
-    let mut decoder = GzDecoder::new(reader);
+    let mut decoder = MultiGzDecoder::new(reader);
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let bytes_read = decoder
@@ -158,5 +158,44 @@ fn strip_gzip_extension(file_name: &str) -> String {
         "content".to_string()
     } else {
         stripped.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn member(text: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(text).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// 多段 gzip 是同一日志的连续正文，空 member 不能提前终止。
+    #[test]
+    fn reads_all_gzip_members_including_empty_members() {
+        let bytes = [member(b"first\n"), member(b""), member(b"second\n")].concat();
+        assert_eq!(
+            read_gzip_entry_bytes(bytes.as_slice(), "app.log", "app.log.gz").unwrap(),
+            b"first\nsecond\n"
+        );
+        assert_eq!(
+            read_gzip_entry_bytes(member(b"").as_slice(), "app.log", "app.log.gz").unwrap(),
+            b""
+        );
+    }
+
+    /// 后续 member 校验失败必须上报，不能仅返回首段并伪装成功。
+    #[test]
+    fn rejects_corrupted_later_gzip_member_and_wrong_entry() {
+        let mut tail = member(b"second\n");
+        let crc = tail.len() - 8;
+        tail[crc] ^= 1;
+        let bytes = [member(b"first\n"), tail].concat();
+        assert!(read_gzip_entry_bytes(bytes.as_slice(), "app.log", "app.log.gz").is_err());
+        assert!(
+            read_gzip_entry_bytes(member(b"first").as_slice(), "wrong.log", "app.log.gz").is_err()
+        );
     }
 }

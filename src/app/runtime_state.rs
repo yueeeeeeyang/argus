@@ -242,7 +242,7 @@ pub(crate) enum RuntimeSqlSortKey {
 }
 
 /// 单个 Runtime 分析页签的持久状态。
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct RuntimeAnalysisState {
     /// 后台任务 generation，避免旧任务覆盖新结果。
     pub generation: usize,
@@ -350,6 +350,15 @@ pub(crate) struct RuntimeAnalysisState {
     pub task_state: RuntimeAnalysisTaskState,
     /// 在途分析任务的取消标记；任务进入终态后清空。
     pub cancel_token: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for RuntimeAnalysisState {
+    /// 状态具有唯一所有者，释放状态时同步取消仍在读取文件的后台任务。
+    fn drop(&mut self) {
+        if let Some(cancel_token) = self.cancel_token.take() {
+            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// Runtime SQL 文本单元格悬浮目标，用于在单元格末尾展示"更多"入口。

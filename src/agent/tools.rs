@@ -4,14 +4,11 @@
 //! 主要功能：工作区来源清单、越界拒绝的文件读取和白名单加确认闸门的 bash 执行。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
-
-use regex::Regex;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
 
 use rig_core::tool::Tool;
@@ -19,7 +16,6 @@ use rig_core::tool::Tool;
 use crate::agent::session::{
     AgentEvent, AgentOperationContext, SnapshotSource, truncate_utf8_with_ellipsis,
 };
-use crate::log_io::encoding_detector::decode_log_bytes;
 
 /// read_file 单次返回内容上限；超出部分截断并提示续读偏移。
 const MAX_READ_FILE_BYTES: usize = 64 * 1024;
@@ -37,16 +33,6 @@ const MAX_BASH_STDOUT_BYTES: usize = 96 * 1024;
 const MAX_BASH_STDERR_BYTES: usize = 32 * 1024;
 /// bash 审批卡片等待用户答复的时长；超时默认拒绝。
 pub(crate) const BASH_APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
-/// 只读命令白名单；按 argv[0] 判定，白名单外命令一律转用户确认。
-const READONLY_COMMAND_WHITELIST: &[&str] = &[
-    "ls", "cat", "grep", "head", "tail", "wc", "find", "sort", "uniq", "awk", "sed", "cut", "tr",
-    "echo", "pwd", "stat", "file", "du", "df", "cd",
-];
-/// 对话工具中允许自动执行的只读重定向：丢弃输出或合并输出，不写入工作区文件。
-static SAFE_REDIRECTION_PATTERN: OnceLock<Regex> = OnceLock::new();
-/// 单层只读 for 循环；循环变量仅用于拼接路径或 echo 文本时可直接放行。
-static READONLY_FOR_LOOP_PATTERN: OnceLock<Regex> = OnceLock::new();
-
 /// 工具统一错误；错误文本面向模型，使用英文且不包含凭据或大段日志原文。
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -133,7 +119,7 @@ pub(crate) fn redact_sensitive_text(text: &str) -> String {
     let patterns = PATTERNS.get_or_init(|| {
         [
             r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+",
-            r#"(?i)(password|passwd|pwd|token|api[_-]?key|secret)\s*[:=]\s*[^\s,;]+"#,
+            r#"(?i)["']?(password|passwd|pwd|token|api[_-]?key|secret)["']?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)"#,
         ]
         .into_iter()
         .filter_map(|pattern| regex::Regex::new(pattern).ok())
@@ -310,12 +296,12 @@ pub(crate) struct ReadFileOutput {
     line_count: usize,
     /// 是否因字节或行数上限截断。
     truncated: bool,
-    /// 截断时建议的续读起始行号。
+    /// 是否因单行过长而只返回其前缀。
+    line_truncated: bool,
+    /// 尚有后续行时建议的续读起始行号。
     next_offset_line: Option<usize>,
-    /// 文件正文；未授权发送原文时为空。
+    /// 经过脱敏和限额裁剪的文件正文。
     content: String,
-    /// 未授权发送原文时的说明。
-    content_withheld: Option<String>,
 }
 
 /// 在授权与路径边界内读取文件内容。
@@ -332,8 +318,7 @@ impl Tool for ReadFileTool {
         "Read a file inside the current workspace directory. The path must stay inside the \
         workspace; traversal, symlink escapes and absolute paths outside it are rejected. \
         Returns up to max_lines lines starting at offset_line (1-based), decoded with the \
-        detected or configured encoding. When raw log content is not authorized the tool \
-        returns metadata only."
+        detected or configured encoding. Outputs are bounded and common credentials are redacted."
             .to_string()
     }
 
@@ -356,75 +341,28 @@ impl Tool for ReadFileTool {
             .max_lines
             .unwrap_or(DEFAULT_READ_FILE_LINES)
             .clamp(1, MAX_READ_FILE_LINES);
-        let empty_output = |encoding: String| ReadFileOutput {
-            path: workspace_path.clone(),
-            absolute_path: absolute_path.display().to_string(),
-            encoding,
+        let window = crate::agent::bounded_file::read_file_window(
+            &absolute_path,
+            &self.0.scope.preferred_encoding,
             offset_line,
-            line_count: 0,
-            truncated: false,
-            next_offset_line: None,
-            content: String::new(),
-            content_withheld: None,
-        };
-        if !self.0.scope.allow_raw_log_content {
-            let mut output = empty_output(String::new());
-            output.content_withheld = Some(
-                "Raw log content is not authorized in this session; only metadata is returned. \
-                Ask the user to enable raw log content in settings."
-                    .to_string(),
-            );
-            return Ok(output);
-        }
-        let file = tokio::fs::File::open(&absolute_path)
-            .await
-            .map_err(|error| AgentToolError::new(format!("cannot open file: {error}")))?;
-        let mut reader = BufReader::new(file);
-        let mut skipped: usize = 0;
-        // 逐行读取并跳到目标行；偏移之前的内容不进入内存。
-        while skipped + 1 < offset_line {
-            let mut discard = Vec::new();
-            let read = reader
-                .read_until(b'\n', &mut discard)
-                .await
-                .map_err(|error| AgentToolError::new(format!("cannot read file: {error}")))?;
-            if read == 0 {
-                return Ok(empty_output(self.0.scope.preferred_encoding.clone()));
-            }
-            skipped += 1;
-        }
-        let mut buffer = Vec::new();
-        let mut collected_lines: usize = 0;
-        let mut truncated = false;
-        let mut next_line = offset_line;
-        while collected_lines < max_lines {
-            let mut line = Vec::new();
-            let read = reader
-                .read_until(b'\n', &mut line)
-                .await
-                .map_err(|error| AgentToolError::new(format!("cannot read file: {error}")))?;
-            if read == 0 {
-                break;
-            }
-            if buffer.len() + line.len() > MAX_READ_FILE_BYTES {
-                truncated = true;
-                break;
-            }
-            next_line += 1;
-            collected_lines += 1;
-            buffer.extend_from_slice(&line);
-        }
-        let decoded = decode_log_bytes(&buffer, &self.0.scope.preferred_encoding);
+            max_lines,
+            MAX_READ_FILE_BYTES,
+            &self.0.cancellation,
+        )
+        .await
+        .map_err(AgentToolError::new)?;
+        let content = redact_sensitive_text(&window.text);
+        let decoded_truncated = content.len() > MAX_READ_FILE_BYTES;
         Ok(ReadFileOutput {
-            content: truncate_utf8_with_ellipsis(
-                redact_sensitive_text(&decoded.text),
-                MAX_READ_FILE_BYTES,
-            ),
-            encoding: decoded.encoding_label.clone(),
-            truncated,
-            next_offset_line: truncated.then_some(next_line),
-            line_count: collected_lines,
-            ..empty_output(String::new())
+            path: workspace_path,
+            absolute_path: absolute_path.display().to_string(),
+            encoding: window.encoding,
+            offset_line,
+            content: truncate_utf8_with_ellipsis(content, MAX_READ_FILE_BYTES),
+            truncated: window.truncated || decoded_truncated,
+            line_truncated: window.line_truncated || decoded_truncated,
+            next_offset_line: window.next_offset_line,
+            line_count: window.line_count,
         })
     }
 }
@@ -463,6 +401,7 @@ pub(crate) struct BashOutput {
 }
 
 /// bash 命令的安全分类结果。
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BashClassification {
     /// 白名单只读命令且全部路径参数都在工作目录内，直接执行。
@@ -482,14 +421,11 @@ impl Tool for BashTool {
     type Output = BashOutput;
 
     fn description(&self) -> String {
-        "Run a shell command with the workspace directory as the working directory. Read-only \
-        whitelisted commands (ls, cat, grep, head, tail, wc, find, sort, uniq, awk, sed, cut, \
-        tr, echo, pwd, stat, file, du, df, cd) run automatically when every path argument stays \
-        inside the workspace. Safe read-only redirections such as 2>/dev/null and 2>&1 are \
-        allowed, and find -exec/-execdir may invoke another read-only whitelisted command. \
-        Anything else (other binaries, writes, destructive find actions or outside paths) \
-        requires explicit user approval and is denied after 60 seconds without an answer. \
-        Keep commands read-only: this is an analysis environment."
+        "Run a command with the workspace as its working directory. Simple read-only commands \
+        with verified arguments and canonical workspace paths run directly as fixed system \
+        programs. Shell syntax, scripts, unknown options and other commands require explicit \
+        approval. Approval allows the displayed command to run with the user's OS permissions; \
+        the working directory is not an OS sandbox. Output is bounded and redacted."
             .to_string()
     }
 
@@ -502,9 +438,12 @@ impl Tool for BashTool {
         if command.is_empty() {
             return Err(AgentToolError::new("command must not be empty"));
         }
-        if let BashClassification::NeedsApproval(reason) =
-            classify_bash_command(&command, &self.0.scope.workspace_root)
-            && !request_bash_approval(&self.0, &command, &reason, BASH_APPROVAL_TIMEOUT).await?
+        let prepared = crate::agent::bash_policy::prepare_readonly_command(
+            &command,
+            &self.0.scope.workspace_root,
+        );
+        if let Err(reason) = &prepared
+            && !request_bash_approval(&self.0, &command, reason, BASH_APPROVAL_TIMEOUT).await?
         {
             return Ok(BashOutput {
                 executed: false,
@@ -520,44 +459,50 @@ impl Tool for BashTool {
             .timeout_ms
             .unwrap_or(DEFAULT_BASH_TIMEOUT_MS)
             .clamp(1_000, MAX_BASH_TIMEOUT_MS);
-        let mut process = tokio::process::Command::new("bash");
-        process
-            .arg("-c")
-            .arg(&command)
-            .current_dir(&self.0.scope.workspace_root)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            // 会话取消后 future 被丢弃，此时必须连带终止子进程，避免残留后台命令。
-            .kill_on_drop(true);
-        let output =
-            match tokio::time::timeout(Duration::from_millis(timeout_ms), process.output()).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(error)) => {
-                    return Err(AgentToolError::new(format!("cannot spawn bash: {error}")));
-                }
-                Err(_) => {
-                    return Err(AgentToolError::new(format!(
-                        "command timed out after {timeout_ms} ms and was terminated"
-                    )));
-                }
-            };
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let stdout_truncated = stdout.len() > MAX_BASH_STDOUT_BYTES;
-        let stderr_truncated = stderr.len() > MAX_BASH_STDERR_BYTES;
+        let process = match prepared {
+            Ok(prepared) => {
+                let mut process = tokio::process::Command::new(prepared.program);
+                process
+                    .args(prepared.arguments)
+                    .current_dir(prepared.working_directory)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("LC_ALL", "C");
+                process
+            }
+            Err(_) => {
+                #[cfg(unix)]
+                let shell = "/bin/bash";
+                #[cfg(not(unix))]
+                let shell = "bash";
+                let mut process = tokio::process::Command::new(shell);
+                process
+                    .args(["--noprofile", "--norc", "-c", &command])
+                    .current_dir(&self.0.scope.workspace_root)
+                    .env_remove("BASH_ENV")
+                    .env_remove("ENV");
+                process
+            }
+        };
+        let output = crate::agent::command_process::execute_command(
+            process,
+            Duration::from_millis(timeout_ms),
+            &self.0.cancellation,
+            MAX_BASH_STDOUT_BYTES,
+            MAX_BASH_STDERR_BYTES,
+        )
+        .await
+        .map_err(AgentToolError::new)?;
+        let stdout = redact_sensitive_text(&String::from_utf8_lossy(&output.stdout.bytes));
+        let stderr = redact_sensitive_text(&String::from_utf8_lossy(&output.stderr.bytes));
+        let stdout_truncated = output.stdout.truncated || stdout.len() > MAX_BASH_STDOUT_BYTES;
+        let stderr_truncated = output.stderr.truncated || stderr.len() > MAX_BASH_STDERR_BYTES;
         Ok(BashOutput {
             executed: true,
             status: String::new(),
-            exit_code: Some(output.status.code().unwrap_or(-1)),
-            stdout: truncate_utf8_with_ellipsis(
-                redact_sensitive_text(&stdout),
-                MAX_BASH_STDOUT_BYTES,
-            ),
-            stderr: truncate_utf8_with_ellipsis(
-                redact_sensitive_text(&stderr),
-                MAX_BASH_STDERR_BYTES,
-            ),
+            exit_code: output.exit_code,
+            stdout: truncate_utf8_with_ellipsis(stdout, MAX_BASH_STDOUT_BYTES),
+            stderr: truncate_utf8_with_ellipsis(stderr, MAX_BASH_STDERR_BYTES),
             stdout_truncated,
             stderr_truncated,
         })
@@ -640,419 +585,13 @@ pub(crate) fn reject_pending_bash_approvals(context: &AgentOperationContext, rea
 
 /// 判定一条命令能否免确认执行。
 ///
-/// 逐段（管道、`;`、`&&`、`||`、换行）解析：每段的首词必须是白名单只读命令、
-/// 不得包含重定向或命令替换等元操作、全部路径形态参数都必须落在工作目录内；
-/// 任一条件不满足即转用户确认。
+/// 与执行器共用同一能力检查；只有可直接执行的固定系统程序和已验证参数免审批。
+#[cfg(test)]
 pub(crate) fn classify_bash_command(command: &str, workspace_root: &Path) -> BashClassification {
-    if let Some(classification) = classify_readonly_for_loop(command, workspace_root) {
-        return classification;
+    match crate::agent::bash_policy::prepare_readonly_command(command, workspace_root) {
+        Ok(_) => BashClassification::AutoRun,
+        Err(reason) => BashClassification::NeedsApproval(reason),
     }
-    // 安全重定向不影响沙箱边界；先从只用于分类的副本中移除，执行仍使用原始命令。
-    let classification_command = strip_safe_redirections(command);
-    let mut current_dir = workspace_root.to_path_buf();
-    for segment in split_command_segments(&classification_command) {
-        if let Some(reason) = segment_meta_operations(&segment) {
-            return BashClassification::NeedsApproval(reason);
-        }
-        let tokens = tokenize_segment(&segment);
-        let mut tokens = tokens.iter().peekable();
-        // 跳过段首环境变量赋值前缀（FOO=bar ls）。
-        while let Some(token) = tokens.peek() {
-            if is_env_assignment(token) {
-                tokens.next();
-            } else {
-                break;
-            }
-        }
-        let Some(command_word) = tokens.next().map(String::as_str) else {
-            continue;
-        };
-        let command_name = command_basename(command_word);
-        if !READONLY_COMMAND_WHITELIST.contains(&command_name.as_str()) {
-            return BashClassification::NeedsApproval(format!(
-                "command \"{command_name}\" is outside the read-only whitelist"
-            ));
-        }
-        let rest: Vec<&str> = tokens.map(String::as_str).collect();
-        if let Some(reason) = destructive_whitelisted_usage(&command_name, &rest) {
-            return BashClassification::NeedsApproval(reason);
-        }
-        if command_name == "cd" {
-            match resolve_cd_target(&rest, workspace_root, &current_dir) {
-                Ok(next_dir) => current_dir = next_dir,
-                Err(reason) => return BashClassification::NeedsApproval(reason),
-            }
-            continue;
-        }
-        // echo 只输出文本，不访问路径；避免把消息中的斜杠误判为越界路径。
-        if command_name == "echo" {
-            continue;
-        }
-        if let Some(reason) = out_of_workspace_argument(&rest, workspace_root, &current_dir) {
-            return BashClassification::NeedsApproval(reason);
-        }
-    }
-    BashClassification::AutoRun
-}
-
-/// 识别并校验单层只读 for 循环；循环体内只允许白名单只读命令。
-fn classify_readonly_for_loop(command: &str, workspace_root: &Path) -> Option<BashClassification> {
-    let pattern = READONLY_FOR_LOOP_PATTERN.get_or_init(|| {
-        Regex::new(
-            r"(?s)^\s*(?P<prefix>(?:.*?&&\s*)?)for\s+(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s+in\s+(?P<items>[^;]+);\s*do\s+(?P<body>.*?);\s*done\s*$",
-        )
-        .expect("只读 for 循环正则必须有效")
-    });
-    let captures = pattern.captures(command)?;
-    let prefix = captures.name("prefix").map_or("", |value| value.as_str());
-    if !prefix.trim().is_empty() {
-        let prefix = prefix.trim().trim_end_matches("&&").trim_end();
-        if let BashClassification::NeedsApproval(reason) =
-            classify_bash_command(prefix, workspace_root)
-        {
-            return Some(BashClassification::NeedsApproval(format!(
-                "for loop prefix: {reason}"
-            )));
-        }
-    }
-
-    let var = captures.name("var")?.as_str();
-    let items = captures.name("items")?.as_str();
-    let item_words = items.split_whitespace().collect::<Vec<_>>();
-    if item_words.is_empty() {
-        return Some(BashClassification::NeedsApproval(
-            "for loop has no items".to_string(),
-        ));
-    }
-    if item_words
-        .iter()
-        .any(|item| item.contains('$') || item.contains('`') || item.starts_with('~'))
-    {
-        return Some(BashClassification::NeedsApproval(
-            "for loop items contain expansion or home directory".to_string(),
-        ));
-    }
-    if let Some(reason) = out_of_workspace_argument(&item_words, workspace_root, workspace_root) {
-        return Some(BashClassification::NeedsApproval(reason));
-    }
-
-    let body = captures.name("body")?.as_str();
-    let placeholder = "__argus_loop_value__";
-    let expanded_body = body
-        .replace(&format!("${{{var}}}"), placeholder)
-        .replace(&format!("${var}"), placeholder);
-    if expanded_body.contains('$') || expanded_body.contains('`') {
-        return Some(BashClassification::NeedsApproval(
-            "for loop body contains unsupported expansion".to_string(),
-        ));
-    }
-    match classify_bash_command(&expanded_body, workspace_root) {
-        BashClassification::AutoRun => Some(BashClassification::AutoRun),
-        BashClassification::NeedsApproval(_) => Some(BashClassification::NeedsApproval(
-            "for loop body is not read-only".to_string(),
-        )),
-    }
-}
-
-/// 移除允许自动执行的安全重定向，仅用于分类副本。
-fn strip_safe_redirections(command: &str) -> String {
-    let pattern = SAFE_REDIRECTION_PATTERN.get_or_init(|| {
-        Regex::new(
-            r"(?x)(?:\b[012]\s*|&)>>?\s*/dev/null|\b[012]?\s*>\s*&\s*[12]|[012]?\s*<\s*/dev/null",
-        )
-        .expect("安全重定向正则必须有效")
-    });
-    pattern.replace_all(command, " ").into_owned()
-}
-
-/// 解析 cd 目标；只允许一个位于工作区内的路径，禁止无参数和 OLDPWD 简写。
-fn resolve_cd_target(
-    args: &[&str],
-    workspace_root: &Path,
-    current_dir: &Path,
-) -> Result<PathBuf, String> {
-    if args.is_empty() {
-        return Err("cd without a target leaves the workspace directory".to_string());
-    }
-    if args.len() != 1 {
-        return Err("cd with multiple targets is not supported".to_string());
-    }
-    let target = args[0];
-    if matches!(target, "-" | "--") {
-        return Err("cd -/-- would leave the workspace directory".to_string());
-    }
-    resolve_bash_workspace_path(target, workspace_root, current_dir)
-        .ok_or_else(|| format!("argument \"{target}\" leaves the workspace directory"))
-}
-
-/// 将命令参数解析为工作区内的绝对路径；相对路径以当前目录为基准。
-fn resolve_bash_workspace_path(
-    argument: &str,
-    workspace_root: &Path,
-    current_dir: &Path,
-) -> Option<PathBuf> {
-    let argument = unquote_shell_token(argument);
-    if argument.is_empty() || argument.starts_with('~') {
-        return None;
-    }
-    let candidate = if Path::new(argument).is_absolute() {
-        PathBuf::from(argument)
-    } else {
-        current_dir.join(argument)
-    };
-    let normalized = normalize_lexical_path(&candidate);
-    let normalized_root = normalize_lexical_path(workspace_root);
-    normalized
-        .starts_with(normalized_root)
-        .then_some(normalized)
-}
-
-/// 去除参数首尾成对的引号；路径判定必须按 shell 去引号后的语义进行。
-fn unquote_shell_token(argument: &str) -> &str {
-    let bytes = argument.as_bytes();
-    if bytes.len() >= 2
-        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
-    {
-        &argument[1..argument.len() - 1]
-    } else {
-        argument
-    }
-}
-
-/// 词法规范化路径中的 `.` 和 `..`，不做文件系统访问。
-fn normalize_lexical_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                normalized.push(component.as_os_str());
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::Normal(value) => normalized.push(value),
-        }
-    }
-    normalized
-}
-
-/// 返回命令词的文件名部分，用于白名单判定。
-fn command_basename(command_word: &str) -> String {
-    let command_word = unquote_shell_token(command_word);
-    Path::new(command_word)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| command_word.to_string())
-}
-
-/// 检测段内的重定向与命令替换；引号内的字符不参与判定。
-fn segment_meta_operations(segment: &str) -> Option<String> {
-    let mut quote: Option<char> = None;
-    for character in segment.chars() {
-        match quote {
-            Some(open) if character == open => quote = None,
-            Some(_) => {}
-            None => match character {
-                '\'' | '"' => quote = Some(character),
-                '>' => return Some("output redirection writes files".to_string()),
-                '$' | '`' => {
-                    return Some("command substitution spawns arbitrary commands".to_string());
-                }
-                _ => {}
-            },
-        }
-    }
-    None
-}
-
-/// 把命令拆分为按 `|`、`;`、`&` 和换行分隔的执行段；引号内的分隔符不生效。
-fn split_command_segments(command: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut characters = command.chars();
-    while let Some(character) = characters.next() {
-        match quote {
-            Some(open) if character == open => {
-                quote = None;
-                current.push(character);
-            }
-            Some(_) => current.push(character),
-            None => match character {
-                '\\' => {
-                    // 保留 shell 转义序列；`find -exec ... \;` 的分号不能被当作命令分隔符。
-                    current.push(character);
-                    if let Some(escaped) = characters.next() {
-                        current.push(escaped);
-                    }
-                }
-                '\'' | '"' => {
-                    quote = Some(character);
-                    current.push(character);
-                }
-                '|' | ';' | '&' | '\n' | '\r' => {
-                    segments.push(std::mem::take(&mut current));
-                }
-                _ => current.push(character),
-            },
-        }
-    }
-    segments.push(current);
-    segments
-        .into_iter()
-        .map(|segment| segment.trim().to_string())
-        .filter(|segment| !segment.is_empty())
-        .collect()
-}
-
-/// 按空白切分单个执行段；引号内空白不切分，引号本身保留给路径检查环节。
-fn tokenize_segment(segment: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    for character in segment.chars() {
-        match quote {
-            Some(open) if character == open => {
-                quote = None;
-                current.push(character);
-            }
-            Some(_) => current.push(character),
-            None => match character {
-                '\'' | '"' => {
-                    quote = Some(character);
-                    current.push(character);
-                }
-                character if character.is_whitespace() => {
-                    if !current.is_empty() {
-                        tokens.push(std::mem::take(&mut current));
-                    }
-                }
-                _ => current.push(character),
-            },
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
-}
-
-/// 判定 token 是否为段首环境变量赋值。
-fn is_env_assignment(token: &str) -> bool {
-    let Some((name, value)) = token.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-        && !value.is_empty()
-}
-
-/// 白名单命令仍会改动文件或派生执行的参数形态。
-fn destructive_whitelisted_usage(command_name: &str, args: &[&str]) -> Option<String> {
-    match command_name {
-        "cd" => {
-            if args.is_empty() || args.iter().any(|arg| matches!(*arg, "-" | "--")) {
-                Some("cd target would leave the workspace directory".to_string())
-            } else {
-                None
-            }
-        }
-        "sed" => args
-            .iter()
-            .find(|arg| **arg == "-i" || arg.starts_with("--in-place"))
-            .map(|_| "sed in-place editing modifies files".to_string()),
-        "find" => find_destructive_action(args),
-        "sort" => args
-            .iter()
-            .find(|arg| **arg == "-o" || arg.starts_with("--output"))
-            .map(|_| "sort --output writes files".to_string()),
-        "awk" => args
-            .iter()
-            .any(|arg| arg.contains("system("))
-            .then(|| "awk program spawns subprocesses".to_string()),
-        _ => None,
-    }
-}
-
-/// 检查 find 的写文件动作与派生子命令；-exec/-execdir 仅允许嵌套白名单只读命令。
-fn find_destructive_action(args: &[&str]) -> Option<String> {
-    let mut index = 0;
-    while index < args.len() {
-        match args[index] {
-            "-delete" => return Some("find -delete modifies files".to_string()),
-            "-ok" | "-okdir" => {
-                return Some(format!(
-                    "find action \"{}\" requires interactive confirmation",
-                    args[index]
-                ));
-            }
-            argument if argument.starts_with("-fprint") || argument == "-fls" => {
-                return Some(format!("find action \"{argument}\" writes files"));
-            }
-            action @ ("-exec" | "-execdir") => {
-                let Some(inner_command) = args.get(index + 1) else {
-                    return Some(format!("find {action} is missing a command"));
-                };
-                let inner_name = command_basename(inner_command);
-                if !READONLY_COMMAND_WHITELIST.contains(&inner_name.as_str()) {
-                    return Some(format!(
-                        "find {action} spawns non-whitelisted command \"{inner_name}\""
-                    ));
-                }
-                let Some(terminator) = args[index + 2..]
-                    .iter()
-                    .position(|argument| matches!(*argument, ";" | "\\;" | "+"))
-                else {
-                    return Some(format!("find {action} is missing a terminator"));
-                };
-                let inner_args = &args[index + 2..index + 2 + terminator];
-                if let Some(reason) = destructive_whitelisted_usage(&inner_name, inner_args) {
-                    return Some(format!("find {action} inner command: {reason}"));
-                }
-                index += terminator + 2;
-                continue;
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    None
-}
-
-/// 检查参数中路径形态的 token 是否全部落在工作目录内。
-fn out_of_workspace_argument(
-    args: &[&str],
-    workspace_root: &Path,
-    current_dir: &Path,
-) -> Option<String> {
-    for arg in args {
-        let unquoted = unquote_shell_token(arg);
-        let looks_like_path = unquoted.starts_with('/')
-            || unquoted.starts_with("./")
-            || unquoted.starts_with("../")
-            || unquoted.starts_with('~')
-            || unquoted == "."
-            || unquoted == ".."
-            || unquoted.contains('/');
-        if !looks_like_path {
-            continue;
-        }
-        if unquoted.starts_with('~') {
-            return Some(format!(
-                "argument \"{unquoted}\" expands to the user home directory"
-            ));
-        }
-        if resolve_bash_workspace_path(unquoted, workspace_root, current_dir).is_none() {
-            return Some(format!(
-                "argument \"{unquoted}\" leaves the workspace directory"
-            ));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1067,10 +606,9 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
-    /// 构造带临时工作目录和显式授权开关的测试上下文及其事件接收端。
+    /// 构造带临时工作目录的测试上下文及其事件接收端。
     fn test_context(
         workspace: &Path,
-        allow_raw_log_content: bool,
     ) -> (
         Arc<AgentOperationContext>,
         async_channel::Receiver<AgentEvent>,
@@ -1084,7 +622,6 @@ mod tests {
                     preferred_encoding: "UTF-8".to_string(),
                     sources: Arc::new(Vec::new()),
                     profiles: Arc::new(StdHashMap::<String, LogProfileSnapshot>::new()),
-                    allow_raw_log_content,
                 }),
                 budget: Arc::new(AgentBudget::balanced()),
                 cancellation: tokio_util::sync::CancellationToken::new(),
@@ -1098,26 +635,22 @@ mod tests {
         )
     }
 
-    /// 白名单只读命令直接放行；管道每段都要白名单。
+    /// 能验证参数和真实文件路径的简单只读命令可直接执行。
     #[test]
+    #[cfg(unix)]
     fn whitelisted_readonly_commands_auto_run() {
         let workspace = temporary_test_dir("bash-classify-allow");
         let root = workspace.path().to_path_buf();
+        std::fs::create_dir_all(root.join("logs")).expect("应创建目录");
+        std::fs::write(root.join("logs/app.log"), "fixture\n").expect("应写入日志");
         for command in [
             "ls -la",
             "grep -n ERROR logs/app.log",
-            "cat logs/app.log | grep -i oom | sort | uniq -c",
+            "cat logs/app.log",
             "head -n 100 logs/app.log",
-            "awk '{print $1}' logs/app.log",
-            "FOO=1 BAR=2 wc -l logs/app.log",
+            "wc -l logs/app.log",
             "df -h",
             "du -sh logs",
-            "grep -n ERROR logs/app.log 2>/dev/null | head -20",
-            "cd \"logs dir/2026-10-27\" && grep -rli -E \"pool exhausted|connection\" sqllog/27 2>/dev/null | head -20",
-            "cd \"logs dir/2026-10-27\" && find . -name \"resin.properties\" -exec grep -n -i -E \"max-active|maxActive\" {} \\; | head -40",
-            "find . -name \"*.log\" -exec head -20 {} \\;",
-            "cd logs && cd .. && ls",
-            "cd \"logs dir/2026-10-27\" && for d in runtime sqllog monitorThread event system monitorlog; do echo \"=== $d ===\"; ls -1 \"$d\" | head -8; done",
         ] {
             assert_eq!(
                 classify_bash_command(command, &root),
@@ -1174,7 +707,7 @@ mod tests {
         let root = workspace.path().to_path_buf();
         std::fs::create_dir_all(root.join("logs")).expect("应创建目录");
         std::fs::write(root.join("logs/app.log"), "one\ntwo\nthree\n").expect("应写入日志");
-        let (context, _event_receiver) = test_context(&root, true);
+        let (context, _event_receiver) = test_context(&root);
 
         let tool = ReadFileTool(context);
         for escape in ["../outside.log", "/etc/passwd", "logs/../../escape"] {
@@ -1204,43 +737,41 @@ mod tests {
         assert_eq!(output.content, "two\nthree\n");
     }
 
-    /// read_file 在未授权发送原文时只返回元数据。
+    /// read_file 默认返回经过脱敏的必要原文。
     #[tokio::test]
-    async fn read_file_withholds_content_without_authorization() {
-        let workspace = temporary_test_dir("read-file-withheld");
-        let root = workspace.path().to_path_buf();
-        std::fs::create_dir_all(root.join("logs")).expect("应创建目录");
-        std::fs::write(root.join("logs/app.log"), "secret\n").expect("应写入日志");
-        let (context, _event_receiver) = test_context(&root, false);
+    async fn read_file_returns_content_by_default() {
+        let workspace = temporary_test_dir("read-file-default");
+        std::fs::write(workspace.path().join("app.log"), "fixture\n").expect("应写入日志");
+        let (context, _events) = test_context(workspace.path());
         let output = ReadFileTool(context)
             .call(ReadFileArgs {
-                path: "logs/app.log".to_string(),
+                path: "app.log".to_string(),
                 offset_line: None,
                 max_lines: None,
             })
             .await
-            .expect("元数据返回不应失败");
-        assert!(output.content.is_empty());
-        assert!(output.content_withheld.is_some());
+            .expect("默认应允许读取原文");
+        assert_eq!(output.content, "fixture\n");
     }
 
     /// bash 工具实际执行白名单命令并回传退出码与输出。
     #[tokio::test]
+    #[cfg(unix)]
     async fn bash_tool_runs_whitelisted_command_in_workspace() {
         let workspace = temporary_test_dir("bash-tool-run");
         let root = workspace.path().to_path_buf();
         std::fs::write(root.join("app.log"), "alpha\nbeta\n").expect("应写入日志");
-        let (context, _event_receiver) = test_context(&root, true);
+        let (context, _event_receiver) = test_context(&root);
         let output = BashTool(context)
             .call(BashArgs {
-                command: "cat app.log | wc -l".to_string(),
+                command: "cat app.log".to_string(),
                 timeout_ms: None,
             })
             .await
             .expect("白名单命令应执行");
         assert!(output.executed);
         assert_eq!(output.exit_code, Some(0));
-        assert_eq!(output.stdout.trim(), "2");
+        assert_eq!(output.stdout, "alpha\nbeta\n");
     }
 
     /// 审批超时按拒绝收敛，且先后发布审批请求与结论事件。
@@ -1248,7 +779,7 @@ mod tests {
     async fn bash_approval_times_out_to_denial() {
         let workspace = temporary_test_dir("bash-approval-timeout");
         let root = workspace.path().to_path_buf();
-        let (context, event_receiver) = test_context(&root, true);
+        let (context, event_receiver) = test_context(&root);
         let approved = request_bash_approval(
             &context,
             "rm -rf .",
@@ -1288,7 +819,7 @@ mod tests {
     async fn pending_approvals_rejected_on_session_exit() {
         let workspace = temporary_test_dir("bash-approval-exit");
         let root = workspace.path().to_path_buf();
-        let (context, _event_receiver) = test_context(&root, true);
+        let (context, _event_receiver) = test_context(&root);
         let (sender, receiver) = tokio::sync::oneshot::channel();
         context
             .bash_pending_approvals
@@ -1309,5 +840,8 @@ mod tests {
         assert!(value.contains("[REDACTED]"));
         assert!(!value.contains("hunter2"));
         assert!(!value.contains("abc.def"));
+        let json = redact_sensitive_text(r#"{"password":"fixture-value","token":"other-fixture"}"#);
+        assert!(!json.contains("fixture-value"));
+        assert!(!json.contains("other-fixture"));
     }
 }

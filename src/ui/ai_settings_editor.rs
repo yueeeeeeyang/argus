@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-15
 //! 修改日期：2026-10-28
 //! 作者：Argus 开发团队
-//! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、原文授权、日志类型匹配规则、分析说明和助手提示词。
+//! 主要功能：按独立模式管理 OpenAI 兼容端点、API Key、日志类型匹配规则、分析说明和助手提示词。
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, IntoElement,
@@ -12,9 +12,8 @@ use secrecy::SecretString;
 
 use crate::app::{ArgusApp, TextInputState};
 use crate::config::{
-    AI_RAW_LOG_CONSENT_VERSION, AiConfig, AiModelProfile, DEFAULT_AI_MAX_RETRY_ATTEMPTS,
-    DEFAULT_AI_SYSTEM_PROMPT, LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget,
-    LogTypeProfile,
+    AiConfig, AiModelProfile, DEFAULT_AI_MAX_RETRY_ATTEMPTS, DEFAULT_AI_SYSTEM_PROMPT,
+    LogNameMatcher, LogNameMatcherMode, LogNameMatcherTarget, LogTypeProfile,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
 use crate::theme::AppTheme;
@@ -184,10 +183,6 @@ struct AiSettingsDraft {
     models: Vec<ModelDraft>,
     /// 当前单项模型编辑索引。
     selected_model: Option<usize>,
-    /// 是否授权必要原文。
-    allow_raw_log_content: bool,
-    /// 原文授权版本。
-    consent_version: String,
     /// 模型请求超时秒数。
     request_timeout_seconds: u64,
     /// 单次模型请求失败后的最大自动重试次数。
@@ -221,8 +216,6 @@ impl AiSettingsDraft {
         let mut draft = Self {
             selected_model: None,
             models,
-            allow_raw_log_content: config.allow_raw_log_content,
-            consent_version: config.consent_version,
             request_timeout_seconds: config.request_timeout_seconds,
             max_retry_attempts: TextInputState::from_value(config.max_retry_attempts.to_string()),
             system_prompt: TextInputState::from_value(config.system_prompt),
@@ -257,8 +250,6 @@ impl AiSettingsDraft {
             base_url: String::new(),
             model: String::new(),
             model_profiles: self.models.iter().map(ModelDraft::to_profile).collect(),
-            allow_raw_log_content: self.allow_raw_log_content,
-            consent_version: self.consent_version.clone(),
             request_timeout_seconds: self.request_timeout_seconds,
             // 输入非法或为空时回落到配置默认值，随后由 AiConfig::normalize 统一收敛区间。
             max_retry_attempts: self
@@ -641,8 +632,6 @@ impl AiSettingsEditor {
             return;
         }
         let mut config = self.draft.to_config();
-        config.allow_raw_log_content = false;
-        config.consent_version.clear();
         config.log_profiles.clear();
         config.normalize();
         let Some(model_index) = self.draft.selected_model else {
@@ -929,7 +918,7 @@ impl Render for AiSettingsEditor {
     }
 }
 
-/// 渲染模型服务、能力探测和日志原文授权配置。
+/// 渲染模型服务与能力探测配置。
 fn render_model_configuration(
     editor: &AiSettingsEditor,
     entity: Entity<AiSettingsEditor>,
@@ -943,7 +932,6 @@ fn render_model_configuration(
         return div().into_any_element();
     };
     let toggle_model = entity.clone();
-    let toggle_raw = entity.clone();
     let test_connection = entity.clone();
     let scroll_handle = editor.model_scroll.clone();
     let content = div()
@@ -1104,55 +1092,20 @@ fn render_model_configuration(
                     "模型请求失败后按指数退避自动重试；达到上限会结束本轮会话并如实报错。",
                     theme,
                 ))
-                .child(
-                    editor_card(theme).child(labeled_input(
-                        "最大重试次数",
-                        "填写 0～20 的整数：0 表示不重试，默认 10 次。首次尝试不计入该次数。",
-                        render_local_input(
-                            entity.clone(),
-                            AiDraftField::MaxRetryAttempts,
-                            &draft.max_retry_attempts,
-                            false,
-                            "例如 10",
-                            &editor.focus_handles,
-                            theme,
-                        ),
+                .child(editor_card(theme).child(labeled_input(
+                    "最大重试次数",
+                    "填写 0～20 的整数：0 表示不重试，默认 10 次。首次尝试不计入该次数。",
+                    render_local_input(
+                        entity.clone(),
+                        AiDraftField::MaxRetryAttempts,
+                        &draft.max_retry_attempts,
+                        false,
+                        "例如 10",
+                        &editor.focus_handles,
                         theme,
-                    )),
-                )
-                .child(editor_section_heading(
-                    "数据发送",
-                    "智能助手默认只使用来源元数据和本地聚合结果。",
+                    ),
                     theme,
-                ))
-                .child(
-                    editor_card(theme)
-                        .child(toggle_row(
-                            "允许发送必要日志原文",
-                            draft.allow_raw_log_content,
-                            theme,
-                            move |_, _, app_cx| {
-                                toggle_raw.update(app_cx, |editor, cx| {
-                                    editor.draft.allow_raw_log_content =
-                                        !editor.draft.allow_raw_log_content;
-                                    editor.draft.consent_version =
-                                        if editor.draft.allow_raw_log_content {
-                                            AI_RAW_LOG_CONSENT_VERSION.to_string()
-                                        } else {
-                                            String::new()
-                                        };
-                                    editor.error_message = None;
-                                    cx.notify();
-                                });
-                            },
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(theme.warning))
-                                .child("启用后，仅允许结构化工具把经过裁剪、脱敏且受预算限制的必要片段发送到当前模型服务。"),
-                        ),
-                ),
+                ))),
         );
     div()
         .flex_1()
@@ -1555,7 +1508,9 @@ fn render_system_prompt_configuration(
                                 .flex_1()
                                 .text_size(px(10.0))
                                 .text_color(rgb(theme.foreground_muted))
-                                .child("最多 32 KiB。固定分析流程、工具沙箱、最高思考模式和证据校验不可被此提示词关闭。"),
+                                .child(
+                                    "最多 32 KiB。工具审批、输出脱敏和证据校验不可被此提示词关闭。",
+                                ),
                         )
                         .child(editor_button(
                             "ai-system-prompt-reset",
@@ -1564,8 +1519,9 @@ fn render_system_prompt_configuration(
                             theme,
                             move |_, _, app_cx| {
                                 reset_entity.update(app_cx, |editor, cx| {
-                                    editor.draft.system_prompt =
-                                        TextInputState::from_value(DEFAULT_AI_SYSTEM_PROMPT.to_string());
+                                    editor.draft.system_prompt = TextInputState::from_value(
+                                        DEFAULT_AI_SYSTEM_PROMPT.to_string(),
+                                    );
                                     editor.error_message = None;
                                     cx.notify();
                                 });

@@ -120,11 +120,6 @@ impl ArgusApp {
         config.validate_log_profiles()?;
         config.validate_system_prompt()?;
         // 设置允许暂时停用全部模型；入口会把它解释为“当前无可选择模型”，而不是依赖已删除的全局开关。
-        if config.allow_raw_log_content
-            && config.consent_version != crate::config::AI_RAW_LOG_CONSENT_VERSION
-        {
-            return Err("日志原文授权说明已更新，请在设置中重新确认".to_string());
-        }
         if let Some((base_url, api_key)) = credential
             && !api_key.trim().is_empty()
         {

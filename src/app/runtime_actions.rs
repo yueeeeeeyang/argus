@@ -96,7 +96,10 @@ impl ArgusApp {
         }
 
         let analysis_id = self.next_runtime_analysis_id;
-        self.next_runtime_analysis_id = self.next_runtime_analysis_id.saturating_add(1);
+        self.next_runtime_analysis_id = self
+            .next_runtime_analysis_id
+            .checked_add(1)
+            .expect("Runtime 分析任务序号已耗尽");
         let title = if targets.len() > 1 {
             format!("Runtime分析({})", targets.len())
         } else {
@@ -279,7 +282,9 @@ impl ArgusApp {
         let Some(state) = self.runtime_analyses.get_mut(&analysis_id) else {
             return;
         };
-        if state.generation != generation {
+        if state.generation != generation
+            || !matches!(state.task_state, RuntimeAnalysisTaskState::Loading { .. })
+        {
             return;
         }
 

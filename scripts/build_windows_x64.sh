@@ -10,15 +10,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WINDOWS_TARGET="x86_64-pc-windows-msvc"
 WINDOWS_ICON="$ROOT_DIR/resources/windows/app.ico"
-TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
-
-# Cargo 将相对形式的 CARGO_TARGET_DIR 解释为相对于当前工作目录。脚本会先切换到项目根目录，
-# 因此这里提前转为绝对路径，确保后续产物校验与 Cargo 的实际输出位置保持一致。
-if [[ "$TARGET_DIR" != /* ]]; then
-  TARGET_DIR="$ROOT_DIR/$TARGET_DIR"
-fi
-
-WINDOWS_EXECUTABLE="$TARGET_DIR/$WINDOWS_TARGET/release/argus.exe"
+# 由本次 Cargo 成功事件确定实际产物位置，同时支持环境变量与 .cargo/config.toml。
+WINDOWS_EXECUTABLE=""
 
 # 检查指定命令是否可用。
 # 参数说明：第一个参数为命令名，第二个参数为缺失时显示的安装提示。
@@ -117,7 +110,7 @@ ensure_windows_icon() {
 # 返回值：构建且产物校验成功时返回 0；Cargo 失败或产物缺失时退出脚本。
 build_windows_executable() {
   cd "$ROOT_DIR"
-  cargo xwin build --release --target "$WINDOWS_TARGET" --bin argus "$@"
+  WINDOWS_EXECUTABLE="$(cargo xwin build --release --target "$WINDOWS_TARGET" --bin argus --message-format=json-render-diagnostics "$@" | python3 "$ROOT_DIR/scripts/read_build_artifact.py")"
 
   if [[ ! -f "$WINDOWS_EXECUTABLE" ]]; then
     echo "交叉编译命令已结束，但未找到目标文件：$WINDOWS_EXECUTABLE" >&2
@@ -146,6 +139,7 @@ validate_windows_executable() {
 require_command "uname" "请安装可提供 uname 的基础系统工具。"
 require_command "cargo" "请先安装 Rust 工具链：https://rustup.rs/"
 require_command "rustup" "请使用 rustup 管理 Rust 工具链：https://rustup.rs/"
+require_command "python3" "请安装 Python 3，以读取 Cargo 的构建产物事件。"
 validate_host_platform
 validate_rust_target
 validate_cargo_xwin

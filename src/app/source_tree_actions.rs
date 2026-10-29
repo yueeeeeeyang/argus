@@ -239,28 +239,44 @@ impl ArgusApp {
         let loader_config = self.config.loader.clone();
         let archive_passwords = self.archive_passwords.clone();
         let label = node.label.clone();
+        let load_generation = self.source_load_generation;
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        if let Some(previous) = self
+            .archive_retry_cancellations
+            .insert(source_id, cancellation.clone())
+        {
+            previous.cancel();
+        }
+        let workspace_lease = self.source_workspace_lease.clone();
         cx.spawn(async move |view, cx| {
+            let worker_cancellation = cancellation.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    // 后台读取期间仍保留工作目录租约，避免清扫与关闭过程中的句柄释放竞争。
+                    let _workspace_lease = workspace_lease;
                     let root_info = crate::loader::workspace::append_materialize_archive(
                         &workspace_root,
                         &label,
                         &archive_path,
                         &loader_config,
                         &archive_passwords,
-                        &tokio_util::sync::CancellationToken::new(),
+                        &worker_cancellation,
                     )?;
                     SourceTreeScanner::scan_paths(
                         vec![root_info.path],
                         loader_config,
-                        tokio_util::sync::CancellationToken::new(),
+                        worker_cancellation,
                         None,
                     )
                 })
                 .await;
 
             view.update(cx, |app, cx| {
+                if app.source_load_generation != load_generation || cancellation.is_cancelled() {
+                    return;
+                }
+                app.archive_retry_cancellations.remove(&source_id);
                 app.apply_archive_node_retry_result(source_id, result);
                 cx.notify();
             })
@@ -357,15 +373,16 @@ impl ArgusApp {
 
     /// 清理旧日志工作区状态，确保新来源不会继承旧日志的标签、筛选和内容选择。
     pub(super) fn reset_log_workspace_after_source_replace(&mut self) {
+        for (_, cancellation) in self.archive_retry_cancellations.drain() {
+            cancellation.cancel();
+        }
         self.log_read_states.clear();
         self.log_reader_generations.clear();
         self.log_tab_view_states.clear();
         // 智能助手依赖当前日志工作目录；来源整体替换后丢弃旧会话，避免继续访问已删除的物化目录。
         self.assistant_tabs.clear();
         self.jstack_analyses.clear();
-        self.next_jstack_analysis_id = 1;
         self.runtime_analyses.clear();
-        self.next_runtime_analysis_id = 1;
         self.reset_log_text_selection();
         self.log_scrollbar_drag = None;
         self.reset_log_search_runtime_state();
@@ -530,6 +547,7 @@ impl ArgusApp {
                         self.placeholder_notice, workspace.materialized_files
                     );
                     self.source_workspace_root = Some(workspace.root);
+                    self.source_workspace_lease = Some(workspace.lease);
                 } else {
                     // 未加载到有效来源时新建工作目录没有消费者，后台回滚删除。
                     crate::loader::workspace::delete_workspace_best_effort(workspace.root);

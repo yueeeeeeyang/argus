@@ -13,6 +13,8 @@ use chrono::DateTime;
 use percent_encoding::percent_decode_str;
 use svn::{NodeKind, RaSvnClient, RaSvnSession, SshAuth, SshConfig, SvnUrl};
 
+use super::download::DownloadFile;
+use super::worker::WorkerCancellation;
 use crate::config::paths::argus_svn_known_hosts_file;
 use crate::remote::connection::SvnLinkConfig;
 use crate::remote::remote_file::{
@@ -23,6 +25,7 @@ use crate::remote::remote_file::{
     send_operation_failed,
 };
 use crate::remote::svn_http::{HttpSvnNodeStat, HttpSvnSession};
+use tokio::io::AsyncWriteExt as _;
 
 /// 当前 SVN 会话的版本选择；HEAD 在每次刷新时重新解析，固定修订保持不变。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,20 +200,32 @@ impl SvnReadSession {
         revision: u64,
         local_path: &Path,
         max_bytes: u64,
+        cancellation: &WorkerCancellation,
     ) -> Result<()> {
         match self {
             Self::RaSvn(session) => {
                 let relative = repository_file_path(path)?;
-                let mut local = tokio::fs::File::create(local_path)
-                    .await
-                    .with_context(|| format!("无法创建本地文件 {}", local_path.display()))?;
-                session
-                    .get_file(&relative, revision, false, &mut local, max_bytes)
-                    .await
-                    .with_context(|| format!("下载 SVN 文件失败：{path}"))
-                    .map(|_| ())
+                let mut download = DownloadFile::new(local_path)?;
+                let mut local = tokio::fs::File::from_std(
+                    download
+                        .file()
+                        .try_clone()
+                        .context("无法创建 SVN 下载写入句柄")?,
+                );
+                let transfer = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => Err(anyhow!("远程会话已取消")),
+                    result = session.get_file(&relative, revision, false, &mut local, max_bytes) => {
+                        result.with_context(|| format!("下载 SVN 文件失败：{path}")).map(|_| ())
+                    }
+                };
+                // tokio 文件写入可能仍在后台执行，先等待完成再释放句柄，保证 Windows 也能删除临时文件。
+                local.flush().await.context("刷新 SVN 下载临时文件失败")?;
+                drop(local);
+                transfer?;
+                download.commit(cancellation)
             }
-            Self::Http(session) => session.download_file(path, revision, local_path),
+            Self::Http(session) => session.download_file(path, revision, local_path, cancellation),
         }
     }
 }
@@ -222,6 +237,7 @@ pub(super) fn run_svn_worker(
     trusted_fingerprint: Option<String>,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -233,6 +249,7 @@ pub(super) fn run_svn_worker(
         trusted_fingerprint,
         command_receiver,
         event_sender,
+        cancellation,
     ))
 }
 
@@ -243,6 +260,7 @@ async fn run_svn_worker_async(
     trusted_fingerprint: Option<String>,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
     if config.url.to_ascii_lowercase().starts_with("svn+ssh://") {
         let parsed_url = SvnUrl::parse(&config.url).context("SVN SSH URL 无效")?;
@@ -281,6 +299,7 @@ async fn run_svn_worker_async(
     send_svn_version(session_id, selection, initial_message, &event_sender);
 
     while let Ok(command) = command_receiver.recv() {
+        cancellation.ensure_active()?;
         match command {
             RemoteFileCommand::TrustHostKey | RemoteFileCommand::RejectHostKey => {}
             RemoteFileCommand::LoadDirectory(path) => {
@@ -421,15 +440,21 @@ async fn run_svn_worker_async(
                     selection.resolved(),
                     &remote_path,
                     &local_path,
+                    &cancellation,
                 )
                 .await
                 .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
                 send_svn_operation_result(session_id, result, &event_sender);
             }
             RemoteFileCommand::DownloadFiles { entries, local_dir } => {
-                let result =
-                    download_svn_files(&mut session, selection.resolved(), &entries, &local_dir)
-                        .await;
+                let result = download_svn_files(
+                    &mut session,
+                    selection.resolved(),
+                    &entries,
+                    &local_dir,
+                    &cancellation,
+                )
+                .await;
                 send_svn_operation_result(session_id, result, &event_sender);
             }
             RemoteFileCommand::ReadFileContent { remote_path } => send_file_preview_loaded(
@@ -753,6 +778,7 @@ async fn download_svn_file(
     revision: u64,
     remote_path: &str,
     local_path: &Path,
+    cancellation: &WorkerCancellation,
 ) -> Result<()> {
     let normalized = normalize_repository_path(remote_path)?;
     let stat = session
@@ -765,7 +791,7 @@ async fn download_svn_file(
     }
     let max_bytes = stat.size.unwrap_or(u64::MAX);
     session
-        .download_file(&normalized, revision, local_path, max_bytes)
+        .download_file(&normalized, revision, local_path, max_bytes, cancellation)
         .await
         .with_context(|| format!("下载 SVN 文件失败：{remote_path}"))?;
     Ok(())
@@ -777,6 +803,7 @@ async fn download_svn_files(
     revision: u64,
     entries: &[RemoteFileEntry],
     local_dir: &Path,
+    cancellation: &WorkerCancellation,
 ) -> Result<String> {
     if entries.is_empty() {
         bail!("未选择要下载的文件");
@@ -794,7 +821,7 @@ async fn download_svn_files(
         })
         .collect::<Result<Vec<_>>>()?;
     for (entry, local_path) in targets {
-        download_svn_file(session, revision, &entry.path, &local_path).await?;
+        download_svn_file(session, revision, &entry.path, &local_path, cancellation).await?;
     }
     Ok(format!("已下载 {} 个文件", entries.len()))
 }

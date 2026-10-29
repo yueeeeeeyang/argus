@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::analysis::jstack::{
     JstackAnalysisResult, JstackFrequencyCell, JstackFrequencyRow, JstackThreadState,
+    JstackVisibleCell,
 };
 use crate::app::{
     ArgusApp, JstackAnalysisState, JstackAnalysisTaskState, JstackThreadNameSelection,
@@ -193,7 +194,7 @@ fn render_missing_state(app: &ArgusApp, theme: &AppTheme) -> AnyElement {
         .into_any_element()
 }
 
-/// 渲染统计和状态图例。
+/// 渲染日志范围标题、统计和状态图例。
 fn render_header(
     app: &ArgusApp,
     state: &JstackAnalysisState,
@@ -216,12 +217,51 @@ fn render_header(
             JstackAnalysisTaskState::Cancelled { .. } => (0, 0, 0, 0, 0),
         };
     let filter_summary = if filtered_count > 0 {
-        format!("，过滤 {filtered_count} 个线程")
+        format!("，配置完全过滤 {filtered_count} 个线程")
     } else {
         String::new()
     };
 
+    render_header_content(
+        app.jstack_analysis_title(analysis_id)
+            .map(|title| StyledText::new(title.to_string())),
+        StyledText::new(format!(
+            "{file_count} 个文件，{snapshot_count} 个快照，{thread_count} 个线程{filter_summary}，跳过 {skipped_count} 个文件"
+        )),
+        div()
+            .debug_selector(|| "jstack-header-filter-controls".to_string())
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(render_thread_filter_toggle(
+                analysis_id,
+                state.is_thread_filter_enabled,
+                has_filter_rules,
+                theme,
+                cx,
+            ))
+            .child(render_state_filter(
+                analysis_id,
+                &state.active_states,
+                theme,
+                cx,
+            )),
+        theme,
+    )
+}
+
+/// 为标题、统计和控件分配独立行及确定的可用宽度，避免自动测量缓存错误的截断结果。
+fn render_header_content(
+    title: Option<StyledText>,
+    summary: StyledText,
+    controls: gpui::Div,
+    theme: &AppTheme,
+) -> gpui::Div {
     div()
+        .debug_selector(|| "jstack-header".to_string())
+        .w_full()
+        .min_w(px(0.0))
+        .flex_none()
         .px(px(JSTACK_VIEW_PADDING))
         .pt(px(8.0))
         .pb(px(7.0))
@@ -230,39 +270,33 @@ fn render_header(
         .gap_2()
         .border_b_1()
         .border_color(rgb(theme.border))
+        // 明确文字可用宽度，避免自动测量时按极窄宽度缓存省略号。
         .child(
             div()
+                .debug_selector(|| "jstack-header-title".to_string())
+                .w_full()
+                .min_w(px(0.0))
+                .text_size(px(13.0))
+                .line_height(px(18.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.foreground))
+                .truncate()
+                .children(title),
+        )
+        .child(
+            div()
+                .debug_selector(|| "jstack-header-summary".to_string())
+                .w_full()
                 .min_w(px(0.0))
                 .text_size(px(12.0))
                 .line_height(px(16.0))
-                .text_color(rgb(theme.foreground))
+                .text_color(rgb(theme.foreground_muted))
                 .truncate()
-                .child(format!(
-                    "{file_count} 个文件，{snapshot_count} 个快照，{thread_count} 个线程{filter_summary}，跳过 {skipped_count} 个文件"
-                )),
+                .child(summary),
         )
         // 过滤控件固定独占一行：分析中文本变长后版式不再跳动，
         // 窗口变窄时也不会溢出面板右边缘。
-        .child(
-            div()
-                .debug_selector(|| "jstack-header-filter-controls".to_string())
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(render_thread_filter_toggle(
-                    analysis_id,
-                    state.is_thread_filter_enabled,
-                    has_filter_rules,
-                    theme,
-                    cx,
-                ))
-                .child(render_state_filter(
-                    analysis_id,
-                    &state.active_states,
-                    theme,
-                    cx,
-                )),
-        )
+        .child(controls)
 }
 
 /// 渲染设置页线程堆栈过滤开关。
@@ -469,7 +503,7 @@ fn render_frequency_matrix(
             .justify_center()
             .text_size(px(13.0))
             .text_color(rgb(theme.foreground_muted))
-            .child("当前状态筛选下没有可展示的 Jstack 线程。")
+            .child("当前状态和配置过滤下没有可展示的 Jstack 线程。")
             .into_any_element();
     }
 
@@ -478,7 +512,6 @@ fn render_frequency_matrix(
         + JSTACK_VIEW_PADDING;
     let row_count = visible_indices.len();
     let visible_indices = Arc::new(visible_indices);
-    let active_states = Arc::new(state.active_states.clone());
     let row_scroll = state.row_scroll.clone();
     let hover_preview = app
         .jstack_cell_hover_preview
@@ -515,13 +548,15 @@ fn render_frequency_matrix(
                     row_indices
                         .iter()
                         .filter_map(|row_index| {
-                            result.rows.get(*row_index).map(|row| {
+                            let row = result.rows.get(*row_index)?;
+                            let visible_cells = state.visible_cells.get(row_index)?;
+                            Some(
                                 render_matrix_row(
                                     analysis_id,
                                     *row_index,
                                     row,
                                     result,
-                                    active_states.as_ref(),
+                                    visible_cells,
                                     thread_name_selection.as_ref(),
                                     selected_cell_key.as_deref(),
                                     matrix_width,
@@ -530,8 +565,8 @@ fn render_frequency_matrix(
                                     &theme,
                                     row_cx,
                                 )
-                                .into_any_element()
-                            })
+                                .into_any_element(),
+                            )
                         })
                         .collect::<Vec<_>>()
                 }),
@@ -555,7 +590,7 @@ fn render_matrix_row(
     row_index: usize,
     row: &JstackFrequencyRow,
     result: &JstackAnalysisResult,
-    active_states: &BTreeSet<JstackThreadState>,
+    visible_cells: &[JstackVisibleCell],
     thread_name_selection: Option<&JstackThreadNameSelection>,
     selected_cell_key: Option<&str>,
     matrix_width: f32,
@@ -569,7 +604,8 @@ fn render_matrix_row(
     let cell_elements = row
         .cells
         .iter()
-        .map(|cell| {
+        .zip(visible_cells)
+        .map(|(cell, visible)| {
             let snapshot_label = result
                 .snapshots
                 .get(cell.snapshot_index)
@@ -579,9 +615,9 @@ fn render_matrix_row(
                 analysis_id,
                 row_index,
                 cell,
+                visible,
                 thread_name.clone(),
                 snapshot_label,
-                active_states,
                 selected_cell_key,
                 row_scroll,
                 theme,
@@ -865,16 +901,16 @@ fn render_frequency_cell(
     analysis_id: usize,
     row_index: usize,
     cell: &JstackFrequencyCell,
+    visible: &JstackVisibleCell,
     thread_name: String,
     snapshot_label: String,
-    active_states: &BTreeSet<JstackThreadState>,
     selected_cell_key: Option<&str>,
     row_scroll: &UniformListScrollHandle,
     theme: &AppTheme,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement + use<> {
-    let state = cell.state;
-    let is_visible = state.is_some_and(|state| active_states.contains(&state));
+    let state = visible.state;
+    let is_visible = visible.count > 0;
     let background = if is_visible {
         state.map(color_for_state).unwrap_or(theme.current_line)
     } else {
@@ -884,40 +920,31 @@ fn render_frequency_cell(
         state
             .map(|state| state.label().to_string())
             .unwrap_or_else(|| "未出现".to_string())
+    } else if cell.count == 0 {
+        "未出现".to_string()
     } else {
         "已被筛选隐藏".to_string()
     };
-    let tooltip_state_label = state
-        .map(|state| state.label().to_string())
-        .unwrap_or_else(|| "未出现".to_string());
-    let tooltip_stack_lines = if is_visible {
-        cell.stack_occurrences
-            .first()
-            .map(|occurrence| occurrence.stack_lines.clone())
-    } else {
-        None
-    };
+    // 预览与点击使用同一个筛选后代表，不能回退到原始首条而展示已隐藏的空闲堆栈。
+    let representative = visible.representative_occurrence_index.and_then(|index| {
+        index
+            .checked_sub(1)
+            .and_then(|index| cell.stack_occurrences.get(index))
+    });
+    let tooltip_stack_lines = representative.map(|occurrence| occurrence.stack_lines.clone());
     let detail_snapshot_index = cell.snapshot_index;
-    let detail_occurrence_index = cell
-        .stack_occurrences
-        .iter()
-        .find(|occurrence| Some(occurrence.state) == state)
-        .or_else(|| cell.stack_occurrences.first())
+    let detail_occurrence_index = representative
         .map(|occurrence| occurrence.occurrence_index)
         .unwrap_or(1);
-    let can_open_detail = is_visible && cell.count > 0;
+    let can_open_detail = is_visible && representative.is_some();
     let cell_key = jstack_cell_selection_key(row_index, cell.snapshot_index);
     let is_selected_cell = selected_cell_key == Some(cell_key.as_str());
     let preview_key = format!("{analysis_id}:{cell_key}");
     let preview_data = JstackCellPreviewData {
         snapshot_label,
         thread_name: thread_name.clone(),
-        count: cell.count,
-        state_label: if is_visible {
-            tooltip_state_label
-        } else {
-            state_label
-        },
+        count: visible.count,
+        state_label,
         stack_lines: tooltip_stack_lines,
     };
 
@@ -926,6 +953,9 @@ fn render_frequency_cell(
             "jstack-cell-{analysis_id}-{row_index}-{}",
             cell.snapshot_index
         )))
+        .debug_selector(move || {
+            format!("jstack-cell-{analysis_id}-{row_index}-{detail_snapshot_index}")
+        })
         .w(px(SNAPSHOT_CELL_SIZE))
         .h(px(SNAPSHOT_CELL_SIZE))
         .rounded(px(3.0))
@@ -1235,5 +1265,208 @@ fn color_for_state(state: JstackThreadState) -> u32 {
         JstackThreadState::Waiting => 0xa16b12,
         JstackThreadState::TimedWaiting => 0x2f82a3,
         JstackThreadState::Other => 0x64748b,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AvailableSpace, Element, TextOverflow, TextStyleRefinement, WhiteSpace};
+
+    /// 同一帧先探测固有尺寸再按真实宽度测量，标题不能一直复用零宽度下的省略号。
+    #[gpui::test]
+    fn jstack_header_text_remeasures_after_intrinsic_width(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.draw(
+            gpui::Point::default(),
+            gpui::size(px(1540.0), px(900.0)),
+            |window, cx| {
+                window.with_text_style(
+                    Some(TextStyleRefinement {
+                        white_space: Some(WhiteSpace::Nowrap),
+                        text_overflow: Some(TextOverflow::Truncate("...".into())),
+                        ..Default::default()
+                    }),
+                    |window| {
+                        for title in [
+                            "thread_000122.log ～ thread_000442.log",
+                            "12 个文件，12 个快照，20 个线程，跳过 0 个文件",
+                        ] {
+                            let mut text = StyledText::new(title);
+                            let (layout_id, _) = text.request_layout(None, None, window, cx);
+                            for width in [0.0, 700.0, 80.0, 1540.0] {
+                                window.compute_layout(
+                                    layout_id,
+                                    gpui::size(
+                                        AvailableSpace::Definite(px(width)),
+                                        AvailableSpace::MaxContent,
+                                    ),
+                                    cx,
+                                );
+                                let rendered = text.layout().text();
+                                if width >= 700.0 {
+                                    assert_eq!(
+                                        rendered, title,
+                                        "宽度确定后必须重新测量并恢复完整文字"
+                                    );
+                                } else {
+                                    assert_ne!(rendered, title, "窄宽度仍应正常截断");
+                                    assert!(rendered.ends_with("..."));
+                                }
+                            }
+                        }
+                    },
+                );
+                div()
+            },
+        );
+    }
+
+    /// 检查实际排版后的文字，防止容器虽足够宽，内部仍复用首次测量得到的省略号。
+    #[gpui::test]
+    fn jstack_header_text_uses_available_width(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let summary = "4 个文件，4 个快照，20 个线程，跳过 0 个文件";
+        for width in [700.0, 1540.0] {
+            for title in [
+                "thread_000236.log ～ thread_000436.log",
+                "开始线程日志.log ～ 结束线程日志.log",
+            ] {
+                let title_element = StyledText::new(title);
+                let summary_element = StyledText::new(summary);
+                let title_layout = title_element.layout().clone();
+                let summary_layout = summary_element.layout().clone();
+                cx.draw(
+                    gpui::Point::default(),
+                    gpui::size(px(width), px(900.0)),
+                    |_, _| {
+                        div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .font_family(ARGUS_UI_FONT_FAMILY)
+                            .child(render_header_content(
+                                Some(title_element),
+                                summary_element,
+                                div().h(px(24.0)).child("配置过滤"),
+                                &AppTheme::dark(),
+                            ))
+                            .child(div().flex_1())
+                    },
+                );
+                assert_eq!(title_layout.text(), title, "空间充足时应显示完整范围标题");
+                assert_eq!(summary_layout.text(), summary, "统计文字不应错误缩为省略号");
+            }
+        }
+    }
+
+    /// 主窗口的嵌套弹性布局会先探测固有尺寸，最终宽度足够时标题和统计必须恢复完整文字。
+    #[gpui::test]
+    fn jstack_header_text_survives_nested_workspace_layout(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let summary = "4 个文件，4 个快照，20 个线程，跳过 0 个文件";
+        for width in [760.0, 1600.0] {
+            for title in [
+                "thread_000236.log ～ thread_000436.log",
+                "开始线程日志.log ～ 结束线程日志.log",
+            ] {
+                let title_element = StyledText::new(title);
+                let summary_element = StyledText::new(summary);
+                let title_layout = title_element.layout().clone();
+                let summary_layout = summary_element.layout().clone();
+                cx.draw(
+                    gpui::Point::default(),
+                    gpui::size(px(width), px(900.0)),
+                    |_, _| {
+                        let analysis = div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .child(render_header_content(
+                                Some(title_element),
+                                summary_element,
+                                div()
+                                    .h(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_size(px(12.0))
+                                    .children(
+                                        [
+                                            "配置过滤",
+                                            "RUNNABLE",
+                                            "BLOCKED",
+                                            "WAITING",
+                                            "TIMED_WAITING",
+                                            "OTHER",
+                                        ]
+                                        .into_iter()
+                                        .map(|label| div().child(label)),
+                                    ),
+                                &AppTheme::dark(),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .overflow_hidden()
+                                    .child(div().min_w(px(1000.0)).h(px(MATRIX_ROW_HEIGHT))),
+                            );
+                        let log_content =
+                            div().size_full().flex().flex_col().overflow_hidden().child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .child(analysis),
+                            );
+                        let panel = div()
+                            .size_full()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            // 与真实玻璃板一致，内层弹性容器不直接指定宽度。
+                            .child(div().flex_1().min_h(px(0.0)).p(px(8.0)).child(log_content));
+
+                        div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .font_family(ARGUS_UI_FONT_FAMILY)
+                            .child(div().h(px(44.0)).flex_none())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .child(div().w(px(350.0)).h_full().flex_none())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .h_full()
+                                            .pt(px(0.5))
+                                            .px(px(8.0))
+                                            .pb(px(8.0))
+                                            .child(panel),
+                                    ),
+                            )
+                    },
+                );
+                assert_eq!(
+                    title_layout.text(),
+                    title,
+                    "窗口宽度 {width}px 时，嵌套布局中的范围标题应完整显示"
+                );
+                assert_eq!(
+                    summary_layout.text(),
+                    summary,
+                    "窗口宽度 {width}px 时，嵌套布局中的统计不能复用省略号"
+                );
+            }
+        }
     }
 }

@@ -10,16 +10,17 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use bzip2::read::BzDecoder;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use xz2::read::XzDecoder;
 
 use crate::loader::archive::adapter::{
-    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo,
+    ArchiveAdapter, ArchiveCapabilities, ArchiveEntryConsumer, ArchiveEntryInfo, ArchiveEntryTarget,
 };
 use crate::loader::archive::detector::ArchiveFormat;
 use crate::loader::archive::tar_adapter::{
-    list_tar_entries, read_tar_entry_bytes, stream_tar_entry,
+    extract_tar_entries_to_paths, list_tar_entries, read_tar_entry_bytes, stream_tar_entry,
 };
+use tokio_util::sync::CancellationToken;
 
 /// tar.gz 可识别扩展名。
 const TAR_GZ_EXTENSIONS: &[&str] = &[".tar.gz", ".tgz"];
@@ -38,6 +39,41 @@ pub(crate) struct CompressedTarArchiveAdapter {
 }
 
 impl ArchiveAdapter for CompressedTarArchiveAdapter {
+    fn supports_batch_extraction(&self) -> bool {
+        true
+    }
+
+    fn extract_entries_to_paths(
+        &self,
+        path: &Path,
+        targets: &[ArchiveEntryTarget],
+        max_log_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        let file =
+            File::open(path).with_context(|| format!("无法打开压缩 TAR：{}", path.display()))?;
+        match self.format {
+            ArchiveFormat::TarGz => extract_tar_entries_to_paths(
+                MultiGzDecoder::new(file),
+                targets,
+                max_log_bytes,
+                cancellation,
+            ),
+            ArchiveFormat::TarBz2 => extract_tar_entries_to_paths(
+                BzDecoder::new(file),
+                targets,
+                max_log_bytes,
+                cancellation,
+            ),
+            ArchiveFormat::TarXz => extract_tar_entries_to_paths(
+                XzDecoder::new(file),
+                targets,
+                max_log_bytes,
+                cancellation,
+            ),
+            _ => bail!("{} 不是压缩 TAR 格式", self.format.label()),
+        }
+    }
     /// 声明压缩 TAR 格式的识别规则和可用能力。
     fn capabilities(&self) -> ArchiveCapabilities {
         let (label, extensions) = match self.format {
@@ -75,7 +111,7 @@ impl ArchiveAdapter for CompressedTarArchiveAdapter {
 
         match self.format {
             ArchiveFormat::TarGz => {
-                list_tar_entries(GzDecoder::new(file), &path.display().to_string())
+                list_tar_entries(MultiGzDecoder::new(file), &path.display().to_string())
             }
             ArchiveFormat::TarBz2 => {
                 list_tar_entries(BzDecoder::new(file), &path.display().to_string())
@@ -131,7 +167,7 @@ where
 {
     match format {
         ArchiveFormat::TarGz => {
-            read_tar_entry_bytes(GzDecoder::new(reader), entry_path, source_label)
+            read_tar_entry_bytes(MultiGzDecoder::new(reader), entry_path, source_label)
         }
         ArchiveFormat::TarBz2 => {
             read_tar_entry_bytes(BzDecoder::new(reader), entry_path, source_label)
@@ -162,9 +198,12 @@ where
     R: Read,
 {
     match format {
-        ArchiveFormat::TarGz => {
-            stream_tar_entry(GzDecoder::new(reader), entry_path, source_label, consumer)
-        }
+        ArchiveFormat::TarGz => stream_tar_entry(
+            MultiGzDecoder::new(reader),
+            entry_path,
+            source_label,
+            consumer,
+        ),
         ArchiveFormat::TarBz2 => {
             stream_tar_entry(BzDecoder::new(reader), entry_path, source_label, consumer)
         }

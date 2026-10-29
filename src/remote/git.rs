@@ -5,8 +5,6 @@
 //! 主要功能：维护按链接隔离的裸仓库缓存，显式完成 HTTPS/SSH 鉴权，并从 tree/blob 读取文件。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
@@ -19,6 +17,8 @@ use git2::{
     RemoteCallbacks, Repository,
 };
 
+use super::download::DownloadFile;
+use super::worker::WorkerCancellation;
 use crate::config::paths::argus_git_repositories_dir;
 use crate::remote::connection::{ConnectionNodeId, GitLinkConfig};
 use crate::remote::remote_file::{
@@ -149,6 +149,7 @@ pub(super) fn run_git_worker(
     trusted_fingerprint: Option<String>,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
     let link_lock = git_link_lock(link_id);
     let _cache_guard = link_lock
@@ -207,6 +208,7 @@ pub(super) fn run_git_worker(
     );
 
     while let Ok(command) = command_receiver.recv() {
+        cancellation.ensure_active()?;
         match command {
             RemoteFileCommand::TrustHostKey | RemoteFileCommand::RejectHostKey => {}
             RemoteFileCommand::LoadDirectory(path) => {
@@ -363,14 +365,24 @@ pub(super) fn run_git_worker(
                 remote_path,
                 local_path,
             } => {
-                let result =
-                    download_git_file(&repository, &selected_version, &remote_path, &local_path)
-                        .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
+                let result = download_git_file(
+                    &repository,
+                    &selected_version,
+                    &remote_path,
+                    &local_path,
+                    &cancellation,
+                )
+                .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
                 send_git_operation_result(session_id, result, &event_sender);
             }
             RemoteFileCommand::DownloadFiles { entries, local_dir } => {
-                let result =
-                    download_git_files(&repository, &selected_version, &entries, &local_dir);
+                let result = download_git_files(
+                    &repository,
+                    &selected_version,
+                    &entries,
+                    &local_dir,
+                    &cancellation,
+                );
                 send_git_operation_result(session_id, result, &event_sender);
             }
             RemoteFileCommand::ReadFileContent { remote_path } => send_file_preview_loaded(
@@ -817,13 +829,15 @@ fn download_git_file(
     version: &str,
     remote_path: &str,
     local_path: &Path,
+    cancellation: &WorkerCancellation,
 ) -> Result<()> {
+    cancellation.ensure_active()?;
     let blob = read_git_blob(repository, version, remote_path)?;
-    let mut local = File::create(local_path)
-        .with_context(|| format!("无法创建本地文件 {}", local_path.display()))?;
+    let mut local = DownloadFile::new(local_path)?;
     local
-        .write_all(blob.content())
-        .with_context(|| format!("下载 Git 文件失败：{remote_path}"))
+        .copy_from(&mut blob.content(), cancellation)
+        .with_context(|| format!("下载 Git 文件失败：{remote_path}"))?;
+    local.commit(cancellation)
 }
 
 /// 下载多个 Git 普通文件；目录、符号链接和子模块均在写入前拒绝。
@@ -832,6 +846,7 @@ fn download_git_files(
     version: &str,
     entries: &[RemoteFileEntry],
     local_dir: &Path,
+    cancellation: &WorkerCancellation,
 ) -> Result<String> {
     if entries.is_empty() {
         bail!("未选择要下载的文件");
@@ -849,7 +864,7 @@ fn download_git_files(
         })
         .collect::<Result<Vec<_>>>()?;
     for (entry, local_path) in targets {
-        download_git_file(repository, version, &entry.path, &local_path)?;
+        download_git_file(repository, version, &entry.path, &local_path, cancellation)?;
     }
     Ok(format!("已下载 {} 个文件", entries.len()))
 }
@@ -986,6 +1001,48 @@ mod tests {
             .unwrap();
         drop(commit_object);
         (temp_dir, repository)
+    }
+
+    #[test]
+    fn git_download_preserves_existing_file_when_source_fails_or_session_is_cancelled() {
+        let (_repository_root, repository) = repository_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.log");
+        std::fs::write(&path, b"original").unwrap();
+        let (guard, cancellation) = crate::remote::worker::WorkerGuard::new(1);
+        assert!(
+            download_git_file(
+                &repository,
+                "refs/remotes/origin/main",
+                "/missing",
+                &path,
+                &cancellation
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        download_git_file(
+            &repository,
+            "refs/remotes/origin/main",
+            "/README.md",
+            &path,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello from git\n");
+        drop(guard);
+        assert!(
+            download_git_file(
+                &repository,
+                "refs/remotes/origin/main",
+                "/binary.dat",
+                &path,
+                &cancellation
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello from git\n");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     /// 验证仓库路径归一化始终限制在根目录内。

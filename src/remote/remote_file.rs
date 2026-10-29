@@ -20,6 +20,8 @@ use smb2::{
     Tree as SmbTree,
 };
 
+use super::download::DownloadFile;
+use super::worker::{WorkerCancellation, WorkerGuard};
 use crate::infra::text_input::TextInputState;
 use crate::remote::connection::{
     ConnectionLinkConfig, ConnectionNodeId, GitLinkConfig, SmbLinkConfig, SshLinkConfig,
@@ -74,6 +76,8 @@ pub(crate) struct RemoteFileSessionState {
     pub status: RemoteFileStatus,
     /// 发送给远程文件后台线程的命令通道。
     pub command_sender: Option<mpsc::Sender<RemoteFileCommand>>,
+    /// 随会话释放的取消守卫，可中断正在执行的 SSH I/O。
+    pub worker_guard: Option<WorkerGuard>,
     /// 等待用户确认的主机指纹；没有待确认时为空。
     pub pending_host_key: Option<PendingHostKey>,
     /// 当前远程目录。
@@ -116,6 +120,7 @@ impl RemoteFileSessionState {
             version_input: TextInputState::default(),
             status: RemoteFileStatus::Connecting,
             command_sender: Some(command_sender),
+            worker_guard: None,
             pending_host_key: None,
             current_dir: String::new(),
             address_input: TextInputState::default(),
@@ -566,13 +571,21 @@ pub(crate) enum RemoteFileEvent {
 /// 启动通用远程文件后台线程，并返回命令发送端与事件接收端。
 pub(crate) fn spawn_remote_file_worker(
     request: RemoteFileWorkerRequest,
-) -> (mpsc::Sender<RemoteFileCommand>, Receiver<RemoteFileEvent>) {
+) -> (
+    mpsc::Sender<RemoteFileCommand>,
+    Receiver<RemoteFileEvent>,
+    WorkerGuard,
+) {
     let (command_sender, command_receiver) = mpsc::channel();
     let (event_sender, event_receiver) = async_channel::unbounded();
+    let (guard, cancellation) = WorkerGuard::new(request.session_id);
     thread::spawn(move || {
-        if let Err(error) =
-            run_remote_file_worker(request.clone(), command_receiver, event_sender.clone())
-        {
+        if let Err(error) = run_remote_file_worker(
+            request.clone(),
+            command_receiver,
+            event_sender.clone(),
+            cancellation,
+        ) {
             send_event_blocking(
                 &event_sender,
                 RemoteFileEvent::Failed {
@@ -582,7 +595,7 @@ pub(crate) fn spawn_remote_file_worker(
             );
         }
     });
-    (command_sender, event_receiver)
+    (command_sender, event_receiver, guard)
 }
 
 /// 校验远程文件重命名的新名称，第一版不允许跨目录移动。
@@ -606,15 +619,48 @@ pub(crate) fn validate_remote_file_rename_name(name: &str) -> Result<String, Str
 /// 参数：`local_dir` 为用户选择的目标目录，`file_name` 为远端条目的原始名称。
 /// 返回值：名称是单个普通路径组件时返回目标路径；空名称、父目录或任一平台分隔符会被拒绝。
 pub(crate) fn local_download_path(local_dir: &Path, file_name: &str) -> Result<PathBuf> {
+    let stem = file_name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let is_device = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    });
     if file_name.is_empty()
         || file_name == "."
         || file_name == ".."
         || file_name.contains('/')
         || file_name.contains('\\')
+        || file_name
+            .chars()
+            .any(|character| character.is_control() || "<>:\"|?*".contains(character))
+        || file_name.ends_with(['.', ' '])
+        || is_device
+        || !matches!(
+            file_name_path_component(file_name),
+            Some(std::path::Component::Normal(_))
+        )
     {
         bail!("远程文件名包含不安全的路径字符，无法下载：{file_name}");
     }
     Ok(local_dir.join(file_name))
+}
+
+/// 只接受一个普通路径组件，拒绝平台前缀和路径规范化产生的别名。
+fn file_name_path_component(file_name: &str) -> Option<std::path::Component<'_>> {
+    let mut components = Path::new(file_name).components();
+    let first = components.next()?;
+    components.next().is_none().then_some(first)
 }
 
 /// 返回指定远程目录的父目录。
@@ -645,6 +691,7 @@ fn run_remote_file_worker(
     request: RemoteFileWorkerRequest,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
     match request.backend.clone() {
         RemoteFileWorkerBackend::Sftp {
@@ -656,10 +703,15 @@ fn run_remote_file_worker(
             trusted_fingerprint,
             command_receiver,
             event_sender,
+            cancellation,
         ),
-        RemoteFileWorkerBackend::Smb { smb } => {
-            run_smb_worker(request.session_id, smb, command_receiver, event_sender)
-        }
+        RemoteFileWorkerBackend::Smb { smb } => run_smb_worker(
+            request.session_id,
+            smb,
+            command_receiver,
+            event_sender,
+            cancellation,
+        ),
         RemoteFileWorkerBackend::Git {
             link_id,
             git,
@@ -671,6 +723,7 @@ fn run_remote_file_worker(
             trusted_fingerprint,
             command_receiver,
             event_sender,
+            cancellation,
         ),
         RemoteFileWorkerBackend::Svn {
             svn,
@@ -681,6 +734,7 @@ fn run_remote_file_worker(
             trusted_fingerprint,
             command_receiver,
             event_sender,
+            cancellation,
         ),
     }
 }
@@ -692,8 +746,9 @@ fn run_ssh_sftp_worker(
     trusted_fingerprint: Option<String>,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
-    let (session, fingerprint) = connect_ssh_session(&ssh)?;
+    let (session, fingerprint) = connect_ssh_session(&ssh, &cancellation)?;
     verify_host_key(
         session_id,
         &ssh,
@@ -718,6 +773,7 @@ fn run_ssh_sftp_worker(
     );
 
     while let Ok(command) = command_receiver.recv() {
+        cancellation.ensure_active()?;
         match command {
             RemoteFileCommand::TrustHostKey | RemoteFileCommand::RejectHostKey => {}
             RemoteFileCommand::LoadDirectory(path) => {
@@ -752,12 +808,12 @@ fn run_ssh_sftp_worker(
                 remote_path,
                 local_path,
             } => {
-                let result = download_file(&sftp, &remote_path, &local_path)
+                let result = download_file(&sftp, &remote_path, &local_path, &cancellation)
                     .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
             RemoteFileCommand::DownloadFiles { entries, local_dir } => {
-                let result = download_files(&sftp, &entries, &local_dir);
+                let result = download_files(&sftp, &entries, &local_dir, &cancellation);
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
             RemoteFileCommand::ReadFileContent { remote_path } => {
@@ -807,6 +863,7 @@ fn run_smb_worker(
     smb: SmbLinkConfig,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
     // 使用多线程运行时：命令循环在 block_on 线程上通过同步 recv() 阻塞等待用户操作，
     // 期间 smb2 客户端派生的后台任务（socket 读取循环、oplock/lease 通知）仍能在
@@ -821,6 +878,7 @@ fn run_smb_worker(
         smb,
         command_receiver,
         event_sender,
+        cancellation,
     ))
 }
 
@@ -830,6 +888,7 @@ async fn run_smb_worker_async(
     smb: SmbLinkConfig,
     command_receiver: mpsc::Receiver<RemoteFileCommand>,
     event_sender: Sender<RemoteFileEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
     let mut client = create_smb_client(&smb).await?;
     let mut current_dir = crate::remote::connection::normalized_smb_initial_dir(&smb.initial_dir);
@@ -844,6 +903,7 @@ async fn run_smb_worker_async(
     );
 
     while let Ok(command) = command_receiver.recv() {
+        cancellation.ensure_active()?;
         match command {
             RemoteFileCommand::TrustHostKey | RemoteFileCommand::RejectHostKey => {}
             RemoteFileCommand::LoadDirectory(path) => {
@@ -884,13 +944,15 @@ async fn run_smb_worker_async(
                 remote_path,
                 local_path,
             } => {
-                let result = download_smb_file(&mut client, &remote_path, &local_path)
-                    .await
-                    .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
+                let result =
+                    download_smb_file(&mut client, &remote_path, &local_path, &cancellation)
+                        .await
+                        .map(|_| format!("已下载 {}", remote_file_name(&remote_path)));
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
             RemoteFileCommand::DownloadFiles { entries, local_dir } => {
-                let result = download_smb_files(&mut client, &entries, &local_dir).await;
+                let result =
+                    download_smb_files(&mut client, &entries, &local_dir, &cancellation).await;
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
             RemoteFileCommand::ReadFileContent { remote_path } => {
@@ -1156,20 +1218,25 @@ async fn download_smb_file(
     client: &mut SmbShareClient,
     remote_path: &str,
     local_path: &Path,
+    cancellation: &WorkerCancellation,
 ) -> Result<()> {
     let mut download = client
         .client
         .download(&client.tree, &smb_relative_path(remote_path))
         .await
         .with_context(|| format!("无法打开 SMB 文件 {remote_path}"))?;
-    let mut local_file = LocalFile::create(local_path)
-        .with_context(|| format!("无法创建本地文件 {}", local_path.display()))?;
-    while let Some(chunk) = download.next_chunk().await {
+    let mut local_file = DownloadFile::new(local_path)?;
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => bail!("远程会话已取消"),
+            chunk = download.next_chunk() => chunk,
+        };
+        let Some(chunk) = chunk else { break };
         let chunk = chunk.with_context(|| format!("下载文件失败：{remote_path}"))?;
-        local_file.write_all(&chunk)?;
+        local_file.file().write_all(&chunk)?;
     }
-    local_file.flush()?;
-    Ok(())
+    local_file.commit(cancellation)
 }
 
 /// 下载多个 SMB 远程普通文件到本地目录。
@@ -1177,6 +1244,7 @@ async fn download_smb_files(
     client: &mut SmbShareClient,
     entries: &[RemoteFileEntry],
     local_dir: &Path,
+    cancellation: &WorkerCancellation,
 ) -> Result<String> {
     if entries.is_empty() {
         bail!("未选择要下载的文件");
@@ -1195,7 +1263,7 @@ async fn download_smb_files(
         })
         .collect::<Result<Vec<_>>>()?;
     for (entry, local_path) in targets {
-        download_smb_file(client, &entry.path, &local_path).await?;
+        download_smb_file(client, &entry.path, &local_path, cancellation).await?;
     }
 
     Ok(format!("已下载 {} 个文件", entries.len()))
@@ -1297,15 +1365,20 @@ fn upload_files(sftp: &ssh2::Sftp, current_dir: &str, local_paths: &[PathBuf]) -
 }
 
 /// 下载单个远程文件到本地路径。
-fn download_file(sftp: &ssh2::Sftp, remote_path: &str, local_path: &Path) -> Result<()> {
+fn download_file(
+    sftp: &ssh2::Sftp,
+    remote_path: &str,
+    local_path: &Path,
+    cancellation: &WorkerCancellation,
+) -> Result<()> {
     let mut remote_file = sftp
         .open(Path::new(remote_path))
         .with_context(|| format!("无法打开远程文件 {remote_path}"))?;
-    let mut local_file = LocalFile::create(local_path)
-        .with_context(|| format!("无法创建本地文件 {}", local_path.display()))?;
-    io::copy(&mut remote_file, &mut local_file)
+    let mut local_file = DownloadFile::new(local_path)?;
+    local_file
+        .copy_from(&mut remote_file, cancellation)
         .with_context(|| format!("下载文件失败：{remote_path}"))?;
-    Ok(())
+    local_file.commit(cancellation)
 }
 
 /// 下载多个远程普通文件到本地目录。
@@ -1313,6 +1386,7 @@ fn download_files(
     sftp: &ssh2::Sftp,
     entries: &[RemoteFileEntry],
     local_dir: &Path,
+    cancellation: &WorkerCancellation,
 ) -> Result<String> {
     if entries.is_empty() {
         bail!("未选择要下载的文件");
@@ -1331,7 +1405,7 @@ fn download_files(
         })
         .collect::<Result<Vec<_>>>()?;
     for (entry, local_path) in targets {
-        download_file(sftp, &entry.path, &local_path)?;
+        download_file(sftp, &entry.path, &local_path, cancellation)?;
     }
 
     Ok(format!("已下载 {} 个文件", entries.len()))
@@ -1857,12 +1931,45 @@ mod tests {
     fn local_download_path_rejects_cross_platform_path_escape() {
         let root = Path::new("/tmp/downloads");
         assert_eq!(
-            local_download_path(root, " app.log ").unwrap(),
-            root.join(" app.log ")
+            local_download_path(root, " app.log").unwrap(),
+            root.join(" app.log")
         );
         assert!(local_download_path(root, "../outside.log").is_err());
         assert!(local_download_path(root, "..\\outside.log").is_err());
         assert!(local_download_path(root, ".").is_err());
+        for name in [
+            "C:escape.log",
+            "report.log:stream",
+            "NUL",
+            "con.log",
+            "COM1.txt",
+            "LPT².log",
+            "aux .txt",
+            "report.log.",
+            "report.log ",
+            "bad\0name",
+            "bad?name",
+        ] {
+            assert!(
+                local_download_path(root, name).is_err(),
+                "必须拒绝不安全名称：{name:?}"
+            );
+        }
+        assert_eq!(
+            local_download_path(root, "中文 report.log").unwrap(),
+            root.join("中文 report.log")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_download_rejects_drive_relative_names() {
+        let root = Path::new(r"D:\downloads");
+        assert!(local_download_path(root, "C:escape.log").is_err());
+        assert_eq!(
+            local_download_path(root, "report.log").unwrap(),
+            root.join("report.log")
+        );
     }
 
     /// 验证远程子路径拼接使用 POSIX 分隔符。

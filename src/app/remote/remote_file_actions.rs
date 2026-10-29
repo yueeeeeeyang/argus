@@ -1069,11 +1069,11 @@ impl ArgusApp {
             session_id,
             backend: worker_backend,
         };
-        let (command_sender, event_receiver) = spawn_remote_file_worker(request);
-        self.remote_file_sessions.insert(
-            session_id,
-            RemoteFileSessionState::connecting(session_id, link, backend, command_sender),
-        );
+        let (command_sender, event_receiver, worker_guard) = spawn_remote_file_worker(request);
+        let mut session =
+            RemoteFileSessionState::connecting(session_id, link, backend, command_sender);
+        session.worker_guard = Some(worker_guard);
+        self.remote_file_sessions.insert(session_id, session);
         Self::spawn_remote_file_event_pump(cx, event_receiver);
         true
     }
@@ -1268,6 +1268,7 @@ impl ArgusApp {
                 if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
                     session.status = RemoteFileStatus::Disconnected;
                     session.command_sender = None;
+                    session.worker_guard = None;
                     session.message = Some(message.clone());
                 }
                 self.placeholder_notice = message;
@@ -1279,6 +1280,7 @@ impl ArgusApp {
                 if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
                     session.status = RemoteFileStatus::Failed;
                     session.command_sender = None;
+                    session.worker_guard = None;
                     session.message = Some(message.clone());
                 }
                 self.placeholder_notice = message;

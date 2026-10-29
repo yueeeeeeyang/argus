@@ -1,7 +1,13 @@
 //! 文件职责：提取 Jstack 线程日志分析的标签创建、结果应用、线程筛选和选区交互等方法到独立子模块。
 
 use super::*;
+use crate::analysis::jstack::JstackLogRange;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// 将分析输入的首末日志名称格式化为页签和页内共用的标题。
+fn format_jstack_log_range(range: &JstackLogRange) -> String {
+    format!("{} ～ {}", range.first_label, range.last_label)
+}
 
 impl ArgusApp {
     /// 创建 Jstack 分析标签页，并启动后台读取与聚合任务。
@@ -70,6 +76,7 @@ impl ArgusApp {
             message: "已取消 Jstack 分析".to_string(),
         };
         state.visible_row_indices.clear();
+        state.visible_cells.clear();
         state.filtered_row_count = 0;
         self.placeholder_notice = "已取消 Jstack 分析".to_string();
     }
@@ -79,6 +86,14 @@ impl ArgusApp {
         self.jstack_analyses.get(&analysis_id)
     }
 
+    /// 按分析 ID 读取页签标题，保证页内标题与对应页签始终一致。
+    pub(crate) fn jstack_analysis_title(&self, analysis_id: usize) -> Option<&str> {
+        self.tabs
+            .iter()
+            .find(|tab| matches!(tab.kind, TabKind::JstackAnalysis { analysis_id: id } if id == analysis_id))
+            .map(|tab| tab.title.as_str())
+    }
+
     /// 返回当前设置页配置的 Jstack 线程过滤器。
     pub(crate) fn jstack_thread_filter(&self) -> JstackThreadFilter {
         JstackThreadFilter::from_rules(&self.config.log_display.jstack_thread_filter_rules)
@@ -86,6 +101,7 @@ impl ArgusApp {
 
     /// 根据当前配置重建所有 Jstack 分析页的可见行缓存。
     pub(crate) fn rebuild_all_jstack_visible_row_caches(&mut self) {
+        self.clear_jstack_cell_hover_preview();
         let thread_filter = self.jstack_thread_filter();
         for state in self.jstack_analyses.values_mut() {
             state.rebuild_visible_row_cache(&thread_filter);
@@ -108,6 +124,7 @@ impl ArgusApp {
         active_occurrence_index: usize,
         cx: &mut Context<Self>,
     ) {
+        let thread_filter = self.jstack_thread_filter();
         let detail_result: std::result::Result<(JstackThreadDetail, String), String> = (|| {
             let Some(state) = self.jstack_analyses.get(&analysis_id) else {
                 return Err("未找到 Jstack 分析结果".to_string());
@@ -118,6 +135,14 @@ impl ArgusApp {
             let Some(row) = result.rows.get(row_index) else {
                 return Err("未找到当前线程行".to_string());
             };
+            if !state
+                .visible_cells
+                .get(&row_index)
+                .and_then(|cells| cells.get(active_snapshot_index))
+                .is_some_and(|cell| cell.count > 0)
+            {
+                return Err("当前快照没有可展示的线程样本".to_string());
+            }
             let thread_name = row.thread_name.clone();
             let selected_cell_key = jstack_cell_selection_key(row_index, active_snapshot_index);
 
@@ -128,6 +153,7 @@ impl ArgusApp {
                 &state.active_states,
                 active_snapshot_index,
                 active_occurrence_index,
+                state.is_thread_filter_enabled.then_some(&thread_filter),
             );
             if occurrences.is_empty() {
                 return Err("当前线程没有可展示的堆栈详情".to_string());
@@ -296,17 +322,15 @@ impl ArgusApp {
         &mut self,
         targets: Vec<JstackAnalysisTarget>,
     ) -> Option<(usize, usize)> {
-        if targets.is_empty() {
-            return None;
-        }
+        let log_range =
+            JstackLogRange::from_labels(targets.iter().map(|target| target.label.as_str()))?;
 
         let analysis_id = self.next_jstack_analysis_id;
-        self.next_jstack_analysis_id = self.next_jstack_analysis_id.saturating_add(1);
-        let title = if targets.len() > 1 {
-            format!("Jstack分析({})", targets.len())
-        } else {
-            "Jstack分析".to_string()
-        };
+        self.next_jstack_analysis_id = self
+            .next_jstack_analysis_id
+            .checked_add(1)
+            .expect("Jstack 分析任务序号已耗尽");
+        let title = format_jstack_log_range(&log_range);
         // 没有选择日志时不会再有占位标签，创建页签一律新建。
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -330,6 +354,7 @@ impl ArgusApp {
                 thread_name_selection_drag: None,
                 selected_cell_key: None,
                 visible_row_indices: Vec::new(),
+                visible_cells: HashMap::new(),
                 filtered_row_count: 0,
                 row_scroll: UniformListScrollHandle::new(),
                 task_state: JstackAnalysisTaskState::Loading {
@@ -350,6 +375,7 @@ impl ArgusApp {
         analysis_id: usize,
         thread_state: JstackThreadState,
     ) {
+        self.clear_jstack_cell_hover_preview();
         let thread_filter = self.jstack_thread_filter();
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Jstack 分析结果".to_string();
@@ -492,6 +518,7 @@ impl ArgusApp {
 
     /// 切换 Jstack 分析页是否应用设置页中的线程堆栈过滤规则。
     pub(crate) fn toggle_jstack_thread_filter(&mut self, analysis_id: usize) {
+        self.clear_jstack_cell_hover_preview();
         let thread_filter = self.jstack_thread_filter();
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             self.placeholder_notice = "未找到 Jstack 分析结果".to_string();
@@ -579,7 +606,9 @@ impl ArgusApp {
         let Some(state) = self.jstack_analyses.get_mut(&analysis_id) else {
             return;
         };
-        if state.generation != generation {
+        if state.generation != generation
+            || !matches!(state.task_state, JstackAnalysisTaskState::Loading { .. })
+        {
             return;
         }
 
@@ -596,11 +625,20 @@ impl ArgusApp {
                 ),
             };
             state.visible_row_indices.clear();
+            state.visible_cells.clear();
             state.filtered_row_count = 0;
             self.placeholder_notice = format!(
                 "已取消 Jstack 分析：取消前完成 {snapshot_count} 个快照，{thread_count} 个线程"
             );
             return;
+        }
+        // 目录输入在后台展开后才有真实文件范围；范围包含跳过文件，不随解析结果缩短。
+        if let Some(log_range) = &result.log_range
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| {
+                matches!(tab.kind, TabKind::JstackAnalysis { analysis_id: id } if id == analysis_id)
+            })
+        {
+            tab.title = format_jstack_log_range(log_range);
         }
         state.task_state = JstackAnalysisTaskState::Ready(result);
         state.rebuild_visible_row_cache(&thread_filter);

@@ -25,8 +25,8 @@ v3 方案的用户决策（已确认）：
 
 - **工作目录物化**：加载时把普通来源复制、压缩包解压进临时工作目录；左侧目录树直接
   显示工作目录真实结构；浏览器与 AI 全部只读普通文件。
-- **通用智能体**：不硬编码任何诊断逻辑；内置 bash + 文件读取工具，只允许在工作目录
-  内执行；白名单外命令弹窗确认。智能助手页签是其上的薄壳，不保留旧行为。
+- **通用智能体**：不硬编码任何诊断逻辑；内置 bash + 文件读取工具。经过验证的只读程序
+  自动执行，其余命令弹窗确认。智能助手页签是其上的薄壳，不保留旧行为。
 - **Skill 体系**：方法论以用户导入的知识文本注入，与代码解耦；不提供内置 Skill。
 
 ## 二、总体架构
@@ -44,7 +44,7 @@ v3 方案的用户决策（已确认）：
 
 AI 层：src/agent/agent_loop.rs 通用单轮模型循环
   ├─ preamble = 安全骨架 + <CONFIGURED_SYSTEM_PROMPT> + <SKILLS>
-  └─ 工具 = list_loaded_sources + read_file + bash（均限定工作目录）
+  └─ 工具 = list_loaded_sources + read_file + bash（初始 cwd 为工作目录）
 产品入口：assistant_tab（智能助手对话页签）
 Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/skills/ 落盘
 ```
@@ -85,35 +85,33 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 每轮发送前从注册表 + 工作目录直接固化 `SourceScopeSnapshot`（不触发文件系统扫描；
 来源树在加载时已一次性完整初始化）：每个日志文件携带工作目录相对路径（正斜杠）、
 真实绝对路径、命中日志类型的名称与说明全文、已知大小；另携带工作目录根、兜底解码
-编码与原文授权开关。模型引用的路径与工具实际解析的路径保持同一坐标系。
+编码。日志原文默认可读取并发送给模型，不再保留单独授权开关；现有输出脱敏仍生效。
+模型引用的路径与工具实际解析的路径保持同一坐标系。
 
-### 4.3 工具（`agent/tools.rs`，全部限定工作目录）
+### 4.3 工具（`agent/tools.rs`）
 
 1. **`list_loaded_sources { path_prefix?, limit }`**：工作区清单分页；返回相对路径、
    绝对路径、大小与命中的日志类型说明。
 2. **`read_file { path, offset_line?, max_lines? }`**：词法规范化先拒绝 `..` 越界，
    再 canonicalize 拦截符号链接逃逸；≤64 KiB / ≤2000 行窗口读取，按检测编码解码，
-   返回续读偏移；`allow_raw_log_content=false` 时只返回元数据；输出经敏感信息遮蔽。
-3. **`bash { command, timeout_ms? }`**：cwd=工作目录，`kill_on_drop`；默认 60s、上限
-   300s；stdout/stderr 各自截断（96/32 KiB）并遮蔽；非零退出码如实返回。
-   - **白名单自动执行**（只读命令）：`ls cat grep head tail wc find sort uniq awk sed
-     cut tr echo pwd stat file du df cd`——按段（管道/`;`/`&&`/换行）解析 argv[0]，跳过
-     段首环境变量赋值，并跟踪 `cd` 后的当前目录；`2>/dev/null`、`2>&1` 等只读重定向直接
-     放行；`find -exec/-execdir` 仅允许嵌套白名单只读命令；单层只读 `for` 循环在循环项安全且
-     循环体全部为只读命令时也会放行。sed `-i`、find `-delete`/
-     `-fprint`/`-ok`、写文件重定向、命令替换 `$(`/反引号、`~` 与任何越出工作目录的路径
-     形态参数，一律转用户确认。
+   返回续读偏移，输出经敏感信息遮蔽。使用分块有界读取，跳过行与超长行不累积正文；
+   超长行标记截断并将续读偏移前进到下一行。
+3. **`bash { command, timeout_ms? }`**：初始 cwd=工作目录；默认 60s、上限
+   300s；stdout/stderr 持续排空，最多保留 96/32 KiB 并遮蔽；非零退出码如实返回。
+   完成、超时和取消均清理 Unix 进程组或 Windows Job，调用者退出后清理任务仍负责回收。
+   - **自动执行**：Unix 下仅使用系统目录中的 `ls cat grep head tail wc sort uniq cut tr
+     echo pwd stat file du df`，按程序逐项验证选项。直接传递解析后的 argv，不执行 shell
+     语法；清除继承环境，文件参数解析真实路径并拒绝越界。管道、重定向、命令替换、循环、
+     `find`、`awk`、`sed`、不支持的参数和 Windows 命令统一转用户确认。
    - **确认通道**：工具挂起等待 oneshot；`AgentEvent::BashApprovalRequired` 携带完整
      命令，界面渲染内联确认卡片（批准/拒绝）；60s 未答复、会话取消或界面关闭都
      按拒绝收敛，并发布 `BashApprovalOutcome` 固化卡片状态。
-   - **授权语义如实告知**：`allow_raw_log_content=false` 无法过滤 bash 输出，在安全
-     骨架中降级为指令级约束。
 
 ### 4.4 安全骨架（preamble）
 
 英文书写、位于系统提示词最高层，不可被用户提示词、日志内容或工具输出覆盖：不可信
-数据边界、工作目录沙箱、证据纪律（不得虚构读取事实）、注入防御、输出脱敏、只读与
-非攻击性约束、原文授权状态与 @ 选择来源的说明；要求以中文 Markdown 回答。
+数据边界、工作目录范围、证据纪律（不得虚构读取事实）、注入防御、输出脱敏、只读与
+非攻击性约束、@ 选择来源的说明；要求以中文 Markdown 回答。
 
 ## 五、Skill 系统（`agent/skills.rs`）
 
@@ -144,15 +142,15 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 ## 七、测试方案
 
-每阶段 `cargo fmt && cargo clippy --all-targets && cargo test` 全绿（当前 `cargo test` 通过
-665 项；统计口径为 `cargo test` 报告的通过用例数，该数字随测试增补变化，以实际运行为准）。
+每阶段运行 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、
+`cargo check --all-targets` 与 `cargo test`；通过用例数以实际运行结果为准。
 重点覆盖：
 
 - 物化器：复制/解压/zip slip/重名冲突/嵌套/GZIP 命名/密码包追加（loader 模块）；
 - 清单：树 → workspace 路径映射、多根消歧、日志类型说明全文固化；
-- read_file：`..`/绝对路径/符号链接越界拒绝、行窗口与续读偏移、未授权只回元数据；
-- bash：白名单与管道逐段判定、重定向/命令替换/破坏性参数/越界路径转确认、审批超时
-  拒绝、退出码与输出截断；
+- read_file：`..`/绝对路径/符号链接越界拒绝、行窗口与续读偏移、长行有界与 UTF-16；
+- bash：固定程序与参数验证、重定向/命令替换/破坏性参数/越界路径转确认、审批超时
+  拒绝、退出码、有界输出，以及超时和取消后的后代进程清理；
 - Skill：frontmatter 解析与拒绝条件、默认集筛选、禁用过滤、目录/ZIP 导入、同名冲突、
   注入边界与预算截断；
 - 手动冒烟：大包加载与浏览、密码包解锁、智能助手页签问答与 bash 审批弹窗、Skill
@@ -172,8 +170,8 @@ Skill：src/agent/skills.rs 仅用户导入（目录/ZIP），config_root/ai/ski
 
 ## 九、风险与限制
 
-- **bash 沙箱是尽力约束**：cwd + 白名单路径校验 + 确认卡片展示完整命令；不做 OS 级
-  沙箱。工作目录是可丢弃的副本，批准写操作的最坏后果是重新加载来源。
+- **执行权限边界**：参数验证与工作目录不构成 OS 沙箱，也不能防御同账号恶意并发替换目录。
+  审批卡片展示完整命令；批准后的 shell 使用当前用户权限，可能访问工作目录外的资源。
 - **普通来源复制的 I/O 成本**：大文件加载时一次性复制（进度明示），换取读取/AI/搜索
   全链路统一；同设备硬链接优化为后续可选项。
 - **Skill 知识质量**：效果依赖模型对导入知识文本的遵循；Skill 只影响提示词，

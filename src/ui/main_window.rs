@@ -161,10 +161,7 @@ pub(crate) fn render(
         // 主窗口关闭时删除当前物化工作目录；崩溃或强杀的场景由下次启动清扫兜底。
         let entity = cx.entity();
         window.on_window_should_close(cx, move |_, app_cx| {
-            let app = entity.read(app_cx);
-            if let Some(root) = app.source_workspace_root.clone() {
-                crate::loader::workspace::delete_workspace_best_effort(root);
-            }
+            entity.update(app_cx, |app, _| app.prepare_to_close());
             true
         });
         app.has_registered_workspace_close_guard = true;

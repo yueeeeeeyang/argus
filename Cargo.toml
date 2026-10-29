@@ -6,7 +6,7 @@
 
 [package]
 name = "argus"
-version = "1.3.5"
+version = "1.3.7"
 edition = "2024"
 publish = false
 description = "Argus 高性能日志查看与分析桌面客户端"
@@ -50,6 +50,8 @@ reqwest = "0.13.5"
 rig-core = "=0.40.0"
 roxmltree = "0.21.2"
 schemars = "1.2.3"
+# SQL 归一化复用完整词法器，区分引号标识符、字面量及运算符。
+sqlparser = { version = "0.63.0", default-features = false, features = ["std"] }
 # SVN SSH 主机指纹预检直接复用与 svn crate 相同的纯 Rust russh 栈，不启动系统 ssh。
 russh = { version = "0.65.0", default-features = false, features = ["ring", "rsa"] }
 sevenz-rust = "0.6.1"
@@ -88,9 +90,16 @@ windows-sys = { version = "0.60.2", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Registry",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+# 取消工具执行时终止独立进程组，覆盖 shell 创建的全部后代。
+libc = "0.2"
 
 [target.'cfg(not(windows))'.dependencies]
 # macOS/Linux 静态构建 libgit2 与 OpenSSL，确保安装包不依赖目标机预装开发库。
@@ -111,6 +120,8 @@ raw-window-handle = "0.6.2"
 embed-resource = "3.0.12"
 
 [dev-dependencies]
+# 验证编译期字体字节的名称与等宽度量，避免依赖 GPUI 测试平台的空字体系统。
+ttf-parser = "0.25.1"
 # 标题栏和模态框等 GPUI 交互需要真实 hitbox/input 回归测试，测试构建开启官方测试上下文。
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
 wiremock = "0.6.5"
@@ -118,6 +129,7 @@ wiremock = "0.6.5"
 [patch.crates-io]
 # GPUI 0.2.2 的 Windows release shader 构建仅能在 Windows 主机运行；本地补丁复用
 # runtime_shaders 特性，将内嵌 HLSL 交给 Windows D3DCompiler，支持 macOS/Linux 交叉编译。
+# 文本测量补丁按换行和截断宽度复用缓存，并在重排时恢复原始样式，避免标题只剩省略号。
 gpui = { path = "third_party/gpui" }
 # block 0.1.6 已停止维护，其空枚举占位类型触发的 uninhabited static 将在未来 Rust 版本成为硬错误；
 # 本地补丁保持 0.1.6 API 不变，仅将占位类型改为零大小结构体。

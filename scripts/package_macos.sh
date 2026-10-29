@@ -17,11 +17,11 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 "$ROOT_DIR/scripts/generate_icons.sh" "$ROOT_DIR/assets/icons/app-icon.png"
 
 cd "$ROOT_DIR"
-cargo build --release
+EXECUTABLE="$(cargo build --release --bin argus --message-format=json-render-diagnostics | python3 "$ROOT_DIR/scripts/read_build_artifact.py")"
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$ROOT_DIR/target/release/argus" "$MACOS_DIR/argus"
+cp "$EXECUTABLE" "$MACOS_DIR/argus"
 cp "$ROOT_DIR/resources/macos/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$ROOT_DIR/resources/macos/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 chmod +x "$MACOS_DIR/argus"

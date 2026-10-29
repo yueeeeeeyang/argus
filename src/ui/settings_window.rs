@@ -2023,7 +2023,7 @@ fn render_jstack_filter_rule_row(
         ))
 }
 
-/// 渲染 Jstack 过滤规则命中徽标；无打开分析时显示占位符。
+/// 渲染规则命中过样本的线程数；命中不代表整行隐藏，无打开分析时显示占位符。
 fn jstack_filter_rule_hit_badge(
     index: usize,
     rule: &JstackThreadFilterRule,
@@ -2041,7 +2041,7 @@ fn jstack_filter_rule_hit_badge(
             .copied()
             .unwrap_or(0);
         if hits > 0 {
-            (format!("命中 {hits}"), true)
+            (format!("命中 {hits} 个线程"), true)
         } else {
             ("未命中".to_string(), false)
         }

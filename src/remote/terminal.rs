@@ -15,6 +15,7 @@ use async_channel::{Receiver, Sender};
 use gpui::ScrollHandle;
 use vt100::Callbacks as Vt100Callbacks;
 
+use super::worker::{WorkerCancellation, WorkerGuard};
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index,
     character_count, word_range_at,
@@ -53,6 +54,8 @@ pub(crate) struct TerminalSessionState {
     pub parser: vt100::Parser<TerminalCallbacks>,
     /// 发送给 SSH 后台线程的命令通道。
     pub command_sender: Option<mpsc::Sender<TerminalCommand>>,
+    /// 会话释放时立即关闭 SSH socket，不等待命令队列。
+    pub worker_guard: Option<WorkerGuard>,
     /// 等待用户确认的主机指纹；没有待确认时为空。
     pub pending_host_key: Option<PendingHostKey>,
     /// 当前远程 PTY 行数。
@@ -98,6 +101,7 @@ impl TerminalSessionState {
                 TerminalCallbacks::default(),
             ),
             command_sender: Some(command_sender),
+            worker_guard: None,
             pending_host_key: None,
             rows: DEFAULT_TERMINAL_ROWS,
             cols: DEFAULT_TERMINAL_COLS,
@@ -899,12 +903,21 @@ pub(crate) enum TerminalEvent {
 /// 启动 SSH 后台线程，并返回命令发送端与事件接收端。
 pub(crate) fn spawn_ssh_worker(
     request: TerminalWorkerRequest,
-) -> (mpsc::Sender<TerminalCommand>, Receiver<TerminalEvent>) {
+) -> (
+    mpsc::Sender<TerminalCommand>,
+    Receiver<TerminalEvent>,
+    WorkerGuard,
+) {
     let (command_sender, command_receiver) = mpsc::channel();
     let (event_sender, event_receiver) = async_channel::unbounded();
+    let (guard, cancellation) = WorkerGuard::new(request.session_id);
     thread::spawn(move || {
-        if let Err(error) = run_ssh_worker(request.clone(), command_receiver, event_sender.clone())
-        {
+        if let Err(error) = run_ssh_worker(
+            request.clone(),
+            command_receiver,
+            event_sender.clone(),
+            cancellation,
+        ) {
             send_event_blocking(
                 &event_sender,
                 TerminalEvent::Failed {
@@ -914,7 +927,7 @@ pub(crate) fn spawn_ssh_worker(
             );
         }
     });
-    (command_sender, event_receiver)
+    (command_sender, event_receiver, guard)
 }
 
 /// DA1 应答：VT220 身份 + 选择性擦除 + ANSI 颜色，避免声明未实现的能力。
@@ -1053,8 +1066,9 @@ fn run_ssh_worker(
     request: TerminalWorkerRequest,
     command_receiver: mpsc::Receiver<TerminalCommand>,
     event_sender: Sender<TerminalEvent>,
+    cancellation: WorkerCancellation,
 ) -> Result<()> {
-    let (session, fingerprint) = connect_ssh_session(&request.ssh)?;
+    let (session, fingerprint) = connect_ssh_session(&request.ssh, &cancellation)?;
     let pty_size = verify_host_key(&request, &command_receiver, &event_sender, &fingerprint)?;
     authenticate_ssh_session(&session, &request.ssh)?;
 
@@ -1078,13 +1092,23 @@ fn run_ssh_worker(
 
     session.set_blocking(false);
     let mut buffer = [0_u8; 8192];
+    let mut pending_input: Option<PendingTerminalInput> = None;
+    let mut pending_resize = None;
     loop {
-        while let Ok(command) = command_receiver.try_recv() {
+        cancellation.ensure_active()?;
+        while pending_input.is_none() {
+            let command = match command_receiver.try_recv() {
+                Ok(command) => command,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+            };
             match command {
                 TerminalCommand::TrustHostKey | TerminalCommand::RejectHostKey => {}
-                TerminalCommand::Input(bytes) => write_channel_bytes(&mut channel, &bytes)?,
+                TerminalCommand::Input(bytes) => {
+                    pending_input = Some(PendingTerminalInput { bytes, written: 0 })
+                }
                 TerminalCommand::Resize { rows, cols } => {
-                    let _ = channel.request_pty_size(cols as u32, rows as u32, None, None);
+                    pending_resize = Some((rows, cols));
                 }
                 TerminalCommand::Disconnect => {
                     let _ = channel.close();
@@ -1096,6 +1120,23 @@ fn run_ssh_worker(
                         },
                     );
                     return Ok(());
+                }
+            }
+        }
+
+        if let Some(input) = pending_input.as_mut()
+            && input.write_available(&mut channel)?
+        {
+            pending_input = None;
+        }
+        if let Some((rows, cols)) = pending_resize {
+            match channel.request_pty_size(cols as u32, rows as u32, None, None) {
+                Ok(()) => pending_resize = None,
+                Err(error) => {
+                    let error = std::io::Error::from(error);
+                    if error.kind() != std::io::ErrorKind::WouldBlock {
+                        return Err(error).context("调整 SSH 终端尺寸失败");
+                    }
                 }
             }
         }
@@ -1174,11 +1215,26 @@ fn verify_host_key(
     }
 }
 
-/// 向远程通道写入字节，非阻塞模式下遇到 WouldBlock 时保留简洁失败提示。
-fn write_channel_bytes(channel: &mut ssh2::Channel, bytes: &[u8]) -> Result<()> {
-    channel
-        .write_all(bytes)
-        .map_err(|error| anyhow!("SSH 输入写入失败：{error}"))
+/// 保留部分写入的进度；网络背压时先读取远端输出，下一轮再继续，避免丢失粘贴内容。
+struct PendingTerminalInput {
+    bytes: Vec<u8>,
+    written: usize,
+}
+
+impl PendingTerminalInput {
+    /// 尽可能写入当前输入；返回 true 表示全部完成，WouldBlock 保留偏移返回 false。
+    fn write_available(&mut self, writer: &mut impl Write) -> Result<bool> {
+        while self.written < self.bytes.len() {
+            match writer.write(&self.bytes[self.written..]) {
+                Ok(0) => bail!("SSH 输入写入失败：远程通道停止接收数据"),
+                Ok(count) => self.written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error).context("SSH 输入写入失败"),
+            }
+        }
+        Ok(true)
+    }
 }
 
 /// 后台线程向 UI 事件通道发送消息；接收端关闭时直接忽略。
@@ -1189,6 +1245,77 @@ fn send_event_blocking(event_sender: &Sender<TerminalEvent>, event: TerminalEven
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 模拟正常部分写、网络背压和真正 I/O 失败，覆盖待写偏移而无需真实 SSH 服务。
+    struct ScriptedWriter {
+        steps: std::collections::VecDeque<std::io::Result<usize>>,
+        received: Vec<u8>,
+    }
+
+    impl Write for ScriptedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let count = self
+                .steps
+                .pop_front()
+                .unwrap_or(Ok(bytes.len()))?
+                .min(bytes.len());
+            self.received.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn terminal_input_resumes_after_partial_write_and_backpressure_without_duplicates() {
+        use std::io::ErrorKind;
+        let mut writer = ScriptedWriter {
+            steps: [
+                Ok(3),
+                Err(ErrorKind::WouldBlock.into()),
+                Err(ErrorKind::Interrupted.into()),
+                Ok(2),
+                Err(ErrorKind::WouldBlock.into()),
+                Ok(3),
+            ]
+            .into(),
+            received: Vec::new(),
+        };
+        let mut input = PendingTerminalInput {
+            bytes: b"abcdefgh".to_vec(),
+            written: 0,
+        };
+        assert!(!input.write_available(&mut writer).unwrap());
+        assert_eq!(input.written, 3);
+        assert!(!input.write_available(&mut writer).unwrap());
+        assert_eq!(input.written, 5);
+        assert!(input.write_available(&mut writer).unwrap());
+        assert_eq!(writer.received, b"abcdefgh");
+    }
+
+    #[test]
+    fn terminal_input_distinguishes_empty_input_zero_write_and_connection_failure() {
+        let mut writer = ScriptedWriter {
+            steps: [Ok(0), Err(std::io::ErrorKind::BrokenPipe.into())].into(),
+            received: Vec::new(),
+        };
+        assert!(
+            PendingTerminalInput {
+                bytes: Vec::new(),
+                written: 0
+            }
+            .write_available(&mut writer)
+            .unwrap()
+        );
+        let mut input = PendingTerminalInput {
+            bytes: b"x".to_vec(),
+            written: 0,
+        };
+        assert!(input.write_available(&mut writer).is_err());
+        assert!(input.write_available(&mut writer).is_err());
+        assert_eq!(input.written, 0);
+    }
 
     /// 构造不连接真实 SSH 的终端会话，便于验证 vt100 屏幕解析逻辑。
     fn terminal_session_for_test(rows: u16, cols: u16) -> TerminalSessionState {
@@ -1205,6 +1332,7 @@ mod tests {
                 TerminalCallbacks::default(),
             ),
             command_sender: Some(sender),
+            worker_guard: None,
             pending_host_key: None,
             rows,
             cols,

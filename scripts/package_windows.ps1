@@ -17,13 +17,28 @@ if (-not (Test-Path $IconPath)) {
 
 Push-Location $RootDir
 try {
-    cargo build --release
+    $BuildMessages = & cargo build --release --bin argus --message-format=json-render-diagnostics
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cargo 构建失败，停止打包并保留已有安装包。"
+    }
+    $BuildEvents = @($BuildMessages | ForEach-Object { $_ | ConvertFrom-Json })
+    $Finished = @($BuildEvents | Where-Object { $_.reason -eq "build-finished" })
+    $Executables = @($BuildEvents | Where-Object {
+        $_.reason -eq "compiler-artifact" -and $_.target.name -eq "argus" -and $_.executable
+    } | ForEach-Object { $_.executable } | Select-Object -Unique)
+    if ($Finished.Count -ne 1 -or -not $Finished[0].success -or $Executables.Count -ne 1) {
+        throw "本次构建未成功生成唯一的 Argus 可执行文件。"
+    }
+    $Executable = $Executables[0]
+    if (-not (Test-Path -PathType Leaf $Executable)) {
+        throw "构建产物不存在：$Executable"
+    }
 
     if (Test-Path $DistDir) {
         Remove-Item $DistDir -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-    Copy-Item (Join-Path $RootDir "target\release\argus.exe") (Join-Path $DistDir "argus.exe")
+    Copy-Item $Executable (Join-Path $DistDir "argus.exe")
     Copy-Item $IconPath (Join-Path $DistDir "Argus.ico")
 
     if (Test-Path $ZipPath) {

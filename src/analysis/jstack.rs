@@ -161,6 +161,60 @@ pub(crate) struct JstackFrequencyCell {
     pub stack_occurrences: Vec<JstackThreadStackOccurrence>,
 }
 
+/// 一个格子经过状态选择和堆栈过滤后的展示摘要，不修改原始样本。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct JstackVisibleCell {
+    /// 当前可见样本数。
+    pub count: usize,
+    /// 按可见样本重新计算的主状态；没有可见样本时为空。
+    pub state: Option<JstackThreadState>,
+    /// 主状态对应的首个可见样本原始序号，从 1 开始，供悬浮预览定位。
+    pub representative_occurrence_index: Option<usize>,
+}
+
+impl JstackFrequencyCell {
+    /// 遍历选中状态且未命中堆栈规则的样本；线程名规则由行级调用方判断。
+    ///
+    /// `thread_filter` 为空表示关闭配置过滤；返回原始记录引用，保留详情定位序号。
+    pub(crate) fn visible_occurrences<'a>(
+        &'a self,
+        active_states: &'a BTreeSet<JstackThreadState>,
+        thread_filter: Option<&'a JstackThreadFilter>,
+    ) -> impl Iterator<Item = &'a JstackThreadStackOccurrence> + 'a {
+        self.stack_occurrences.iter().filter(move |occurrence| {
+            active_states.contains(&occurrence.state)
+                && !thread_filter.is_some_and(|filter| filter.matches_stack_occurrence(occurrence))
+        })
+    }
+
+    /// 汇总可见样本，沿用聚合器的主状态平票优先级，并选择该状态的原始样本作预览。
+    ///
+    /// 原格子的 count/state 不参与计算，避免被过滤样本继续影响计数或状态颜色。
+    pub(crate) fn visible_summary(
+        &self,
+        active_states: &BTreeSet<JstackThreadState>,
+        thread_filter: Option<&JstackThreadFilter>,
+    ) -> JstackVisibleCell {
+        let mut count = 0;
+        let mut state_counts = BTreeMap::new();
+        let mut first_occurrence_indices = BTreeMap::new();
+        for occurrence in self.visible_occurrences(active_states, thread_filter) {
+            count += 1;
+            *state_counts.entry(occurrence.state).or_default() += 1;
+            first_occurrence_indices
+                .entry(occurrence.state)
+                .or_insert(occurrence.occurrence_index);
+        }
+        let state = dominant_state(&state_counts);
+        JstackVisibleCell {
+            count,
+            state,
+            representative_occurrence_index: state
+                .and_then(|state| first_occurrence_indices.get(&state).copied()),
+        }
+    }
+}
+
 /// 频率矩阵中的线程行。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JstackFrequencyRow {
@@ -199,9 +253,33 @@ pub(crate) struct JstackSkippedSnapshot {
     pub reason: String,
 }
 
+/// 按分析输入顺序记录首末日志名称，解析失败不会改变用户选择的范围。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JstackLogRange {
+    /// 展开目录后第一个候选日志的展示名称。
+    pub first_label: String,
+    /// 展开目录后最后一个候选日志的展示名称。
+    pub last_label: String,
+}
+
+impl JstackLogRange {
+    /// 按传入顺序提取首末名称；空输入返回 `None`，单文件的首末名称相同。
+    pub(crate) fn from_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Option<Self> {
+        let mut labels = labels.into_iter();
+        let first_label = labels.next()?;
+        let last_label = labels.last().unwrap_or(first_label);
+        Some(Self {
+            first_label: first_label.to_string(),
+            last_label: last_label.to_string(),
+        })
+    }
+}
+
 /// Jstack 分析结果，包含快照列、线程行和诊断统计。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JstackAnalysisResult {
+    /// 完整候选输入的首末日志名称，不因读取或解析失败而缩短。
+    pub log_range: Option<JstackLogRange>,
     /// 成功解析的快照列。
     pub snapshots: Vec<JstackSnapshot>,
     /// 按总频率排序后的线程行。
@@ -272,30 +350,55 @@ impl JstackThreadFilter {
         self.rules.is_empty()
     }
 
-    /// 判断一个频率行是否命中任意启用规则。
+    /// 线程名命中时隐藏整行；堆栈规则仅在至少一个样本且所有样本均被规则覆盖时隐藏整行。
+    ///
+    /// 空快照不参与判断，不同堆栈规则可以联合覆盖多个样本；保留任一业务样本就保留该行。
     pub(crate) fn matches_row(&self, row: &JstackFrequencyRow) -> bool {
         if self.is_empty() {
             return false;
         }
+        if self.matches_thread_name(&row.thread_name) {
+            return true;
+        }
 
+        let mut occurrences = row
+            .cells
+            .iter()
+            .flat_map(|cell| cell.stack_occurrences.iter())
+            .peekable();
+        occurrences.peek().is_some()
+            && occurrences.all(|occurrence| self.matches_stack_occurrence(occurrence))
+    }
+
+    /// 仅判断启用的线程名规则，线程名规则始终作用于整个线程身份。
+    pub(crate) fn matches_thread_name(&self, thread_name: &str) -> bool {
         let mut normalized_thread_name: Option<String> = None;
         self.rules.iter().any(|rule| match &rule.matcher {
             JstackFilterMatcher::ThreadName(pattern) => {
                 let thread_name =
-                    normalized_thread_name.get_or_insert_with(|| row.thread_name.to_lowercase());
+                    normalized_thread_name.get_or_insert_with(|| thread_name.to_lowercase());
                 thread_name_pattern_matches(pattern, thread_name)
             }
-            JstackFilterMatcher::StackSegment(pattern) => row.cells.iter().any(|cell| {
-                cell.stack_occurrences
-                    .iter()
-                    .any(|occurrence| occurrence.normalized_stack_text.contains(pattern.as_str()))
-            }),
+            JstackFilterMatcher::StackSegment(_) => false,
         })
     }
 
-    /// 统计每条启用规则命中的频率行数，结果按原配置列表索引归位；禁用规则位置为 0。
+    /// 仅判断单个样本是否命中任意启用堆栈规则，不把某次等待状态传播到其他样本。
+    pub(crate) fn matches_stack_occurrence(
+        &self,
+        occurrence: &JstackThreadStackOccurrence,
+    ) -> bool {
+        self.rules.iter().any(|rule| match &rule.matcher {
+            JstackFilterMatcher::ThreadName(_) => false,
+            JstackFilterMatcher::StackSegment(pattern) => {
+                occurrence.normalized_stack_text.contains(pattern.as_str())
+            }
+        })
+    }
+
+    /// 统计每条启用规则命中过至少一个样本的线程行数；线程名规则直接按行匹配。
     ///
-    /// 说明：统计需要逐规则判断，不能提前退出；线程名小写化按行只计算一次。
+    /// 命中统计不等于整行隐藏数；结果按原配置索引归位，禁用规则为 0，每条规则每行只计一次。
     pub(crate) fn rule_hit_counts(
         &self,
         rows: &[JstackFrequencyRow],
@@ -466,6 +569,9 @@ pub(crate) fn analyze_jstack_targets(
     }
 
     let total_files = snapshot_targets.len();
+    // 必须在读取前保存完整输入范围；首尾日志即使无效，也仍属于本次分析选择。
+    let log_range =
+        JstackLogRange::from_labels(snapshot_targets.iter().map(|target| target.label.as_str()));
     for target in snapshot_targets {
         // 取消只在文件边界生效，保证单个快照的解析结果不会被截断成半份。
         if cancel_token.load(Ordering::Relaxed) {
@@ -490,6 +596,7 @@ pub(crate) fn analyze_jstack_targets(
     }
 
     let mut result = build_analysis_result(snapshots, skipped_snapshots, total_files);
+    result.log_range = log_range;
     result.was_cancelled = was_cancelled;
     result
 }
@@ -593,6 +700,8 @@ pub(crate) fn build_analysis_result(
     skipped_snapshots: Vec<JstackSkippedSnapshot>,
     total_files: usize,
 ) -> JstackAnalysisResult {
+    let log_range =
+        JstackLogRange::from_labels(snapshots.iter().map(|snapshot| snapshot.label.as_str()));
     let mut thread_identities = BTreeSet::new();
     let mut per_snapshot_threads: Vec<HashMap<(String, String), JstackSnapshotThreadAggregate>> =
         Vec::with_capacity(snapshots.len());
@@ -669,6 +778,7 @@ pub(crate) fn build_analysis_result(
     });
 
     JstackAnalysisResult {
+        log_range,
         snapshots,
         rows,
         skipped_snapshots,
@@ -1024,6 +1134,28 @@ mod tests {
         build_analysis_result(vec![snapshot], Vec::new(), 1)
     }
 
+    /// 按输入顺序聚合快照，线程头保持一致以复现同一线程跨快照的状态变化。
+    fn analyze_filter_snapshots(texts: &[&str]) -> JstackAnalysisResult {
+        let snapshots = texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                parse_jstack_snapshot(
+                    SourceId(index + 1),
+                    format!("snapshot-{index}.log"),
+                    format!("/tmp/snapshot-{index}.log"),
+                    text,
+                )
+            })
+            .collect();
+        build_analysis_result(snapshots, Vec::new(), texts.len())
+    }
+
+    /// 构造同一线程身份的一次出现；堆栈内容决定该样本是否属于应隐藏的等待段。
+    fn filter_thread_sample(state: &str, frame: &str) -> String {
+        format!("\"http-worker\" #42\njava.lang.Thread.State: {state}\nat {frame}\n")
+    }
+
     /// 在分析结果中查找指定线程名所在的行。
     fn row_by_name<'a>(
         result: &'a crate::analysis::jstack::JstackAnalysisResult,
@@ -1049,6 +1181,30 @@ mod tests {
 "blocked-1" #3 prio=5 tid=0x0000000149012000 nid=0x1708 waiting for monitor entry
    java.lang.Thread.State: BLOCKED (on object monitor)
 "#
+    }
+
+    /// 文件名范围只保留输入首末，不排序；空输入和单文件不需要特殊展示占位值。
+    #[test]
+    fn log_range_preserves_input_order_and_empty_single_boundaries() {
+        assert_eq!(JstackLogRange::from_labels(std::iter::empty()), None);
+        assert_eq!(
+            JstackLogRange::from_labels(["线程.log"]),
+            Some(JstackLogRange {
+                first_label: "线程.log".to_string(),
+                last_label: "线程.log".to_string(),
+            })
+        );
+        assert_eq!(
+            JstackLogRange::from_labels(["z.log", "middle.log", "a.log"]),
+            Some(JstackLogRange {
+                first_label: "z.log".to_string(),
+                last_label: "a.log".to_string(),
+            })
+        );
+        assert_eq!(
+            build_analysis_result(Vec::new(), Vec::new(), 0).log_range,
+            None
+        );
     }
 
     /// 验证标准 Jstack 能解析线程名和状态。
@@ -1175,6 +1331,13 @@ mod tests {
 
         assert_eq!(result.snapshots[0].label, "001.log");
         assert_eq!(result.snapshots[1].label, "002.log");
+        assert_eq!(
+            result.log_range,
+            Some(JstackLogRange {
+                first_label: "001.log".to_string(),
+                last_label: "002.log".to_string(),
+            })
+        );
         assert_eq!(result.rows[0].thread_name, "busy");
         assert_eq!(result.rows[0].total_count, 3);
         assert_eq!(result.rows[0].cells[0].count, 1);
@@ -1302,6 +1465,239 @@ mod tests {
         );
     }
 
+    /// 默认 socket 等待段不能让其他快照中的业务执行记录整行消失，且不受输入顺序影响。
+    #[test]
+    fn stack_filter_preserves_busy_snapshots_in_both_input_orders() {
+        let rules =
+            crate::config::app_config::LogDisplayConfig::default().jstack_thread_filter_rules;
+        let idle_rule_index = rules
+            .iter()
+            .position(|rule| rule.pattern.contains("threadKeepalive"))
+            .expect("默认规则应包含 Resin keepalive 等待段");
+        let idle = format!("\"http-worker\" #42\n{}\n", rules[idle_rule_index].pattern);
+        let busy = filter_thread_sample("RUNNABLE", "app.Business.execute(Business.java:10)");
+        let filter = JstackThreadFilter::from_rules(&rules);
+        let active_states = BTreeSet::from([JstackThreadState::Runnable]);
+
+        for texts in [
+            [idle.as_str(), busy.as_str()],
+            [busy.as_str(), idle.as_str()],
+        ] {
+            let result = analyze_filter_snapshots(&texts);
+            let row = row_by_name(&result, "http-worker");
+            assert_eq!(row.total_count, 2, "过滤不能删除原始样本");
+            assert!(!filter.matches_row(row), "业务快照存在时必须保留线程行");
+            assert_eq!(
+                filter.rule_hit_counts(&result.rows, rules.len())[idle_rule_index],
+                1,
+                "规则命中过该线程，但不代表整行被隐藏"
+            );
+            for cell in &row.cells {
+                let summary = cell.visible_summary(&active_states, Some(&filter));
+                assert_eq!(
+                    summary.count,
+                    usize::from(texts[cell.snapshot_index] == busy)
+                );
+                assert_eq!(
+                    cell.visible_summary(&active_states, None).count,
+                    1,
+                    "关闭配置过滤应恢复等待样本"
+                );
+            }
+        }
+        let idle_only = analyze_filter_snapshots(&[&idle]);
+        assert!(filter.matches_row(row_by_name(&idle_only, "http-worker")));
+        let busy_only = analyze_filter_snapshots(&[&busy]);
+        assert!(!filter.matches_row(row_by_name(&busy_only, "http-worker")));
+    }
+
+    /// 不同规则联合覆盖全部样本才隐藏线程；没有该线程的快照既不阻止也不触发隐藏。
+    #[test]
+    fn stack_filter_requires_nonempty_samples_fully_covered_by_enabled_rules() {
+        let accept = filter_thread_sample("RUNNABLE", "app.Idle.accept(Idle.java:1)");
+        let park = filter_thread_sample("WAITING", "app.Idle.park(Idle.java:2)");
+        let missing = "\"other-worker\" #7\njava.lang.Thread.State: RUNNABLE\nat app.Other.run(Other.java:1)\n";
+        let result = analyze_filter_snapshots(&[&accept, missing, &park]);
+        let row = row_by_name(&result, "http-worker");
+        let rules = [
+            stack_segment_rule("app.Idle.accept"),
+            stack_segment_rule("app.Idle.park"),
+        ];
+        let filter = JstackThreadFilter::from_rules(&rules);
+        assert!(filter.matches_row(row));
+        assert_eq!(
+            filter.rule_hit_counts(std::slice::from_ref(row), rules.len()),
+            vec![1, 1]
+        );
+        assert!(!JstackThreadFilter::from_rules(&rules[..1]).matches_row(row));
+        assert!(row.cells[1].stack_occurrences.is_empty());
+
+        let mut empty = row.clone();
+        empty.cells = vec![row.cells[1].clone()];
+        empty.total_count = 0;
+        assert!(
+            !filter.matches_row(&empty),
+            "空样本集合不能因 all 的空真值被隐藏"
+        );
+        assert_eq!(
+            empty.cells[0].visible_summary(
+                &BTreeSet::from([JstackThreadState::Runnable]),
+                Some(&filter)
+            ),
+            JstackVisibleCell::default()
+        );
+    }
+
+    /// 线程名规则始终作用于整行，不应误入单样本堆栈过滤接口。
+    #[test]
+    fn thread_name_rules_hide_rows_without_matching_stack_occurrences() {
+        let result = analyze_single_snapshot(&filter_thread_sample(
+            "RUNNABLE",
+            "app.Business.run(Business.java:1)",
+        ));
+        let row = row_by_name(&result, "http-worker");
+        let filter = JstackThreadFilter::from_rules(&[thread_name_rule("HTTP-*")]);
+        assert!(filter.matches_thread_name("http-worker"));
+        assert!(filter.matches_row(row));
+        assert!(!filter.matches_stack_occurrence(&row.cells[0].stack_occurrences[0]));
+        assert_eq!(
+            row.cells[0]
+                .visible_summary(
+                    &BTreeSet::from([JstackThreadState::Runnable]),
+                    Some(&filter)
+                )
+                .count,
+            1,
+            "线程名隐藏由行调用方处理，格子只负责状态与堆栈规则"
+        );
+    }
+
+    /// 同一格子的计数、颜色和预览必须来自过滤后的样本，平票优先级与原聚合器保持一致。
+    #[test]
+    fn visible_cell_recomputes_count_state_and_original_representative_index() {
+        let text = [
+            filter_thread_sample("WAITING", "app.Idle.park(Idle.java:1)"),
+            filter_thread_sample("WAITING", "app.Idle.park(Idle.java:1)"),
+            filter_thread_sample("RUNNABLE", "app.Business.run(Business.java:2)"),
+            filter_thread_sample("BLOCKED", "app.Business.lock(Business.java:3)"),
+            filter_thread_sample("TIMED_WAITING", "app.Business.await(Business.java:4)"),
+            filter_thread_sample("WAITING", "app.Business.join(Business.java:5)"),
+        ]
+        .concat();
+        let result = analyze_single_snapshot(&text);
+        let row = row_by_name(&result, "http-worker");
+        let cell = &row.cells[0];
+        let filter = JstackThreadFilter::from_rules(&[stack_segment_rule("app.Idle.park")]);
+        let all_states = BTreeSet::from([
+            JstackThreadState::Runnable,
+            JstackThreadState::Blocked,
+            JstackThreadState::TimedWaiting,
+            JstackThreadState::Waiting,
+        ]);
+        assert_eq!(cell.count, 6);
+        assert_eq!(cell.state, Some(JstackThreadState::Waiting));
+        assert!(!filter.matches_row(row));
+        assert_eq!(
+            filter.rule_hit_counts(std::slice::from_ref(row), 1),
+            vec![1],
+            "同一规则命中多次仍只统计一行"
+        );
+        assert_eq!(
+            cell.visible_summary(&all_states, Some(&filter)),
+            JstackVisibleCell {
+                count: 4,
+                state: Some(JstackThreadState::Blocked),
+                representative_occurrence_index: Some(4),
+            }
+        );
+        assert_eq!(
+            cell.visible_summary(&all_states, None),
+            JstackVisibleCell {
+                count: 6,
+                state: Some(JstackThreadState::Waiting),
+                representative_occurrence_index: Some(1),
+            }
+        );
+        let runnable = BTreeSet::from([JstackThreadState::Runnable]);
+        assert_eq!(
+            cell.visible_summary(&runnable, Some(&filter)),
+            JstackVisibleCell {
+                count: 1,
+                state: Some(JstackThreadState::Runnable),
+                representative_occurrence_index: Some(3),
+            }
+        );
+        assert_eq!(
+            cell.visible_occurrences(&all_states, Some(&filter))
+                .map(|occurrence| occurrence.occurrence_index)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5, 6]
+        );
+        let waiting = BTreeSet::from([JstackThreadState::Waiting, JstackThreadState::TimedWaiting]);
+        assert_eq!(
+            cell.visible_summary(&waiting, Some(&filter)).state,
+            Some(JstackThreadState::TimedWaiting)
+        );
+        assert_eq!(
+            cell.visible_summary(&BTreeSet::new(), Some(&filter)),
+            JstackVisibleCell::default()
+        );
+    }
+
+    /// 关闭或禁用堆栈规则时保留样本；一个快照内的等待样本不能隐藏业务样本。
+    #[test]
+    fn disabled_stack_rules_do_not_hide_busy_occurrences_in_the_same_snapshot() {
+        let text = [
+            filter_thread_sample("RUNNABLE", "app.Idle.accept(Idle.java:1)"),
+            filter_thread_sample("RUNNABLE", "app.Business.run(Business.java:1)"),
+        ]
+        .concat();
+        let result = analyze_single_snapshot(&text);
+        let row = row_by_name(&result, "http-worker");
+        let rules = [
+            stack_segment_rule("app.Idle.accept"),
+            JstackThreadFilterRule {
+                enabled: false,
+                ..stack_segment_rule("app.Business.run")
+            },
+            JstackThreadFilterRule {
+                enabled: false,
+                ..thread_name_rule("http-worker")
+            },
+        ];
+        let filter = JstackThreadFilter::from_rules(&rules);
+        assert!(!filter.matches_row(row));
+        assert!(!filter.matches_thread_name("http-worker"));
+        assert_eq!(
+            filter.rule_hit_counts(&result.rows, rules.len()),
+            vec![1, 0, 0]
+        );
+        let active_states = BTreeSet::from([JstackThreadState::Runnable]);
+        assert_eq!(
+            row.cells[0].visible_summary(&active_states, Some(&filter)),
+            JstackVisibleCell {
+                count: 1,
+                state: Some(JstackThreadState::Runnable),
+                representative_occurrence_index: Some(2),
+            }
+        );
+        let disabled_rules = rules
+            .into_iter()
+            .map(|mut rule| {
+                rule.enabled = false;
+                rule
+            })
+            .collect::<Vec<_>>();
+        let disabled = JstackThreadFilter::from_rules(&disabled_rules);
+        assert!(!disabled.matches_row(row));
+        assert_eq!(
+            row.cells[0]
+                .visible_summary(&active_states, Some(&disabled))
+                .count,
+            2
+        );
+    }
+
     /// 验证含具体锁地址的线程段规则能匹配锁地址不同的真实堆栈。
     #[test]
     fn stack_segment_filter_normalizes_lock_addresses() {
@@ -1404,7 +1800,7 @@ mod tests {
             filter.rule_hit_counts(&result.rows, rules.len()),
             vec![1, 0, 1]
         );
-        // 命中行数与 matches_row 口径一致：命中任意启用规则即计入一次。
+        // 该用例每行只有一个样本，命中规则时恰好也会隐藏整行。
         let hit_rows = result
             .rows
             .iter()
@@ -1435,6 +1831,7 @@ mod tests {
         assert!(result.was_cancelled, "取消标记置位后结果必须标记为已取消");
         assert_eq!(result.snapshot_count(), 0, "取消后不应产出快照");
         assert_eq!(result.total_files, 0, "取消发生在展开阶段，不应进入读取");
+        assert_eq!(result.log_range, None, "未展开输入时没有日志文件范围");
 
         let _ = fs::remove_file(path);
     }
@@ -1470,8 +1867,99 @@ mod tests {
         assert_eq!(result.snapshot_count(), 1);
         assert_eq!(result.skipped_count(), 1);
         assert_eq!(result.thread_count(), 3);
+        assert_eq!(
+            result.log_range,
+            Some(JstackLogRange {
+                first_label: "ok.log".to_string(),
+                last_label: "missing.log".to_string(),
+            })
+        );
 
         let _ = fs::remove_file(path);
+    }
+
+    /// 首文件读取失败、末文件没有线程时，标题范围仍覆盖用户按顺序选择的全部输入。
+    #[test]
+    fn log_range_keeps_unreadable_first_and_empty_last_targets() {
+        let dir = isolated_test_dir("jstack-range-failed-boundaries");
+        fs::create_dir_all(&dir).expect("应能创建 Jstack 范围测试目录");
+        fs::write(dir.join("m-thread.log"), sample_jstack_text())
+            .expect("应能写入有效 Jstack 日志");
+        fs::write(dir.join("a-empty.log"), "").expect("应能写入空日志");
+        let targets = ["z-missing.log", "m-thread.log", "a-empty.log"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| {
+                jstack_target_for_local_file(SourceId(index + 1), dir.join(label))
+                    .expect("测试日志路径应包含文件名")
+            })
+            .collect();
+
+        let result = analyze_jstack_targets(
+            targets,
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+            test_cancel_token(),
+        );
+
+        assert_eq!(result.total_files, 3);
+        assert_eq!(result.snapshot_count(), 1);
+        assert_eq!(result.snapshots[0].label, "m-thread.log");
+        assert_eq!(result.skipped_count(), 2);
+        assert_eq!(
+            result.log_range,
+            Some(JstackLogRange {
+                first_label: "z-missing.log".to_string(),
+                last_label: "a-empty.log".to_string(),
+            })
+        );
+
+        fs::remove_dir_all(dir).expect("应能清理 Jstack 范围测试目录");
+    }
+
+    /// 没有候选日志的目录不产生范围；候选日志全无效时仍保留稳定的目录首末文件名。
+    #[test]
+    fn log_range_distinguishes_empty_directory_from_all_invalid_logs() {
+        let dir = isolated_test_dir("jstack-range-empty-and-invalid");
+        fs::create_dir_all(&dir).expect("应能创建 Jstack 范围测试目录");
+        let target = JstackAnalysisTarget {
+            source_id: SourceId(1),
+            location: SourceLocation::LocalPath(dir.clone()),
+            label: "thread-dir".to_string(),
+            path: dir.display().to_string(),
+        };
+        let empty = analyze_jstack_targets(
+            vec![target.clone()],
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+            test_cancel_token(),
+        );
+        assert_eq!(empty.total_files, 0);
+        assert_eq!(empty.log_range, None);
+
+        // 逆序创建，证明范围沿用目录遍历的稳定路径排序而不是文件系统枚举顺序。
+        fs::write(dir.join("30-invalid.log"), "INFO 普通日志，没有线程栈")
+            .expect("应能写入非 Jstack 日志");
+        fs::write(dir.join("10-empty.log"), "").expect("应能写入空日志");
+        fs::write(dir.join("00-ignore.bin"), sample_jstack_text()).expect("应能写入非候选文件");
+        let invalid = analyze_jstack_targets(
+            vec![target],
+            "UTF-8".to_string(),
+            LoaderConfig::default(),
+            test_cancel_token(),
+        );
+        assert_eq!(invalid.total_files, 2);
+        assert_eq!(invalid.snapshot_count(), 0);
+        assert_eq!(invalid.skipped_count(), 2);
+        assert_eq!(
+            invalid.log_range,
+            Some(JstackLogRange {
+                first_label: "10-empty.log".to_string(),
+                last_label: "30-invalid.log".to_string(),
+            })
+        );
+
+        fs::remove_dir_all(dir).expect("应能清理 Jstack 范围测试目录");
     }
 
     /// 验证本地目录目标会递归展开为多个 Jstack 快照，非候选文件不会进入统计。
@@ -1501,6 +1989,22 @@ mod tests {
         assert_eq!(result.snapshot_count(), 2);
         assert_eq!(result.skipped_count(), 0);
         assert_eq!(result.thread_count(), 3);
+        assert_eq!(
+            result
+                .snapshots
+                .iter()
+                .map(|snapshot| snapshot.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thread-b.txt", "thread-a.log"],
+            "目录展开按完整路径排序，范围必须与实际快照列顺序一致"
+        );
+        assert_eq!(
+            result.log_range,
+            Some(JstackLogRange {
+                first_label: "thread-b.txt".to_string(),
+                last_label: "thread-a.log".to_string(),
+            })
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

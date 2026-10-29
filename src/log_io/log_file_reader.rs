@@ -27,6 +27,9 @@ use crate::log_io::mmap_backend::MappedLogFile;
 pub(crate) const LARGE_LOG_THRESHOLD_BYTES: u64 = 30 * 1024 * 1024;
 /// 分页行缓存上限，避免大日志滚动后把已访问内容全部留在内存中。
 const PAGED_DECODE_CACHE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+/// 哈希表预留空间、行记录、Arc 头和淘汰队列的保守固定开销，空行也必须占用预算。
+const PAGED_CACHE_ENTRY_OVERHEAD_BYTES: usize =
+    2 * std::mem::size_of::<(usize, PagedLine)>() + 3 * std::mem::size_of::<usize>();
 /// 分页搜索批量读取字节上限；顺序扫描时按字节窗口合并行，避免逐行 seek/read。
 const PAGED_SEARCH_BATCH_BYTES: u64 = 8 * 1024 * 1024;
 /// 编码检测采样大小；大文件只读取开头样本判断编码。
@@ -362,7 +365,7 @@ impl PagedLogDocument {
         let mut ordered = Vec::with_capacity(end_line - start_line);
         let mut missing = Vec::new();
 
-        if let Ok(mut cache) = self.cache.lock() {
+        if let Ok(cache) = self.cache.lock() {
             for line_number in start_line..end_line {
                 if let Some(line) = cache.get(line_number) {
                     ordered.push(Some(line));
@@ -410,7 +413,7 @@ impl PagedLogDocument {
         let end_line = start_line
             .saturating_add(max_lines)
             .min(self.line_index.len());
-        let Ok(mut cache) = self.cache.lock() else {
+        let Ok(cache) = self.cache.lock() else {
             return (start_line..end_line).map(|_| None).collect();
         };
 
@@ -755,28 +758,25 @@ impl PagedLineCache {
         }
     }
 
-    /// 读取缓存行，并刷新最近使用顺序。
-    fn get(&mut self, line_number: usize) -> Option<PagedLine> {
-        let line = self.lines.get(&line_number).cloned()?;
-        self.order.retain(|stored| *stored != line_number);
-        self.order.push_back(line_number);
-        Some(line)
+    /// 命中只做哈希查询，按插入顺序淘汰，避免 UI 每读一行都遍历完整缓存。
+    fn get(&self, line_number: usize) -> Option<PagedLine> {
+        self.lines.get(&line_number).cloned()
     }
 
     /// 插入缓存行，并按总字节数淘汰旧行。
     fn insert(&mut self, line: PagedLine) {
         let line_number = line.line_number;
         if let Some(old) = self.lines.insert(line_number, line) {
-            self.used_bytes = self.used_bytes.saturating_sub(old.text.len());
+            self.used_bytes = self.used_bytes.saturating_sub(Self::entry_bytes(&old));
             if let Some(current) = self.lines.get(&line_number) {
-                self.used_bytes = self.used_bytes.saturating_add(current.text.len());
+                self.used_bytes = self.used_bytes.saturating_add(Self::entry_bytes(current));
             }
             self.evict_if_needed();
             return;
         }
 
         if let Some(current) = self.lines.get(&line_number) {
-            self.used_bytes = self.used_bytes.saturating_add(current.text.len());
+            self.used_bytes = self.used_bytes.saturating_add(Self::entry_bytes(current));
         }
         self.order.push_back(line_number);
         self.evict_if_needed();
@@ -789,7 +789,14 @@ impl PagedLineCache {
         self.order.clear();
     }
 
-    /// 淘汰最久未使用的行；重复 order 项会自然跳过。
+    /// 正文与固定结构共同计费，防止大量短行绕过缓存上限。
+    fn entry_bytes(line: &PagedLine) -> usize {
+        line.text
+            .len()
+            .saturating_add(PAGED_CACHE_ENTRY_OVERHEAD_BYTES)
+    }
+
+    /// 淘汰最早插入的行，命中查询不改变队列顺序。
     fn evict_if_needed(&mut self) {
         while self.used_bytes > self.limit_bytes {
             let Some(line_number) = self.order.pop_front() else {
@@ -798,7 +805,7 @@ impl PagedLineCache {
             let Some(line) = self.lines.remove(&line_number) else {
                 continue;
             };
-            self.used_bytes = self.used_bytes.saturating_sub(line.text.len());
+            self.used_bytes = self.used_bytes.saturating_sub(Self::entry_bytes(&line));
         }
     }
 }
@@ -970,6 +977,55 @@ fn display_column_count(line: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::{PAGED_CACHE_ENTRY_OVERHEAD_BYTES, PagedLine, PagedLineCache};
+    use std::sync::Arc;
+
+    /// 缓存命中不重排整个队列，短行和空行的结构开销也参与淘汰。
+    #[test]
+    fn paged_cache_hits_do_not_reorder_and_empty_lines_are_bounded() {
+        let mut cache = PagedLineCache::new(PAGED_CACHE_ENTRY_OVERHEAD_BYTES * 2);
+        let line = |line_number| PagedLine {
+            line_number,
+            text: Arc::from(""),
+            byte_offset: line_number as u64,
+        };
+        cache.insert(line(0));
+        cache.insert(line(1));
+        assert!(cache.get(0).is_some());
+        cache.insert(line(2));
+        assert!(cache.get(0).is_none());
+        assert!(cache.get(1).is_some());
+        assert_eq!(cache.lines.len(), 2);
+        assert_eq!(cache.order.len(), 2);
+        cache.insert(PagedLine {
+            text: Arc::from("新内容"),
+            ..line(1)
+        });
+        assert!(cache.get(1).is_none());
+        assert!(cache.get(2).is_some());
+        cache.clear();
+        assert_eq!(cache.used_bytes, 0);
+        assert!(cache.get(2).is_none());
+    }
+
+    /// 单行超出预算时不留在缓存，后续较小行仍可正常命中。
+    #[test]
+    fn paged_cache_rejects_oversized_entries_without_retaining_queue_items() {
+        let mut cache = PagedLineCache::new(PAGED_CACHE_ENTRY_OVERHEAD_BYTES + 1);
+        cache.insert(PagedLine {
+            line_number: 0,
+            text: Arc::from("超出预算"),
+            byte_offset: 0,
+        });
+        assert!(cache.lines.is_empty());
+        assert!(cache.order.is_empty());
+        cache.insert(PagedLine {
+            line_number: 1,
+            text: Arc::from("a"),
+            byte_offset: 1,
+        });
+        assert_eq!(cache.get(1).unwrap().text.as_ref(), "a");
+    }
     use super::{
         LARGE_LOG_THRESHOLD_BYTES, LogDocument, LogFileReader, OpenLogRequest, PagedLogDocument,
         split_decoded_lines,

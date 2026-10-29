@@ -41,11 +41,11 @@ if [[ ! -f "$ROOT_DIR/resources/windows/app.ico" ]]; then
 fi
 
 cd "$ROOT_DIR"
-cargo build --release --target "$TARGET"
+EXECUTABLE="$(cargo build --release --target "$TARGET" --bin argus --message-format=json-render-diagnostics | python3 "$ROOT_DIR/scripts/read_build_artifact.py")"
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
-cp "$ROOT_DIR/target/$TARGET/release/argus.exe" "$DIST_DIR/argus.exe"
+cp "$EXECUTABLE" "$DIST_DIR/argus.exe"
 cp "$ROOT_DIR/resources/windows/app.ico" "$DIST_DIR/Argus.ico"
 
 python3 - "$DIST_DIR" "$ZIP_PATH" <<'PY'

@@ -69,11 +69,13 @@ pub(crate) fn parse_skill_markdown(content: &str) -> Result<AgentSkill, String> 
     }
     // 名称同时用作目录名和 <SKILL name="..."> 注入边界：允许 Unicode 字母数字与 -_.，
     // 拒绝空白、路径分隔符、控制字符以及会破坏 XML 边界的引号与尖括号。
-    if !name.chars().all(|character| {
-        !character.is_whitespace()
-            && !character.is_control()
-            && !matches!(character, '"' | '\'' | '<' | '>' | '&' | '/' | '\\')
-    }) {
+    if matches!(name.as_str(), "." | "..")
+        || !name.chars().all(|character| {
+            !character.is_whitespace()
+                && !character.is_control()
+                && !matches!(character, '"' | '\'' | '<' | '>' | '&' | '/' | '\\' | ':')
+        })
+    {
         return Err("name 不能包含空白、引号、尖括号、& 或路径分隔符，且不能为空".to_string());
     }
     let description = description.unwrap_or_default();
@@ -242,6 +244,10 @@ pub(crate) fn import_skill_from_path(source: &Path, config_root: &Path) -> Resul
 
 /// 删除一个导入 Skill 的目录；返回是否存在该目录。
 pub(crate) fn remove_imported_skill(name: &str, config_root: &Path) -> Result<bool, String> {
+    let relative = validate_skill_entry_path(name)?;
+    if relative.components().count() != 1 {
+        return Err("Skill 名称必须是单层目录名".to_string());
+    }
     let target_dir = config_root.join("ai").join("skills").join(name);
     if !target_dir.exists() {
         return Ok(false);
@@ -298,10 +304,7 @@ fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
         let entry_name = entry
             .name()
             .map_err(|error| format!("读取 ZIP 条目名失败：{error}"))?;
-        if entry_name.starts_with('/') || entry_name.contains("..") {
-            return Err(format!("ZIP 条目路径不安全：{entry_name}"));
-        }
-        let relative = PathBuf::from(entry_name.replace('\\', "/"));
+        let relative = validate_skill_entry_path(&entry_name)?;
         if is_packaging_metadata(&relative) {
             continue;
         }
@@ -314,6 +317,23 @@ fn collect_zip_skill_files(source: &Path) -> Result<Vec<ImportFile>, String> {
         });
     }
     relocate_skill_root(files)
+}
+
+/// 先统一 ZIP 分隔符，再按跨平台路径语义拒绝绝对路径、父目录和盘符/备用数据流。
+fn validate_skill_entry_path(name: &str) -> Result<PathBuf, String> {
+    let normalized = name.replace('\\', "/");
+    let relative = PathBuf::from(&normalized);
+    if normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized.chars().any(char::is_control)
+        || relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!("ZIP 条目路径不安全：{name}"));
+    }
+    Ok(relative)
 }
 
 /// 把文件列表的公共顶层目录剥掉，使 SKILL.md 位于导入根。
@@ -521,6 +541,46 @@ mod tests {
         assert!(!home.join("evil.txt").exists());
     }
 
+    /// 根级 Skill 与反斜杠绝对路径组合曾绕过校验；所有平台均必须在落盘前拒绝。
+    #[test]
+    fn rejects_normalized_absolute_zip_paths_before_writing() {
+        use std::io::Write as _;
+        for entry_name in [
+            "\\outside.txt",
+            "\\\\server\\share\\outside.txt",
+            "C:\\outside.txt",
+            "C:outside.txt",
+            "..\\outside.txt",
+        ] {
+            assert!(
+                validate_skill_entry_path(entry_name).is_err(),
+                "路径应拒绝：{entry_name}"
+            );
+        }
+        let home = tempfile_dir("normalized-zip-path");
+        let outside = home.path().join("outside.txt");
+        let entry_name = outside.to_string_lossy().replace('/', "\\");
+        let zip_path = home.path().join("skill.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path).expect("应创建 ZIP"));
+        writer
+            .start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+            .expect("应创建 Skill");
+        writer
+            .write_all(b"---\nname: unsafe-fixture\ndescription: fixture\n---\nbody")
+            .expect("应写入 Skill");
+        writer
+            .start_file(entry_name, zip::write::SimpleFileOptions::default())
+            .expect("应创建测试条目");
+        writer.write_all(b"fixture").expect("应写入测试条目");
+        writer.finish().expect("应完成 ZIP");
+        assert!(import_skill_from_path(&zip_path, home.path()).is_err());
+        assert!(!outside.exists(), "不得写入导入目录之外");
+        assert!(
+            !home.path().join("ai").exists(),
+            "拒绝发生在任何目标文件写入之前"
+        );
+    }
+
     /// 验证 macOS Finder 压缩的 zip（含 __MACOSX 元数据）可以正常导入。
     #[test]
     fn imports_finder_zip_with_macos_metadata() {
@@ -592,7 +652,16 @@ mod tests {
     /// 验证破坏注入边界或目录语义的名称仍被拒绝。
     #[test]
     fn rejects_names_breaking_boundaries() {
-        for name in ["has space", "has\"quote", "has<angle>", "a/b", "a\\b"] {
+        for name in [
+            "has space",
+            "has\"quote",
+            "has<angle>",
+            "a/b",
+            "a\\b",
+            ".",
+            "..",
+            "C:relative",
+        ] {
             let content = format!("---\nname: {name}\ndescription: d\n---\nbody\n");
             assert!(
                 parse_skill_markdown(&content).is_err(),

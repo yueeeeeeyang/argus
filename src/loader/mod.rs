@@ -11,6 +11,7 @@ pub(crate) mod path_browser;
 pub(crate) mod source_registry;
 pub(crate) mod source_scanner;
 pub(crate) mod workspace;
+mod workspace_lease;
 
 pub(crate) use export::export_source_file;
 pub(crate) use log_source::{SourceId, SourceKind, SourceLocation, SourceMetadata, SourceTreeNode};

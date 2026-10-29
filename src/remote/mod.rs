@@ -5,6 +5,7 @@
 //! 主要功能：统一组织连接配置、SSH 公共能力、Git/SVN 仓库浏览、远程文件操作和终端会话。
 
 pub(crate) mod connection;
+mod download;
 pub(crate) mod git;
 pub(crate) mod remote_file;
 mod ssh;
@@ -12,3 +13,4 @@ mod svn;
 mod svn_http;
 pub(crate) mod terminal;
 pub(crate) mod terminal_input;
+mod worker;

@@ -76,7 +76,10 @@ impl ConfigManager {
         match Self::load_from_path(&self.settings_path) {
             Ok((config, warnings)) => (config, join_config_warnings(warnings)),
             Err(error) => (
-                AppConfig::default(),
+                AppConfig {
+                    has_loaded_connection_secrets: false,
+                    ..AppConfig::default()
+                },
                 Some(format!(
                     "读取设置文件 {} 失败，已使用默认设置：{error}",
                     self.settings_path.display()
@@ -173,12 +176,13 @@ fn join_config_warnings(warnings: Vec<String>) -> Option<String> {
 /// 返回值：需要展示给用户的非致命说明列表。
 fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
     let mut warnings = Vec::new();
+    config.has_loaded_connection_secrets = false;
     let mut stored = match load_connection_secrets(&config.connections.secrets) {
         Ok(secrets) => secrets,
         Err(error) => {
-            // 读取失败不阻断启动：保留设置文件中的明文，让用户仍能连接。
+            // 读取失败保留原始密文与连接，禁止随后用不完整集合覆盖凭据库。
             warnings.push(format!("读取系统凭据库中的连接凭据失败：{error}"));
-            ConnectionSecrets::new()
+            return warnings;
         }
     };
 
@@ -230,7 +234,8 @@ fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
     }
 
     // 把合并结果写回凭据库；写入失败时降级为本地密文，绝不丢弃已读到的机密。
-    if needs_write && !stored.is_empty() {
+    config.has_loaded_connection_secrets = warnings.is_empty();
+    if config.has_loaded_connection_secrets && needs_write && !stored.is_empty() {
         match store_connection_secrets(&stored) {
             Ok(SecretWriteOutcome::Keyring) => {
                 config.connections.secrets.clear();
@@ -265,6 +270,12 @@ fn hydrate_connection_secrets(config: &mut AppConfig) -> Vec<String> {
 ///
 /// 返回值：机密无法保存时返回错误，调用方中止整次保存，避免用户以为已保存成功。
 fn persist_connection_secrets(config: &mut AppConfig) -> Result<(), ConfigError> {
+    if !config.has_loaded_connection_secrets {
+        return Err(ConfigError::Secret(
+            "连接凭据尚未完整读取，已阻止保存以保护现有凭据；请恢复凭据库访问后重新打开应用"
+                .to_string(),
+        ));
+    }
     let mut secrets = ConnectionSecrets::new();
 
     for link in &mut config.connections.links {
@@ -389,6 +400,18 @@ username = "smbuser"
                 .iter()
                 .any(|warning| warning.contains("无法解密") || warning.contains("失败")),
             "无法恢复密码必须如实上报：{warnings:?}"
+        );
+        let original = fs::read(&path).expect("应读取原始密文配置");
+        let mut changed = loaded;
+        changed.appearance.theme_mode = "light.toml".to_string();
+        assert!(matches!(
+            ConfigManager::save_to_path(&path, &changed),
+            Err(ConfigError::Secret(_))
+        ));
+        assert_eq!(
+            fs::read(&path).expect("原配置应保留"),
+            original,
+            "无关设置保存不得覆盖未恢复的凭据"
         );
     }
 
@@ -710,6 +733,7 @@ private_key_passphrase = " phrase "
     fn save_then_load_round_trips_settings() {
         let path = test_settings_path("round-trip");
         let config = AppConfig {
+            has_loaded_connection_secrets: true,
             ai: Default::default(),
             appearance: AppearanceConfig {
                 theme_mode: "custom_dark.toml".to_string(),

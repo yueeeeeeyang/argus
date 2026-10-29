@@ -4,8 +4,10 @@
 //! 作者：Argus 开发团队
 //! 主要功能：发现 SVN HTTPv2 修订资源、枚举目录、读取文件，并安全处理认证与重定向。
 
-use std::fs::File;
-use std::io::{Read, Write};
+use super::download::DownloadFile;
+use super::worker::WorkerCancellation;
+
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -217,7 +219,14 @@ impl HttpSvnSession {
     }
 
     /// 把历史修订中的文件流式写入本地路径，不把完整文件保存在内存中。
-    pub(super) fn download_file(&self, path: &str, revision: u64, local_path: &Path) -> Result<()> {
+    pub(super) fn download_file(
+        &self,
+        path: &str,
+        revision: u64,
+        local_path: &Path,
+        cancellation: &WorkerCancellation,
+    ) -> Result<()> {
+        cancellation.ensure_active()?;
         let normalized_path = normalize_browse_path(path)?;
         let request_url = self.revision_url(&normalized_path, revision)?;
         let response = self
@@ -225,12 +234,11 @@ impl HttpSvnSession {
             .expect("非可选 DAV 请求必须返回响应")
             .0;
         let response = require_status(response, &[200], "下载 SVN HTTP 文件")?;
-        let mut local = File::create(local_path)
-            .with_context(|| format!("无法创建本地文件 {}", local_path.display()))?;
-        std::io::copy(&mut response.into_reader(), &mut local)
+        let mut local = DownloadFile::new(local_path)?;
+        local
+            .copy_from(&mut response.into_reader(), cancellation)
             .context("写入 SVN HTTP 下载文件失败")?;
-        local.flush().context("刷新 SVN HTTP 下载文件失败")?;
-        Ok(())
+        local.commit(cancellation)
     }
 
     /// 发送 OPTIONS 并解析 Subversion HTTPv2 必需的修订资源头。
@@ -818,6 +826,18 @@ mod tests {
             .read_file_bytes("hello.txt", 42, 1024)
             .expect("应读取文件正文");
         assert_eq!(bytes, b"hello\n");
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("hello.txt");
+        std::fs::write(&destination, b"old").unwrap();
+        session
+            .download_file(
+                "hello.txt",
+                42,
+                &destination,
+                &WorkerCancellation::default(),
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"hello\n");
 
         assert!(
             session
@@ -826,6 +846,57 @@ mod tests {
                 .is_none(),
             "不存在的资源不应报错"
         );
+    }
+
+    #[test]
+    fn interrupted_http_download_keeps_original_file() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
+                )
+                .unwrap();
+        });
+        let url = Url::parse(&format!("http://{address}/repo")).unwrap();
+        let session = HttpSvnSession {
+            agent: ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(2))
+                .build(),
+            base_url: url.clone(),
+            authorization: None,
+            revision_root_stub: url,
+            browse_root_segments: Vec::new(),
+            initial_youngest_revision: None,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("report.log");
+        std::fs::write(&destination, b"original").unwrap();
+        assert!(
+            session
+                .download_file(
+                    "report.log",
+                    1,
+                    &destination,
+                    &WorkerCancellation::default()
+                )
+                .is_err()
+        );
+        server.join().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     /// 验证 DAV multistatus 能区分自身、目录和普通文件，并解析大小与时间。

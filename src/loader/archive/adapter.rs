@@ -6,7 +6,8 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 use anyhow::{Context as _, Result, bail};
 
@@ -44,6 +45,12 @@ pub(crate) struct ArchiveCapabilities {
 
 /// 压缩包条目流式输出回调；适配器每读取到一段解压后字节就调用一次。
 pub(crate) type ArchiveEntryConsumer<'a> = dyn FnMut(&[u8]) -> Result<()> + 'a;
+
+/// 一次顺序提取中已完成路径校验和命名分配的条目。
+pub(crate) struct ArchiveEntryTarget {
+    pub entry_path: String,
+    pub target: PathBuf,
+}
 
 /// 标记“单个条目无法解码、可以跳过该条目继续加载”的错误。
 ///
@@ -102,6 +109,22 @@ pub(crate) trait ArchiveEntrySession: Send {
 pub(crate) trait ArchiveAdapter: Sync {
     /// 返回当前适配器的能力声明。
     fn capabilities(&self) -> ArchiveCapabilities;
+
+    /// 顺序容器必须一次遍历提取，避免每个条目重新解压前面的全部内容。
+    fn supports_batch_extraction(&self) -> bool {
+        false
+    }
+
+    /// 提取一批已校验条目；不支持该能力的适配器必须明确报错。
+    fn extract_entries_to_paths(
+        &self,
+        _path: &Path,
+        _targets: &[ArchiveEntryTarget],
+        _max_log_bytes: u64,
+        _cancellation: &CancellationToken,
+    ) -> Result<()> {
+        bail!("当前归档格式不支持顺序批量提取")
+    }
 
     /// 判断文件头样本是否匹配当前压缩格式。
     fn matches_header(&self, _sample: &[u8]) -> bool {

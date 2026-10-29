@@ -14,10 +14,15 @@ use std::thread;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+use sqlparser::{
+    dialect::GenericDialect,
+    keywords::Keyword,
+    tokenizer::{Token, Tokenizer, Whitespace},
+};
 
 use crate::config::LoaderConfig;
 use crate::loader::{SourceId, SourceLocation};
-use crate::log_io::encoding_detector::{decode_log_bytes, decode_log_bytes_with_known_encoding};
+use crate::log_io::encoding_detector::decode_log_bytes;
 
 use super::source_input::collect_analysis_files;
 
@@ -350,7 +355,7 @@ pub(crate) fn parse_runtime_request_text(
     let label = label.into();
     let path = path.into();
     let metadata = parse_runtime_file_name(&label)?;
-    let sql_records = parse_runtime_sql_records(text);
+    let sql_records = parse_runtime_sql_records(text)?;
     Ok(build_request_record(
         0,
         source_id,
@@ -896,125 +901,112 @@ fn format_ratio_for_search(ratio: f64) -> String {
 /// 参数说明：
 /// - `sql`：Runtime 日志中记录的 SQL 原文。
 ///
-/// 返回值：大小写和空白稳定、常见字面量替换为 `?` 的 SQL 结构文本。
-pub(crate) fn normalize_runtime_sql_structure(sql: &str) -> String {
-    let mut tokens = Vec::new();
-    let mut chars = sql.chars().peekable();
-    while let Some(ch) = chars.peek().copied() {
-        if ch.is_whitespace() {
-            chars.next();
-            continue;
-        }
-
-        if ch == '\'' || ch == '"' {
-            skip_quoted_runtime_sql_literal(&mut chars, ch);
-            tokens.push("?".to_string());
-            continue;
-        }
-
-        if runtime_sql_number_literal_starts(&mut chars) {
-            skip_runtime_sql_number_literal(&mut chars);
-            tokens.push("?".to_string());
-            continue;
-        }
-
-        if runtime_sql_identifier_starts(ch) {
-            let mut word = String::new();
-            while let Some(next) = chars.peek().copied() {
-                if runtime_sql_identifier_continues(next) {
-                    word.push(next.to_ascii_lowercase());
-                    chars.next();
-                } else {
-                    break;
-                }
+/// 返回值：大小写和空白稳定、常见字面量替换为 `?` 的 SQL 结构文本；引号或词法不完整时返回错误。
+pub(crate) fn normalize_runtime_sql_structure(sql: &str) -> Result<String> {
+    // 保留标识符的原始引号转义，避免不同列名、表名或运算符被错误合并。
+    let tokens = Tokenizer::new(&GenericDialect {}, sql)
+        .with_unescape(false)
+        .tokenize()
+        .context("SQL 结构归一化失败")?
+        .into_iter()
+        .filter(|token| match token {
+            // 优化器提示和可执行版本注释会影响计划，不能与普通注释一样丢弃。
+            Token::Whitespace(Whitespace::MultiLineComment(comment))
+                if comment.starts_with('+') || comment.starts_with('!') =>
+            {
+                true
             }
-            if matches!(word.as_str(), "true" | "false" | "null") {
-                tokens.push("?".to_string());
-            } else {
-                tokens.push(word);
-            }
+            Token::Whitespace(_) | Token::EOF => false,
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    let mut normalized = Vec::with_capacity(tokens.len());
+    for (index, token) in tokens.iter().enumerate() {
+        // 一元符号属于数字参数，二元加减属于 SQL 结构；空白不参与该判定。
+        if matches!(token, Token::Plus | Token::Minus)
+            && matches!(tokens.get(index + 1), Some(Token::Number(..)))
+            && runtime_sql_expects_operand(index.checked_sub(1).map(|previous| &tokens[previous]))
+        {
             continue;
         }
-
-        tokens.push(ch.to_string());
-        chars.next();
+        normalized.push(match token {
+            Token::Word(word) if word.quote_style.is_none() => match word.keyword {
+                Keyword::TRUE | Keyword::FALSE | Keyword::NULL => "?".to_string(),
+                _ => word.value.to_lowercase(),
+            },
+            Token::Number(..)
+            | Token::SingleQuotedString(_)
+            | Token::DoubleQuotedString(_)
+            | Token::TripleSingleQuotedString(_)
+            | Token::TripleDoubleQuotedString(_)
+            | Token::DollarQuotedString(_)
+            | Token::SingleQuotedByteStringLiteral(_)
+            | Token::DoubleQuotedByteStringLiteral(_)
+            | Token::TripleSingleQuotedByteStringLiteral(_)
+            | Token::TripleDoubleQuotedByteStringLiteral(_)
+            | Token::SingleQuotedRawStringLiteral(_)
+            | Token::DoubleQuotedRawStringLiteral(_)
+            | Token::TripleSingleQuotedRawStringLiteral(_)
+            | Token::TripleDoubleQuotedRawStringLiteral(_)
+            | Token::NationalStringLiteral(_)
+            | Token::QuoteDelimitedStringLiteral(_)
+            | Token::NationalQuoteDelimitedStringLiteral(_)
+            | Token::EscapedStringLiteral(_)
+            | Token::UnicodeStringLiteral(_)
+            | Token::HexStringLiteral(_) => "?".to_string(),
+            _ => token.to_string(),
+        });
     }
-
-    format_runtime_sql_tokens(&collapse_runtime_sql_in_lists(tokens))
+    Ok(format_runtime_sql_tokens(&collapse_runtime_sql_in_lists(
+        normalized,
+    )))
 }
 
-/// 跳过单引号或双引号包裹的 SQL 字面量，兼容 SQL 双写引号和反斜杠转义。
-fn skip_quoted_runtime_sql_literal(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    quote: char,
-) {
-    chars.next();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            let _ = chars.next();
-            continue;
-        }
-        if ch == quote {
-            if chars.peek().is_some_and(|next| *next == quote) {
-                chars.next();
-                continue;
-            }
-            break;
-        }
-    }
-}
-
-/// 判断当前位置是否可能是数字字面量开头，避免把标识符中的数字误归一化。
-fn runtime_sql_number_literal_starts(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
-    let mut cloned = chars.clone();
-    match cloned.next() {
-        Some(first) if first.is_ascii_digit() => true,
-        Some('-' | '+') => cloned.next().is_some_and(|next| next.is_ascii_digit()),
-        Some('.') => cloned.next().is_some_and(|next| next.is_ascii_digit()),
+/// 判断当前位置是否只能接收表达式操作数；其后的符号可视为数字字面量的一部分。
+fn runtime_sql_expects_operand(previous: Option<&Token>) -> bool {
+    match previous {
+        None => true,
+        Some(Token::Word(word)) if word.quote_style.is_none() => matches!(
+            word.keyword,
+            Keyword::SELECT
+                | Keyword::WHERE
+                | Keyword::HAVING
+                | Keyword::AND
+                | Keyword::OR
+                | Keyword::NOT
+                | Keyword::WHEN
+                | Keyword::THEN
+                | Keyword::ELSE
+                | Keyword::BETWEEN
+                | Keyword::VALUES
+                | Keyword::RETURNING
+                | Keyword::LIMIT
+                | Keyword::OFFSET
+        ),
+        Some(
+            Token::LParen
+            | Token::Comma
+            | Token::Eq
+            | Token::DoubleEq
+            | Token::Neq
+            | Token::Lt
+            | Token::Gt
+            | Token::LtEq
+            | Token::GtEq
+            | Token::Spaceship
+            | Token::Plus
+            | Token::Minus
+            | Token::Mul
+            | Token::Div
+            | Token::Mod
+            | Token::StringConcat
+            | Token::Ampersand
+            | Token::Pipe
+            | Token::Caret
+            | Token::Assignment,
+        ) => true,
         _ => false,
     }
-}
-
-/// 跳过整数、小数、科学计数法等常见数字字面量。
-fn skip_runtime_sql_number_literal(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    if chars.peek().is_some_and(|ch| matches!(ch, '-' | '+')) {
-        chars.next();
-    }
-    while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-        chars.next();
-    }
-    if chars.peek().is_some_and(|ch| *ch == '.') {
-        chars.next();
-        while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-            chars.next();
-        }
-    }
-    if chars.peek().is_some_and(|ch| matches!(ch, 'e' | 'E')) {
-        let mut cloned = chars.clone();
-        cloned.next();
-        if cloned.peek().is_some_and(|ch| matches!(ch, '-' | '+')) {
-            cloned.next();
-        }
-        if cloned.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-            chars.next();
-            if chars.peek().is_some_and(|ch| matches!(ch, '-' | '+')) {
-                chars.next();
-            }
-            while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                chars.next();
-            }
-        }
-    }
-}
-
-/// 判断字符是否可以作为 SQL 标识符开头。
-fn runtime_sql_identifier_starts(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-/// 判断字符是否可以继续组成 SQL 标识符。
-fn runtime_sql_identifier_continues(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
 /// 将 `in (?, ?, ?)` 一类参数列表折叠成 `in (?)`，避免列表长度影响频率聚合。
@@ -1231,18 +1223,14 @@ fn read_prepared_runtime_requests_parallel(
         .min(prepared_targets.len())
         .max(1);
     if worker_count == 1 {
-        let mut encoding_hint = None;
         return prepared_targets
             .into_iter()
+            .take_while(|_| !cancel_token.load(Ordering::Relaxed))
             .map(|target| {
                 let order = target.order;
                 (
                     order,
-                    read_prepared_runtime_request_outcome(
-                        target,
-                        default_encoding,
-                        &mut encoding_hint,
-                    ),
+                    read_prepared_runtime_request_outcome(target, default_encoding),
                 )
             })
             .collect();
@@ -1256,7 +1244,6 @@ fn read_prepared_runtime_requests_parallel(
             // 取消标记在线程间共享：已启动的工作线程在各自文件边界停止，未处理的文件不再产出结果。
             let cancel_token = cancel_token.clone();
             handles.push(scope.spawn(move || {
-                let mut encoding_hint = None;
                 chunk
                     .iter()
                     .cloned()
@@ -1265,11 +1252,7 @@ fn read_prepared_runtime_requests_parallel(
                         let order = target.order;
                         (
                             order,
-                            read_prepared_runtime_request_outcome(
-                                target,
-                                default_encoding,
-                                &mut encoding_hint,
-                            ),
+                            read_prepared_runtime_request_outcome(target, default_encoding),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1289,16 +1272,13 @@ fn read_prepared_runtime_requests_parallel(
 fn read_prepared_runtime_request_outcome(
     target: PreparedRuntimeTarget,
     default_encoding: &str,
-    encoding_hint: &mut Option<String>,
 ) -> RuntimeParseOutcome {
     let source_id = target.source_id;
     let label = target.label.clone();
-    read_prepared_runtime_request(target, default_encoding, encoding_hint).map_err(|error| {
-        RuntimeSkippedFile {
-            source_id,
-            label,
-            reason: error.to_string(),
-        }
+    read_prepared_runtime_request(target, default_encoding).map_err(|error| RuntimeSkippedFile {
+        source_id,
+        label,
+        reason: format!("{error:#}"),
     })
 }
 
@@ -1306,11 +1286,9 @@ fn read_prepared_runtime_request_outcome(
 fn read_prepared_runtime_request(
     target: PreparedRuntimeTarget,
     default_encoding: &str,
-    encoding_hint: &mut Option<String>,
 ) -> Result<RuntimeRequestRecord> {
-    let sql_records =
-        read_runtime_sql_records_from_location(&target.location, default_encoding, encoding_hint)
-            .with_context(|| format!("读取 Runtime 日志失败：{}", target.location.display_path()))?;
+    let sql_records = read_runtime_sql_records_from_location(&target.location, default_encoding)
+        .with_context(|| format!("读取 Runtime 日志失败：{}", target.location.display_path()))?;
 
     Ok(build_request_record(
         0,
@@ -1326,33 +1304,21 @@ fn read_prepared_runtime_request(
 fn read_runtime_sql_records_from_location(
     location: &SourceLocation,
     default_encoding: &str,
-    encoding_hint: &mut Option<String>,
 ) -> Result<Vec<RuntimeSqlRecord>> {
-    let bytes = match location {
-        SourceLocation::LocalPath(path) => {
-            if should_stream_runtime_utf8_file(default_encoding, encoding_hint)
-                && let Ok(records) = read_runtime_sql_records_from_utf8_file(path)
-            {
-                *encoding_hint = Some("UTF-8".to_string());
-                return Ok(records);
-            }
-            fs::read(path)
-                .with_context(|| format!("无法读取 Runtime 日志文件：{}", path.display()))?
-        }
-    };
-    Ok(parse_runtime_sql_records_from_bytes(
-        &bytes,
-        default_encoding,
-        encoding_hint,
-    ))
-}
-
-/// 判断当前批次是否可以尝试 UTF-8 流式解析，失败后仍会回退到完整解码。
-fn should_stream_runtime_utf8_file(default_encoding: &str, encoding_hint: &Option<String>) -> bool {
-    encoding_hint
-        .as_deref()
-        .map(|encoding| encoding.eq_ignore_ascii_case("UTF-8"))
-        .unwrap_or_else(|| default_encoding.eq_ignore_ascii_case("UTF-8"))
+    let SourceLocation::LocalPath(path) = location;
+    match read_runtime_sql_records_from_utf8_file(path) {
+        Ok(records) => return Ok(records),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidData) => {}
+        Err(error) => return Err(error),
+    }
+    // 每个文件独立识别编码；其他文件的 GBK/Big5 提示不能证明本文件采用相同编码。
+    let bytes =
+        fs::read(path).with_context(|| format!("无法读取 Runtime 日志文件：{}", path.display()))?;
+    let decoded = decode_log_bytes(&bytes, default_encoding);
+    parse_runtime_sql_records(&decoded.text)
 }
 
 /// 使用 UTF-8 流式读取本地 Runtime 日志，避免为大量小文件构造完整正文字符串。
@@ -1380,27 +1346,10 @@ fn read_runtime_sql_records_from_utf8_file(path: &Path) -> Result<Vec<RuntimeSql
         } else {
             trimmed
         };
-        parser.push_line(content);
+        parser.push_line(content)?;
     }
 
-    Ok(parser.finish())
-}
-
-/// 使用批次内的编码提示解码 Runtime 日志，并在成功后更新提示以加速同批后续文件。
-fn parse_runtime_sql_records_from_bytes(
-    bytes: &[u8],
-    default_encoding: &str,
-    encoding_hint: &mut Option<String>,
-) -> Vec<RuntimeSqlRecord> {
-    let decoded = if let Some(encoding_label) = encoding_hint.as_deref() {
-        decode_log_bytes_with_known_encoding(bytes, encoding_label, default_encoding)
-    } else {
-        decode_log_bytes(bytes, default_encoding)
-    };
-    if !decoded.encoding_label.eq_ignore_ascii_case("UTF-8-lossy") {
-        *encoding_hint = Some(decoded.encoding_label.clone());
-    }
-    parse_runtime_sql_records(&decoded.text)
+    parser.finish()
 }
 
 /// 从文件名中解析请求元信息。
@@ -1526,11 +1475,11 @@ struct RuntimeSqlParser {
 
 impl RuntimeSqlParser {
     /// 追加一行 Runtime 日志内容。
-    fn push_line(&mut self, line: &str) {
+    fn push_line(&mut self, line: &str) -> Result<()> {
         if let Some(record) = parse_runtime_sql_start_line(line) {
-            self.flush_current();
+            self.flush_current()?;
             self.current = Some(record);
-            return;
+            return Ok(());
         }
 
         // 不符合 5 个耗时前缀的行视为上一条 SQL 的换行续写；文件开头的杂散行直接忽略。
@@ -1540,20 +1489,22 @@ impl RuntimeSqlParser {
             }
             current.sql_text.push_str(line);
         }
+        Ok(())
     }
 
     /// 完成解析并返回 SQL 明细。
-    fn finish(mut self) -> Vec<RuntimeSqlRecord> {
-        self.flush_current();
-        self.records
+    fn finish(mut self) -> Result<Vec<RuntimeSqlRecord>> {
+        self.flush_current()?;
+        Ok(self.records)
     }
 
     /// 把当前 SQL 明细写入结果。
-    fn flush_current(&mut self) {
+    fn flush_current(&mut self) -> Result<()> {
         if let Some(mut record) = self.current.take() {
-            record.normalized_sql = normalize_runtime_sql_structure(&record.sql_text);
+            record.normalized_sql = normalize_runtime_sql_structure(&record.sql_text)?;
             self.records.push(record);
         }
+        Ok(())
     }
 }
 
@@ -1588,10 +1539,10 @@ fn parse_duration_token(text: &str) -> Option<(u64, &str)> {
 }
 
 /// 解析完整文本中的 SQL 明细。
-fn parse_runtime_sql_records(text: &str) -> Vec<RuntimeSqlRecord> {
+fn parse_runtime_sql_records(text: &str) -> Result<Vec<RuntimeSqlRecord>> {
     let mut parser = RuntimeSqlParser::default();
     for line in text.lines() {
-        parser.push_line(line);
+        parser.push_line(line)?;
     }
     parser.finish()
 }
@@ -1766,9 +1717,11 @@ mod tests {
     #[test]
     fn normalizes_runtime_sql_literals_to_structure() {
         let first =
-            normalize_runtime_sql_structure("SELECT * FROM user WHERE id = 1 AND name = 'Alice'");
+            normalize_runtime_sql_structure("SELECT * FROM user WHERE id = 1 AND name = 'Alice'")
+                .expect("应归一化 SQL");
         let second =
-            normalize_runtime_sql_structure("select  *  from user where id = 2 and name = 'Bob'");
+            normalize_runtime_sql_structure("select  *  from user where id = 2 and name = 'Bob'")
+                .expect("应归一化 SQL");
 
         assert_eq!(first, "select * from user where id = ? and name = ?");
         assert_eq!(first, second);
@@ -1779,7 +1732,7 @@ mod tests {
     fn normalizes_runtime_sql_common_parameter_shapes() {
         let normalized = normalize_runtime_sql_structure(
             "select * from orders where enabled = true and deleted_at is null and price > -1.5e3 and id in (1, 2, 3)",
-        );
+        ).expect("应归一化 SQL");
 
         assert_eq!(
             normalized,
@@ -1887,16 +1840,11 @@ mod tests {
             "\u{FEFF}1ms 0ms 0ms 0ms 0ms select *\nfrom table_a\n2ms 0ms 0ms 0ms 0ms select 2",
         )
         .expect("应能写入 UTF-8 Runtime 日志");
-        let mut encoding_hint = None;
 
-        let records = read_runtime_sql_records_from_location(
-            &SourceLocation::LocalPath(path),
-            "UTF-8",
-            &mut encoding_hint,
-        )
-        .expect("应能流式读取 Runtime 日志");
+        let records =
+            read_runtime_sql_records_from_location(&SourceLocation::LocalPath(path), "UTF-8")
+                .expect("应能流式读取 Runtime 日志");
 
-        assert_eq!(encoding_hint.as_deref(), Some("UTF-8"));
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].sql_text, "select *\nfrom table_a");
         assert_eq!(records[1].sql_text, "select 2");
@@ -2047,5 +1995,127 @@ mod tests {
         assert_eq!(result.requests[1].request_path, "/api/first");
         assert_eq!(result.requests[1].index, 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 验证双引号、反引号标识符保留名称与大小写，防止跨表错误合并。
+    #[test]
+    fn sql_normalization_preserves_quoted_identifiers() {
+        let normalize = |sql| normalize_runtime_sql_structure(sql).expect("应归一化合法 SQL");
+        assert_ne!(
+            normalize(r#"select "a" from "orders""#),
+            normalize(r#"select "b" from "users""#)
+        );
+        assert_ne!(
+            normalize(r#"select "Name" from t"#),
+            normalize(r#"select "name" from t"#)
+        );
+        assert_eq!(
+            normalize(r#"select "a""b" from `orders` where id=1"#),
+            r#"select "a""b" from `orders` where id = ?"#
+        );
+    }
+
+    /// 验证二元加减不会作为数值符号吞掉，空白变化也不会拆成不同结构。
+    #[test]
+    fn sql_normalization_distinguishes_operators_and_unary_signs() {
+        let normalize = |sql| normalize_runtime_sql_structure(sql).expect("应归一化合法 SQL");
+        assert_ne!(
+            normalize("select amount+1 from orders"),
+            normalize("select amount-1 from orders")
+        );
+        assert_eq!(
+            normalize("select amount+1 from orders"),
+            normalize("SELECT amount + 2 FROM orders")
+        );
+        assert_eq!(
+            normalize("select -1, +2, 1e-3, .5 from t where n > -3"),
+            "select ?, ?, ?, ? from t where n > ?"
+        );
+        assert_eq!(normalize("select n - -1 from t"), "select n - ? from t");
+        assert_ne!(
+            normalize("select n >= 1 from t"),
+            normalize("select n > 1 from t")
+        );
+    }
+
+    /// 验证字符串中的引号、注释符号和美元引号不会被当作 SQL 结构。
+    #[test]
+    fn sql_normalization_handles_escaped_and_dollar_literals() {
+        let normalized = normalize_runtime_sql_structure(
+            "select 'it''s -- text', $$value+1$$, $tag$other$tag$ from t /* ordinary comment */ where id in (1,2)",
+        ).expect("应正确处理引号与注释");
+        assert_eq!(normalized, "select ?, ?, ? from t where id in (?)");
+    }
+
+    /// 验证词法不完整不会静默产出错误聚合键，而是通过文件跳过信息报告失败。
+    #[test]
+    fn malformed_sql_is_reported_instead_of_grouped() {
+        assert!(normalize_runtime_sql_structure("select 'unfinished").is_err());
+        assert!(normalize_runtime_sql_structure("select /* unfinished").is_err());
+        let error = parse_runtime_request_text(
+            SourceId(1),
+            "100&u&_api_bad&1000&0&0.log",
+            "bad.log",
+            "1 0 0 0 0 select 'unfinished",
+        )
+        .expect_err("应报告不完整 SQL");
+        assert!(error.to_string().contains("SQL 结构归一化失败"));
+    }
+
+    /// 验证同批多个工作线程各自读取混合编码文件，前一个文件不污染后续 UTF-8。
+    #[test]
+    fn mixed_runtime_file_encodings_are_detected_independently() {
+        let dir = runtime_test_dir("mixed-encoding");
+        let mut targets = Vec::new();
+        for index in 0..(MAX_RUNTIME_PARSE_WORKERS * 2) {
+            let path = dir.join(format!("100&u&_api_mixed&{}&0&0.log", 1000 + index));
+            let text = "1 0 0 0 0 select '用户'";
+            let bytes = if index % 2 == 0 {
+                encoding_rs::GBK.encode(text).0.into_owned()
+            } else {
+                text.as_bytes().to_vec()
+            };
+            fs::write(&path, bytes).expect("应写入混合编码日志");
+            targets.push(RuntimeAnalysisTarget {
+                source_id: SourceId(index + 1),
+                label: path.file_name().unwrap().to_string_lossy().into_owned(),
+                path: path.display().to_string(),
+                location: SourceLocation::LocalPath(path),
+                kind: RuntimeAnalysisTargetKind::File,
+            });
+        }
+        let result = analyze_runtime_targets(
+            targets,
+            "UTF-8".into(),
+            LoaderConfig::default(),
+            test_cancel_token(),
+        );
+        assert!(
+            result.skipped_files.is_empty(),
+            "{:?}",
+            result.skipped_files
+        );
+        assert_eq!(result.requests.len(), MAX_RUNTIME_PARSE_WORKERS * 2);
+        assert!(
+            result
+                .requests
+                .iter()
+                .all(|request| request.sql_records[0].sql_text == "select '用户'")
+        );
+        fs::remove_dir_all(dir).expect("应清理混合编码测试目录");
+    }
+
+    /// 验证 UTF-8 快路径读失败会如实上报，不通过重复解码掩盖文件不存在。
+    #[test]
+    fn runtime_file_read_errors_are_reported() {
+        let dir = runtime_test_dir("missing-runtime");
+        let missing = SourceLocation::LocalPath(dir.join("missing.log"));
+        let error = read_runtime_sql_records_from_location(&missing, "UTF-8")
+            .expect_err("缺失文件必须失败");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        fs::remove_dir_all(dir).expect("应清理缺失文件测试目录");
     }
 }

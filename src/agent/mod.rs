@@ -6,6 +6,9 @@
 
 pub(crate) mod agent_loop;
 pub(crate) mod assistant;
+mod bash_policy;
+mod bounded_file;
+mod command_process;
 pub(crate) mod credential;
 pub(crate) mod model_gateway;
 pub(crate) mod runtime;
@@ -36,6 +39,9 @@ mod architecture_tests {
         "src/agent/source_scan.rs",
         "src/agent/session.rs",
         "src/agent/tools.rs",
+        "src/agent/bash_policy.rs",
+        "src/agent/bounded_file.rs",
+        "src/agent/command_process.rs",
     ];
     /// 主窗口业务模块的导入前缀；模型工具不得重新接回这些展示或交互流程。
     ///

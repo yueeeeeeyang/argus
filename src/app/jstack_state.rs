@@ -4,7 +4,7 @@
 //! 作者：Argus 开发团队
 //! 主要功能：定义分析任务状态、频率矩阵状态、线程名选区和可见行筛选逻辑
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -13,7 +13,7 @@ use gpui::UniformListScrollHandle;
 
 use crate::analysis::jstack::{
     JstackAnalysisResult, JstackFrequencyRow, JstackThreadFilter, JstackThreadStackOccurrence,
-    JstackThreadState,
+    JstackThreadState, JstackVisibleCell,
 };
 use crate::infra::text_selection::{TextSelectionGranularity, character_count, word_range_at};
 
@@ -35,7 +35,7 @@ pub(crate) enum JstackAnalysisTaskState {
 }
 
 /// 单个 Jstack 分析页签的持久状态。
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct JstackAnalysisState {
     /// 后台任务 generation，避免旧任务覆盖新结果。
     pub generation: usize,
@@ -51,7 +51,9 @@ pub(crate) struct JstackAnalysisState {
     pub selected_cell_key: Option<String>,
     /// 当前筛选条件下可见的结果行索引，避免矩阵滚动渲染时重复扫描全部线程。
     pub visible_row_indices: Vec<usize>,
-    /// 当前线程堆栈配置过滤隐藏的线程数量，用于标题统计展示。
+    /// 按原始行索引缓存筛选后的格子摘要；渲染不再重复扫描堆栈，原始样本保持不变。
+    pub visible_cells: HashMap<usize, Vec<JstackVisibleCell>>,
+    /// 配置规则完全排除的线程数量；仅部分样本被隐藏的线程不计入。
     pub filtered_row_count: usize,
     /// 线程频率矩阵行虚拟列表滚动句柄。
     pub row_scroll: UniformListScrollHandle,
@@ -59,6 +61,15 @@ pub(crate) struct JstackAnalysisState {
     pub task_state: JstackAnalysisTaskState,
     /// 在途分析任务的取消标记；任务进入终态后清空。
     pub cancel_token: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for JstackAnalysisState {
+    /// 标签关闭、来源替换和窗口释放都必须通知工作线程停止。
+    fn drop(&mut self) {
+        if let Some(cancel_token) = self.cancel_token.take() {
+            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// Jstack 分析矩阵左侧线程名的单行文本选区。
@@ -103,62 +114,68 @@ impl JstackAnalysisState {
     /// 参数说明：
     /// - `thread_filter`：设置页当前配置的线程过滤器。
     ///
-    /// 返回值：无；结果会写入 `visible_row_indices` 和 `filtered_row_count`。
+    /// 返回值：无；重建可见行、格子摘要和完全过滤的线程数，清除旧的格子选择。
     pub(crate) fn rebuild_visible_row_cache(&mut self, thread_filter: &JstackThreadFilter) {
+        self.selected_cell_key = None;
+        self.thread_name_selection = None;
+        self.thread_name_selection_drag = None;
         let JstackAnalysisTaskState::Ready(result) = &self.task_state else {
             self.visible_row_indices.clear();
+            self.visible_cells.clear();
             self.filtered_row_count = 0;
             return;
         };
 
         let should_filter_threads = self.is_thread_filter_enabled && !thread_filter.is_empty();
-        let (matched_row_count, visible_row_indices) = compute_visible_jstack_rows(
+        let visible = compute_visible_jstack_rows(
             result,
             &self.active_states,
             should_filter_threads.then_some(thread_filter),
         );
-        self.filtered_row_count = if should_filter_threads {
-            matched_row_count
-        } else {
-            0
-        };
-        self.visible_row_indices = visible_row_indices;
+        self.filtered_row_count = visible.filtered_row_count;
+        self.visible_row_indices = visible.indices;
+        self.visible_cells = visible.cells;
     }
 }
 
-/// 单遍计算 Jstack 可见行索引和被过滤规则命中的行数。
-///
-/// 说明：逐行只调用一次 `matches_row`，同时服务可见行缓存和标题过滤统计，
-/// 避免线程数较多时重复扫描堆栈文本；排序口径与历史版本保持一致。
+/// 一次筛选生成的可见矩阵，只存摘要，不复制完整堆栈。
+struct JstackVisibleRows {
+    indices: Vec<usize>,
+    cells: HashMap<usize, Vec<JstackVisibleCell>>,
+    filtered_row_count: usize,
+}
+
+/// 按样本应用状态与堆栈规则，用同一份摘要决定显示、计数和排序。
 fn compute_visible_jstack_rows(
     result: &JstackAnalysisResult,
     active_states: &BTreeSet<JstackThreadState>,
     thread_filter: Option<&JstackThreadFilter>,
-) -> (usize, Vec<usize>) {
+) -> JstackVisibleRows {
     // 不提前返回：状态全不选时可见行自然为空，但过滤统计仍按全部行计算，与历史口径一致。
     let mut matched_row_count = 0_usize;
     let mut visible_rows = Vec::new();
+    let mut visible_cells = HashMap::new();
     for (index, row) in result.rows.iter().enumerate() {
         let is_filtered = thread_filter.is_some_and(|filter| filter.matches_row(row));
         if is_filtered {
             matched_row_count += 1;
+            continue;
+        }
+        if active_states.is_empty() {
+            continue;
         }
 
-        // 按当前状态筛选后的实际命中次数排序，避免隐藏状态的历史出现次数把低命中线程顶到前面。
-        let visible_hit_count = row
+        // 一份样本被过滤不能抹掉同线程的其他执行记录；主状态也必须从剩余样本重算。
+        let cells = row
             .cells
             .iter()
-            .filter(|cell| {
-                cell.count > 0
-                    && cell
-                        .state
-                        .is_some_and(|state| active_states.contains(&state))
-            })
-            .map(|cell| cell.count)
-            .sum::<usize>();
+            .map(|cell| cell.visible_summary(active_states, thread_filter))
+            .collect::<Vec<_>>();
+        let visible_hit_count = cells.iter().map(|cell| cell.count).sum::<usize>();
 
-        if !is_filtered && visible_hit_count > 0 {
+        if visible_hit_count > 0 {
             visible_rows.push((index, visible_hit_count));
+            visible_cells.insert(index, cells);
         }
     }
 
@@ -174,10 +191,11 @@ fn compute_visible_jstack_rows(
                 })
         })
     });
-    (
-        matched_row_count,
-        visible_rows.into_iter().map(|(index, _)| index).collect(),
-    )
+    JstackVisibleRows {
+        filtered_row_count: matched_row_count,
+        indices: visible_rows.into_iter().map(|(index, _)| index).collect(),
+        cells: visible_cells,
+    }
 }
 
 /// 返回当前 Jstack 筛选条件下需要渲染的结果行索引。
@@ -189,7 +207,7 @@ pub(super) fn visible_jstack_row_indices(
     active_states: &BTreeSet<JstackThreadState>,
     thread_filter: Option<&JstackThreadFilter>,
 ) -> Vec<usize> {
-    compute_visible_jstack_rows(result, active_states, thread_filter).1
+    compute_visible_jstack_rows(result, active_states, thread_filter).indices
 }
 
 /// 为线程详情窗口收集当前可见状态下的代表堆栈记录。
@@ -199,6 +217,7 @@ pub(super) fn visible_jstack_row_indices(
 /// - `active_states`：当前启用的线程状态筛选。
 /// - `active_snapshot_index`：点击方块所在快照序号。
 /// - `active_occurrence_index`：点击方块在同一快照内选中的出现序号。
+/// - `thread_filter`：当前生效的配置过滤；关闭时传 `None`。
 ///
 /// 返回值：按快照顺序排列的堆栈记录，每个快照最多一条。
 pub(super) fn jstack_detail_occurrences_for_visible_cells(
@@ -206,37 +225,30 @@ pub(super) fn jstack_detail_occurrences_for_visible_cells(
     active_states: &BTreeSet<JstackThreadState>,
     active_snapshot_index: usize,
     active_occurrence_index: usize,
+    thread_filter: Option<&JstackThreadFilter>,
 ) -> Vec<JstackThreadStackOccurrence> {
-    if active_states.is_empty() {
+    if active_states.is_empty()
+        || thread_filter.is_some_and(|filter| filter.matches_thread_name(&row.thread_name))
+    {
         return Vec::new();
     }
 
     row.cells
         .iter()
         .filter_map(|cell| {
-            let cell_state = cell.state?;
-            if cell.count == 0 || !active_states.contains(&cell_state) {
-                return None;
-            }
-
-            if cell.snapshot_index == active_snapshot_index {
-                return cell
-                    .stack_occurrences
-                    .iter()
-                    .find(|occurrence| occurrence.occurrence_index == active_occurrence_index)
-                    .or_else(|| {
-                        cell.stack_occurrences
-                            .iter()
-                            .find(|occurrence| occurrence.state == cell_state)
-                    })
-                    .or_else(|| cell.stack_occurrences.first())
-                    .cloned();
-            }
-
-            cell.stack_occurrences
-                .iter()
-                .find(|occurrence| occurrence.state == cell_state)
-                .or_else(|| cell.stack_occurrences.first())
+            let summary = cell.visible_summary(active_states, thread_filter);
+            let representative = summary.representative_occurrence_index?;
+            let selected = (cell.snapshot_index == active_snapshot_index)
+                .then(|| {
+                    cell.visible_occurrences(active_states, thread_filter)
+                        .find(|occurrence| occurrence.occurrence_index == active_occurrence_index)
+                })
+                .flatten();
+            selected
+                .or_else(|| {
+                    cell.visible_occurrences(active_states, thread_filter)
+                        .find(|occurrence| occurrence.occurrence_index == representative)
+                })
                 .cloned()
         })
         .collect()

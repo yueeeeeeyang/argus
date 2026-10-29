@@ -64,6 +64,9 @@ const DEFAULT_JSTACK_STACK_SEGMENT_FILTER_ACCEPT: &str = concat!(
 /// 应用配置根对象，字段结构与 `~/.argus/settings.toml` 保持一致。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct AppConfig {
+    /// 凭据读取失败时禁止把缺失的内存值当成删除操作保存；此状态不写入配置文件。
+    #[serde(skip)]
+    pub has_loaded_connection_secrets: bool,
     /// AI 日志分析配置；API Key 不包含在该结构中。
     #[serde(default)]
     pub ai: AiConfig,
@@ -124,6 +127,7 @@ impl Default for AppConfig {
     /// 构造应用默认配置，保证无设置文件时也能稳定启动。
     fn default() -> Self {
         Self {
+            has_loaded_connection_secrets: true,
             ai: AiConfig::default(),
             appearance: AppearanceConfig::default(),
             loader: LoaderConfig::default(),
@@ -375,6 +379,7 @@ mod tests {
     #[test]
     fn normalized_clamps_numeric_settings() {
         let config = AppConfig {
+            has_loaded_connection_secrets: true,
             ai: AiConfig::default(),
             appearance: AppearanceConfig {
                 theme_mode: "light".to_string(),
