@@ -202,7 +202,7 @@ fn render_welcome_tile(
         .cursor_pointer()
         .hover(|this| this.opacity(0.82))
         .on_click(on_click)
-        .child(render_icon(icon, theme.info, 26.0))
+        .child(render_icon(icon, theme.foreground_muted, 26.0))
         .child(
             div()
                 .text_size(px(13.0))

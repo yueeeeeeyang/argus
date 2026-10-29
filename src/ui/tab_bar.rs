@@ -31,6 +31,8 @@ const TAB_BOTTOM_INSET: f32 = 8.0;
 const TAB_GAP: f32 = 6.0;
 /// 标签块圆角半径（像素）。
 const TAB_BLOCK_RADIUS: f32 = 6.0;
+/// 少量混入前景色，让激活页签在深色下提亮、浅色下加深，同时保留主题原有色调。
+const TAB_ACTIVE_FOREGROUND_RATIO: f32 = 0.08;
 /// 普通标签最小宽度；短标题标签在空间充足时可保持紧凑。
 const TAB_MIN_WIDTH: f32 = 72.0;
 /// 极窄窗口下的兜底宽度，优先保证不突破可视区域。
@@ -341,11 +343,14 @@ fn render_tab(
     let should_show_close = is_active || is_hovered;
     // 标签统一为标题栏内的灰色矩形块，与下方内容玻璃板之间留出窗口背景色间距。
     let background = if is_active {
-        theme.current_line
+        rgb(theme.current_line).blend(gpui::Rgba {
+            a: TAB_ACTIVE_FOREGROUND_RATIO,
+            ..rgb(theme.foreground)
+        })
     } else if is_hovered {
-        theme.status_bar
+        rgb(theme.status_bar)
     } else {
-        theme.title_bar
+        rgb(theme.title_bar)
     };
     let height = TAB_BLOCK_HEIGHT;
     let foreground = if is_active || is_hovered {
@@ -378,7 +383,7 @@ fn render_tab(
                 .items_center()
                 .gap_1()
                 .rounded(px(TAB_BLOCK_RADIUS))
-                .bg(rgb(background))
+                .bg(background)
                 .text_color(rgb(foreground))
                 .when(is_loading, |this| {
                     this.child(render_loading_spinner(
