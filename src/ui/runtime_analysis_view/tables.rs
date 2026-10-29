@@ -84,7 +84,7 @@ pub(crate) fn render_request_details_table(
     let Some(summary) = filtered_summary_for_request_path(result, request_path, state) else {
         return render_empty_message("未找到当前请求地址的详情。", theme);
     };
-    let sorted_indices = cached_sorted_request_indices(result, &summary, state);
+    let sorted_indices = cached_sorted_request_indices(result, summary, state);
     let row_count = sorted_indices.len();
     let scroll_handle = state.request_scroll.clone();
 
@@ -97,7 +97,7 @@ pub(crate) fn render_request_details_table(
         .overflow_hidden()
         .child(render_request_details_topbar(
             analysis_id,
-            &summary,
+            summary,
             theme,
             cx,
         ))
@@ -279,7 +279,9 @@ pub(crate) fn render_sql_frequency_table(
     let rows = sql_frequency_rows(result, state);
     let row_count = rows.len();
     let scroll_handle = state.sql_frequency_scroll.clone();
-    let empty_message = if state.is_sql_frequency_rows_computing {
+    let empty_message = if state.is_filter_pending || state.is_filter_computing {
+        "正在应用过滤条件..."
+    } else if state.is_sql_analysis_computing {
         "正在计算 SQL 频率分析..."
     } else {
         "当前过滤条件下没有 SQL 频率数据。"
@@ -452,7 +454,9 @@ pub(crate) fn render_slow_sql_table(
     let rows = slow_sql_rows(result, state);
     let row_count = rows.len();
     let scroll_handle = state.slow_sql_scroll.clone();
-    let empty_message = if state.is_slow_sql_rows_computing {
+    let empty_message = if state.is_filter_pending || state.is_filter_computing {
+        "正在应用过滤条件..."
+    } else if state.is_sql_analysis_computing {
         "正在计算慢 SQL 分析..."
     } else {
         "当前过滤条件下没有慢 SQL 数据。"

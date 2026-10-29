@@ -20,6 +20,7 @@ use crate::infra::text_selection::{
     TextSelectionGranularity, character_count, slice_character_range, word_range_at,
 };
 
+use super::runtime_view_actions::RuntimeViewComputationState;
 use super::types::{
     RuntimeDateTimePart, RuntimeFilterInputKind, RuntimePickerTimeEdit, TextInputState,
 };
@@ -282,6 +283,8 @@ pub(crate) struct RuntimeAnalysisState {
     pub filter_input_generation: usize,
     /// 过滤后台任务 generation，用于丢弃过期计算结果。
     pub filter_task_generation: usize,
+    /// 过滤计算取消标记；输入变化后立即停止旧扫描。
+    pub filter_cancel_token: Option<Arc<AtomicBool>>,
     /// 是否存在等待防抖应用的过滤输入。
     pub is_filter_pending: bool,
     /// 是否正在后台构建过滤结果缓存。
@@ -318,18 +321,16 @@ pub(crate) struct RuntimeAnalysisState {
     pub slow_sql_detail_sql: Option<String>,
     /// Runtime 三类结果共享的过滤行缓存，避免切换页面和滚动时重复全量扫描。
     pub runtime_filter_rows_cache: Option<RuntimeAnalysisFilterRows>,
-    /// SQL 频率分析后台计算 generation，用于丢弃过期结果。
-    pub sql_frequency_rows_task_generation: usize,
-    /// 慢 SQL 分析后台计算 generation，用于丢弃过期结果。
-    pub slow_sql_rows_task_generation: usize,
-    /// SQL 频率分析是否正在后台计算。
-    pub is_sql_frequency_rows_computing: bool,
-    /// 慢 SQL 分析是否正在后台计算。
-    pub is_slow_sql_rows_computing: bool,
-    /// 当前正在计算的 SQL 频率过滤快照。
-    pub sql_frequency_rows_computing_filter: Option<RuntimeSqlAnalysisFilterSnapshot>,
-    /// 当前正在计算的慢 SQL 过滤快照。
-    pub slow_sql_rows_computing_filter: Option<RuntimeSqlAnalysisFilterSnapshot>,
+    /// 共用 SQL 聚合后台任务 generation，频率和慢 SQL 一次扫描生成。
+    pub sql_analysis_task_generation: usize,
+    /// 是否正在后台构建共用 SQL 聚合。
+    pub is_sql_analysis_computing: bool,
+    /// 当前共用 SQL 聚合任务使用的过滤快照。
+    pub sql_analysis_computing_filter: Option<RuntimeSqlAnalysisFilterSnapshot>,
+    /// 共用 SQL 聚合取消标记。
+    pub sql_analysis_cancel_token: Option<Arc<AtomicBool>>,
+    /// 当前视图详情和排序任务的去重、取消状态。
+    pub view_computation: RuntimeViewComputationState,
     /// SQL 频率分析过滤结果缓存，避免滚动重绘时重复全量聚合。
     pub sql_frequency_rows_cache: RefCell<Option<RuntimeSqlFrequencyRowsCache>>,
     /// SQL 频率详情过滤结果缓存，避免详情滚动重绘时重复全量扫描。
@@ -353,11 +354,33 @@ pub(crate) struct RuntimeAnalysisState {
 }
 
 impl Drop for RuntimeAnalysisState {
-    /// 状态具有唯一所有者，释放状态时同步取消仍在读取文件的后台任务。
+    /// 状态具有唯一所有者，释放时同步取消读取、过滤、聚合和视图任务。
     fn drop(&mut self) {
         if let Some(cancel_token) = self.cancel_token.take() {
             cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.cancel_derived_tasks();
+    }
+}
+
+impl RuntimeAnalysisState {
+    /// 停止派生计算并作废其结果，不清除仍在展示的已应用过滤缓存。
+    pub(crate) fn cancel_derived_tasks(&mut self) {
+        for cancel_token in [
+            self.filter_cancel_token.take(),
+            self.sql_analysis_cancel_token.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.filter_task_generation = self.filter_task_generation.saturating_add(1);
+        self.sql_analysis_task_generation = self.sql_analysis_task_generation.saturating_add(1);
+        self.is_filter_computing = false;
+        self.is_sql_analysis_computing = false;
+        self.sql_analysis_computing_filter = None;
+        self.view_computation.cancel();
     }
 }
 
@@ -635,6 +658,7 @@ pub(super) fn apply_runtime_filter_snapshot_to_state(
 
 /// 过滤结果真正生效后清理表格滚动、选区和旧的局部缓存。
 pub(super) fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysisState) {
+    state.cancel_derived_tasks();
     state.summary_scroll = UniformListScrollHandle::new();
     state.request_scroll = UniformListScrollHandle::new();
     state.sql_scroll = UniformListScrollHandle::new();
@@ -656,13 +680,6 @@ pub(super) fn reset_runtime_filter_result_view_state(state: &mut RuntimeAnalysis
     state.summary_rows_cache.borrow_mut().take();
     state.request_indices_cache.borrow_mut().take();
     state.sql_indices_cache.borrow_mut().take();
-    state.sql_frequency_rows_task_generation =
-        state.sql_frequency_rows_task_generation.saturating_add(1);
-    state.slow_sql_rows_task_generation = state.slow_sql_rows_task_generation.saturating_add(1);
-    state.is_sql_frequency_rows_computing = false;
-    state.is_slow_sql_rows_computing = false;
-    state.sql_frequency_rows_computing_filter = None;
-    state.slow_sql_rows_computing_filter = None;
     state.scrollbar_drag = None;
 }
 

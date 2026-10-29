@@ -24,6 +24,7 @@ mod menu_actions;
 mod remote_state;
 mod runtime_actions;
 mod runtime_state;
+mod runtime_view_actions;
 mod search_state;
 mod source_tree_actions;
 mod types;
@@ -48,9 +49,8 @@ use crate::analysis::jstack::{
 };
 use crate::analysis::runtime::{
     RuntimeAnalysisFilterRows, RuntimeAnalysisResult, RuntimeAnalysisTarget,
-    RuntimeAnalysisTargetKind, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
-    analyze_runtime_targets, build_runtime_analysis_filter_rows,
-    build_runtime_slow_sql_rows_for_filter, build_runtime_sql_frequency_rows_for_filter,
+    RuntimeAnalysisTargetKind, RuntimeSqlAnalysisRows, analyze_runtime_targets,
+    build_runtime_analysis_filter_rows, build_runtime_sql_analysis_rows,
     parse_runtime_analysis_filter_criteria,
 };
 use crate::config::app_config::{

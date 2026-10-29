@@ -4,7 +4,6 @@
 //! 作者：Argus 开发团队
 //! 主要功能：展示 Runtime 请求总览、请求详情和 SQL 明细三层可排序表格。
 
-use std::cmp::Ordering;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -13,24 +12,17 @@ use chrono::{Datelike, Local, TimeZone, Timelike};
 use crate::analysis::runtime::{
     RuntimeAnalysisFilterCriteria, RuntimeAnalysisResult, RuntimeRequestRecord,
     RuntimeRequestSummary, RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow,
-    RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord, filtered_runtime_summary_from_indices,
-    parse_runtime_analysis_filter_criteria, parse_runtime_filter_time_value,
-    runtime_request_matches_cross_filters as domain_runtime_request_matches_cross_filters,
-    runtime_request_matches_keyword as domain_runtime_request_matches_keyword,
-    runtime_sql_matches_keyword as domain_runtime_sql_matches_keyword,
-    sort_runtime_sql_frequency_detail_rows,
+    RuntimeSqlFrequencyDetailRow, RuntimeSqlRecord, parse_runtime_analysis_filter_criteria,
+    parse_runtime_filter_time_value,
 };
 use crate::app::{
     AppTextInputTarget, ArgusApp, RUNTIME_SQL_COLLAPSED_ROW_HEIGHT, RuntimeAnalysisResultType,
     RuntimeAnalysisState, RuntimeAnalysisTaskState, RuntimeAnalysisView, RuntimeFilterInputKind,
-    RuntimeRequestIndicesCache, RuntimeRequestSortKey, RuntimeScrollbarDrag, RuntimeScrollbarTable,
-    RuntimeSortDirection, RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey,
-    RuntimeSqlFrequencyDetailRowsCache, RuntimeSqlIndicesCache, RuntimeSqlSortKey,
-    RuntimeSqlTextDialog, RuntimeSqlTextSelection, RuntimeSummaryRowsCache, RuntimeSummarySortKey,
-    RuntimeTableCellSelection, TextInputState,
+    RuntimeRequestSortKey, RuntimeScrollbarDrag, RuntimeScrollbarTable, RuntimeSortDirection,
+    RuntimeSqlAnalysisFilterSnapshot, RuntimeSqlCellKey, RuntimeSqlSortKey, RuntimeSqlTextDialog,
+    RuntimeSqlTextSelection, RuntimeSummarySortKey, RuntimeTableCellSelection, TextInputState,
 };
 use crate::fonts::{ARGUS_LOG_FONT_FAMILY, ARGUS_UI_FONT_FAMILY};
-use crate::infra::perf::PerfSpan;
 use crate::infra::text_selection::{
     TextSelectionGranularity, byte_index_for_character, char_column_for_byte_index, character_count,
 };
@@ -145,10 +137,11 @@ pub(crate) use tables::*;
 
 /// 渲染 Runtime 分析页签主体。
 pub(crate) fn render(
-    app: &ArgusApp,
+    app: &mut ArgusApp,
     analysis_id: usize,
     cx: &mut Context<ArgusApp>,
 ) -> impl IntoElement {
+    app.ensure_runtime_view_rows(analysis_id, cx);
     let theme = app.theme.clone();
     let Some(state) = app.runtime_analysis_state(analysis_id) else {
         return render_missing_state(app, &theme);
@@ -337,77 +330,95 @@ fn render_ready_view(
     cx: &mut Context<ArgusApp>,
 ) -> AnyElement {
     let sql_dialog_focus_handle = analysis_focus_handle.clone();
-    let content = match state.result_type {
-        RuntimeAnalysisResultType::Statistics => match &state.view {
-            RuntimeAnalysisView::Summary => {
-                render_summary_table(analysis_id, state, result, analysis_focus_handle, theme, cx)
-                    .into_any_element()
-            }
-            RuntimeAnalysisView::RequestDetails { request_path } => render_request_details_table(
-                analysis_id,
-                state,
-                result,
-                request_path,
-                analysis_focus_handle,
-                theme,
-                cx,
-            ),
-            RuntimeAnalysisView::SqlList {
-                request_path,
-                request_index,
-            } => {
-                let Some(request) = result.requests.get(*request_index) else {
-                    return render_empty_message("未找到当前 Runtime 请求记录。", theme);
-                };
-                render_sql_table(
+    let content = if !state.has_runtime_view_rows() {
+        render_empty_message("正在准备表格数据...", theme)
+    } else {
+        match state.result_type {
+            RuntimeAnalysisResultType::Statistics => match &state.view {
+                RuntimeAnalysisView::Summary => render_summary_table(
                     analysis_id,
                     state,
-                    request_path,
-                    request,
+                    result,
                     analysis_focus_handle,
                     theme,
                     cx,
                 )
-                .into_any_element()
-            }
-        },
-        RuntimeAnalysisResultType::SqlFrequency => match state.sql_frequency_detail_sql.as_ref() {
-            Some(normalized_sql) => render_sql_frequency_detail_table(
-                analysis_id,
-                state,
-                result,
-                normalized_sql,
-                analysis_focus_handle,
-                theme,
-                cx,
-            )
-            .into_any_element(),
-            None => render_sql_frequency_table(
-                analysis_id,
-                state,
-                result,
-                analysis_focus_handle,
-                theme,
-                cx,
-            )
-            .into_any_element(),
-        },
-        RuntimeAnalysisResultType::SlowSql => match state.slow_sql_detail_sql.as_ref() {
-            Some(normalized_sql) => render_slow_sql_detail_table(
-                analysis_id,
-                state,
-                result,
-                normalized_sql,
-                analysis_focus_handle,
-                theme,
-                cx,
-            )
-            .into_any_element(),
-            None => {
-                render_slow_sql_table(analysis_id, state, result, analysis_focus_handle, theme, cx)
+                .into_any_element(),
+                RuntimeAnalysisView::RequestDetails { request_path } => {
+                    render_request_details_table(
+                        analysis_id,
+                        state,
+                        result,
+                        request_path,
+                        analysis_focus_handle,
+                        theme,
+                        cx,
+                    )
+                }
+                RuntimeAnalysisView::SqlList {
+                    request_path,
+                    request_index,
+                } => {
+                    let Some(request) = result.requests.get(*request_index) else {
+                        return render_empty_message("未找到当前 Runtime 请求记录。", theme);
+                    };
+                    render_sql_table(
+                        analysis_id,
+                        state,
+                        request_path,
+                        request,
+                        analysis_focus_handle,
+                        theme,
+                        cx,
+                    )
                     .into_any_element()
+                }
+            },
+            RuntimeAnalysisResultType::SqlFrequency => {
+                match state.sql_frequency_detail_sql.as_ref() {
+                    Some(normalized_sql) => render_sql_frequency_detail_table(
+                        analysis_id,
+                        state,
+                        result,
+                        normalized_sql,
+                        analysis_focus_handle,
+                        theme,
+                        cx,
+                    )
+                    .into_any_element(),
+                    None => render_sql_frequency_table(
+                        analysis_id,
+                        state,
+                        result,
+                        analysis_focus_handle,
+                        theme,
+                        cx,
+                    )
+                    .into_any_element(),
+                }
             }
-        },
+            RuntimeAnalysisResultType::SlowSql => match state.slow_sql_detail_sql.as_ref() {
+                Some(normalized_sql) => render_slow_sql_detail_table(
+                    analysis_id,
+                    state,
+                    result,
+                    normalized_sql,
+                    analysis_focus_handle,
+                    theme,
+                    cx,
+                )
+                .into_any_element(),
+                None => render_slow_sql_table(
+                    analysis_id,
+                    state,
+                    result,
+                    analysis_focus_handle,
+                    theme,
+                    cx,
+                )
+                .into_any_element(),
+            },
+        }
     };
 
     div()
@@ -764,12 +775,12 @@ mod tests {
             sql_frequency_detail_sql: None,
             slow_sql_detail_sql: None,
             runtime_filter_rows_cache: None,
-            sql_frequency_rows_task_generation: 0,
-            slow_sql_rows_task_generation: 0,
-            is_sql_frequency_rows_computing: false,
-            is_slow_sql_rows_computing: false,
-            sql_frequency_rows_computing_filter: None,
-            slow_sql_rows_computing_filter: None,
+            sql_analysis_task_generation: 0,
+            is_sql_analysis_computing: false,
+            sql_analysis_computing_filter: None,
+            sql_analysis_cancel_token: None,
+            filter_cancel_token: None,
+            view_computation: Default::default(),
             sql_frequency_rows_cache: RefCell::new(None),
             sql_frequency_detail_rows_cache: RefCell::new(None),
             slow_sql_rows_cache: RefCell::new(None),
@@ -797,6 +808,20 @@ mod tests {
         state.sql_frequency_rows_cache.borrow_mut().take();
         state.sql_frequency_detail_rows_cache.borrow_mut().take();
         state.slow_sql_rows_cache.borrow_mut().take();
+    }
+
+    /// 模拟后台过滤和可见表格任务完成，渲染辅助函数只消费已发布缓存。
+    fn prepare_runtime_view_for_test(
+        result: &RuntimeAnalysisResult,
+        state: &mut RuntimeAnalysisState,
+    ) {
+        state.runtime_filter_rows_cache =
+            crate::analysis::runtime::build_runtime_analysis_filter_rows(
+                result,
+                runtime_sql_analysis_filter_snapshot(state),
+                &std::sync::atomic::AtomicBool::new(false),
+            );
+        state.populate_runtime_view_cache_for_test(result);
     }
 
     /// 构造 Runtime 过滤测试结果，并补齐稳定请求索引。
@@ -871,13 +896,14 @@ mod tests {
         state.filter_end_time_input.value = "2500".to_string();
         apply_runtime_filter_inputs_for_test(&mut state);
 
-        let rows = sorted_summary_rows(&result, &state);
+        prepare_runtime_view_for_test(&result, &mut state);
+        let rows = cached_sorted_summary_rows(&result, &state);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].request_path, "/api/one");
         assert_eq!(rows[0].request_count, 1);
         assert_eq!(rows[0].average_duration_ms, 200.0);
-        assert_eq!(rows[0].request_indices, vec![1]);
+        assert_eq!(rows[0].request_indices.as_slice(), &[1]);
     }
 
     /// 验证用户名过滤支持逗号分隔的多个模糊匹配关键字。
@@ -888,11 +914,12 @@ mod tests {
         state.filter_username_input.value = " bob, carol ".to_string();
         apply_runtime_filter_inputs_for_test(&mut state);
 
-        let rows = sorted_summary_rows(&result, &state);
+        prepare_runtime_view_for_test(&result, &mut state);
+        let rows = cached_sorted_summary_rows(&result, &state);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].request_count, 1);
-        assert_eq!(rows[0].request_indices, vec![2]);
+        assert_eq!(rows[0].request_indices.as_slice(), &[2]);
     }
 
     /// 验证任意关键字过滤可以命中 SQL 文本，并同步过滤 SQL 明细列表。
@@ -903,12 +930,18 @@ mod tests {
         state.filter_keyword_input.value = "orders".to_string();
         apply_runtime_filter_inputs_for_test(&mut state);
 
-        let rows = sorted_summary_rows(&result, &state);
-        let sql_indices = sorted_sql_indices(&result.requests[1], &state);
+        prepare_runtime_view_for_test(&result, &mut state);
+        let rows = cached_sorted_summary_rows(&result, &state);
+        state.view = RuntimeAnalysisView::SqlList {
+            request_path: "/api/one".to_string(),
+            request_index: 1,
+        };
+        prepare_runtime_view_for_test(&result, &mut state);
+        let sql_indices = cached_sorted_sql_indices(&result.requests[1], &state);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].request_count, 2);
-        assert_eq!(sql_indices, vec![0]);
+        assert_eq!(sql_indices.as_slice(), &[0]);
     }
 
     /// 验证 SQL 频率分析会按归一化结构聚合，并按执行次数降序展示。
@@ -982,6 +1015,10 @@ mod tests {
         let result = runtime_sql_analysis_test_result();
         let state = runtime_filter_test_state();
 
+        let mut state = state;
+        state.result_type = RuntimeAnalysisResultType::SqlFrequency;
+        state.sql_frequency_detail_sql = Some("select * from users where id = ?".to_string());
+        prepare_runtime_view_for_test(&result, &mut state);
         let rows = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
 
         assert_eq!(rows.len(), 2);
@@ -1006,6 +1043,10 @@ mod tests {
         state.filter_keyword_input.value = "id = 2".to_string();
         apply_runtime_filter_inputs_for_test(&mut state);
 
+        let mut state = state;
+        state.result_type = RuntimeAnalysisResultType::SqlFrequency;
+        state.sql_frequency_detail_sql = Some("select * from users where id = ?".to_string());
+        prepare_runtime_view_for_test(&result, &mut state);
         let rows = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
 
         assert_eq!(rows.len(), 1);
@@ -1020,10 +1061,111 @@ mod tests {
         state.filter_keyword_input.value = "users".to_string();
         apply_runtime_filter_inputs_for_test(&mut state);
 
+        state.result_type = RuntimeAnalysisResultType::SqlFrequency;
+        state.sql_frequency_detail_sql = Some("select * from users where id = ?".to_string());
+        prepare_runtime_view_for_test(&result, &mut state);
         let first = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
         let second = sql_frequency_detail_rows(&result, &state, "select * from users where id = ?");
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// 缓存缺失时必须等待后台任务，不能在渲染读取中扫描非空结果并填充缓存。
+    #[test]
+    fn runtime_table_cache_misses_do_not_compute_rows() {
+        let result = runtime_sql_analysis_test_result();
+        let state = runtime_filter_test_state();
+        assert!(!state.has_runtime_view_rows());
+        assert!(cached_sorted_summary_rows(&result, &state).is_empty());
+        assert!(cached_sorted_request_indices(&result, &result.summaries[0], &state).is_empty());
+        assert!(cached_sorted_sql_indices(&result.requests[0], &state).is_empty());
+        assert!(
+            sql_frequency_detail_rows(&result, &state, "select * from users where id = ?")
+                .is_empty()
+        );
+        assert!(state.summary_rows_cache.borrow().is_none());
+        assert!(state.request_indices_cache.borrow().is_none());
+        assert!(state.sql_indices_cache.borrow().is_none());
+        assert!(state.sql_frequency_detail_rows_cache.borrow().is_none());
+    }
+
+    /// 请求详情直接借用原始或已过滤的聚合行，滚动不复制大分组的请求索引。
+    #[test]
+    fn runtime_request_summary_borrows_original_and_filtered_rows() {
+        let result = runtime_filter_test_result();
+        let mut state = runtime_filter_test_state();
+        let summary = filtered_summary_for_request_path(&result, "/api/one", &state).unwrap();
+        assert!(std::ptr::eq(summary, &result.summaries[0]));
+        state.filter_username_input.value = "alice".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
+        prepare_runtime_view_for_test(&result, &mut state);
+        let summary = filtered_summary_for_request_path(&result, "/api/one", &state).unwrap();
+        let cached = &state.runtime_filter_rows_cache.as_ref().unwrap().summaries[0];
+        assert!(std::ptr::eq(summary, cached));
+        assert_eq!(summary.request_indices.as_slice(), &[0, 1]);
+        assert!(filtered_summary_for_request_path(&result, "/missing", &state).is_none());
+    }
+
+    /// 重绘复用同一结果；切换排序后先等待新任务，完成后使用新顺序。
+    #[test]
+    fn runtime_table_sort_changes_require_new_matching_cache() {
+        let result = runtime_filter_test_result();
+        let mut state = runtime_filter_test_state();
+        prepare_runtime_view_for_test(&result, &mut state);
+        let first = cached_sorted_summary_rows(&result, &state);
+        assert!(Arc::ptr_eq(
+            &first,
+            &cached_sorted_summary_rows(&result, &state)
+        ));
+        state.summary_sort_direction = RuntimeSortDirection::Ascending;
+        assert!(!state.has_runtime_view_rows());
+        assert!(cached_sorted_summary_rows(&result, &state).is_empty());
+        prepare_runtime_view_for_test(&result, &mut state);
+        assert!(state.has_runtime_view_rows());
+
+        state.view = RuntimeAnalysisView::RequestDetails {
+            request_path: "/api/one".to_string(),
+        };
+        state.request_sort_key = RuntimeRequestSortKey::RequestDuration;
+        prepare_runtime_view_for_test(&result, &mut state);
+        let first = cached_sorted_request_indices(&result, &result.summaries[0], &state);
+        assert_eq!(first.as_slice(), &[2, 1, 0]);
+        assert!(Arc::ptr_eq(
+            &first,
+            &cached_sorted_request_indices(&result, &result.summaries[0], &state)
+        ));
+        state.request_sort_direction = RuntimeSortDirection::Ascending;
+        assert!(!state.has_runtime_view_rows());
+        assert!(cached_sorted_request_indices(&result, &result.summaries[0], &state).is_empty());
+        prepare_runtime_view_for_test(&result, &mut state);
+        assert_eq!(
+            cached_sorted_request_indices(&result, &result.summaries[0], &state).as_slice(),
+            &[0, 1, 2]
+        );
+    }
+
+    /// 已完成的空集合不能继续显示加载；待应用输入不影响旧缓存，真正应用后必须匹配新快照。
+    #[test]
+    fn runtime_loading_distinguishes_empty_results_and_pending_filters() {
+        let result = runtime_filter_test_result();
+        let mut state = runtime_filter_test_state();
+        state.filter_username_input.value = "no-match".to_string();
+        apply_runtime_filter_inputs_for_test(&mut state);
+        assert!(!state.has_runtime_view_rows());
+        prepare_runtime_view_for_test(&result, &mut state);
+        assert!(state.has_runtime_view_rows());
+        assert!(cached_sorted_summary_rows(&result, &state).is_empty());
+        state.filter_username_input.value = "alice".to_string();
+        state.is_filter_pending = true;
+        assert!(state.has_runtime_view_rows());
+        apply_runtime_filter_inputs_for_test(&mut state);
+        assert!(!state.has_runtime_view_rows());
+        assert!(cached_sorted_summary_rows(&result, &state).is_empty());
+        prepare_runtime_view_for_test(&result, &mut state);
+        assert_eq!(
+            cached_sorted_summary_rows(&result, &state)[0].request_count,
+            2
+        );
     }
 
     /// 验证 SQL 频率和慢 SQL 分析在懒计算完成前不做同步全量计算。

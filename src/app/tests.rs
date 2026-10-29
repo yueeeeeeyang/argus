@@ -8,7 +8,10 @@ use super::*;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::analysis::runtime::{build_runtime_analysis_result, parse_runtime_request_text};
+use crate::analysis::runtime::{
+    RuntimeSlowSqlSummaryRow, RuntimeSqlFrequencyAnalysisRow, RuntimeSqlFrequencyDetailRow,
+    build_runtime_analysis_result, parse_runtime_request_text,
+};
 use crate::config::JstackThreadFilterRuleKind;
 use crate::config::paths::{isolated_test_dir, temporary_test_dir};
 use crate::remote::connection::ConnectionLinkKind;
@@ -2035,6 +2038,445 @@ fn switching_runtime_statistics_preserves_sql_analysis_caches() {
         .expect("应存在 Runtime 分析状态");
     assert!(state.sql_frequency_rows_cache.borrow().is_some());
     assert!(state.slow_sql_rows_cache.borrow().is_some());
+}
+
+/// 生成已完成分析，调度测试不依赖真实日志读取或用户目录。
+fn app_with_ready_runtime_task() -> (ArgusApp, usize) {
+    let mut app = app_with_placeholder_sources();
+    let source_id = source_id_by_label(&app, "app.log");
+    let targets = app.runtime_targets_from_source_ids(&[source_id]);
+    let (analysis_id, _) = app.create_runtime_analysis_tab_state(targets).unwrap();
+    app.runtime_analysis_state_mut(analysis_id)
+        .unwrap()
+        .task_state = RuntimeAnalysisTaskState::Ready(Arc::new(build_runtime_analysis_result(
+        Vec::new(),
+        Vec::new(),
+        0,
+        false,
+    )));
+    (app, analysis_id)
+}
+
+/// 共用聚合使用同一组执行记录，调度必须同时发布两种展示顺序。
+fn runtime_sql_task_rows() -> RuntimeSqlAnalysisRows {
+    RuntimeSqlAnalysisRows {
+        frequency: Arc::new(vec![RuntimeSqlFrequencyAnalysisRow {
+            normalized_sql: "select ?".to_string(),
+            total_execute_ms: 24,
+            execute_count: 2,
+        }]),
+        slow: Arc::new(vec![RuntimeSlowSqlSummaryRow {
+            normalized_sql: "select ?".to_string(),
+            total_execute_ms: 24,
+            execute_count: 2,
+        }]),
+    }
+}
+
+/// 输入尚未应用时停止旧扫描，同时保留当前页正在使用的详情和聚合缓存。
+#[test]
+fn runtime_input_change_cancels_computations_without_discarding_applied_caches() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (mut app, analysis_id) = app_with_ready_runtime_task();
+    let filter_cancel = Arc::new(AtomicBool::new(false));
+    let sql_cancel = Arc::new(AtomicBool::new(false));
+    let details = Arc::new(vec![RuntimeSqlFrequencyDetailRow {
+        request_index: 0,
+        sql_index: 0,
+        execute_ms: 12,
+    }]);
+    let rows = runtime_sql_task_rows();
+    let frequency = rows.frequency.clone();
+    let slow = rows.slow.clone();
+    app.apply_runtime_sql_analysis_rows(
+        analysis_id,
+        0,
+        RuntimeSqlAnalysisFilterSnapshot::default(),
+        rows,
+    );
+    {
+        let state = app.runtime_analysis_state_mut(analysis_id).unwrap();
+        state.filter_cancel_token = Some(filter_cancel.clone());
+        state.sql_analysis_cancel_token = Some(sql_cancel.clone());
+        state.is_filter_computing = true;
+        state.is_sql_analysis_computing = true;
+        state.sql_analysis_computing_filter = Some(RuntimeSqlAnalysisFilterSnapshot::default());
+        state.sql_frequency_detail_sql = Some("select ?".to_string());
+        state
+            .sql_frequency_detail_rows_cache
+            .replace(Some(RuntimeSqlFrequencyDetailRowsCache {
+                filter: RuntimeSqlAnalysisFilterSnapshot::default(),
+                normalized_sql: "select ?".to_string(),
+                rows: details.clone(),
+            }));
+        state.filter_keyword_input.value = "new keyword".to_string();
+    }
+
+    assert_eq!(app.after_runtime_filter_changed(analysis_id), Some(1));
+    assert!(filter_cancel.load(Ordering::Relaxed));
+    assert!(sql_cancel.load(Ordering::Relaxed));
+    let state = app.runtime_analysis_state(analysis_id).unwrap();
+    assert!(state.is_filter_pending);
+    assert!(!state.is_filter_computing);
+    assert!(!state.is_sql_analysis_computing);
+    assert!(state.applied_filter_keyword.is_empty());
+    assert_eq!(state.sql_frequency_detail_sql.as_deref(), Some("select ?"));
+    assert!(Arc::ptr_eq(
+        &state
+            .sql_frequency_detail_rows_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .rows,
+        &details
+    ));
+    assert!(Arc::ptr_eq(
+        &state
+            .sql_frequency_rows_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .rows,
+        &frequency
+    ));
+    assert!(Arc::ptr_eq(
+        &state.slow_sql_rows_cache.borrow().as_ref().unwrap().rows,
+        &slow
+    ));
+
+    // 取消与后台完成竞争时，旧 generation 即使成功返回也不得换掉现有缓存。
+    app.apply_runtime_sql_analysis_rows(
+        analysis_id,
+        0,
+        RuntimeSqlAnalysisFilterSnapshot::default(),
+        runtime_sql_task_rows(),
+    );
+    assert!(Arc::ptr_eq(
+        &app.runtime_analysis_state(analysis_id)
+            .unwrap()
+            .sql_frequency_rows_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .rows,
+        &frequency,
+    ));
+}
+
+/// 关闭单页、关闭全部和替换来源都取消过滤与 SQL 聚合，避免离页后继续占用工作线程。
+#[test]
+fn runtime_state_removal_cancels_all_background_tokens() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for remove in [
+        ArgusApp::close_all_tabs,
+        ArgusApp::reset_log_workspace_after_source_replace,
+        ArgusApp::prepare_to_close,
+    ] {
+        let (mut app, analysis_id) = app_with_ready_runtime_task();
+        let read_cancel = Arc::new(AtomicBool::new(false));
+        let filter_cancel = Arc::new(AtomicBool::new(false));
+        let sql_cancel = Arc::new(AtomicBool::new(false));
+        let state = app.runtime_analysis_state_mut(analysis_id).unwrap();
+        state.cancel_token = Some(read_cancel.clone());
+        state.filter_cancel_token = Some(filter_cancel.clone());
+        state.sql_analysis_cancel_token = Some(sql_cancel.clone());
+
+        remove(&mut app);
+
+        assert!(read_cancel.load(Ordering::Relaxed));
+        assert!(filter_cancel.load(Ordering::Relaxed));
+        assert!(sql_cancel.load(Ordering::Relaxed));
+        assert!(app.runtime_analysis_state(analysis_id).is_none());
+    }
+    let (mut app, analysis_id) = app_with_ready_runtime_task();
+    let cancel = Arc::new(AtomicBool::new(false));
+    app.runtime_analysis_state_mut(analysis_id)
+        .unwrap()
+        .filter_cancel_token = Some(cancel.clone());
+    app.close_tab(app.active_tab_id.unwrap());
+    assert!(cancel.load(Ordering::Relaxed));
+}
+
+/// 待应用输入不能重启已取消的旧聚合；恢复原条件时复用缓存，不重复全量计算。
+#[gpui::test]
+fn runtime_pending_filter_blocks_old_aggregation_and_reuses_reverted_filter(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (app, analysis_id) = app_with_ready_runtime_task();
+    let entity = cx.new(|_| app);
+    entity.update(cx, |app, cx| {
+        let rows = runtime_sql_task_rows();
+        let frequency = rows.frequency.clone();
+        let slow = rows.slow.clone();
+        app.apply_runtime_sql_analysis_rows(
+            analysis_id,
+            0,
+            RuntimeSqlAnalysisFilterSnapshot::default(),
+            rows,
+        );
+        {
+            let state = app.runtime_analysis_state_mut(analysis_id).unwrap();
+            state.result_type = RuntimeAnalysisResultType::SqlFrequency;
+            state.filter_keyword_input.value = "pending".to_string();
+        }
+        let input_generation = app.after_runtime_filter_changed(analysis_id).unwrap();
+        app.ensure_runtime_sql_analysis_rows(analysis_id, cx);
+        assert!(
+            !app.runtime_analysis_state(analysis_id)
+                .unwrap()
+                .is_sql_analysis_computing
+        );
+        assert!(
+            app.runtime_analysis_state(analysis_id)
+                .unwrap()
+                .sql_analysis_cancel_token
+                .is_none()
+        );
+
+        app.runtime_analysis_state_mut(analysis_id)
+            .unwrap()
+            .filter_keyword_input
+            .value
+            .clear();
+        let restored_generation = app.after_runtime_filter_changed(analysis_id).unwrap();
+        app.start_runtime_filter_apply_if_current(analysis_id, input_generation, cx);
+        assert!(
+            app.runtime_analysis_state(analysis_id)
+                .unwrap()
+                .is_filter_pending
+        );
+        app.start_runtime_filter_apply_if_current(analysis_id, restored_generation, cx);
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(!state.is_filter_pending);
+        assert!(!state.is_filter_computing);
+        assert!(!state.is_sql_analysis_computing);
+        assert!(Arc::ptr_eq(
+            &state
+                .sql_frequency_rows_cache
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .rows,
+            &frequency
+        ));
+        assert!(Arc::ptr_eq(
+            &state.slow_sql_rows_cache.borrow().as_ref().unwrap().rows,
+            &slow
+        ));
+    });
+}
+
+/// 频率与慢 SQL 切换共享同一个在途任务，完成后两个页面均命中同次聚合缓存。
+#[gpui::test]
+fn runtime_sql_result_types_share_one_background_aggregation(cx: &mut gpui::TestAppContext) {
+    let (app, analysis_id) = app_with_ready_runtime_task();
+    let entity = cx.new(|_| app);
+    entity.update(cx, |app, cx| {
+        app.set_runtime_result_type(
+            analysis_id,
+            RuntimeAnalysisResultType::SqlFrequency,
+            Some(cx),
+        );
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        let task_generation = state.sql_analysis_task_generation;
+        let cancel = state.sql_analysis_cancel_token.as_ref().unwrap().clone();
+        app.set_runtime_result_type(analysis_id, RuntimeAnalysisResultType::SlowSql, Some(cx));
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert_eq!(state.sql_analysis_task_generation, task_generation);
+        assert!(Arc::ptr_eq(
+            state.sql_analysis_cancel_token.as_ref().unwrap(),
+            &cancel
+        ));
+    });
+    cx.run_until_parked();
+    entity.update(cx, |app, cx| {
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(!state.is_sql_analysis_computing);
+        let task_generation = state.sql_analysis_task_generation;
+        assert!(state.sql_frequency_rows_cache.borrow().is_some());
+        assert!(state.slow_sql_rows_cache.borrow().is_some());
+        app.set_runtime_result_type(
+            analysis_id,
+            RuntimeAnalysisResultType::SqlFrequency,
+            Some(cx),
+        );
+        assert_eq!(
+            app.runtime_analysis_state(analysis_id)
+                .unwrap()
+                .sql_analysis_task_generation,
+            task_generation
+        );
+    });
+}
+
+/// 待应用期间切换页面不会启动旧条件；恢复原输入后，缺失的聚合缓存仍能正常完成。
+#[gpui::test]
+fn runtime_pending_view_switch_resumes_aggregation_after_input_restoration(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (app, analysis_id) = app_with_ready_runtime_task();
+    let entity = cx.new(|_| app);
+    entity.update(cx, |app, cx| {
+        app.runtime_analysis_state_mut(analysis_id)
+            .unwrap()
+            .filter_keyword_input
+            .value = "pending".to_string();
+        app.after_runtime_filter_changed(analysis_id).unwrap();
+        for result_type in [
+            RuntimeAnalysisResultType::SqlFrequency,
+            RuntimeAnalysisResultType::SlowSql,
+        ] {
+            app.set_runtime_result_type(analysis_id, result_type, Some(cx));
+            let state = app.runtime_analysis_state(analysis_id).unwrap();
+            assert!(state.is_filter_pending);
+            assert!(!state.is_sql_analysis_computing);
+            assert!(state.sql_analysis_cancel_token.is_none());
+        }
+        app.runtime_analysis_state_mut(analysis_id)
+            .unwrap()
+            .filter_keyword_input
+            .value
+            .clear();
+        let restored_generation = app.after_runtime_filter_changed(analysis_id).unwrap();
+        app.start_runtime_filter_apply_if_current(analysis_id, restored_generation, cx);
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(!state.is_filter_pending);
+        assert!(state.is_sql_analysis_computing);
+    });
+    cx.run_until_parked();
+    entity.update(cx, |app, _| {
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(!state.is_sql_analysis_computing);
+        assert!(state.sql_frequency_rows_cache.borrow().is_some());
+        assert!(state.slow_sql_rows_cache.borrow().is_some());
+    });
+}
+
+/// 旧视图任务完成后必须释放在途槽位，返回原视图时不能一直等待已结束的任务。
+#[gpui::test]
+fn runtime_view_task_completed_after_navigation_can_restart_when_returning(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut app = app_with_placeholder_sources();
+    let analysis_id = runtime_analysis_ready_for_picker_test(&mut app, "");
+    let entity = cx.new(|_| app);
+    entity.update(cx, |app, cx| {
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+            panic!("应已完成分析");
+        };
+        let request_path = result.summaries[0].request_path.clone();
+        assert!(!state.has_runtime_view_rows());
+        app.ensure_runtime_view_rows(analysis_id, cx);
+
+        // 不创建窗口，也不为详情页启动任务，复现动作已切页但下一帧尚未渲染的间隙。
+        app.open_runtime_request_details(analysis_id, request_path);
+    });
+    cx.run_until_parked();
+    entity.update(cx, |app, cx| {
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(matches!(
+            state.view,
+            RuntimeAnalysisView::RequestDetails { .. }
+        ));
+        assert!(state.summary_rows_cache.borrow().is_none());
+        assert!(state.request_indices_cache.borrow().is_none());
+        app.show_runtime_summary(analysis_id);
+        app.ensure_runtime_view_rows(analysis_id, cx);
+        assert!(
+            !app.runtime_analysis_state(analysis_id)
+                .unwrap()
+                .has_runtime_view_rows()
+        );
+    });
+    cx.run_until_parked();
+    entity.update(cx, |app, _| {
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(
+            state.has_runtime_view_rows(),
+            "返回总览后应能重新计算并退出加载状态"
+        );
+        let cache = state.summary_rows_cache.borrow();
+        let rows = &cache.as_ref().expect("应发布新启动任务的总览结果").rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request_count, 1);
+        assert!(state.request_indices_cache.borrow().is_none());
+    });
+}
+
+/// 新输入取消已启动的扫描；即使旧结果已完成，也只能发布当前输入对应的过滤缓存。
+#[gpui::test]
+fn runtime_filter_superseding_input_cancels_started_task_and_rejects_stale_rows(
+    cx: &mut gpui::TestAppContext,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (app, analysis_id) = app_with_ready_runtime_task();
+    let entity = cx.new(|_| app);
+    entity.update(cx, |app, cx| {
+        app.runtime_analysis_state_mut(analysis_id)
+            .unwrap()
+            .filter_keyword_input
+            .value = "obsolete".to_string();
+        let obsolete_input_generation = app.after_runtime_filter_changed(analysis_id).unwrap();
+        app.start_runtime_filter_apply_if_current(analysis_id, obsolete_input_generation, cx);
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        let obsolete_task_generation = state.filter_task_generation;
+        let obsolete_cancel = state.filter_cancel_token.as_ref().unwrap().clone();
+        let RuntimeAnalysisTaskState::Ready(result) = &state.task_state else {
+            panic!("应已完成分析");
+        };
+        let obsolete_rows = build_runtime_analysis_filter_rows(
+            result,
+            runtime_filter_input_snapshot_from_state(state),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        app.runtime_analysis_state_mut(analysis_id)
+            .unwrap()
+            .filter_keyword_input
+            .value = "latest".to_string();
+        let current_input_generation = app.after_runtime_filter_changed(analysis_id).unwrap();
+        assert!(obsolete_cancel.load(Ordering::Relaxed));
+        app.start_runtime_filter_apply_if_current(analysis_id, current_input_generation, cx);
+        app.apply_runtime_filter_rows(
+            analysis_id,
+            obsolete_input_generation,
+            obsolete_task_generation,
+            obsolete_rows,
+            cx,
+        );
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(state.is_filter_computing);
+        assert!(state.applied_filter_keyword.is_empty());
+        assert!(state.runtime_filter_rows_cache.is_none());
+        assert!(
+            !state
+                .filter_cancel_token
+                .as_ref()
+                .unwrap()
+                .load(Ordering::Relaxed)
+        );
+    });
+    cx.run_until_parked();
+    entity.update(cx, |app, _| {
+        let state = app.runtime_analysis_state(analysis_id).unwrap();
+        assert!(!state.is_filter_pending);
+        assert!(!state.is_filter_computing);
+        assert!(state.filter_cancel_token.is_none());
+        assert_eq!(state.applied_filter_keyword, "latest");
+        assert_eq!(
+            state
+                .runtime_filter_rows_cache
+                .as_ref()
+                .unwrap()
+                .filter
+                .keyword,
+            "latest"
+        );
+    });
 }
 
 /// 验证 SQL 频率详情动作会进入详情页，并可返回频率列表。
@@ -5776,9 +6218,11 @@ fn runtime_drilldown_topbars_keep_table_visible(cx: &mut gpui::TestAppContext) {
     });
 
     // 请求详情页：信息区必须占满剩余宽度，明细表必须保留可用高度。
-    app.update(cx, |app, _| {
+    app.update(cx, |app, cx| {
         app.open_runtime_request_details(analysis_id, request_path.clone());
+        app.ensure_runtime_view_rows(analysis_id, cx);
     });
+    cx.run_until_parked();
     next_frame(cx);
     assert_details_layout_is_usable(
         cx,
@@ -5789,9 +6233,11 @@ fn runtime_drilldown_topbars_keep_table_visible(cx: &mut gpui::TestAppContext) {
     );
 
     // SQL 列表页。
-    app.update(cx, |app, _| {
+    app.update(cx, |app, cx| {
         app.open_runtime_sql_list(analysis_id, request_path, 0);
+        app.ensure_runtime_view_rows(analysis_id, cx);
     });
+    cx.run_until_parked();
     next_frame(cx);
     assert_details_layout_is_usable(
         cx,
@@ -5802,9 +6248,11 @@ fn runtime_drilldown_topbars_keep_table_visible(cx: &mut gpui::TestAppContext) {
     );
 
     // SQL 频率分析下钻页。
-    app.update(cx, |app, _| {
+    app.update(cx, |app, cx| {
         app.open_runtime_sql_frequency_detail(analysis_id, normalized_sql.clone());
+        app.ensure_runtime_view_rows(analysis_id, cx);
     });
+    cx.run_until_parked();
     next_frame(cx);
     assert_details_layout_is_usable(
         cx,
@@ -5815,9 +6263,11 @@ fn runtime_drilldown_topbars_keep_table_visible(cx: &mut gpui::TestAppContext) {
     );
 
     // 慢 SQL 分析下钻页。
-    app.update(cx, |app, _| {
+    app.update(cx, |app, cx| {
         app.open_runtime_slow_sql_detail(analysis_id, normalized_sql);
+        app.ensure_runtime_view_rows(analysis_id, cx);
     });
+    cx.run_until_parked();
     next_frame(cx);
     assert_details_layout_is_usable(
         cx,
