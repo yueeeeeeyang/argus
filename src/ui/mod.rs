@@ -1,6 +1,6 @@
 //! 文件职责：导出 Argus 桌面界面层的所有视图与组件模块。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-09-24
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
 //! 主要功能：组织主窗口、来源侧栏、内容视图、分析页面、设置窗口、远程会话和可复用组件。
 
@@ -12,6 +12,7 @@ pub(crate) mod connection_dialog;
 pub(crate) mod connection_tree_panel;
 pub(crate) mod custom_title_bar;
 pub(crate) mod dir_tree_panel;
+pub(crate) mod file_diff_window;
 pub(crate) mod file_preview_window;
 pub(crate) mod highlight_colors;
 pub(crate) mod input_native;

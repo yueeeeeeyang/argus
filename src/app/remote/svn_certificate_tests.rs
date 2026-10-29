@@ -5,7 +5,6 @@ use crate::config::ConfigManager;
 use crate::config::paths::{isolated_test_dir, temporary_test_dir};
 use crate::remote::connection::SvnLinkConfig;
 use crate::remote::svn_tls::{SvnCertificateFailure, SvnCertificatePrompt};
-use gpui::AppContext as _;
 
 fn test_app() -> ArgusApp {
     ArgusApp::new_with_config_manager(ConfigManager::new(

@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "argus"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -217,6 +217,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust",
  "sha2 0.11.1",
+ "similar",
  "smb2",
  "sqlparser",
  "ssh2",
@@ -6928,6 +6929,9 @@ name = "similar"
 version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f8bec09ae8fae0f4f265a4559a9334be3929d8504e9b536df0a41302bd1733"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "simplecss"

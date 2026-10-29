@@ -1,6 +1,6 @@
 //! 文件职责：提供通用上下文菜单与下拉菜单组件。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
 //! 主要功能：按窗口坐标渲染可滚动菜单，并将菜单项动作分发给应用状态。
 
@@ -200,6 +200,11 @@ pub(crate) enum MenuAction {
         /// 远程文件会话 ID。
         session_id: usize,
     },
+    /// 对比 SVN 文件当前版本与指定修订。
+    CompareRepositoryFileSelection {
+        /// 远程文件会话 ID。
+        session_id: usize,
+    },
     /// 重命名远程文件管理中当前选中的文件或目录。
     RenameRemoteFileSelection {
         /// 远程文件会话 ID。
@@ -271,6 +276,9 @@ impl MenuAction {
             }
             Self::PreviewRemoteFileSelection { session_id } => {
                 format!("preview-remote-file-selection-{session_id}")
+            }
+            Self::CompareRepositoryFileSelection { session_id } => {
+                format!("compare-svn-file-selection-{session_id}")
             }
             Self::RenameRemoteFileSelection { session_id } => {
                 format!("rename-remote-file-selection-{session_id}")

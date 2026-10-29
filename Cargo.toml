@@ -6,7 +6,7 @@
 
 [package]
 name = "argus"
-version = "1.4.1"
+version = "1.4.3"
 edition = "2024"
 publish = false
 description = "Argus 高性能日志查看与分析桌面客户端"
@@ -58,6 +58,7 @@ russh = { version = "0.65.0", default-features = false, features = ["ring", "rsa
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.5"
 sevenz-rust = "0.6.1"
+similar = "3.2.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 secrecy = "0.10.3"

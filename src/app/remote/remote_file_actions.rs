@@ -1,18 +1,24 @@
 //! 文件职责：实现 SFTP、SMB、Git、SVN 通用远程文件管理标签、事件回收、文件操作和输入框交互。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-27
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：从 SSH/SMB/Git/SVN 链接打开通用文件管理，并按协议能力约束浏览、预览、下载和写操作。
+//! 主要功能：从 SSH/SMB/Git/SVN 链接打开通用文件管理，支持预览加载重试、仓库历史对比和协议能力约束。
 
 use std::borrow::Borrow;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use gpui::{Context, Keystroke, PathPromptOptions, Pixels, Point, SharedString};
+use gpui::{
+    AppContext, Bounds, Context, Keystroke, PathPromptOptions, Pixels, Point, SharedString,
+    TitlebarOptions, WindowBounds, WindowHandle, WindowOptions, point, px, size,
+};
 
 use crate::app::{
     AppTextInputTarget, ArgusApp, ArgusTab, ConnectionDialogState, ConnectionHostKeyPromptState,
-    ConnectionSvnCertificatePromptState, HostKeyPromptOwner, InputTextSelectionDrag,
-    RemoteFileDeletePromptState, RemoteFileDialogState, RemoteFileRenameDialogState, TabKind,
+    ConnectionSvnCertificatePromptState, FILE_PREVIEW_WINDOW_HEIGHT,
+    FILE_PREVIEW_WINDOW_MIN_HEIGHT, FILE_PREVIEW_WINDOW_MIN_WIDTH, FILE_PREVIEW_WINDOW_WIDTH,
+    HostKeyPromptOwner, InputTextSelectionDrag, RemoteFileDeletePromptState, RemoteFileDialogState,
+    RemoteFileDiffDialogState, RemoteFilePreviewState, RemoteFileRenameDialogState, TabKind,
     TextInputState, Workspace,
 };
 use crate::infra::text_selection::{
@@ -21,19 +27,31 @@ use crate::infra::text_selection::{
 use crate::loader::PathBrowser;
 use crate::remote::connection::ConnectionLinkConfig;
 use crate::remote::remote_file::{
-    RemoteFileBackend, RemoteFileCommand, RemoteFileEntry, RemoteFileEntryKind, RemoteFileEvent,
-    RemoteFileSessionState, RemoteFileStatus, RemoteFileWorkerBackend, RemoteFileWorkerRequest,
-    is_remote_file_entry_previewable, remote_parent_dir, spawn_remote_file_worker,
-    validate_remote_file_rename_name,
+    FilePreviewContent, RemoteFileBackend, RemoteFileCommand, RemoteFileEntry, RemoteFileEntryKind,
+    RemoteFileEvent, RemoteFileSessionState, RemoteFileStatus, RemoteFileWorkerBackend,
+    RemoteFileWorkerRequest, is_remote_file_entry_previewable, remote_parent_dir,
+    spawn_remote_file_worker, validate_remote_file_rename_name,
 };
 use crate::remote::svn_certificate::{SvnCertificateApproval, SvnCertificateDecision};
 use crate::remote::svn_tls::SvnCertificateTrust;
 use crate::remote::terminal::PendingHostKey;
 use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind};
+use crate::ui::file_diff_window::{
+    FILE_DIFF_WINDOW_HEIGHT, FILE_DIFF_WINDOW_MIN_HEIGHT, FILE_DIFF_WINDOW_MIN_WIDTH,
+    FILE_DIFF_WINDOW_WIDTH, FileDiffWindow,
+};
+use crate::ui::file_preview_window::{FILE_PREVIEW_AUTO_RETRY_LIMIT, FilePreviewWindow};
+
+#[cfg(test)]
+#[path = "remote_file_diff_tests.rs"]
+mod remote_file_diff_tests;
 
 #[cfg(test)]
 #[path = "svn_certificate_tests.rs"]
 mod svn_certificate_tests;
+
+/// 预览读取失败后自动重试前的等待时间，给瞬时网络抖动恢复机会。
+const REMOTE_FILE_PREVIEW_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 /// 远程文件管理输入框的可变部件引用。
 struct RemoteFileInputParts<'a> {
@@ -373,6 +391,7 @@ impl ArgusApp {
         &mut self,
         session_id: usize,
         path: String,
+        cx: &mut Context<Self>,
     ) {
         let Some(entry) = self.remote_file_entry(session_id, &path).cloned() else {
             self.placeholder_notice = "未找到远程文件".to_string();
@@ -386,16 +405,267 @@ impl ArgusApp {
                 "正在进入远程目录...",
             );
         } else if is_remote_file_entry_previewable(&entry) {
-            self.request_remote_file_preview(session_id, entry.path, entry.size);
+            self.request_remote_file_preview(session_id, entry.path, entry.size, cx);
         }
     }
 
-    /// 请求读取远程普通文件内容用于预览；超上限或未连接时给出提示。
+    /// 打开仓库文件版本对比独立窗口。
+    pub(crate) fn open_file_diff_window(
+        &mut self,
+        file_name: String,
+        current_version: String,
+        target_version: String,
+        current_content: FilePreviewContent,
+        target_content: FilePreviewContent,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_theme = self.theme.clone();
+        let app_entity = cx.entity();
+        let bounds = Bounds::centered(
+            None,
+            size(px(FILE_DIFF_WINDOW_WIDTH), px(FILE_DIFF_WINDOW_HEIGHT)),
+            cx,
+        );
+        let window_options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(20.0), px(14.0))),
+            }),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(FILE_DIFF_WINDOW_MIN_WIDTH),
+                px(FILE_DIFF_WINDOW_MIN_HEIGHT),
+            )),
+            ..Default::default()
+        };
+        match cx.open_window(window_options, move |_, cx| {
+            cx.new(|cx| {
+                FileDiffWindow::new(
+                    app_entity,
+                    initial_theme,
+                    file_name,
+                    current_version,
+                    target_version,
+                    current_content,
+                    target_content,
+                    cx,
+                )
+            })
+        }) {
+            Ok(_) => self.placeholder_notice = "已打开版本对比".to_string(),
+            Err(error) => self.placeholder_notice = format!("打开版本对比失败：{error}"),
+        }
+    }
+
+    /// 判断当前 SVN 会话是否允许对唯一选中的普通文件发起版本对比。
+    pub(crate) fn can_compare_repository_file_selection(&self, session_id: usize) -> bool {
+        let Some(session) = self.remote_file_sessions.get(&session_id) else {
+            return false;
+        };
+        if !matches!(
+            session.backend,
+            RemoteFileBackend::Svn | RemoteFileBackend::Git
+        ) || session.status != RemoteFileStatus::Connected
+            || session.selected_paths.len() != 1
+        {
+            return false;
+        }
+        let Some(path) = session.selected_paths.iter().next() else {
+            return false;
+        };
+        session
+            .entries
+            .iter()
+            .find(|entry| entry.path == *path)
+            .is_some_and(is_remote_file_entry_previewable)
+    }
+
+    /// 打开仓库文件版本对比弹窗，并向 worker 请求文件历史提交。
+    pub(crate) fn open_repository_file_diff_dialog(&mut self, session_id: usize) {
+        if !self.can_compare_repository_file_selection(session_id) {
+            self.placeholder_notice = "请选择一个 SVN 普通文件进行版本对比".to_string();
+            return;
+        }
+        let Some(session) = self.remote_file_sessions.get(&session_id) else {
+            self.placeholder_notice = "文件管理会话不存在".to_string();
+            return;
+        };
+        let Some(path) = session.selected_paths.iter().next().cloned() else {
+            return;
+        };
+        let Some(entry) = session.entries.iter().find(|entry| entry.path == path) else {
+            return;
+        };
+        let current_version = session
+            .selected_repository_version
+            .as_ref()
+            .and_then(|id| {
+                session
+                    .repository_versions
+                    .iter()
+                    .find(|version| &version.id == id)
+                    .map(|version| version.label.clone())
+            })
+            .or_else(|| {
+                let value = session.version_input.value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            })
+            .unwrap_or_else(|| "HEAD".to_string());
+        let remote_path = entry.path.clone();
+        let file_name = entry.name.clone();
+        self.remote_file_dialog = Some(RemoteFileDialogState::RepositoryDiff(
+            RemoteFileDiffDialogState {
+                session_id,
+                remote_path: remote_path.clone(),
+                file_name: file_name.clone(),
+                current_version,
+                entries: Vec::new(),
+                selected_target: None,
+                commit_scroll: gpui::ScrollHandle::new(),
+                is_versions_open: false,
+                is_loading_history: true,
+                history_error: None,
+                error_message: None,
+            },
+        ));
+        if !self.send_remote_file_command(
+            session_id,
+            RemoteFileCommand::LoadFileHistory { remote_path },
+            RemoteFileStatus::Loading,
+            "正在加载 SVN 文件历史...",
+        ) {
+            if let Some(RemoteFileDialogState::RepositoryDiff(dialog)) =
+                self.remote_file_dialog.as_mut()
+            {
+                dialog.is_loading_history = false;
+                dialog.history_error = Some("无法加载 SVN 提交历史".to_string());
+            }
+            return;
+        }
+        self.placeholder_notice = format!("正在加载 {file_name} 的提交历史");
+    }
+
+    /// 重新加载当前对比弹窗的 SVN 文件历史。
+    pub(crate) fn reload_repository_file_history(&mut self) {
+        let Some(RemoteFileDialogState::RepositoryDiff(dialog)) = self.remote_file_dialog.as_mut()
+        else {
+            return;
+        };
+        let session_id = dialog.session_id;
+        let remote_path = dialog.remote_path.clone();
+        dialog.entries.clear();
+        dialog.selected_target = None;
+        dialog.commit_scroll.set_offset(point(px(0.0), px(0.0)));
+        dialog.is_versions_open = false;
+        dialog.is_loading_history = true;
+        dialog.history_error = None;
+        dialog.error_message = None;
+        if !self.send_remote_file_command(
+            session_id,
+            RemoteFileCommand::LoadFileHistory { remote_path },
+            RemoteFileStatus::Loading,
+            "正在重新加载 SVN 文件历史...",
+        ) {
+            if let Some(RemoteFileDialogState::RepositoryDiff(dialog)) =
+                self.remote_file_dialog.as_mut()
+            {
+                dialog.is_loading_history = false;
+                dialog.history_error = Some("无法重新加载 SVN 提交历史".to_string());
+            }
+            return;
+        }
+        self.placeholder_notice = "正在重新加载提交历史".to_string();
+    }
+
+    /// 展开或收起对比弹窗的历史版本下拉菜单。
+    pub(crate) fn toggle_repository_diff_versions(&mut self) {
+        let Some(RemoteFileDialogState::RepositoryDiff(dialog)) = self.remote_file_dialog.as_mut()
+        else {
+            return;
+        };
+        if dialog.is_loading_history || dialog.history_error.is_some() {
+            return;
+        }
+        dialog.is_versions_open = !dialog.is_versions_open;
+        dialog.error_message = None;
+    }
+
+    /// 在对比弹窗中选择一个历史版本。
+    pub(crate) fn select_repository_diff_target(&mut self, target_id: String) {
+        let Some(RemoteFileDialogState::RepositoryDiff(dialog)) = self.remote_file_dialog.as_mut()
+        else {
+            return;
+        };
+        if !dialog
+            .entries
+            .iter()
+            .any(|entry| entry.target_id == target_id)
+        {
+            return;
+        }
+        dialog.selected_target = Some(target_id);
+        dialog.commit_scroll.set_offset(point(px(0.0), px(0.0)));
+        dialog.is_versions_open = false;
+        dialog.error_message = None;
+    }
+
+    /// 提交版本对比弹窗，发送读取当前版本与目标版本的命令。
+    fn submit_repository_diff_dialog(&mut self, mut dialog: RemoteFileDiffDialogState) {
+        if dialog.is_loading_history {
+            let message = "正在加载历史版本，请稍候".to_string();
+            dialog.error_message = Some(message.clone());
+            self.remote_file_dialog = Some(RemoteFileDialogState::RepositoryDiff(dialog));
+            self.placeholder_notice = message;
+            return;
+        }
+        if let Some(message) = dialog.history_error.clone() {
+            dialog.error_message = Some(message.clone());
+            self.remote_file_dialog = Some(RemoteFileDialogState::RepositoryDiff(dialog));
+            self.placeholder_notice = message;
+            return;
+        }
+        let Some(target_version) = dialog.selected_target.clone() else {
+            let message = "请选择对比版本".to_string();
+            dialog.error_message = Some(message.clone());
+            self.remote_file_dialog = Some(RemoteFileDialogState::RepositoryDiff(dialog));
+            self.placeholder_notice = message;
+            return;
+        };
+        let Some(target_label) = dialog
+            .entries
+            .iter()
+            .find(|entry| entry.target_id == target_version)
+            .map(|entry| entry.label.clone())
+        else {
+            let message = "所选对比版本已不在历史列表中".to_string();
+            dialog.error_message = Some(message.clone());
+            self.remote_file_dialog = Some(RemoteFileDialogState::RepositoryDiff(dialog));
+            self.placeholder_notice = message;
+            return;
+        };
+        let session_id = dialog.session_id;
+        let remote_path = dialog.remote_path;
+        self.remote_file_dialog = None;
+        self.send_remote_file_command(
+            session_id,
+            RemoteFileCommand::CompareFileVersions {
+                remote_path,
+                target_version,
+                target_label,
+            },
+            RemoteFileStatus::Transferring,
+            "正在读取对比版本...",
+        );
+    }
+
+    /// 请求读取远程普通文件内容用于预览；先打开带加载动画的预览窗口，再发送读取命令。
     pub(crate) fn request_remote_file_preview(
         &mut self,
         session_id: usize,
         remote_path: String,
         size: Option<u64>,
+        cx: &mut Context<Self>,
     ) {
         if let Some(size) = size
             && size > crate::remote::remote_file::REMOTE_FILE_PREVIEW_MAX_FILE_SIZE
@@ -403,16 +673,370 @@ impl ArgusApp {
             self.placeholder_notice = "文件过大，无法预览".to_string();
             return;
         }
-        self.send_remote_file_command(
+        self.start_remote_file_preview(session_id, remote_path, cx);
+    }
+
+    /// 打开或复用预览窗口，并发送首个读取命令。
+    fn start_remote_file_preview(
+        &mut self,
+        session_id: usize,
+        remote_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.remote_file_sessions.get(&session_id) else {
+            self.placeholder_notice = "文件管理会话不存在".to_string();
+            return;
+        };
+        if session.status != RemoteFileStatus::Connected {
+            self.placeholder_notice = "文件管理会话尚未连接，暂不能预览".to_string();
+            return;
+        }
+        if !session.capabilities.preview {
+            self.placeholder_notice = "当前文件协议不支持预览".to_string();
+            return;
+        }
+        let Some(entry) = session
+            .entries
+            .iter()
+            .find(|entry| entry.path == remote_path)
+        else {
+            self.placeholder_notice = "未找到远程文件".to_string();
+            return;
+        };
+        let file_name = entry.name.clone();
+        let request_id = self.next_remote_file_preview_request_id;
+        self.next_remote_file_preview_request_id =
+            self.next_remote_file_preview_request_id.saturating_add(1);
+        let window = if let Some(state) = self.remote_file_previews.get(&session_id) {
+            let existing = state.window;
+            match existing.update(cx, |view, window, cx| {
+                view.show_loading(file_name.clone(), 0, cx);
+                window.activate_window();
+            }) {
+                Ok(()) => existing,
+                Err(_) => {
+                    self.remote_file_previews.remove(&session_id);
+                    let Some(window) =
+                        self.open_remote_file_preview_window(session_id, file_name.clone(), cx)
+                    else {
+                        return;
+                    };
+                    window
+                }
+            }
+        } else {
+            let Some(window) =
+                self.open_remote_file_preview_window(session_id, file_name.clone(), cx)
+            else {
+                return;
+            };
+            window
+        };
+        self.remote_file_previews.insert(
             session_id,
-            RemoteFileCommand::ReadFileContent { remote_path },
+            RemoteFilePreviewState {
+                request_id,
+                remote_path: remote_path.clone(),
+                file_name: file_name.clone(),
+                retry_count: 0,
+                is_loading: true,
+                window,
+            },
+        );
+        if !self.send_remote_file_command(
+            session_id,
+            RemoteFileCommand::ReadFileContent {
+                remote_path,
+                request_id,
+            },
             RemoteFileStatus::Transferring,
             "正在读取文件...",
+        ) {
+            if let Some(state) = self.remote_file_previews.get_mut(&session_id) {
+                state.is_loading = false;
+            }
+            let _ = window.update(cx, |view, _, cx| {
+                view.show_error("无法发起文件预览请求，请检查连接".to_string(), cx)
+            });
+            return;
+        }
+        self.placeholder_notice = format!("正在读取 {file_name}");
+    }
+
+    /// 打开独立的预览窗口，初始状态为加载中。
+    fn open_remote_file_preview_window(
+        &mut self,
+        session_id: usize,
+        file_name: String,
+        cx: &mut Context<Self>,
+    ) -> Option<WindowHandle<FilePreviewWindow>> {
+        let initial_theme = self.theme.clone();
+        let app_entity = cx.entity();
+        let bounds = Bounds::centered(
+            None,
+            size(
+                px(FILE_PREVIEW_WINDOW_WIDTH),
+                px(FILE_PREVIEW_WINDOW_HEIGHT),
+            ),
+            cx,
         );
+        let window_options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(20.0), px(14.0))),
+            }),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(FILE_PREVIEW_WINDOW_MIN_WIDTH),
+                px(FILE_PREVIEW_WINDOW_MIN_HEIGHT),
+            )),
+            ..Default::default()
+        };
+        match cx.open_window(window_options, move |_, cx| {
+            cx.new(|cx| {
+                FilePreviewWindow::new_loading(app_entity, initial_theme, file_name, session_id, cx)
+            })
+        }) {
+            Ok(window) => Some(window),
+            Err(error) => {
+                self.placeholder_notice = format!("打开文件预览失败：{error}");
+                None
+            }
+        }
+    }
+
+    /// 应用预览读取结果：成功显示内容，失败先自动重试，用尽次数后展示手动重试按钮。
+    pub(crate) fn apply_remote_file_preview_result(
+        &mut self,
+        session_id: usize,
+        request_id: u64,
+        file_name: String,
+        content: FilePreviewContent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.remote_file_previews.get(&session_id) else {
+            return;
+        };
+        if state.request_id != request_id || !state.is_loading {
+            return;
+        }
+        let window = state.window;
+        let retry_count = state.retry_count;
+        let request_path = state.remote_path.clone();
+
+        if let FilePreviewContent::Error(message) = content {
+            if retry_count < FILE_PREVIEW_AUTO_RETRY_LIMIT {
+                let next_retry = retry_count + 1;
+                if let Some(state) = self.remote_file_previews.get_mut(&session_id) {
+                    state.retry_count = next_retry;
+                }
+                if window
+                    .update(cx, |view, _, cx| {
+                        view.show_loading(file_name.clone(), next_retry, cx)
+                    })
+                    .is_err()
+                {
+                    self.remote_file_previews.remove(&session_id);
+                    if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+                        session.status = RemoteFileStatus::Connected;
+                        session.message = Some("预览窗口已关闭".to_string());
+                    }
+                    return;
+                }
+                if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+                    session.status = RemoteFileStatus::Transferring;
+                    session.message = Some(format!(
+                        "文件读取失败，正在自动重试 {next_retry}/{FILE_PREVIEW_AUTO_RETRY_LIMIT}"
+                    ));
+                }
+                self.placeholder_notice = format!(
+                    "读取 {file_name} 失败，正在自动重试 {next_retry}/{FILE_PREVIEW_AUTO_RETRY_LIMIT}"
+                );
+                self.schedule_remote_file_preview_retry(session_id, request_id, cx);
+            } else {
+                if let Some(state) = self.remote_file_previews.get_mut(&session_id) {
+                    state.is_loading = false;
+                }
+                let updated = window.update(cx, |view, window, cx| {
+                    view.show_error(message.clone(), cx);
+                    window.activate_window();
+                });
+                if updated.is_err() {
+                    self.remote_file_previews.remove(&session_id);
+                    if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+                        session.status = RemoteFileStatus::Connected;
+                        session.message = Some("预览窗口已关闭".to_string());
+                    }
+                    return;
+                }
+                if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+                    session.status = RemoteFileStatus::Connected;
+                    session.message = Some(format!("文件预览失败：{file_name}"));
+                }
+                self.placeholder_notice = format!("{file_name} 预览失败：{message}");
+            }
+            return;
+        }
+
+        self.remote_file_previews.remove(&session_id);
+        let updated = window.update(cx, |view, window, cx| {
+            view.show_content(file_name.clone(), content, cx);
+            window.activate_window();
+        });
+        if updated.is_err() {
+            self.placeholder_notice = "预览窗口已关闭".to_string();
+        }
+        if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+            session.status = RemoteFileStatus::Connected;
+            session.message = Some(format!("已加载预览：{file_name}"));
+        }
+        self.placeholder_notice = format!("已加载预览：{file_name}（{request_path}）");
+    }
+
+    /// 延迟后重发同一预览请求；同一请求 ID 保证不会串到新预览。
+    fn schedule_remote_file_preview_retry(
+        &mut self,
+        session_id: usize,
+        request_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(REMOTE_FILE_PREVIEW_RETRY_DELAY)
+                .await;
+            let _ = view.update(cx, |app, cx| {
+                let Some(state) = app.remote_file_previews.get(&session_id) else {
+                    return;
+                };
+                if state.request_id != request_id || !state.is_loading {
+                    return;
+                }
+                let window = state.window;
+                let remote_path = state.remote_path.clone();
+                if window.update(cx, |_, _, _| ()).is_err() {
+                    app.remote_file_previews.remove(&session_id);
+                    if let Some(session) = app.remote_file_sessions.get_mut(&session_id) {
+                        session.status = RemoteFileStatus::Connected;
+                        session.message = Some("预览窗口已关闭".to_string());
+                    }
+                    return;
+                }
+                if let Some(session) = app.remote_file_sessions.get_mut(&session_id) {
+                    session.status = RemoteFileStatus::Connected;
+                }
+                if !app.send_remote_file_command(
+                    session_id,
+                    RemoteFileCommand::ReadFileContent {
+                        remote_path,
+                        request_id,
+                    },
+                    RemoteFileStatus::Transferring,
+                    "正在重新读取文件...",
+                ) {
+                    if let Some(state) = app.remote_file_previews.get_mut(&session_id) {
+                        state.is_loading = false;
+                    }
+                    let _ = window.update(cx, |view, _, cx| {
+                        view.show_error("无法重新发起预览读取，请检查连接".to_string(), cx)
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 连接断开或失败时终止仍处于加载状态的预览，并保留错误提示。
+    fn fail_pending_remote_file_preview(
+        &mut self,
+        session_id: usize,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.remote_file_previews.get(&session_id) else {
+            return;
+        };
+        if !state.is_loading {
+            return;
+        }
+        let window = state.window;
+        if let Some(state) = self.remote_file_previews.get_mut(&session_id) {
+            state.is_loading = false;
+        }
+        let _ = window.update(cx, |view, _, cx| view.show_error(message, cx));
+    }
+
+    /// 预览窗口手动重试按钮：重置自动重试计数并立即重新读取。
+    pub(crate) fn retry_remote_file_preview(&mut self, session_id: usize, cx: &mut Context<Self>) {
+        if !self
+            .remote_file_sessions
+            .get(&session_id)
+            .is_some_and(|session| {
+                session.status == RemoteFileStatus::Connected && session.command_sender.is_some()
+            })
+        {
+            self.placeholder_notice = "文件管理连接不可用，请重新连接后重试".to_string();
+            return;
+        }
+        let Some((request_id, remote_path, file_name, window)) =
+            self.remote_file_previews.get(&session_id).map(|state| {
+                (
+                    state.request_id,
+                    state.remote_path.clone(),
+                    state.file_name.clone(),
+                    state.window,
+                )
+            })
+        else {
+            return;
+        };
+        if let Some(state) = self.remote_file_previews.get_mut(&session_id) {
+            state.retry_count = 0;
+            state.is_loading = true;
+        }
+        if window
+            .update(cx, |view, window, cx| {
+                view.show_loading(file_name, 0, cx);
+                window.activate_window();
+            })
+            .is_err()
+        {
+            self.remote_file_previews.remove(&session_id);
+            if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+                session.status = RemoteFileStatus::Connected;
+                session.message = Some("预览窗口已关闭".to_string());
+            }
+            self.placeholder_notice = "预览窗口已关闭，请重新打开预览".to_string();
+            return;
+        }
+        if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+            session.status = RemoteFileStatus::Connected;
+        }
+        if !self.send_remote_file_command(
+            session_id,
+            RemoteFileCommand::ReadFileContent {
+                remote_path,
+                request_id,
+            },
+            RemoteFileStatus::Transferring,
+            "正在重新读取文件...",
+        ) {
+            if let Some(state) = self.remote_file_previews.get_mut(&session_id) {
+                state.is_loading = false;
+            }
+            let _ = window.update(cx, |view, _, cx| {
+                view.show_error("无法重新发起预览读取，请检查连接".to_string(), cx)
+            });
+        }
     }
 
     /// 右键菜单触发：对当前唯一选中的可预览普通文件发起预览。
-    pub(crate) fn preview_remote_file_selection(&mut self, session_id: usize) {
+    pub(crate) fn preview_remote_file_selection(
+        &mut self,
+        session_id: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self.remote_file_sessions.get(&session_id) else {
             self.placeholder_notice = "文件管理会话不存在".to_string();
             return;
@@ -433,7 +1057,7 @@ impl ArgusApp {
             self.placeholder_notice = "该文件不支持预览".to_string();
             return;
         }
-        self.request_remote_file_preview(session_id, entry.path, entry.size);
+        self.request_remote_file_preview(session_id, entry.path, entry.size, cx);
     }
 
     /// 设置远程文件列表当前选中项。
@@ -699,6 +1323,9 @@ impl ArgusApp {
             Some(RemoteFileDialogState::ConfirmDelete(prompt)) => {
                 self.confirm_delete_remote_file_entry(prompt)
             }
+            Some(RemoteFileDialogState::RepositoryDiff(dialog)) => {
+                self.submit_repository_diff_dialog(dialog)
+            }
             None => {}
         }
     }
@@ -754,7 +1381,8 @@ impl ArgusApp {
                 .map(|session| &session.version_input),
             AppTextInputTarget::RemoteFileRenameName => match self.remote_file_dialog.as_ref()? {
                 RemoteFileDialogState::Rename(dialog) => Some(&dialog.name_input),
-                RemoteFileDialogState::ConfirmDelete(_) => None,
+                RemoteFileDialogState::ConfirmDelete(_)
+                | RemoteFileDialogState::RepositoryDiff(_) => None,
             },
             _ => None,
         }
@@ -776,7 +1404,8 @@ impl ArgusApp {
                 .map(|session| &mut session.version_input),
             AppTextInputTarget::RemoteFileRenameName => match self.remote_file_dialog.as_mut()? {
                 RemoteFileDialogState::Rename(dialog) => Some(&mut dialog.name_input),
-                RemoteFileDialogState::ConfirmDelete(_) => None,
+                RemoteFileDialogState::ConfirmDelete(_)
+                | RemoteFileDialogState::RepositoryDiff(_) => None,
             },
             _ => None,
         }
@@ -1287,14 +1916,67 @@ impl ArgusApp {
             }
             RemoteFileEvent::FileContentLoaded {
                 session_id,
+                request_id,
                 file_name,
                 content,
             } => {
+                self.apply_remote_file_preview_result(
+                    session_id, request_id, file_name, content, cx,
+                );
+            }
+            RemoteFileEvent::FileHistoryLoaded {
+                session_id,
+                remote_path,
+                entries,
+                error,
+            } => {
+                let entry_count = entries.len();
+                let history_error = error.clone();
                 if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
                     session.status = RemoteFileStatus::Connected;
-                    session.message = Some(format!("已加载预览：{file_name}"));
+                    session.message = Some(match &history_error {
+                        Some(message) => message.clone(),
+                        None => format!("已加载文件历史：{entry_count} 个提交"),
+                    });
                 }
-                self.open_file_preview_window(file_name, content, cx);
+                if let Some(RemoteFileDialogState::RepositoryDiff(dialog)) =
+                    self.remote_file_dialog.as_mut()
+                    && dialog.session_id == session_id
+                    && dialog.remote_path == remote_path
+                {
+                    dialog.is_loading_history = false;
+                    dialog.is_versions_open = false;
+                    dialog.history_error = history_error.clone();
+                    dialog.entries = entries;
+                    dialog.selected_target =
+                        dialog.entries.first().map(|entry| entry.target_id.clone());
+                    dialog.commit_scroll.set_offset(point(px(0.0), px(0.0)));
+                }
+                self.placeholder_notice = match history_error {
+                    Some(message) => message,
+                    None => format!("已加载 {entry_count} 个历史版本"),
+                };
+            }
+            RemoteFileEvent::FileComparisonLoaded {
+                session_id,
+                file_name,
+                current_version,
+                target_version,
+                current_content,
+                target_content,
+            } => {
+                if let Some(session) = self.remote_file_sessions.get_mut(&session_id) {
+                    session.status = RemoteFileStatus::Connected;
+                    session.message = Some(format!("已加载版本对比：{file_name}"));
+                }
+                self.open_file_diff_window(
+                    file_name,
+                    current_version,
+                    target_version,
+                    current_content,
+                    target_content,
+                    cx,
+                );
             }
             RemoteFileEvent::OperationSucceeded {
                 session_id,
@@ -1329,6 +2011,11 @@ impl ArgusApp {
                     session.worker_guard = None;
                     session.message = Some(message.clone());
                 }
+                self.fail_pending_remote_file_preview(
+                    session_id,
+                    "文件管理连接已断开，无法继续预览".to_string(),
+                    cx,
+                );
                 self.placeholder_notice = message;
                 self.open_next_svn_certificate_prompt();
             }
@@ -1343,6 +2030,11 @@ impl ArgusApp {
                     session.worker_guard = None;
                     session.message = Some(message.clone());
                 }
+                self.fail_pending_remote_file_preview(
+                    session_id,
+                    "文件管理连接失败，无法继续预览".to_string(),
+                    cx,
+                );
                 self.placeholder_notice = message;
                 self.open_next_svn_certificate_prompt();
             }
@@ -1640,19 +2332,19 @@ impl ArgusApp {
         command: RemoteFileCommand,
         busy_status: RemoteFileStatus,
         busy_message: &str,
-    ) {
+    ) -> bool {
         let Some(session) = self.remote_file_sessions.get_mut(&session_id) else {
             self.placeholder_notice = "文件管理会话不存在".to_string();
-            return;
+            return false;
         };
         let protocol_label = session.backend.label();
         if session.status != RemoteFileStatus::Connected {
             self.placeholder_notice = format!("{protocol_label} 尚未连接，暂不能执行文件操作");
-            return;
+            return false;
         }
         let Some(sender) = &session.command_sender else {
             self.placeholder_notice = format!("{protocol_label} 通道不可用");
-            return;
+            return false;
         };
         let is_allowed = match &command {
             RemoteFileCommand::UploadFiles { .. } => {
@@ -1673,19 +2365,25 @@ impl ArgusApp {
             RemoteFileCommand::LoadDirectory(_) | RemoteFileCommand::Refresh => {
                 session.capabilities.browse
             }
-            RemoteFileCommand::ReadFileContent { .. } => session.capabilities.preview,
+            RemoteFileCommand::ReadFileContent { .. }
+            | RemoteFileCommand::CompareFileVersions { .. }
+            | RemoteFileCommand::LoadFileHistory { .. } => session.capabilities.preview,
             RemoteFileCommand::TrustHostKey
             | RemoteFileCommand::RejectHostKey
             | RemoteFileCommand::Disconnect => true,
         };
         if !is_allowed {
             self.placeholder_notice = format!("{protocol_label} 当前会话不允许执行该操作");
-            return;
+            return false;
         }
-        let _ = sender.send(command);
+        if sender.send(command).is_err() {
+            self.placeholder_notice = format!("{protocol_label} 无法发送文件操作命令");
+            return false;
+        }
         session.status = busy_status;
         session.message = Some(busy_message.to_string());
         self.placeholder_notice = busy_message.to_string();
+        true
     }
 
     /// 提交远程文件重命名弹窗。
@@ -1849,6 +2547,7 @@ fn remote_file_dialog_session_id(dialog: &RemoteFileDialogState) -> Option<usize
     match dialog {
         RemoteFileDialogState::Rename(dialog) => Some(dialog.session_id),
         RemoteFileDialogState::ConfirmDelete(prompt) => Some(prompt.session_id),
+        RemoteFileDialogState::RepositoryDiff(dialog) => Some(dialog.session_id),
     }
 }
 

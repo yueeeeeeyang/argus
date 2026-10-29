@@ -1,9 +1,12 @@
 //! 文件职责：渲染可写远程文件后端共用的应用内模态弹窗。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-10-16
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：提供远程文件重命名和删除二次确认交互。
+//! 主要功能：提供远程文件重命名、删除二次确认和仓库历史版本下拉选择，提交说明支持悬停滚动条。
 
+use std::sync::Arc;
+
+use chrono::{Local, TimeZone};
 use gpui::{
     Context, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*,
     px, rgb,
@@ -11,15 +14,22 @@ use gpui::{
 
 use crate::app::{
     AppTextInputTarget, ArgusApp, RemoteFileDeletePromptState, RemoteFileDialogState,
+    RemoteFileDiffDialogState,
 };
 use crate::fonts::ARGUS_UI_FONT_FAMILY;
+use crate::remote::remote_file::RepositoryHistoryEntry;
 use crate::theme::AppTheme;
+use crate::ui::components::dropdown::{Dropdown, DropdownItem, render_dropdown};
 use crate::ui::components::icon::{ArgusIcon, render_icon};
 use crate::ui::components::icon_button::{IconButtonSize, render_icon_button};
 use crate::ui::components::input::{
     Input, InputPointerAction, InputPointerEvent, InputSize, render_input,
 };
+use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::components::modal_dialog::{ModalDialog, render_modal_dialog};
+use crate::ui::components::scrollbar::{
+    render_scroll_handle_vertical_scrollbar, scroll_area_hover_handler,
+};
 use crate::ui::input_native::app_native_input;
 
 /// 重命名弹窗宽度。
@@ -34,6 +44,31 @@ const REMOTE_FILE_DELETE_DIALOG_WIDTH: f32 = 500.0;
 const REMOTE_FILE_DELETE_DIALOG_HEIGHT: f32 = 148.0;
 /// 删除确认弹窗标题栏高度，与新增目录弹窗一致。
 const REMOTE_FILE_DELETE_HEADER_HEIGHT: f32 = 56.0;
+/// 仓库文件版本对比弹窗宽度。
+const REMOTE_FILE_REPOSITORY_DIFF_DIALOG_WIDTH: f32 = 680.0;
+/// 已选择历史版本时的高度，保证提交详情和底部按钮完整可见。
+const REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT: f32 = 420.0;
+/// 已选择历史版本且追加错误行时的高度。
+const REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_WITH_ERROR: f32 = 448.0;
+/// 尚未选择历史版本时的紧凑高度。
+const REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY: f32 = 280.0;
+/// 尚未选择历史版本且追加错误行时的高度。
+const REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY_WITH_ERROR: f32 = 308.0;
+/// 尚未选择历史版本但下拉菜单展开时的高度，保证菜单不被裁切。
+const REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY_WITH_MENU: f32 = 360.0;
+/// 尚未选择历史版本、下拉菜单展开且存在错误行时的高度。
+const REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY_WITH_MENU_AND_ERROR: f32 = 388.0;
+/// 弹窗内容左右内边距。
+const REMOTE_FILE_REPOSITORY_DIFF_CONTENT_PADDING: f32 = 20.0;
+/// “对比版本”左侧标签宽度。
+const REMOTE_FILE_REPOSITORY_DIFF_LABEL_WIDTH: f32 = 70.0;
+/// 标签与下拉框之间的间距。
+const REMOTE_FILE_REPOSITORY_DIFF_LABEL_GAP: f32 = 12.0;
+/// 历史版本下拉框宽度；右侧与下方提交信息框严格对齐。
+const REMOTE_FILE_REPOSITORY_DIFF_DROPDOWN_WIDTH: f32 = REMOTE_FILE_REPOSITORY_DIFF_DIALOG_WIDTH
+    - REMOTE_FILE_REPOSITORY_DIFF_CONTENT_PADDING * 2.0
+    - REMOTE_FILE_REPOSITORY_DIFF_LABEL_WIDTH
+    - REMOTE_FILE_REPOSITORY_DIFF_LABEL_GAP;
 
 /// 渲染当前远程文件管理弹窗。
 pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoElement {
@@ -75,6 +110,35 @@ pub(crate) fn render(app: &ArgusApp, cx: &mut Context<ArgusApp>) -> impl IntoEle
             cx,
         )
         .into_any_element(),
+        RemoteFileDialogState::RepositoryDiff(dialog) => {
+            let has_selected_target = dialog.selected_target.is_some();
+            let height = match (
+                has_selected_target,
+                dialog.is_versions_open,
+                dialog.error_message.is_some(),
+            ) {
+                (true, _, true) => REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_WITH_ERROR,
+                (true, _, false) => REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT,
+                (false, true, true) => {
+                    REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY_WITH_MENU_AND_ERROR
+                }
+                (false, true, false) => REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY_WITH_MENU,
+                (false, false, true) => REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY_WITH_ERROR,
+                (false, false, false) => REMOTE_FILE_REPOSITORY_DIFF_DIALOG_HEIGHT_EMPTY,
+            };
+            render_modal_dialog(
+                ModalDialog {
+                    overlay_id: "remote-file-repository-diff-dialog-overlay",
+                    container_id: "remote-file-repository-diff-dialog-container",
+                    width: REMOTE_FILE_REPOSITORY_DIFF_DIALOG_WIDTH,
+                    height,
+                    content: render_repository_diff_dialog(dialog, &theme, cx).into_any_element(),
+                },
+                theme,
+                cx,
+            )
+            .into_any_element()
+        }
     }
 }
 
@@ -212,6 +276,309 @@ fn render_rename_dialog(
                         })),
                 ),
         )
+}
+
+/// 渲染仓库文件版本对比弹窗，历史版本通过下拉菜单选择。
+fn render_repository_diff_dialog(
+    dialog: RemoteFileDiffDialogState,
+    theme: &AppTheme,
+    cx: &mut Context<ArgusApp>,
+) -> impl IntoElement {
+    let selected_entry = dialog
+        .selected_target
+        .as_ref()
+        .and_then(|target_id| {
+            dialog
+                .entries
+                .iter()
+                .find(|entry| &entry.target_id == target_id)
+        })
+        .cloned();
+    let selected_id = dialog.selected_target.clone().unwrap_or_default();
+    let selected_label = selected_entry
+        .as_ref()
+        .map(history_label)
+        .unwrap_or_default();
+    let items = dialog
+        .entries
+        .iter()
+        .map(|entry| DropdownItem {
+            id: entry.target_id.clone(),
+            label: history_label(entry),
+        })
+        .collect::<Vec<_>>();
+    let is_loading = dialog.is_loading_history;
+    let history_error = dialog.history_error.clone();
+    let error_message = dialog.error_message.clone();
+    let commit_scroll = dialog.commit_scroll.clone();
+    let app_entity = cx.entity();
+    let toggle_entity = app_entity.clone();
+    let select_entity = app_entity.clone();
+
+    let version_selector = if is_loading {
+        div()
+            .h(px(30.0))
+            .w_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.content))
+            .child(render_loading_spinner(
+                ("svn-history-loading", 0),
+                theme.info,
+                16.0,
+            ))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.foreground_muted))
+                    .child("正在加载提交历史..."),
+            )
+            .into_any_element()
+    } else if let Some(message) = history_error.clone() {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .line_clamp(2)
+                    .text_color(rgb(theme.error))
+                    .child(message),
+            )
+            .child(text_button(
+                "重新加载历史",
+                false,
+                theme,
+                cx,
+                move |app, cx| {
+                    app.reload_repository_file_history();
+                    cx.notify();
+                },
+            ))
+            .into_any_element()
+    } else if items.is_empty() {
+        div()
+            .h(px(30.0))
+            .w_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.content))
+            .text_size(px(12.0))
+            .text_color(rgb(theme.foreground_muted))
+            .child("没有可用的提交历史")
+            .into_any_element()
+    } else {
+        render_dropdown(
+            Dropdown {
+                id: "remote-file-repository-diff-version-dropdown",
+                selected_id,
+                selected_label,
+                placeholder: "请选择对比版本",
+                is_open: dialog.is_versions_open,
+                items,
+                show_inline_menu: true,
+                width: REMOTE_FILE_REPOSITORY_DIFF_DROPDOWN_WIDTH,
+            },
+            theme,
+            move |_, _, cx| {
+                cx.stop_propagation();
+                toggle_entity.update(cx, |app, app_cx| {
+                    app.toggle_repository_diff_versions();
+                    app_cx.notify();
+                });
+            },
+            Arc::new(move |target_id, _, cx| {
+                cx.stop_propagation();
+                select_entity.update(cx, |app, app_cx| {
+                    app.select_repository_diff_target(target_id.clone());
+                    app_cx.notify();
+                });
+            }),
+        )
+        .into_any_element()
+    };
+
+    let selected_detail = selected_entry.map(|entry| {
+        let message = if entry.message.trim().is_empty() {
+            "无提交说明".to_string()
+        } else {
+            entry.message.clone()
+        };
+        let commit_scroll = commit_scroll.clone();
+        div()
+            .w_full()
+            .flex_none()
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.current_line))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .overflow_hidden()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.foreground_muted))
+                    .child(entry.label)
+                    .child(entry.author.unwrap_or_else(|| "未知作者".to_string()))
+                    .child(format_history_date(entry.date)),
+            )
+            .child(
+                div()
+                    .id("repository-diff-commit-scroll-area")
+                    .relative()
+                    .w_full()
+                    .on_hover(scroll_area_hover_handler(
+                        "repository-diff-commit".to_string(),
+                    ))
+                    .child(
+                        div()
+                            .id("remote-file-repository-diff-commit-message")
+                            .debug_selector(|| {
+                                "remote-file-repository-diff-commit-message".to_string()
+                            })
+                            .max_h(px(170.0))
+                            .overflow_hidden()
+                            .overflow_y_scroll()
+                            .scrollbar_width(px(0.0))
+                            .track_scroll(&commit_scroll)
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(rgb(theme.foreground))
+                            .child(message),
+                    )
+                    .children(render_scroll_handle_vertical_scrollbar(
+                        commit_scroll,
+                        "repository-diff-commit",
+                        "repository-diff-commit-scrollbar",
+                        theme,
+                    )),
+            )
+    });
+
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .rounded_lg()
+        .overflow_hidden()
+        .bg(rgb(theme.content))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .font_family(ARGUS_UI_FONT_FAMILY)
+        .text_color(rgb(theme.foreground))
+        .child(dialog_header(
+            "对比文件历史版本",
+            ArgusIcon::History,
+            "关闭版本对比",
+            theme,
+            cx,
+        ))
+        .child(
+            div()
+                .px_5()
+                .pb_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.foreground_muted))
+                        .child(format!(
+                            "{}（当前版本：{}）",
+                            dialog.file_name, dialog.current_version
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(REMOTE_FILE_REPOSITORY_DIFF_LABEL_GAP))
+                        .child(
+                            div()
+                                .w(px(REMOTE_FILE_REPOSITORY_DIFF_LABEL_WIDTH))
+                                .flex_none()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.foreground_muted))
+                                .child("对比版本"),
+                        )
+                        .child(div().flex_1().min_w(px(0.0)).child(version_selector)),
+                )
+                .when_some(selected_detail, |this, detail| this.child(detail))
+                .when_some(error_message, |this, message| {
+                    this.child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.error))
+                            .child(message),
+                    )
+                })
+                .child(
+                    div()
+                        .mt_1()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(text_button("取消", false, theme, cx, |app, cx| {
+                            app.close_remote_file_dialog();
+                            cx.notify();
+                        }))
+                        .child(text_button("开始对比", true, theme, cx, |app, cx| {
+                            app.submit_remote_file_dialog();
+                            cx.notify();
+                        })),
+                ),
+        )
+}
+
+/// 构造历史版本下拉项文案：版本标识、时间和提交说明摘要。
+fn history_label(entry: &RepositoryHistoryEntry) -> String {
+    let message = history_message_summary(&entry.message);
+    let date = format_history_date(entry.date);
+    if message.is_empty() {
+        format!("{} · {date}", entry.label)
+    } else {
+        format!("{} · {date} · {message}", entry.label)
+    }
+}
+
+/// 提取提交说明首个非空行并限制摘要长度。
+fn history_message_summary(message: &str) -> String {
+    let line = message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or_default();
+    let mut chars = line.chars();
+    let mut summary = chars.by_ref().take(80).collect::<String>();
+    if chars.next().is_some() {
+        summary.push('…');
+    }
+    summary
+}
+
+/// 格式化历史提交时间，无法解析时显示占位符。
+fn format_history_date(date: Option<u64>) -> String {
+    date.and_then(|value| Local.timestamp_opt(value as i64, 0).single())
+        .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 /// 渲染删除确认弹窗。
@@ -448,4 +815,51 @@ fn text_button(
                 on_click(app, cx);
             }),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证历史下拉框右侧与下方提交信息框右侧严格对齐。
+    #[test]
+    fn dropdown_right_edge_aligns_with_commit_detail() {
+        assert_eq!(
+            REMOTE_FILE_REPOSITORY_DIFF_CONTENT_PADDING * 2.0
+                + REMOTE_FILE_REPOSITORY_DIFF_LABEL_WIDTH
+                + REMOTE_FILE_REPOSITORY_DIFF_LABEL_GAP
+                + REMOTE_FILE_REPOSITORY_DIFF_DROPDOWN_WIDTH,
+            REMOTE_FILE_REPOSITORY_DIFF_DIALOG_WIDTH
+        );
+    }
+
+    /// 验证历史下拉文案同时包含修订号、时间和提交说明。
+    #[test]
+    fn history_label_contains_revision_date_and_commit() {
+        let entry = RepositoryHistoryEntry {
+            target_id: "r123".to_string(),
+            label: "r123".to_string(),
+            author: Some("alice".to_string()),
+            date: Some(1_700_000_000),
+            message: "修复登录问题\n第二行说明".to_string(),
+        };
+        let label = history_label(&entry);
+        assert!(label.starts_with("r123 · "));
+        assert!(label.contains("修复登录问题"));
+        assert!(!label.contains('\n'));
+    }
+
+    /// 验证超长提交说明只保留首行前 80 个字符并追加省略号。
+    #[test]
+    fn long_commit_summary_is_truncated() {
+        let summary = history_message_summary(&"长".repeat(90));
+        assert_eq!(summary.chars().count(), 81);
+        assert!(summary.ends_with('…'));
+    }
+
+    /// 验证无提交时间时展示占位符。
+    #[test]
+    fn missing_history_date_uses_placeholder() {
+        assert_eq!(format_history_date(None), "-");
+    }
 }

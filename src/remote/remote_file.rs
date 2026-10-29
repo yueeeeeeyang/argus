@@ -1,8 +1,8 @@
 //! 文件职责：封装 SFTP、SMB、Git、SVN 通用远程文件会话、后台 worker 与文件元数据。
 //! 创建日期：2026-06-26
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：以统一命令事件模型驱动可写文件协议和只读仓库协议的浏览、预览与下载。
+//! 主要功能：以统一命令事件模型驱动可写文件协议和只读仓库协议的浏览、预览、历史与下载。
 
 use std::collections::BTreeSet;
 use std::fs::File as LocalFile;
@@ -281,6 +281,21 @@ pub(crate) struct RepositoryVersion {
     pub kind: RepositoryVersionKind,
 }
 
+/// 仓库文件历史中的一次提交，SVN 使用修订号，Git 使用提交哈希。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepositoryHistoryEntry {
+    /// 发给 worker 的目标版本稳定 ID，例如 `r123` 或完整 Git 提交哈希。
+    pub target_id: String,
+    /// UI 展示的短版本标识，例如 `r123` 或 Git 短哈希。
+    pub label: String,
+    /// 提交作者；服务端未提供时为空。
+    pub author: Option<String>,
+    /// 提交时间的 Unix 秒；服务端未提供时为空。
+    pub date: Option<u64>,
+    /// 提交说明，已去除首尾空白。
+    pub message: String,
+}
+
 /// 远程文件管理会话状态。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteFileStatus {
@@ -456,6 +471,22 @@ pub(crate) enum RemoteFileCommand {
     ReadFileContent {
         /// 远程文件路径。
         remote_path: String,
+        /// 预览请求 ID，用于丢弃已被新预览取代的迟到结果。
+        request_id: u64,
+    },
+    /// 读取仓库文件当前版本与指定历史版本的内容用于对比。
+    CompareFileVersions {
+        /// 远程文件路径。
+        remote_path: String,
+        /// 目标版本稳定 ID：SVN 为 `r123`，Git 为提交哈希。
+        target_version: String,
+        /// 目标版本展示文本。
+        target_label: String,
+    },
+    /// 读取仓库文件历史提交，供对比版本下拉选择。
+    LoadFileHistory {
+        /// 远程文件路径。
+        remote_path: String,
     },
     /// 在当前目录内重命名文件或目录。
     Rename {
@@ -550,10 +581,38 @@ pub(crate) enum RemoteFileEvent {
     FileContentLoaded {
         /// 会话 ID。
         session_id: usize,
+        /// 预览请求 ID。
+        request_id: u64,
         /// 文件名，用于预览窗口标题。
         file_name: String,
         /// 预览内容。
         content: FilePreviewContent,
+    },
+    /// 仓库文件历史加载完成；失败时 `entries` 为空并携带错误。
+    FileHistoryLoaded {
+        /// 会话 ID。
+        session_id: usize,
+        /// 发起历史查询的远程文件路径。
+        remote_path: String,
+        /// 历史提交，按提交时间从新到旧排列。
+        entries: Vec<RepositoryHistoryEntry>,
+        /// 历史加载失败原因；成功时为空。
+        error: Option<String>,
+    },
+    /// 仓库文件当前版本与指定历史版本的读取结果。
+    FileComparisonLoaded {
+        /// 会话 ID。
+        session_id: usize,
+        /// 文件名，用于 diff 窗口标题。
+        file_name: String,
+        /// 当前文件所在版本展示文本。
+        current_version: String,
+        /// 对比版本展示文本。
+        target_version: String,
+        /// 当前版本内容。
+        current_content: FilePreviewContent,
+        /// 目标版本内容。
+        target_content: FilePreviewContent,
     },
     /// 操作成功。
     OperationSucceeded {
@@ -835,13 +894,23 @@ fn run_ssh_sftp_worker(
                 let result = download_files(&sftp, &entries, &local_dir, &cancellation);
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
-            RemoteFileCommand::ReadFileContent { remote_path } => {
+            RemoteFileCommand::ReadFileContent {
+                remote_path,
+                request_id,
+            } => {
                 send_file_preview_loaded(
                     session_id,
+                    request_id,
                     read_sftp_file_preview(&sftp, &remote_path),
                     &event_sender,
                 );
             }
+            RemoteFileCommand::CompareFileVersions { .. }
+            | RemoteFileCommand::LoadFileHistory { .. } => send_operation_failed(
+                &event_sender,
+                session_id,
+                anyhow!("仅 SVN 或 Git 支持文件版本对比和历史查询"),
+            ),
             RemoteFileCommand::Rename {
                 remote_path,
                 new_name,
@@ -974,13 +1043,23 @@ async fn run_smb_worker_async(
                     download_smb_files(&mut client, &entries, &local_dir, &cancellation).await;
                 send_operation_result_without_refresh(session_id, &event_sender, result);
             }
-            RemoteFileCommand::ReadFileContent { remote_path } => {
+            RemoteFileCommand::ReadFileContent {
+                remote_path,
+                request_id,
+            } => {
                 send_file_preview_loaded(
                     session_id,
+                    request_id,
                     read_smb_file_preview(&mut client, &remote_path).await,
                     &event_sender,
                 );
             }
+            RemoteFileCommand::CompareFileVersions { .. }
+            | RemoteFileCommand::LoadFileHistory { .. } => send_operation_failed(
+                &event_sender,
+                session_id,
+                anyhow!("仅 SVN 或 Git 支持文件版本对比和历史查询"),
+            ),
             RemoteFileCommand::Rename {
                 remote_path,
                 new_name,
@@ -1582,6 +1661,7 @@ fn send_operation_result_without_refresh(
 /// 发送远程文件预览内容读取完成事件。
 pub(crate) fn send_file_preview_loaded(
     session_id: usize,
+    request_id: u64,
     preview: (String, FilePreviewContent),
     event_sender: &Sender<RemoteFileEvent>,
 ) {
@@ -1590,6 +1670,7 @@ pub(crate) fn send_file_preview_loaded(
         event_sender,
         RemoteFileEvent::FileContentLoaded {
             session_id,
+            request_id,
             file_name,
             content,
         },
@@ -1864,6 +1945,8 @@ fn verify_host_key(
                         | RemoteFileCommand::DownloadFile { .. }
                         | RemoteFileCommand::DownloadFiles { .. }
                         | RemoteFileCommand::ReadFileContent { .. }
+                        | RemoteFileCommand::CompareFileVersions { .. }
+                        | RemoteFileCommand::LoadFileHistory { .. }
                         | RemoteFileCommand::Rename { .. }
                         | RemoteFileCommand::Delete { .. },
                     ) => {}

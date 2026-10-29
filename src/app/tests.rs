@@ -1,6 +1,6 @@
 //! 文件职责：app 模块的单元测试。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-10-28
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
 //! 主要功能：测试应用状态、来源树、标签页、搜索、分析和连接等核心行为。
 
@@ -15,6 +15,7 @@ use crate::analysis::runtime::{
 use crate::config::JstackThreadFilterRuleKind;
 use crate::config::paths::{isolated_test_dir, temporary_test_dir};
 use crate::remote::connection::ConnectionLinkKind;
+use crate::ui::components::icon::ArgusIcon;
 use gpui::MouseButton;
 
 /// 构造隔离真实用户目录的配置管理器。
@@ -117,6 +118,62 @@ fn insert_test_sftp_session(
     session.status = crate::remote::remote_file::RemoteFileStatus::Connected;
     session.current_dir = "/home/tester".to_string();
     session.address_input = TextInputState::from_value(session.current_dir.clone());
+    app.remote_file_sessions.insert(session_id, session);
+    receiver
+}
+
+/// 在配置中创建一个测试 SVN 链接。
+fn add_test_svn_link(app: &mut ArgusApp) -> ConnectionNodeId {
+    app.config
+        .connections
+        .add_svn_link(
+            None,
+            "测试 SVN 仓库",
+            crate::remote::connection::SvnLinkConfig {
+                url: "https://svn.example.test/repository".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("应能创建测试 SVN 链接")
+}
+
+/// 插入不连接真实服务器的 SVN 会话，并返回命令接收端。
+fn insert_test_svn_session(
+    app: &mut ArgusApp,
+    session_id: usize,
+    link_id: ConnectionNodeId,
+) -> std::sync::mpsc::Receiver<crate::remote::remote_file::RemoteFileCommand> {
+    let link = app
+        .config
+        .connections
+        .link(link_id)
+        .expect("应存在测试链接")
+        .clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut session = crate::remote::remote_file::RemoteFileSessionState::connecting(
+        session_id,
+        &link,
+        crate::remote::remote_file::RemoteFileBackend::Svn,
+        sender,
+    );
+    session.status = crate::remote::remote_file::RemoteFileStatus::Connected;
+    session.current_dir = "/".to_string();
+    session.address_input = TextInputState::from_value(session.current_dir.clone());
+    session.repository_versions = vec![crate::remote::remote_file::RepositoryVersion {
+        id: "HEAD".to_string(),
+        label: "HEAD (r42)".to_string(),
+        kind: crate::remote::remote_file::RepositoryVersionKind::SvnHead,
+    }];
+    session.selected_repository_version = Some("HEAD".to_string());
+    session.entries = vec![crate::remote::remote_file::RemoteFileEntry {
+        name: "app.rs".to_string(),
+        path: "/app.rs".to_string(),
+        kind: crate::remote::remote_file::RemoteFileEntryKind::RegularFile,
+        size: Some(256),
+        mtime: None,
+        permissions: Some(0o100644),
+    }];
+    session.selected_paths.insert("/app.rs".to_string());
     app.remote_file_sessions.insert(session_id, session);
     receiver
 }
@@ -1185,18 +1242,22 @@ fn sftp_entry_context_menu_shows_file_actions() {
         entries[0].action,
         MenuAction::PreviewRemoteFileSelection { session_id } if session_id == 1
     ));
+    assert_eq!(entries[0].icon, Some(ArgusIcon::FileText));
     assert!(matches!(
         entries[1].action,
         MenuAction::DownloadRemoteFileSelection { session_id } if session_id == 1
     ));
+    assert_eq!(entries[1].icon, Some(ArgusIcon::Download));
     assert!(matches!(
         entries[2].action,
         MenuAction::RenameRemoteFileSelection { session_id } if session_id == 1
     ));
+    assert_eq!(entries[2].icon, Some(ArgusIcon::Rename));
     assert!(matches!(
         entries[3].action,
         MenuAction::DeleteRemoteFileSelection { session_id } if session_id == 1
     ));
+    assert_eq!(entries[3].icon, Some(ArgusIcon::Trash));
     assert!(entries[3].is_danger);
 }
 
@@ -1242,15 +1303,21 @@ fn repository_file_actions_hide_and_reject_all_writes() {
         gpui::point(gpui::px(2.0), gpui::px(3.0)),
     );
     let entries = app.active_menu_entries();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert!(matches!(
         entries[0].action,
         MenuAction::PreviewRemoteFileSelection { session_id: 9 }
     ));
     assert!(matches!(
         entries[1].action,
+        MenuAction::CompareRepositoryFileSelection { session_id: 9 }
+    ));
+    assert_eq!(entries[1].icon, Some(ArgusIcon::History));
+    assert!(matches!(
+        entries[2].action,
         MenuAction::DownloadRemoteFileSelection { session_id: 9 }
     ));
+    assert!(app.can_compare_repository_file_selection(9));
     assert!(!app.can_rename_remote_file_selection(9));
     assert!(!app.can_delete_remote_file_selection(9));
 
@@ -1260,6 +1327,77 @@ fn repository_file_actions_hide_and_reject_all_writes() {
     assert!(matches!(
         receiver.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}
+
+/// 验证 Git 对比弹窗加载提交历史并提交完整提交哈希。
+#[test]
+fn git_file_compare_dialog_submits_selected_commit() {
+    let mut app = test_app();
+    let link_id = add_test_svn_link(&mut app);
+    let receiver = insert_test_svn_session(&mut app, 31, link_id);
+    let first_commit = "a".repeat(40);
+    let second_commit = "b".repeat(40);
+    if let Some(session) = app.remote_file_sessions.get_mut(&31) {
+        session.backend = crate::remote::remote_file::RemoteFileBackend::Git;
+        session.capabilities = session.backend.capabilities();
+        session.repository_versions = vec![crate::remote::remote_file::RepositoryVersion {
+            id: "refs/remotes/origin/main".to_string(),
+            label: "main（默认分支）".to_string(),
+            kind: crate::remote::remote_file::RepositoryVersionKind::GitBranch,
+        }];
+        session.selected_repository_version = Some("refs/remotes/origin/main".to_string());
+    }
+
+    app.open_repository_file_diff_dialog(31);
+    match app.remote_file_dialog.as_ref() {
+        Some(RemoteFileDialogState::RepositoryDiff(dialog)) => {
+            assert_eq!(dialog.current_version, "main（默认分支）");
+            assert!(dialog.is_loading_history);
+        }
+        other => panic!("应打开 Git 版本对比弹窗，实际为 {other:?}"),
+    }
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::remote::remote_file::RemoteFileCommand::LoadFileHistory { remote_path })
+            if remote_path == "/app.rs"
+    ));
+
+    if let Some(RemoteFileDialogState::RepositoryDiff(dialog)) = app.remote_file_dialog.as_mut() {
+        dialog.is_loading_history = false;
+        dialog.entries = vec![
+            crate::remote::remote_file::RepositoryHistoryEntry {
+                target_id: first_commit.clone(),
+                label: "aaaaaaa".to_string(),
+                author: Some("alice".to_string()),
+                date: Some(1_700_000_000),
+                message: "修复问题".to_string(),
+            },
+            crate::remote::remote_file::RepositoryHistoryEntry {
+                target_id: second_commit.clone(),
+                label: "bbbbbbb".to_string(),
+                author: None,
+                date: None,
+                message: "旧提交".to_string(),
+            },
+        ];
+    }
+    if let Some(session) = app.remote_file_sessions.get_mut(&31) {
+        session.status = crate::remote::remote_file::RemoteFileStatus::Connected;
+    }
+    app.select_repository_diff_target(first_commit.clone());
+    app.submit_remote_file_dialog();
+
+    assert!(app.remote_file_dialog.is_none());
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::remote::remote_file::RemoteFileCommand::CompareFileVersions {
+            remote_path,
+            target_version,
+            target_label,
+        }) if remote_path == "/app.rs"
+            && target_version == first_commit
+            && target_label == "aaaaaaa"
     ));
 }
 
@@ -6765,4 +6903,217 @@ fn workspace_shutdown_cancels_source_tasks() {
     assert!(retry.is_cancelled());
     assert_ne!(generation, app.source_load_generation);
     assert!(app.source_workspace_lease.is_none());
+}
+
+/// 验证 SVN 单文件右键菜单提供版本对比，并拒绝多选和非 SVN 会话。
+#[test]
+fn svn_entry_context_menu_offers_version_compare_for_single_file() {
+    let mut app = test_app();
+    let link_id = add_test_svn_link(&mut app);
+    let _receiver = insert_test_svn_session(&mut app, 21, link_id);
+    let remote_path = "/app.rs".to_string();
+
+    app.open_remote_file_entry_context_menu(
+        21,
+        remote_path.clone(),
+        gpui::point(gpui::px(2.0), gpui::px(3.0)),
+    );
+    let entries = app.active_menu_entries();
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(
+        entries[0].action,
+        MenuAction::PreviewRemoteFileSelection { session_id: 21 }
+    ));
+    assert!(matches!(
+        entries[1].action,
+        MenuAction::CompareRepositoryFileSelection { session_id: 21 }
+    ));
+    assert_eq!(entries[1].icon, Some(ArgusIcon::History));
+    assert!(matches!(
+        entries[2].action,
+        MenuAction::DownloadRemoteFileSelection { session_id: 21 }
+    ));
+    assert!(app.can_compare_repository_file_selection(21));
+
+    let session = app.remote_file_sessions.get_mut(&21).unwrap();
+    session
+        .entries
+        .push(crate::remote::remote_file::RemoteFileEntry {
+            name: "other.rs".to_string(),
+            path: "/other.rs".to_string(),
+            kind: crate::remote::remote_file::RemoteFileEntryKind::RegularFile,
+            size: Some(128),
+            mtime: None,
+            permissions: Some(0o100644),
+        });
+    session.selected_paths.insert("/other.rs".to_string());
+    assert!(!app.can_compare_repository_file_selection(21));
+
+    let sftp_link_id = add_test_ssh_link(&mut app);
+    let _sftp_receiver = insert_test_sftp_session(&mut app, 22, sftp_link_id);
+    if let Some(session) = app.remote_file_sessions.get_mut(&22) {
+        session
+            .selected_paths
+            .insert("/home/tester/app.log".to_string());
+    }
+    assert!(!app.can_compare_repository_file_selection(22));
+}
+
+/// 验证 SVN 对比弹窗先加载历史，再提交选中的修订号。
+#[test]
+fn svn_file_compare_dialog_loads_history_and_submits_selected_revision() {
+    let mut app = test_app();
+    let link_id = add_test_svn_link(&mut app);
+    let receiver = insert_test_svn_session(&mut app, 23, link_id);
+
+    app.open_repository_file_diff_dialog(23);
+    match app.remote_file_dialog.as_ref() {
+        Some(RemoteFileDialogState::RepositoryDiff(dialog)) => {
+            assert_eq!(dialog.session_id, 23);
+            assert_eq!(dialog.file_name, "app.rs");
+            assert_eq!(dialog.remote_path, "/app.rs");
+            assert_eq!(dialog.current_version, "HEAD (r42)");
+            assert!(dialog.is_loading_history);
+            assert!(dialog.entries.is_empty());
+            assert_eq!(dialog.selected_target, None);
+        }
+        other => panic!("应打开 SVN 版本对比弹窗，实际为 {other:?}"),
+    }
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::remote::remote_file::RemoteFileCommand::LoadFileHistory {
+            remote_path,
+        }) if remote_path == "/app.rs"
+    ));
+
+    if let Some(RemoteFileDialogState::RepositoryDiff(dialog)) = app.remote_file_dialog.as_mut() {
+        dialog.is_loading_history = false;
+        dialog.entries = vec![
+            crate::remote::remote_file::RepositoryHistoryEntry {
+                target_id: "r7".to_string(),
+                label: "r7".to_string(),
+                author: Some("tester".to_string()),
+                date: Some(1_700_000_000),
+                message: "修复问题".to_string(),
+            },
+            crate::remote::remote_file::RepositoryHistoryEntry {
+                target_id: "r3".to_string(),
+                label: "r3".to_string(),
+                author: None,
+                date: None,
+                message: String::new(),
+            },
+        ];
+    }
+    if let Some(session) = app.remote_file_sessions.get_mut(&23) {
+        session.status = crate::remote::remote_file::RemoteFileStatus::Connected;
+    }
+    app.select_repository_diff_target("r7".to_string());
+    app.submit_remote_file_dialog();
+
+    assert!(app.remote_file_dialog.is_none());
+    assert_eq!(
+        app.remote_file_sessions[&23].status,
+        crate::remote::remote_file::RemoteFileStatus::Transferring
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::remote::remote_file::RemoteFileCommand::CompareFileVersions {
+            remote_path,
+            target_version,
+            target_label,
+        }) if remote_path == "/app.rs" && target_version == "r7" && target_label == "r7"
+    ));
+}
+
+/// 验证未选择历史版本时保留弹窗并显示校验错误，不发送对比命令。
+#[test]
+fn svn_file_compare_dialog_requires_selected_revision() {
+    let mut app = test_app();
+    let link_id = add_test_svn_link(&mut app);
+    let receiver = insert_test_svn_session(&mut app, 24, link_id);
+
+    app.open_repository_file_diff_dialog(24);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::remote::remote_file::RemoteFileCommand::LoadFileHistory { .. })
+    ));
+    if let Some(RemoteFileDialogState::RepositoryDiff(dialog)) = app.remote_file_dialog.as_mut() {
+        dialog.is_loading_history = false;
+        dialog.history_error = None;
+        dialog.entries.clear();
+        dialog.selected_target = None;
+    }
+    if let Some(session) = app.remote_file_sessions.get_mut(&24) {
+        session.status = crate::remote::remote_file::RemoteFileStatus::Connected;
+    }
+    app.submit_remote_file_dialog();
+
+    match app.remote_file_dialog.as_ref() {
+        Some(RemoteFileDialogState::RepositoryDiff(dialog)) => {
+            assert_eq!(dialog.error_message.as_deref(), Some("请选择对比版本"));
+        }
+        other => panic!("应保留 SVN 版本对比弹窗，实际为 {other:?}"),
+    }
+    assert_eq!(
+        app.remote_file_sessions[&24].status,
+        crate::remote::remote_file::RemoteFileStatus::Connected
+    );
+    assert!(receiver.try_recv().is_err());
+
+    if let Some(RemoteFileDialogState::RepositoryDiff(dialog)) = app.remote_file_dialog.as_mut() {
+        dialog.entries = vec![crate::remote::remote_file::RepositoryHistoryEntry {
+            target_id: "r5".to_string(),
+            label: "r5".to_string(),
+            author: None,
+            date: None,
+            message: "第五版".to_string(),
+        }];
+    }
+    assert!(app.remote_file_dialog.is_some());
+}
+
+/// 验证目录无法发起版本对比。
+#[test]
+fn svn_file_compare_rejects_directory() {
+    let mut app = test_app();
+    let link_id = add_test_svn_link(&mut app);
+    let _receiver = insert_test_svn_session(&mut app, 25, link_id);
+
+    if let Some(session) = app.remote_file_sessions.get_mut(&25) {
+        session.entries[0].kind = crate::remote::remote_file::RemoteFileEntryKind::Directory;
+    }
+    app.open_repository_file_diff_dialog(25);
+    assert!(app.remote_file_dialog.is_none());
+    assert!(
+        app.placeholder_notice
+            .contains("请选择一个 SVN 普通文件进行版本对比")
+    );
+}
+
+/// 验证 SVN 对比菜单动作在窗口上下文中打开版本输入弹窗并关闭菜单。
+#[gpui::test]
+fn svn_compare_menu_action_opens_version_dialog(cx: &mut gpui::TestAppContext) {
+    let app = cx.new(|_| test_app());
+    app.update(cx, |app, cx| {
+        let link_id = add_test_svn_link(app);
+        let _receiver = insert_test_svn_session(app, 26, link_id);
+        app.open_remote_file_entry_context_menu(
+            26,
+            "/app.rs".to_string(),
+            gpui::point(gpui::px(2.0), gpui::px(3.0)),
+        );
+
+        app.handle_menu_action_with_context(
+            MenuAction::CompareRepositoryFileSelection { session_id: 26 },
+            None,
+            cx,
+        );
+
+        assert!(app.active_menu.is_none());
+        assert!(matches!(
+            app.remote_file_dialog,
+            Some(RemoteFileDialogState::RepositoryDiff(_))
+        ));
+    });
 }

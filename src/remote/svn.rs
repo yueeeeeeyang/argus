@@ -1,7 +1,8 @@
 //! 文件职责：使用纯 Rust ra_svn、russh 与内置 DAV 客户端实现 SVN 仓库只读文件管理。
 //! 创建日期：2026-07-15
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：按 URL 选择 ra_svn 或 HTTP DAV 会话，限制浏览根目录并支持 HEAD/固定修订切换。
+//! 主要功能：按 URL 选择 ra_svn 或 HTTP DAV 会话，支持 HEAD/固定修订切换、文件预览与提交历史查询。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -11,7 +12,10 @@ use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use async_channel::Sender;
 use chrono::DateTime;
 use percent_encoding::percent_decode_str;
-use svn::{NodeKind, RaSvnClient, RaSvnSession, SshAuth, SshConfig, SvnUrl};
+use svn::{
+    LogEntry, LogOptions, LogRevProps, NodeKind, RaSvnClient, RaSvnSession, SshAuth, SshConfig,
+    SvnUrl,
+};
 
 use super::download::DownloadFile;
 use super::worker::WorkerCancellation;
@@ -19,15 +23,18 @@ use crate::config::paths::argus_svn_known_hosts_file;
 use crate::remote::connection::SvnLinkConfig;
 use crate::remote::remote_file::{
     FilePreviewContent, REMOTE_FILE_PREVIEW_MAX_FILE_SIZE, REMOTE_FILE_PREVIEW_MAX_READ,
-    RemoteFileCommand, RemoteFileEntry, RemoteFileEntryKind, RemoteFileEvent, RepositoryVersion,
-    RepositoryVersionKind, local_download_path, preview_content_from_bytes, remote_child_path,
-    remote_file_name, resolve_remote_path, send_event_blocking, send_file_preview_loaded,
-    send_operation_failed,
+    RemoteFileCommand, RemoteFileEntry, RemoteFileEntryKind, RemoteFileEvent,
+    RepositoryHistoryEntry, RepositoryVersion, RepositoryVersionKind, local_download_path,
+    preview_content_from_bytes, remote_child_path, remote_file_name, resolve_remote_path,
+    send_event_blocking, send_file_preview_loaded, send_operation_failed,
 };
 use crate::remote::svn_certificate::SvnCertificateContext;
 use crate::remote::svn_http::{HttpSvnNodeStat, HttpSvnSession};
 use crate::remote::svn_tls::SvnCertificateTrust;
 use tokio::io::AsyncWriteExt as _;
+
+/// SVN 文件历史最多加载的提交数，避免大仓库一次性拉取过多记录。
+const SVN_FILE_HISTORY_LIMIT: usize = 100;
 
 /// 当前 SVN 会话的版本选择；HEAD 在每次刷新时重新解析，固定修订保持不变。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,6 +138,46 @@ impl SvnReadSession {
                 .await
                 .context("无法读取 SVN HEAD 修订号"),
             Self::Http(session) => session.latest_revision(),
+        }
+    }
+
+    /// 查询指定文件在当前修订之前的历史提交。
+    ///
+    /// 参数说明：
+    /// - `path`：以链接位置为根的远程文件路径。
+    /// - `start_revision`：历史查询起点，通常为当前展示修订。
+    /// - `limit`：最多返回的提交数。
+    async fn file_history(
+        &mut self,
+        path: &str,
+        start_revision: u64,
+        limit: usize,
+    ) -> Result<Vec<RepositoryHistoryEntry>> {
+        let normalized = normalize_repository_path(path)?;
+        match self {
+            Self::RaSvn(session) => {
+                let relative = normalized.trim_start_matches('/').to_string();
+                if relative.is_empty() {
+                    bail!("仓库根目录不是普通文件");
+                }
+                let options = LogOptions {
+                    target_paths: vec![relative],
+                    start_rev: Some(start_revision),
+                    end_rev: Some(0),
+                    changed_paths: false,
+                    // 只返回目标路径实际存在的修订，避免选择复制前的旧路径后无法读取对比文件。
+                    strict_node: true,
+                    limit: limit as u64,
+                    include_merged_revisions: false,
+                    revprops: LogRevProps::All,
+                };
+                let entries = session
+                    .log_with_options(&options)
+                    .await
+                    .context("读取 SVN 文件历史失败")?;
+                Ok(entries.into_iter().filter_map(svn_history_entry).collect())
+            }
+            Self::Http(session) => session.file_history(&normalized, start_revision, limit),
         }
     }
 
@@ -418,7 +465,7 @@ async fn run_svn_worker_async(
                                 &event_sender,
                                 session_id,
                                 selection,
-                                anyhow!("无法解析 SVN HEAD：{error}"),
+                                anyhow!("无法解析 SVN HEAD：{error:#}"),
                             );
                             continue;
                         }
@@ -474,11 +521,111 @@ async fn run_svn_worker_async(
                 .await;
                 send_svn_operation_result(session_id, result, &event_sender);
             }
-            RemoteFileCommand::ReadFileContent { remote_path } => send_file_preview_loaded(
+            RemoteFileCommand::ReadFileContent {
+                remote_path,
+                request_id,
+            } => send_file_preview_loaded(
                 session_id,
+                request_id,
                 read_svn_file_preview(&mut session, selection.resolved(), &remote_path).await,
                 &event_sender,
             ),
+            RemoteFileCommand::CompareFileVersions {
+                remote_path,
+                target_version,
+                target_label,
+            } => {
+                let target_revision = match parse_svn_revision(&target_version) {
+                    Ok(Some(revision)) => revision,
+                    Ok(None) => {
+                        send_operation_failed(
+                            &event_sender,
+                            session_id,
+                            anyhow!("请选择具体 SVN 修订号进行对比"),
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        send_operation_failed(&event_sender, session_id, error);
+                        continue;
+                    }
+                };
+                let current_revision = selection.resolved();
+                let current_label = selection.display();
+                let current =
+                    match read_svn_diff_content(&mut session, current_revision, &remote_path).await
+                    {
+                        Ok(content) => content,
+                        Err(error) => {
+                            send_operation_failed(
+                                &event_sender,
+                                session_id,
+                                anyhow!("读取当前版本失败：{remote_path}：{error:#}"),
+                            );
+                            continue;
+                        }
+                    };
+                let target_content = match read_svn_diff_content(
+                    &mut session,
+                    target_revision,
+                    &remote_path,
+                )
+                .await
+                {
+                    Ok(content) => content,
+                    Err(error) => {
+                        send_operation_failed(
+                            &event_sender,
+                            session_id,
+                            anyhow!("读取目标版本失败：{remote_path}：{error:#}"),
+                        );
+                        continue;
+                    }
+                };
+                send_event_blocking(
+                    &event_sender,
+                    RemoteFileEvent::FileComparisonLoaded {
+                        session_id,
+                        file_name: remote_file_name(&remote_path),
+                        current_version: current_label,
+                        target_version: target_label,
+                        current_content: FilePreviewContent::Text {
+                            content: current.0,
+                            truncated: current.1,
+                        },
+                        target_content: FilePreviewContent::Text {
+                            content: target_content.0,
+                            truncated: target_content.1,
+                        },
+                    },
+                );
+            }
+            RemoteFileCommand::LoadFileHistory { remote_path } => {
+                let current_revision = selection.resolved();
+                let result = session
+                    .file_history(&remote_path, current_revision, SVN_FILE_HISTORY_LIMIT)
+                    .await;
+                match result {
+                    Ok(entries) => send_event_blocking(
+                        &event_sender,
+                        RemoteFileEvent::FileHistoryLoaded {
+                            session_id,
+                            remote_path,
+                            entries,
+                            error: None,
+                        },
+                    ),
+                    Err(error) => send_event_blocking(
+                        &event_sender,
+                        RemoteFileEvent::FileHistoryLoaded {
+                            session_id,
+                            remote_path,
+                            entries: Vec::new(),
+                            error: Some(format!("加载 SVN 文件历史失败：{error:#}")),
+                        },
+                    ),
+                }
+            }
             RemoteFileCommand::UploadFiles { .. }
             | RemoteFileCommand::Rename { .. }
             | RemoteFileCommand::Delete { .. } => send_operation_failed(
@@ -712,6 +859,24 @@ async fn read_svn_directory(
     Ok(entries)
 }
 
+/// 将 SVN 日志条目转换为 UI 历史项；无效修订和 r0 不参与文件对比。
+fn svn_history_entry(entry: LogEntry) -> Option<RepositoryHistoryEntry> {
+    if entry.invalid_revnum || entry.rev == 0 {
+        return None;
+    }
+    let label = format!("r{}", entry.rev);
+    Some(RepositoryHistoryEntry {
+        target_id: label.clone(),
+        label,
+        author: entry
+            .author
+            .map(|author| author.trim().to_string())
+            .filter(|author| !author.is_empty()),
+        date: entry.date.as_deref().and_then(parse_svn_timestamp),
+        message: entry.message.unwrap_or_default().trim().to_string(),
+    })
+}
+
 /// 解析 SVN 返回的 RFC3339 时间；负时间戳不映射为无符号 Unix 秒。
 fn parse_svn_timestamp(value: &str) -> Option<u64> {
     DateTime::parse_from_rfc3339(value)
@@ -841,6 +1006,38 @@ async fn download_svn_files(
         download_svn_file(session, revision, &entry.path, &local_path, cancellation).await?;
     }
     Ok(format!("已下载 {} 个文件", entries.len()))
+}
+
+/// 读取用于 diff 的 SVN 文本内容；最大 2 MiB，并返回是否因超限截断。
+async fn read_svn_diff_content(
+    session: &mut SvnReadSession,
+    revision: u64,
+    remote_path: &str,
+) -> Result<(String, bool)> {
+    let normalized = normalize_repository_path(remote_path)?;
+    let stat = session
+        .stat(&normalized, revision)
+        .await
+        .map_err(|error| anyhow!("无法读取 SVN 文件信息：{error:#}"))?
+        .ok_or_else(|| anyhow!("文件在 r{revision} 不存在"))?;
+    if stat.kind != RemoteFileEntryKind::RegularFile {
+        bail!("仅支持普通文件版本对比");
+    }
+    // 对比只读取上限加 1 字节：既能判断是否超限，又避免为超大文件分配无界内存。
+    let max_bytes = REMOTE_FILE_PREVIEW_MAX_FILE_SIZE + 1;
+    let mut bytes = session
+        .read_file_bytes(&normalized, revision, max_bytes)
+        .await
+        .map_err(|error| anyhow!("读取 SVN 文件失败：{error:#}"))?;
+    let truncated = bytes.len() as u64 > REMOTE_FILE_PREVIEW_MAX_FILE_SIZE;
+    if truncated {
+        bytes.truncate(REMOTE_FILE_PREVIEW_MAX_FILE_SIZE as usize);
+    }
+    match preview_content_from_bytes(bytes, truncated) {
+        FilePreviewContent::Text { content, truncated } => Ok((content, truncated)),
+        FilePreviewContent::Binary => bail!("二进制文件无法对比"),
+        FilePreviewContent::Error(error) => bail!(error),
+    }
 }
 
 /// 读取 SVN 文件用于预览；通过 stat 强制执行 2 MiB 总大小上限。
@@ -1035,5 +1232,40 @@ mod tests {
             failure_event,
             RemoteFileEvent::OperationFailed { session_id: 7, .. }
         ));
+    }
+
+    /// 验证 SVN 日志条目映射为历史项，并过滤无效修订和 r0。
+    #[test]
+    fn svn_history_entry_maps_and_filters_log_metadata() {
+        let entry = LogEntry {
+            rev: 42,
+            changed_paths: Vec::new(),
+            author: Some(" alice ".to_string()),
+            date: Some("2026-10-29T10:20:30.000000Z".to_string()),
+            message: Some(" 修复登录问题 \n".to_string()),
+            rev_props: Default::default(),
+            has_children: false,
+            invalid_revnum: false,
+            subtractive_merge: false,
+        };
+        let mapped = svn_history_entry(entry).expect("有效修订应映射");
+        assert_eq!(mapped.target_id, "r42");
+        assert_eq!(mapped.label, "r42");
+        assert_eq!(mapped.author.as_deref(), Some("alice"));
+        assert!(mapped.date.is_some());
+        assert_eq!(mapped.message, "修复登录问题");
+
+        let zero = LogEntry {
+            rev: 0,
+            changed_paths: Vec::new(),
+            author: None,
+            date: None,
+            message: None,
+            rev_props: Default::default(),
+            has_children: false,
+            invalid_revnum: false,
+            subtractive_merge: false,
+        };
+        assert!(svn_history_entry(zero).is_none());
     }
 }

@@ -280,26 +280,45 @@ impl ArgusApp {
             ActiveMenuKind::RemoteFileEntry { session_id } => {
                 let mut entries = Vec::new();
                 if self.can_preview_remote_file_selection(session_id) {
-                    entries.push(MenuEntry::new(
-                        "预览",
-                        MenuAction::PreviewRemoteFileSelection { session_id },
-                    ));
+                    entries.push(
+                        MenuEntry::new(
+                            "预览",
+                            MenuAction::PreviewRemoteFileSelection { session_id },
+                        )
+                        .with_icon(ArgusIcon::FileText),
+                    );
+                }
+                if self.can_compare_repository_file_selection(session_id) {
+                    entries.push(
+                        MenuEntry::new(
+                            "对比",
+                            MenuAction::CompareRepositoryFileSelection { session_id },
+                        )
+                        .with_icon(ArgusIcon::History),
+                    );
                 }
                 if self.can_download_remote_file_selection(session_id) {
-                    entries.push(MenuEntry::new(
-                        "下载",
-                        MenuAction::DownloadRemoteFileSelection { session_id },
-                    ));
+                    entries.push(
+                        MenuEntry::new(
+                            "下载",
+                            MenuAction::DownloadRemoteFileSelection { session_id },
+                        )
+                        .with_icon(ArgusIcon::Download),
+                    );
                 }
                 if self.can_rename_remote_file_selection(session_id) {
-                    entries.push(MenuEntry::new(
-                        "重命名",
-                        MenuAction::RenameRemoteFileSelection { session_id },
-                    ));
+                    entries.push(
+                        MenuEntry::new(
+                            "重命名",
+                            MenuAction::RenameRemoteFileSelection { session_id },
+                        )
+                        .with_icon(ArgusIcon::Rename),
+                    );
                 }
                 if self.can_delete_remote_file_selection(session_id) {
                     entries.push(
                         MenuEntry::new("删除", MenuAction::DeleteRemoteFileSelection { session_id })
+                            .with_icon(ArgusIcon::Trash)
                             .danger(),
                     );
                 }
@@ -387,6 +406,9 @@ impl ArgusApp {
             }
             MenuAction::PreviewRemoteFileSelection { .. } => {
                 self.placeholder_notice = "文件预览需要从界面菜单触发".to_string();
+            }
+            MenuAction::CompareRepositoryFileSelection { .. } => {
+                self.placeholder_notice = "版本对比需要从界面菜单触发".to_string();
             }
             MenuAction::RenameRemoteFileSelection { session_id } => {
                 self.open_remote_file_rename_dialog(session_id);
@@ -521,7 +543,11 @@ impl ArgusApp {
                 self.close_active_menu();
             }
             MenuAction::PreviewRemoteFileSelection { session_id } => {
-                self.preview_remote_file_selection(session_id);
+                self.preview_remote_file_selection(session_id, cx);
+                self.close_active_menu();
+            }
+            MenuAction::CompareRepositoryFileSelection { session_id } => {
+                self.open_repository_file_diff_dialog(session_id);
                 self.close_active_menu();
             }
             MenuAction::RenameRemoteFileSelection { session_id } => {

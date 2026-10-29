@@ -254,56 +254,6 @@ impl ArgusApp {
         }
     }
 
-    /// 打开远程文件预览独立窗口，展示 worker 读取回传的文件内容。
-    ///
-    /// 参数说明：
-    /// - `file_name`：文件名，用于窗口标题。
-    /// - `content`：预览内容，可能为文本、二进制提示或读取错误。
-    /// - `cx`：主应用上下文，用于创建无系统标题栏窗口并同步主题。
-    pub(crate) fn open_file_preview_window(
-        &mut self,
-        file_name: String,
-        content: crate::remote::remote_file::FilePreviewContent,
-        cx: &mut Context<Self>,
-    ) {
-        let initial_theme = self.theme.clone();
-        let app_entity = cx.entity();
-        let bounds = Bounds::centered(
-            None,
-            size(
-                px(FILE_PREVIEW_WINDOW_WIDTH),
-                px(FILE_PREVIEW_WINDOW_HEIGHT),
-            ),
-            cx,
-        );
-        let window_options = WindowOptions {
-            // 与主窗口一致的原生红绿灯标题栏：关闭/最小化/最大化由系统按钮承担，
-            // 预览窗口内不再提供自定义关闭按钮。
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(20.0), px(14.0))),
-            }),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(
-                px(FILE_PREVIEW_WINDOW_MIN_WIDTH),
-                px(FILE_PREVIEW_WINDOW_MIN_HEIGHT),
-            )),
-            ..Default::default()
-        };
-
-        match cx.open_window(window_options, move |_, cx| {
-            cx.new(|cx| FilePreviewWindow::new(app_entity, initial_theme, file_name, content, cx))
-        }) {
-            Ok(_) => {
-                self.placeholder_notice = "已打开文件预览".to_string();
-            }
-            Err(error) => {
-                self.placeholder_notice = format!("打开文件预览失败：{error}");
-            }
-        }
-    }
-
     /// 打开或更新 Jstack 方块内部悬浮气泡。
     ///
     /// 参数说明：

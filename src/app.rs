@@ -1,6 +1,6 @@
 //! 文件职责：维护 Argus 应用状态、来源加载状态和界面展示数据。
 //! 创建日期：2026-06-09
-//! 修改日期：2026-10-28
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
 //! 主要功能：提供工作区切换、真实来源树、日志阅读、Jstack/Runtime、AI 日志分析及远程连接状态。
 
@@ -87,7 +87,6 @@ use crate::ui::components::context_menu::{ActiveMenu, ActiveMenuKind, MenuAction
 use crate::ui::connection_dialog::{
     ConnectionCredentialWindow, ConnectionDirectoryWindow, ConnectionLinkWindow,
 };
-use crate::ui::file_preview_window::FilePreviewWindow;
 use crate::ui::jstack_analysis_view::JstackCellHoverPreview;
 use crate::ui::jstack_thread_detail_window::JstackThreadDetailWindow;
 use crate::ui::main_window;
@@ -340,6 +339,10 @@ pub(crate) struct ArgusApp {
     pub next_remote_file_session_id: usize,
     /// 当前打开的远程文件管理弹窗。
     pub remote_file_dialog: Option<RemoteFileDialogState>,
+    /// 远程文件预览窗口及自动重试状态，按文件管理会话 ID 复用。
+    pub remote_file_previews: HashMap<usize, RemoteFilePreviewState>,
+    /// 下一个远程文件预览请求 ID。
+    pub next_remote_file_preview_request_id: u64,
     /// 当前 Jstack 频率方块的内部悬浮气泡数据。
     pub jstack_cell_hover_preview: Option<JstackCellHoverPreview>,
     /// 来源树中用于“选中文件搜索”的多选日志节点。
@@ -511,6 +514,8 @@ impl ArgusApp {
             remote_file_sessions: HashMap::new(),
             next_remote_file_session_id: 1,
             remote_file_dialog: None,
+            remote_file_previews: HashMap::new(),
+            next_remote_file_preview_request_id: 1,
             jstack_cell_hover_preview: None,
             selected_search_source_ids: BTreeSet::new(),
             last_source_selection_anchor: None,

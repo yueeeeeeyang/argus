@@ -61,7 +61,7 @@ impl Default for PreviewSearchState {
 
 impl PreviewSearchState {
     /// 令在途任务失效，防抖任务和扫描任务使用同一令牌。
-    fn cancel(&mut self) {
+    pub(super) fn cancel(&mut self) {
         if let Some(token) = self.cancel_token.take() {
             token.store(true, Ordering::Relaxed);
         }

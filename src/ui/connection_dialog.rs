@@ -1685,6 +1685,7 @@ fn render_link_directory_selector(
                 is_open,
                 items,
                 show_inline_menu: false,
+                width: 260.0,
             },
             theme,
             move |_, _, cx| {
@@ -1856,6 +1857,7 @@ fn render_link_credential_selector(
                         is_open,
                         items,
                         show_inline_menu: false,
+                        width: 260.0,
                     },
                     theme,
                     move |_, _, cx| {

@@ -1,12 +1,15 @@
 //! 文件职责：提取远程连接弹窗状态类型定义。
 //! 创建日期：2026-07-08
-//! 修改日期：2026-07-15
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：定义连接目录表单、SSH/SMB/Git/SVN 链接表单、主机指纹确认和文件管理弹窗状态。
+//! 主要功能：定义连接目录表单、SSH/SMB/Git/SVN 链接表单、主机指纹确认和文件管理弹窗状态，含仓库历史版本选择。
 
 use super::types::TextInputState;
 use crate::remote::connection::{ConnectionCredentialId, ConnectionLinkKind, ConnectionNodeId};
+use crate::remote::remote_file::RepositoryHistoryEntry;
 use crate::remote::svn_tls::SvnCertificatePrompt;
+use crate::ui::file_preview_window::FilePreviewWindow;
+use gpui::{ScrollHandle, WindowHandle};
 
 /// 链接工作区当前打开的弹窗。
 #[derive(Clone, Debug)]
@@ -172,6 +175,8 @@ pub(crate) enum RemoteFileDialogState {
     Rename(RemoteFileRenameDialogState),
     /// 删除远程普通文件或空目录前的二次确认。
     ConfirmDelete(RemoteFileDeletePromptState),
+    /// 仓库文件版本对比的历史版本选择。
+    RepositoryDiff(RemoteFileDiffDialogState),
 }
 
 /// 可写远程文件后端共用的重命名弹窗状态。
@@ -187,6 +192,49 @@ pub(crate) struct RemoteFileRenameDialogState {
     pub name_input: TextInputState,
     /// 最近一次校验错误。
     pub error_message: Option<String>,
+}
+
+/// 仓库文件版本对比弹窗状态。
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteFileDiffDialogState {
+    /// 远程文件管理会话 ID。
+    pub session_id: usize,
+    /// 当前文件远程路径。
+    pub remote_path: String,
+    /// 文件名，用于提示与 diff 窗口标题。
+    pub file_name: String,
+    /// 当前文件所在版本展示文本。
+    pub current_version: String,
+    /// 文件历史提交，按提交时间从新到旧排列。
+    pub entries: Vec<RepositoryHistoryEntry>,
+    /// 当前选择的对比版本稳定 ID。
+    pub selected_target: Option<String>,
+    /// 提交说明滚动句柄，用于自绘悬停滚动条。
+    pub commit_scroll: ScrollHandle,
+    /// 历史版本下拉菜单是否展开。
+    pub is_versions_open: bool,
+    /// 是否正在加载历史提交。
+    pub is_loading_history: bool,
+    /// 历史提交加载失败原因。
+    pub history_error: Option<String>,
+    /// 最近一次提交校验错误。
+    pub error_message: Option<String>,
+}
+
+/// 单个远程文件预览窗口及其自动重试状态。
+pub(crate) struct RemoteFilePreviewState {
+    /// 当前预览请求 ID，用于丢弃已被新预览取代的迟到结果。
+    pub request_id: u64,
+    /// 当前预览的远程路径。
+    pub remote_path: String,
+    /// 当前预览文件名。
+    pub file_name: String,
+    /// 已自动重试次数。
+    pub retry_count: u8,
+    /// 是否仍在等待读取结果；手动重试时重新置为真。
+    pub is_loading: bool,
+    /// 复用并更新的独立预览窗口句柄。
+    pub window: WindowHandle<FilePreviewWindow>,
 }
 
 /// 可写远程文件后端共用的删除二次确认弹窗状态。

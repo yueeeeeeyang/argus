@@ -2,7 +2,7 @@
 //! 创建日期：2026-07-03
 //! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：展示远程文本、跨行代码高亮与行号，支持搜索、悬停滚动条、文本选择和复制。
+//! 主要功能：展示加载动画、自动重试与远程文本预览，支持语法高亮、搜索、文本选择和复制。
 
 use std::borrow::Borrow;
 use std::ops::Range;
@@ -34,6 +34,7 @@ use crate::remote::remote_file::FilePreviewContent;
 use crate::search::preview_search::PreviewSearchMatch;
 use crate::theme::AppTheme;
 use crate::ui::components::icon::{ArgusIcon, render_icon};
+use crate::ui::components::loading_spinner::render_loading_spinner;
 use crate::ui::custom_title_bar::{TITLE_BAR_HEIGHT, platform_window_controls};
 use crate::ui::log_content_view::merge_log_line_highlights;
 
@@ -62,6 +63,12 @@ const FILE_PREVIEW_TEXT_LEFT_PADDING: f32 = 12.0;
 const FILE_PREVIEW_STATUS_BAR_HEIGHT: f32 = 26.0;
 /// 居中状态卡片最大宽度，避免错误详情横向撑满窗口。
 const FILE_PREVIEW_MESSAGE_MAX_WIDTH: f32 = 520.0;
+/// 状态卡片详情最大高度；超长错误在卡片内部滚动，不撑出窗口。
+const FILE_PREVIEW_MESSAGE_DETAIL_MAX_HEIGHT: f32 = 150.0;
+/// 预览读取失败后的自动重试次数。
+pub(crate) const FILE_PREVIEW_AUTO_RETRY_LIMIT: u8 = 3;
+/// 长链接或无空格文本插入换行机会的字符间隔。
+const FILE_PREVIEW_TEXT_BREAK_INTERVAL: usize = 24;
 
 /// 预览窗口正文状态，由读取回传的内容派生。
 enum FilePreviewBody {
@@ -73,6 +80,13 @@ enum FilePreviewBody {
         highlighter: DocumentHighlighter,
         /// 是否因超过预览读取上限被截断。
         truncated: bool,
+    },
+    /// 正在读取文件；`retry_count` 为已自动重试次数。
+    Loading {
+        /// 已自动重试次数；0 表示首次读取。
+        retry_count: u8,
+        /// 自动重试上限。
+        max_retries: u8,
     },
     /// 二进制文件，无法以文本预览。
     Binary,
@@ -127,6 +141,10 @@ struct PreviewTextSelectionDrag {
 pub(crate) struct FilePreviewWindow {
     /// 当前窗口使用的主题快照。
     theme: AppTheme,
+    /// 主应用实体，用于手动重试时回调。
+    app: Entity<ArgusApp>,
+    /// 关联的远程文件会话 ID；为空表示测试或非远程预览，不展示重试按钮。
+    retry_session_id: Option<usize>,
     /// 文件名，用于标题展示。
     file_name: String,
     /// 根据文件名识别的语法语言，供标题标签和逐行高亮共同使用。
@@ -174,6 +192,7 @@ impl FilePreviewWindow {
     /// - `file_name`：预览文件名。
     /// - `content`：worker 读取回传的预览内容。
     /// - `cx`：窗口上下文，用于创建滚动句柄和订阅主应用变化。
+    #[cfg(test)]
     pub(crate) fn new(
         app: Entity<ArgusApp>,
         theme: AppTheme,
@@ -182,39 +201,50 @@ impl FilePreviewWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let language = detect_highlight_language(&file_name, &file_name);
-        let body = match content {
-            FilePreviewContent::Text { content, truncated } => {
-                // 使用 `str::lines` 正确处理 `\r\n`/`\n` 换行，且不产生末尾空行。
-                let lines = Arc::new(content.lines().map(str::to_string).collect::<Vec<_>>());
-                let highlighter = DocumentHighlighter::new(lines.clone(), language);
-                FilePreviewBody::Text {
-                    lines,
-                    highlighter,
-                    truncated,
-                }
-            }
-            FilePreviewContent::Binary => FilePreviewBody::Binary,
-            FilePreviewContent::Error(message) => FilePreviewBody::Error(message),
-        };
-        let longest_line_index = match &body {
-            FilePreviewBody::Text { lines, .. } => lines
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, line)| line.len())
-                .map(|(index, _)| index)
-                .unwrap_or(0),
-            _ => 0,
-        };
-        let measured_content_lines = match &body {
-            FilePreviewBody::Text { lines, .. } => vec![false; lines.len()],
-            _ => Vec::new(),
-        };
+        let body = preview_body_from_content(content, language);
+        Self::build(app, theme, file_name, None, body, cx)
+    }
+
+    /// 创建处于加载状态的远程文件预览窗口。
+    pub(crate) fn new_loading(
+        app: Entity<ArgusApp>,
+        theme: AppTheme,
+        file_name: String,
+        session_id: usize,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(
+            app,
+            theme,
+            file_name,
+            Some(session_id),
+            FilePreviewBody::Loading {
+                retry_count: 0,
+                max_retries: FILE_PREVIEW_AUTO_RETRY_LIMIT,
+            },
+            cx,
+        )
+    }
+
+    /// 使用指定正文状态创建窗口，供首次打开和后续重试/结果更新复用。
+    fn build(
+        app: Entity<ArgusApp>,
+        theme: AppTheme,
+        file_name: String,
+        retry_session_id: Option<usize>,
+        body: FilePreviewBody,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let language = detect_highlight_language(&file_name, &file_name);
+        let (longest_line_index, measured_content_lines) = preview_body_layout_state(&body);
         let _app_observer = observe_app_theme(cx, &app, theme.clone(), |view, theme, _| {
             view.theme = theme.clone();
         });
 
         Self {
             theme,
+            app,
+            retry_session_id,
             file_name,
             language,
             body,
@@ -234,6 +264,63 @@ impl FilePreviewWindow {
             selection_autoscroll_loop_active: false,
             _app_observer,
         }
+    }
+
+    /// 切换到加载状态；用于首次预览和自动重试。
+    pub(crate) fn show_loading(
+        &mut self,
+        file_name: String,
+        retry_count: u8,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_name != file_name {
+            self.file_name = file_name;
+            self.language = detect_highlight_language(&self.file_name, &self.file_name);
+        }
+        self.apply_body(FilePreviewBody::Loading {
+            retry_count,
+            max_retries: FILE_PREVIEW_AUTO_RETRY_LIMIT,
+        });
+        cx.notify();
+    }
+
+    /// 展示读取成功的预览内容。
+    pub(crate) fn show_content(
+        &mut self,
+        file_name: String,
+        content: FilePreviewContent,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_name = file_name;
+        self.language = detect_highlight_language(&self.file_name, &self.file_name);
+        let body = preview_body_from_content(content, self.language);
+        self.apply_body(body);
+        cx.notify();
+    }
+
+    /// 展示最终失败信息，并保留手动重试入口。
+    pub(crate) fn show_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.apply_body(FilePreviewBody::Error(message));
+        cx.notify();
+    }
+
+    /// 替换正文并清理旧文件对应的滚动、选区与搜索状态。
+    fn apply_body(&mut self, body: FilePreviewBody) {
+        self.search.cancel();
+        let (longest_line_index, measured_content_lines) = preview_body_layout_state(&body);
+        self.body = body;
+        self.scroll = UniformListScrollHandle::new();
+        self.longest_line_index = longest_line_index;
+        self.has_measured_content_width = false;
+        self.content_min_width = px(0.0);
+        self.measured_content_lines = measured_content_lines;
+        self.is_body_hovered = false;
+        self.scrollbar_drag = None;
+        self.search = PreviewSearchState::default();
+        self.preview_selection = None;
+        self.preview_selection_drag = None;
+        self.selection_autoscroll_pointer = None;
+        self.selection_autoscroll_loop_active = false;
     }
 
     /// 返回当前正文文本行；非文本正文返回 `None`。
@@ -593,6 +680,16 @@ impl FilePreviewWindow {
                     format!("{} 行", lines.len())
                 }
             }
+            FilePreviewBody::Loading {
+                retry_count,
+                max_retries,
+            } => {
+                if *retry_count == 0 {
+                    "读取中".to_string()
+                } else {
+                    format!("正在重试 {retry_count}/{max_retries}")
+                }
+            }
             FilePreviewBody::Binary => "二进制文件".to_string(),
             FilePreviewBody::Error(_) => "读取失败".to_string(),
         };
@@ -717,6 +814,10 @@ impl FilePreviewWindow {
                     .child(render_preview_scrollbar_sensor(cx))
                     .into_any_element()
             }
+            FilePreviewBody::Loading {
+                retry_count,
+                max_retries,
+            } => render_preview_loading(*retry_count, *max_retries, &self.theme),
             FilePreviewBody::Binary => render_preview_message(
                 ArgusIcon::File,
                 "无法预览二进制文件",
@@ -724,10 +825,50 @@ impl FilePreviewWindow {
                 false,
                 &self.theme,
             ),
-            FilePreviewBody::Error(message) => {
-                render_preview_message(ArgusIcon::Info, "文件预览失败", message, true, &self.theme)
+            FilePreviewBody::Error(message) => render_preview_error(
+                message,
+                self.retry_session_id,
+                self.app.clone(),
+                &self.theme,
+            ),
+        }
+    }
+}
+
+/// 把 worker 返回的预览内容转换为窗口正文状态。
+fn preview_body_from_content(
+    content: FilePreviewContent,
+    language: HighlightLanguage,
+) -> FilePreviewBody {
+    match content {
+        FilePreviewContent::Text { content, truncated } => {
+            // 使用 `str::lines` 正确处理 `\r\n`/`\n` 换行，且不产生末尾空行。
+            let lines = Arc::new(content.lines().map(str::to_string).collect::<Vec<_>>());
+            let highlighter = DocumentHighlighter::new(lines.clone(), language);
+            FilePreviewBody::Text {
+                lines,
+                highlighter,
+                truncated,
             }
         }
+        FilePreviewContent::Binary => FilePreviewBody::Binary,
+        FilePreviewContent::Error(message) => FilePreviewBody::Error(message),
+    }
+}
+
+/// 返回正文最长行索引和逐行宽度测量标记；非文本正文使用空标记。
+fn preview_body_layout_state(body: &FilePreviewBody) -> (usize, Vec<bool>) {
+    match body {
+        FilePreviewBody::Text { lines, .. } => (
+            lines
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, line)| line.len())
+                .map(|(index, _)| index)
+                .unwrap_or(0),
+            vec![false; lines.len()],
+        ),
+        _ => (0, Vec::new()),
     }
 }
 
@@ -1008,16 +1149,188 @@ fn render_preview_message(
                         }))
                         .child(title.to_string()),
                 )
+                .child(render_preview_detail(detail, theme)),
+        )
+        .into_any_element()
+}
+
+/// 渲染错误状态卡片，提供手动重试入口，并把长错误限制在卡片内部滚动。
+fn render_preview_error(
+    message: &str,
+    retry_session_id: Option<usize>,
+    app: Entity<ArgusApp>,
+    theme: &AppTheme,
+) -> AnyElement {
+    let can_retry = retry_session_id.is_some();
+    let retry_app = app.clone();
+    let mut card = div()
+        .w_full()
+        .max_w(px(FILE_PREVIEW_MESSAGE_MAX_WIDTH))
+        .p_5()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.current_line))
+        .child(render_icon(ArgusIcon::Info, theme.error, 24.0))
+        .child(
+            div()
+                .mt_1()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.error))
+                .child("文件预览失败"),
+        )
+        .child(render_preview_detail(message, theme));
+    if can_retry {
+        card = card
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.foreground_muted))
+                    .child("自动重试后仍无法读取文件，可手动重试。".to_string()),
+            )
+            .child(
+                div()
+                    .id("file-preview-retry-button")
+                    .debug_selector(|| "file-preview-retry-button".to_string())
+                    .mt_1()
+                    .h(px(30.0))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.content))
+                    .hover(|this| this.bg(rgb(theme.current_line)))
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.foreground))
+                    .child(render_icon(ArgusIcon::Refresh, theme.info, 14.0))
+                    .child("重试")
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let Some(session_id) = retry_session_id else {
+                            return;
+                        };
+                        let app = retry_app.clone();
+                        app.update(cx, |app, app_cx| {
+                            app.retry_remote_file_preview(session_id, app_cx);
+                        });
+                    }),
+            );
+    }
+    div()
+        .size_full()
+        .p_6()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(card)
+        .into_any_element()
+}
+
+/// 渲染加载状态卡片；自动重试时显示当前次数。
+fn render_preview_loading(retry_count: u8, max_retries: u8, theme: &AppTheme) -> AnyElement {
+    let (title, detail) = if retry_count == 0 {
+        (
+            "正在读取文件",
+            "正在从远程仓库加载文件内容，请稍候...".to_string(),
+        )
+    } else {
+        (
+            "正在重试读取文件",
+            format!("自动重试 {retry_count}/{max_retries}，请稍候..."),
+        )
+    };
+    div()
+        .size_full()
+        .p_6()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .id("file-preview-loading-card")
+                .debug_selector(|| "file-preview-loading-card".to_string())
+                .w_full()
+                .max_w(px(FILE_PREVIEW_MESSAGE_MAX_WIDTH))
+                .p_5()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.current_line))
+                .child(render_loading_spinner(
+                    ("file-preview-loading", retry_count as usize),
+                    theme.info,
+                    26.0,
+                ))
                 .child(
                     div()
-                        .max_w_full()
-                        .text_center()
+                        .mt_1()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.foreground))
+                        .child(title),
+                )
+                .child(
+                    div()
                         .text_size(px(12.0))
                         .text_color(rgb(theme.foreground_muted))
-                        .child(detail.to_string()),
+                        .child(detail),
                 ),
         )
         .into_any_element()
+}
+
+/// 渲染状态卡片详情；长 URL 等无空格文本插入换行机会，并限制高度内部滚动。
+fn render_preview_detail(detail: &str, theme: &AppTheme) -> impl IntoElement {
+    div()
+        .id("file-preview-error-detail")
+        .w_full()
+        .max_w_full()
+        .max_h(px(FILE_PREVIEW_MESSAGE_DETAIL_MAX_HEIGHT))
+        .overflow_hidden()
+        .overflow_y_scroll()
+        .scrollbar_width(px(6.0))
+        .text_center()
+        .text_size(px(12.0))
+        .line_height(px(17.0))
+        .text_color(rgb(theme.foreground_muted))
+        .child(insert_preview_text_breaks(detail))
+}
+
+/// 为超长无空格文本插入零宽换行点，避免 URL 或异常信息横向撑出卡片。
+fn insert_preview_text_breaks(text: &str) -> String {
+    let mut output = String::with_capacity(text.len() + text.len() / 16);
+    let mut run_length = 0;
+    for character in text.chars() {
+        output.push(character);
+        if character.is_whitespace() {
+            run_length = 0;
+            continue;
+        }
+        run_length += 1;
+        if run_length >= FILE_PREVIEW_TEXT_BREAK_INTERVAL
+            || matches!(
+                character,
+                '/' | '?' | '&' | '=' | ':' | ';' | ',' | '\\' | '_' | '-' | '.'
+            )
+        {
+            output.push('\u{200B}');
+            run_length = 0;
+        }
+    }
+    output
 }
 
 /// 调度预览窗口拖拽选择自动滚动的下一帧；拖拽结束或指针回到视口内时循环自动停止。
@@ -1415,5 +1728,59 @@ mod tests {
             preview_selection_byte_range_for_line(None, 0, &lines[0]),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use crate::config::ConfigManager;
+    use crate::config::paths::isolated_test_dir;
+    use gpui::{TestAppContext, size};
+
+    /// 验证加载态和错误态渲染，错误态提供手动重试按钮。
+    #[gpui::test]
+    fn loading_and_error_states_render_retry_entry(cx: &mut TestAppContext) {
+        let app = cx.new(|_| {
+            ArgusApp::new_with_config_manager(ConfigManager::new(
+                isolated_test_dir("file-preview-retry").join("settings.toml"),
+            ))
+        });
+        let theme = cx.read(|cx| app.read(cx).theme.clone());
+        let app_for_preview = app.clone();
+        let (preview, cx) = cx.add_window_view(move |_, cx| {
+            FilePreviewWindow::new_loading(app_for_preview, theme, "app.rs".to_string(), 1, cx)
+        });
+        cx.simulate_resize(size(px(920.0), px(700.0)));
+
+        preview.read_with(cx, |view, _| {
+            assert!(matches!(
+                view.body,
+                FilePreviewBody::Loading { retry_count: 0, .. }
+            ));
+        });
+        assert!(cx.debug_bounds("file-preview-loading-card").is_some());
+        assert!(cx.debug_bounds("file-preview-retry-button").is_none());
+
+        preview.update(cx, |view, cx| {
+            view.show_error(
+                "无法读取 SVN 文件信息：http://10.1.3.12/svn/A%9B%AF%5B%E5%88%A9".to_string(),
+                cx,
+            );
+        });
+        cx.simulate_resize(size(px(920.0), px(700.0)));
+        preview.read_with(cx, |view, _| {
+            assert!(matches!(view.body, FilePreviewBody::Error(_)));
+        });
+        assert!(cx.debug_bounds("file-preview-retry-button").is_some());
+    }
+
+    /// 验证长 URL 会插入零宽换行点且不改变原始字符内容。
+    #[test]
+    fn long_error_text_gets_zero_width_break_opportunities() {
+        let message = "http://10.1.3.12/svn/A%9B%AF%5B%E5%88%A9%E5%88%A9";
+        let wrapped = insert_preview_text_breaks(message);
+        assert!(wrapped.contains('\u{200B}'));
+        assert_eq!(wrapped.replace('\u{200B}', ""), message);
     }
 }

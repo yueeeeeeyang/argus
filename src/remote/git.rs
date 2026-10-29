@@ -1,8 +1,8 @@
 //! 文件职责：使用内置 libgit2 实现 Git 仓库的只读缓存、浏览、预览与下载。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-07-16
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：维护按链接隔离的裸仓库缓存，显式完成 HTTPS/SSH 鉴权，并从 tree/blob 读取文件。
+//! 主要功能：维护按链接隔离的裸仓库缓存，显式完成 HTTPS/SSH 鉴权，并从 tree/blob 读取文件与提交历史。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -23,10 +23,10 @@ use crate::config::paths::argus_git_repositories_dir;
 use crate::remote::connection::{ConnectionNodeId, GitLinkConfig};
 use crate::remote::remote_file::{
     FilePreviewContent, REMOTE_FILE_PREVIEW_MAX_FILE_SIZE, REMOTE_FILE_PREVIEW_MAX_READ,
-    RemoteFileCommand, RemoteFileEntry, RemoteFileEntryKind, RemoteFileEvent, RepositoryVersion,
-    RepositoryVersionKind, local_download_path, preview_content_from_bytes, remote_child_path,
-    remote_file_name, resolve_remote_path, send_event_blocking, send_file_preview_loaded,
-    send_operation_failed,
+    RemoteFileCommand, RemoteFileEntry, RemoteFileEntryKind, RemoteFileEvent,
+    RepositoryHistoryEntry, RepositoryVersion, RepositoryVersionKind, local_download_path,
+    preview_content_from_bytes, remote_child_path, remote_file_name, resolve_remote_path,
+    send_event_blocking, send_file_preview_loaded, send_operation_failed,
 };
 
 /// 远程分支在裸仓库中的本地命名空间。
@@ -37,6 +37,10 @@ const GIT_TAG_PREFIX: &str = "refs/tags/";
 const GIT_MODE_TREE: i32 = 0o040000;
 const GIT_MODE_SYMLINK: i32 = 0o120000;
 const GIT_MODE_SUBMODULE: i32 = 0o160000;
+/// Git 文件历史最多展示的提交数。
+const GIT_FILE_HISTORY_LIMIT: usize = 100;
+/// Git 文件历史遍历的提交上限，避免超长仓库为稀有文件无界扫描。
+const GIT_FILE_HISTORY_MAX_WALK: usize = 10_000;
 /// 每个链接独立的缓存互斥锁表，避免并发 fetch、清理和对象读取相互破坏。
 static GIT_LINK_LOCKS: OnceLock<Mutex<BTreeMap<ConnectionNodeId, Arc<Mutex<()>>>>> =
     OnceLock::new();
@@ -385,11 +389,95 @@ pub(super) fn run_git_worker(
                 );
                 send_git_operation_result(session_id, result, &event_sender);
             }
-            RemoteFileCommand::ReadFileContent { remote_path } => send_file_preview_loaded(
+            RemoteFileCommand::ReadFileContent {
+                remote_path,
+                request_id,
+            } => send_file_preview_loaded(
                 session_id,
+                request_id,
                 read_git_file_preview(&repository, &selected_version, &remote_path),
                 &event_sender,
             ),
+            RemoteFileCommand::CompareFileVersions {
+                remote_path,
+                target_version,
+                target_label,
+            } => {
+                let current_label = versions
+                    .iter()
+                    .find(|version| version.id == selected_version)
+                    .map(|version| version.label.clone())
+                    .unwrap_or_else(|| selected_version.clone());
+                let current =
+                    match read_git_diff_content(&repository, &selected_version, &remote_path) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            send_operation_failed(
+                                &event_sender,
+                                session_id,
+                                anyhow!("读取当前版本失败：{remote_path}：{error:#}"),
+                            );
+                            continue;
+                        }
+                    };
+                let target_content =
+                    match read_git_diff_content(&repository, &target_version, &remote_path) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            send_operation_failed(
+                                &event_sender,
+                                session_id,
+                                anyhow!("读取目标版本失败：{remote_path}：{error:#}"),
+                            );
+                            continue;
+                        }
+                    };
+                send_event_blocking(
+                    &event_sender,
+                    RemoteFileEvent::FileComparisonLoaded {
+                        session_id,
+                        file_name: remote_file_name(&remote_path),
+                        current_version: current_label,
+                        target_version: target_label,
+                        current_content: FilePreviewContent::Text {
+                            content: current.0,
+                            truncated: current.1,
+                        },
+                        target_content: FilePreviewContent::Text {
+                            content: target_content.0,
+                            truncated: target_content.1,
+                        },
+                    },
+                );
+            }
+            RemoteFileCommand::LoadFileHistory { remote_path } => {
+                let result = read_git_file_history(
+                    &repository,
+                    &selected_version,
+                    &remote_path,
+                    GIT_FILE_HISTORY_LIMIT,
+                );
+                match result {
+                    Ok(entries) => send_event_blocking(
+                        &event_sender,
+                        RemoteFileEvent::FileHistoryLoaded {
+                            session_id,
+                            remote_path,
+                            entries,
+                            error: None,
+                        },
+                    ),
+                    Err(error) => send_event_blocking(
+                        &event_sender,
+                        RemoteFileEvent::FileHistoryLoaded {
+                            session_id,
+                            remote_path,
+                            entries: Vec::new(),
+                            error: Some(format!("加载 Git 文件历史失败：{error:#}")),
+                        },
+                    ),
+                }
+            }
             RemoteFileCommand::UploadFiles { .. }
             | RemoteFileCommand::Rename { .. }
             | RemoteFileCommand::Delete { .. } => send_operation_failed(
@@ -738,17 +826,25 @@ fn read_git_directory(
     Ok(entries)
 }
 
-/// 返回指定版本中路径对应的 tree；标签通过 peel_to_commit 统一解析到提交树。
+/// 把引用名、标签或提交哈希统一解析为 Git 提交。
+fn git_commit_at_version<'repo>(
+    repository: &'repo Repository,
+    version: &str,
+) -> Result<git2::Commit<'repo>> {
+    repository
+        .revparse_single(version)
+        .with_context(|| format!("Git 版本不存在：{version}"))?
+        .peel_to_commit()
+        .with_context(|| format!("Git 版本无法解析到提交：{version}"))
+}
+
+/// 返回指定版本中路径对应的 tree；标签和提交哈希都会统一解析到提交树。
 fn git_tree_at_path<'repo>(
     repository: &'repo Repository,
     version: &str,
     path: &str,
 ) -> Result<git2::Tree<'repo>> {
-    let commit = repository
-        .find_reference(version)
-        .with_context(|| format!("Git 版本不存在：{version}"))?
-        .peel_to_commit()
-        .with_context(|| format!("Git 版本无法解析到提交：{version}"))?;
+    let commit = git_commit_at_version(repository, version)?;
     let root = commit.tree().context("无法读取 Git 提交树")?;
     let relative = repository_relative_path(path)?;
     if relative.is_empty() {
@@ -773,11 +869,7 @@ fn read_git_blob<'repo>(
     if relative.is_empty() {
         bail!("仓库根目录不是普通文件");
     }
-    let commit = repository
-        .find_reference(version)
-        .with_context(|| format!("Git 版本不存在：{version}"))?
-        .peel_to_commit()
-        .with_context(|| format!("Git 版本无法解析到提交：{version}"))?;
+    let commit = git_commit_at_version(repository, version)?;
     let tree = commit.tree().context("无法读取 Git 提交树")?;
     let entry = tree
         .get_path(Path::new(&relative))
@@ -889,6 +981,102 @@ fn read_git_file_preview(
     let truncated = blob.size() > REMOTE_FILE_PREVIEW_MAX_READ;
     let bytes = blob.content()[..blob.size().min(REMOTE_FILE_PREVIEW_MAX_READ)].to_vec();
     (file_name, preview_content_from_bytes(bytes, truncated))
+}
+
+/// 读取 Git 文件当前/历史版本内容用于 diff；超过 2 MiB 时截断并标记。
+fn read_git_diff_content(
+    repository: &Repository,
+    version: &str,
+    remote_path: &str,
+) -> Result<(String, bool)> {
+    let blob = read_git_blob(repository, version, remote_path)?;
+    let max_bytes = REMOTE_FILE_PREVIEW_MAX_FILE_SIZE as usize;
+    let truncated = blob.size() > max_bytes;
+    let bytes = blob.content()[..blob.size().min(max_bytes)].to_vec();
+    match preview_content_from_bytes(bytes, truncated) {
+        FilePreviewContent::Text { content, truncated } => Ok((content, truncated)),
+        FilePreviewContent::Binary => bail!("二进制文件无法对比"),
+        FilePreviewContent::Error(error) => bail!(error),
+    }
+}
+
+/// 查询当前引用下指定文件的历史提交，按提交时间从新到旧返回。
+fn read_git_file_history(
+    repository: &Repository,
+    version: &str,
+    remote_path: &str,
+    limit: usize,
+) -> Result<Vec<RepositoryHistoryEntry>> {
+    let relative = repository_relative_path(remote_path)?;
+    if relative.is_empty() {
+        bail!("仓库根目录不是普通文件");
+    }
+    let start = git_commit_at_version(repository, version)?;
+    let mut revwalk = repository.revwalk().context("无法创建 Git 提交遍历")?;
+    revwalk
+        .set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+        .context("无法设置 Git 提交排序")?;
+    revwalk
+        .push(start.id())
+        .context("无法从当前版本遍历 Git 提交")?;
+
+    let mut entries = Vec::new();
+    for (walked, oid) in revwalk.enumerate() {
+        if walked >= GIT_FILE_HISTORY_MAX_WALK {
+            break;
+        }
+        let oid = oid.context("遍历 Git 提交失败")?;
+        let commit = repository.find_commit(oid).context("无法读取 Git 提交")?;
+        let signature = git_path_signature(&commit, &relative)?;
+        let changed = if commit.parent_count() == 0 {
+            signature.is_some()
+        } else {
+            let mut changed = false;
+            for index in 0..commit.parent_count() {
+                let parent = commit.parent(index).context("无法读取 Git 父提交")?;
+                let parent_signature = git_path_signature(&parent, &relative)?;
+                if signature != parent_signature {
+                    changed = true;
+                    break;
+                }
+            }
+            changed
+        };
+        // 删除提交没有可读取的目标文件，不作为对比版本展示。
+        if !changed || signature.is_none() {
+            continue;
+        }
+        let target_id = oid.to_string();
+        let label = target_id.chars().take(7).collect::<String>();
+        entries.push(RepositoryHistoryEntry {
+            target_id,
+            label,
+            author: commit
+                .author()
+                .name()
+                .ok()
+                .map(str::to_string)
+                .filter(|name| !name.trim().is_empty()),
+            date: u64::try_from(commit.time().seconds()).ok(),
+            message: commit.message().unwrap_or_default().trim().to_string(),
+        });
+        if entries.len() >= limit {
+            break;
+        }
+    }
+    Ok(entries)
+}
+
+/// 返回指定提交中路径的文件模式与对象 ID；路径不存在时为空。
+fn git_path_signature(
+    commit: &git2::Commit<'_>,
+    relative: &str,
+) -> Result<Option<(git2::Oid, i32)>> {
+    let tree = commit.tree().context("无法读取 Git 提交树")?;
+    Ok(tree
+        .get_path(Path::new(relative))
+        .ok()
+        .map(|entry| (entry.id(), entry.filemode())))
 }
 
 /// 将 Git 下载结果转换为统一成功/失败事件。
@@ -1043,6 +1231,122 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"hello from git\n");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    /// 构造包含三次提交的仓库，其中 README 只在第二次提交变化。
+    fn history_fixture() -> (tempfile::TempDir, Repository) {
+        let temp_dir = temporary_test_dir("git-history-fixture");
+        let repository = Repository::init_bare(temp_dir.path()).expect("应初始化裸仓库");
+        let signature =
+            git2::Signature::now("Argus History", "history@example.com").expect("应创建签名");
+
+        let first_blob = repository.blob(b"one\n").unwrap();
+        let mut first_builder = repository.treebuilder(None).unwrap();
+        first_builder
+            .insert("README.md", first_blob, 0o100644)
+            .unwrap();
+        let first_tree = first_builder.write().unwrap();
+        drop(first_builder);
+        let first_tree = repository.find_tree(first_tree).unwrap();
+        let first_commit = repository
+            .commit(
+                Some("refs/heads/main"),
+                &signature,
+                &signature,
+                "first",
+                &first_tree,
+                &[],
+            )
+            .unwrap();
+        drop(first_tree);
+
+        let first_parent = repository.find_commit(first_commit).unwrap();
+        let second_blob = repository.blob(b"two\n").unwrap();
+        let mut second_builder = repository
+            .treebuilder(Some(&first_parent.tree().unwrap()))
+            .unwrap();
+        second_builder
+            .insert("README.md", second_blob, 0o100644)
+            .unwrap();
+        let second_tree = second_builder.write().unwrap();
+        drop(second_builder);
+        let second_tree = repository.find_tree(second_tree).unwrap();
+        let second_commit = repository
+            .commit(
+                Some("refs/heads/main"),
+                &signature,
+                &signature,
+                "second",
+                &second_tree,
+                &[&first_parent],
+            )
+            .unwrap();
+        drop(second_tree);
+        drop(first_parent);
+
+        let second_parent = repository.find_commit(second_commit).unwrap();
+        let changelog = repository.blob(b"changelog\n").unwrap();
+        let mut third_builder = repository
+            .treebuilder(Some(&second_parent.tree().unwrap()))
+            .unwrap();
+        third_builder
+            .insert("CHANGELOG.md", changelog, 0o100644)
+            .unwrap();
+        let third_tree = third_builder.write().unwrap();
+        drop(third_builder);
+        let third_tree = repository.find_tree(third_tree).unwrap();
+        repository
+            .commit(
+                Some("refs/heads/main"),
+                &signature,
+                &signature,
+                "third",
+                &third_tree,
+                &[&second_parent],
+            )
+            .unwrap();
+        drop(third_tree);
+        drop(second_parent);
+
+        (temp_dir, repository)
+    }
+
+    /// 验证 Git 文件历史只返回该文件发生变化的提交，并支持用提交哈希读取历史内容。
+    #[test]
+    fn git_file_history_and_commit_diff_are_scoped_to_path() {
+        let (_temp_dir, repository) = history_fixture();
+        let entries =
+            read_git_file_history(&repository, "refs/heads/main", "/README.md", 100).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].message, "second");
+        assert_eq!(entries[1].message, "first");
+        assert_eq!(entries[0].label.chars().count(), 7);
+        assert!(entries[0].target_id.starts_with(&entries[0].label));
+        assert_eq!(entries[0].author.as_deref(), Some("Argus History"));
+        assert!(entries[0].date.is_some());
+
+        let current = read_git_diff_content(&repository, "refs/heads/main", "/README.md").unwrap();
+        assert_eq!(current.0, "two\n");
+        assert!(!current.1);
+
+        let previous =
+            read_git_diff_content(&repository, &entries[1].target_id, "/README.md").unwrap();
+        assert_eq!(previous.0, "one\n");
+
+        let history_via_hash =
+            read_git_file_history(&repository, &entries[0].target_id, "/README.md", 100).unwrap();
+        assert_eq!(history_via_hash.len(), 2);
+        assert_eq!(history_via_hash[0].target_id, entries[0].target_id);
+    }
+
+    /// 验证二进制文件不能进入文本 diff。
+    #[test]
+    fn git_diff_rejects_binary_blob() {
+        let (_temp_dir, repository) = repository_fixture();
+        assert!(
+            read_git_diff_content(&repository, "refs/remotes/origin/main", "/binary.dat").is_err()
+        );
     }
 
     /// 验证仓库路径归一化始终限制在根目录内。

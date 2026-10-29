@@ -1,8 +1,8 @@
 //! 文件职责：提供 Argus 通用下拉选择组件。
 //! 创建日期：2026-06-12
-//! 修改日期：2026-06-12
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：统一渲染设置页等场景中的单选下拉框，支持主题化、展开列表和选项点击回调。
+//! 主要功能：统一渲染设置页等场景中的单选下拉框，支持自定义宽度、主题化、展开列表和选项点击回调。
 
 use std::sync::Arc;
 
@@ -39,6 +39,8 @@ pub(crate) struct Dropdown {
     pub items: Vec<DropdownItem>,
     /// 是否在组件内部渲染菜单；复杂窗口可关闭该项并在根层渲染浮层菜单。
     pub show_inline_menu: bool,
+    /// 下拉框宽度，按所在表单的可用空间传入。
+    pub width: f32,
 }
 
 /// 下拉框选项点击回调类型。
@@ -76,7 +78,7 @@ pub(crate) fn render_dropdown(
     div()
         .id(dropdown.id)
         .relative()
-        .w(px(260.0))
+        .w(px(dropdown.width))
         .h(px(30.0))
         .rounded_sm()
         .text_size(px(12.0))

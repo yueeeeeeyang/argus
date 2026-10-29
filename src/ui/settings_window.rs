@@ -1891,6 +1891,7 @@ fn render_appearance_section(
                 is_open: snapshot.is_theme_dropdown_open,
                 items: dropdown_items,
                 show_inline_menu: false,
+                width: 260.0,
             },
             theme,
             move |_, _, cx| {

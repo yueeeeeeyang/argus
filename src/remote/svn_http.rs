@@ -1,8 +1,8 @@
 //! 文件职责：使用内置 HTTP 客户端实现 Subversion WebDAV/DeltaV 仓库的只读访问。
 //! 创建日期：2026-07-15
-//! 修改日期：2026-10-28
+//! 修改日期：2026-10-29
 //! 作者：Argus 开发团队
-//! 主要功能：发现 SVN HTTPv2 修订资源、枚举目录、读取文件，并安全处理认证与重定向。
+//! 主要功能：发现 SVN HTTPv2 修订资源、枚举目录、读取文件与提交历史，并安全处理认证与重定向。
 
 use super::download::DownloadFile;
 use super::svn_certificate::SvnCertificateContext;
@@ -22,7 +22,9 @@ use roxmltree::{Document, Node};
 use url::Url;
 
 use crate::remote::connection::SvnLinkConfig;
-use crate::remote::remote_file::{RemoteFileEntry, RemoteFileEntryKind, remote_child_path};
+use crate::remote::remote_file::{
+    RemoteFileEntry, RemoteFileEntryKind, RepositoryHistoryEntry, remote_child_path,
+};
 
 #[cfg(test)]
 #[path = "svn_http_certificate_tests.rs"]
@@ -240,6 +242,29 @@ impl HttpSvnSession {
         Ok(bytes)
     }
 
+    /// 查询文件在当前修订之前的历史提交，供对比版本下拉选择。
+    ///
+    /// 参数说明：
+    /// - `path`：以链接位置为根的远程文件路径。
+    /// - `start_revision`：历史查询起点，通常为当前展示修订。
+    /// - `limit`：最多返回的提交数。
+    pub(super) fn file_history(
+        &self,
+        path: &str,
+        start_revision: u64,
+        limit: usize,
+    ) -> Result<Vec<RepositoryHistoryEntry>> {
+        let normalized_path = normalize_browse_path(path)?;
+        let request_url = self.public_browse_url(&normalized_path)?;
+        let body = svn_log_report_body(start_revision, limit);
+        let (response, _) = self
+            .send_request("REPORT", &request_url, None, Some(&body), false)?
+            .expect("非可选 DAV 请求必须返回响应");
+        let response = require_status(response, &[200], "读取 SVN HTTP 文件历史")?;
+        let xml = read_xml_response(response)?;
+        parse_history_log_report(&xml)
+    }
+
     /// 把历史修订中的文件流式写入本地路径，不把完整文件保存在内存中。
     pub(super) fn download_file(
         &self,
@@ -312,6 +337,24 @@ impl HttpSvnSession {
         self.browse_root_segments = configured_segments[repository_segments.len()..].to_vec();
         self.initial_youngest_revision = Some(discovery.youngest_revision);
         Ok(())
+    }
+
+    /// 构造浏览根下的公开资源 URL，供只支持公开资源的 log-report 使用。
+    fn public_browse_url(&self, browse_path: &str) -> Result<Url> {
+        let mut url = self.base_url.clone();
+        url.set_query(None);
+        url.set_fragment(None);
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow!("SVN HTTP 浏览根 URL 不能追加路径"))?;
+        segments.pop_if_empty();
+        for segment in browse_path.trim_matches('/').split('/') {
+            if !segment.is_empty() {
+                segments.push(segment);
+            }
+        }
+        drop(segments);
+        Ok(url)
     }
 
     /// 构造 HTTPv2 历史修订资源 URL，始终在配置链接指向的浏览根之下追加路径。
@@ -470,7 +513,7 @@ fn http_status_error(
         401 => anyhow!("SVN HTTP 仓库需要用户名和密码"),
         403 => anyhow!("当前账号无权读取 SVN HTTP 仓库"),
         404 => anyhow!("SVN HTTP 仓库路径或修订不存在"),
-        405 | 501 => anyhow!("服务器或代理未开放 SVN 所需的 OPTIONS/PROPFIND/GET 方法"),
+        405 | 501 => anyhow!("服务器或代理未开放 SVN 所需的 OPTIONS/PROPFIND/GET/REPORT 方法"),
         _ => anyhow!("SVN HTTP 服务返回 {status} {}", response.status_text()),
     }
 }
@@ -685,6 +728,85 @@ fn dav_property_text<'a, 'input>(prop: Node<'a, 'input>, name: &str) -> Option<&
 }
 
 /// 判断 XML 节点是否属于 DAV 命名空间且本地名称匹配。
+/// 判断节点是否属于 SVN 的 `svn:` XML 命名空间。
+fn is_svn_element(node: Node<'_, '_>, name: &str) -> bool {
+    node.is_element()
+        && node.tag_name().namespace() == Some("svn:")
+        && node.tag_name().name() == name
+}
+
+/// 构造 SVN log-report 请求体；请求目标是文件自身，因此无需再传 `<S:path>`。
+fn svn_log_report_body(start_revision: u64, limit: usize) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <S:log-report xmlns:S=\"svn:\">\n\
+         <S:start-revision>{start_revision}</S:start-revision>\n\
+         <S:end-revision>0</S:end-revision>\n\
+         <S:limit>{limit}</S:limit>\n\
+         <S:path/>\n\
+         <S:strict-node-history/>\n\
+         <S:revprop>svn:author</S:revprop>\n\
+         <S:revprop>svn:date</S:revprop>\n\
+         <S:revprop>svn:log</S:revprop>\n\
+         </S:log-report>"
+    )
+}
+
+/// 解析 log-report 响应，提取修订号、作者、时间和提交说明。
+fn parse_history_log_report(xml: &str) -> Result<Vec<RepositoryHistoryEntry>> {
+    let document = Document::parse(xml).context("无法解析 SVN 文件历史 XML 响应")?;
+    let mut entries = Vec::new();
+    for item in document
+        .descendants()
+        .filter(|node| is_svn_element(*node, "log-item"))
+    {
+        let Some(revision) = item
+            .children()
+            .find(|node| is_dav_element(*node, "version-name"))
+            .and_then(|node| node.text())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if revision == 0 {
+            continue;
+        }
+        let author = item
+            .children()
+            .find(|node| is_dav_element(*node, "creator-displayname"))
+            .and_then(|node| node.text())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let date = item
+            .children()
+            .find(|node| is_svn_element(*node, "date"))
+            .and_then(|node| node.text())
+            .and_then(parse_dav_timestamp);
+        let message = item
+            .children()
+            .find(|node| is_dav_element(*node, "comment"))
+            .and_then(|node| node.text())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let label = format!("r{revision}");
+        entries.push((
+            revision,
+            RepositoryHistoryEntry {
+                target_id: label.clone(),
+                label,
+                author,
+                date,
+                message,
+            },
+        ));
+    }
+    entries.sort_by_key(|(revision, _)| std::cmp::Reverse(*revision));
+    entries.dedup_by_key(|(revision, _)| *revision);
+    Ok(entries.into_iter().map(|(_, entry)| entry).collect())
+}
+
 fn is_dav_element(node: Node<'_, '_>, name: &str) -> bool {
     node.is_element()
         && node.tag_name().namespace() == Some("DAV:")
@@ -995,6 +1117,73 @@ mod tests {
             "http://example.com/svn/repo/!svn/rvr/7/trunk/%E7%9B%AE%E5%BD%95/%E6%96%87%E4%BB%B6.txt"
         );
         assert!(normalize_browse_path("/../secret").is_err());
+    }
+
+    /// 验证公开浏览 URL 保留链接子目录并编码 Unicode 路径。
+    #[test]
+    fn public_browse_url_encodes_history_target() {
+        let session = HttpSvnSession {
+            agent: ureq::agent(),
+            base_url: Url::parse("http://example.com/svn/repo/trunk/").unwrap(),
+            authorization: None,
+            revision_root_stub: Url::parse("http://example.com/svn/repo/!svn/rvr").unwrap(),
+            browse_root_segments: vec!["trunk".to_string()],
+            initial_youngest_revision: None,
+            tls: None,
+            certificate_context: None,
+        };
+        assert_eq!(
+            session
+                .public_browse_url("/目录/文件.txt")
+                .unwrap()
+                .as_str(),
+            "http://example.com/svn/repo/trunk/%E7%9B%AE%E5%BD%95/%E6%96%87%E4%BB%B6.txt"
+        );
+    }
+
+    /// 验证 log-report 响应提取修订号、作者、时间和提交说明。
+    #[test]
+    fn history_log_report_parses_commit_metadata() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+<D:version-name>42</D:version-name>
+<D:creator-displayname>alice</D:creator-displayname>
+<S:date>2026-10-29T10:20:30.000000Z</S:date>
+<D:comment>修复登录问题
+第二行</D:comment>
+</S:log-item>
+<S:log-item>
+<D:version-name>17</D:version-name>
+<S:date>2026-10-01T08:00:00.000000Z</S:date>
+<D:comment>初始化</D:comment>
+</S:log-item>
+</S:log-report>"#;
+        let revisions = parse_history_log_report(xml).unwrap();
+
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].target_id, "r42");
+        assert_eq!(revisions[0].label, "r42");
+        assert_eq!(revisions[0].author.as_deref(), Some("alice"));
+        assert!(revisions[0].date.is_some());
+        assert_eq!(revisions[0].message, "修复登录问题\n第二行");
+        assert_eq!(revisions[1].target_id, "r17");
+        assert_eq!(revisions[1].author, None);
+        assert_eq!(revisions[1].message, "初始化");
+    }
+
+    /// 验证历史请求体包含修订范围、数量和常用提交属性。
+    #[test]
+    fn history_request_body_requests_commit_fields() {
+        let body = svn_log_report_body(42, 100);
+        assert!(body.contains("<S:start-revision>42</S:start-revision>"));
+        assert!(body.contains("<S:end-revision>0</S:end-revision>"));
+        assert!(body.contains("<S:limit>100</S:limit>"));
+        assert!(body.contains("<S:path/>"));
+        assert!(body.contains("<S:strict-node-history/>"));
+        assert!(body.contains("svn:author"));
+        assert!(body.contains("svn:date"));
+        assert!(body.contains("svn:log"));
     }
 
     /// 验证 HTTP 用户名从 URL 或独立字段读取，最终请求 URL 不保留任何凭据信息。
